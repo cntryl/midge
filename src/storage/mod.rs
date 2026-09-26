@@ -565,6 +565,9 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Submit one typed metadata lookup with the caller's remaining budget.
+    fn submit_head_request(&self, request: StorageRequest, callback: StorageCallback);
+
     /// Submit one typed delete, retaining its deadline, condition and reservation.
     fn submit_delete_request(&self, request: StorageRequest, callback: StorageCallback);
 

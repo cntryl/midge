@@ -108,6 +108,47 @@ pub(crate) fn forward_typed_delete_to_legacy<B: super::StorageBackend + ?Sized>(
 }
 
 #[cfg(test)]
+pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
+    backend: &B,
+    request: super::StorageRequest,
+    callback: super::StorageCallback,
+) {
+    let timeout = request.remaining_timeout();
+    let key = request.key;
+    if timeout.is_zero() {
+        let _ = callback.send(super::StorageEvent::HeadComplete {
+            key,
+            result: super::StorageOutcome::Err(super::storage_timeout_error("head timed out")),
+        });
+        return;
+    }
+    if !matches!(request.precondition, super::StoragePrecondition::None) {
+        let _ = callback.send(super::StorageEvent::HeadComplete {
+            key,
+            result: super::StorageOutcome::Err(super::StorageError::protocol(
+                "HEAD does not accept a mutation precondition",
+            )),
+        });
+        return;
+    }
+    let callback = if let Some(reservation) = request.reservation {
+        match super::retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => retained,
+            Err(error) => {
+                let _ = callback.send(super::StorageEvent::HeadComplete {
+                    key,
+                    result: super::StorageOutcome::Err(super::StorageError::from(error)),
+                });
+                return;
+            }
+        }
+    } else {
+        callback
+    };
+    backend.submit_head_with_timeout(&key, timeout, callback);
+}
+
+#[cfg(test)]
 macro_rules! forward_storage_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::storage::forward_storage_backend!(@method $inner, $method);)+
@@ -122,6 +163,12 @@ macro_rules! forward_storage_backend {
         fn submit_delete_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::StorageCallback) {
             self.$inner.submit_delete_request(request, callback);
+        }
+    };
+    (@method $inner:ident, submit_head_request) => {
+        fn submit_head_request(&self, request: $crate::storage::StorageRequest,
+            callback: $crate::storage::StorageCallback) {
+            self.$inner.submit_head_request(request, callback);
         }
     };
     (@method $inner:ident, submit_read_with_metadata) => {

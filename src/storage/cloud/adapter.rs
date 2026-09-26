@@ -86,6 +86,51 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "head timed out",
+                )),
+            });
+            return;
+        }
+        if !matches!(
+            request.precondition,
+            crate::storage::StoragePrecondition::None
+        ) {
+            let _ = callback.send(StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(crate::storage::StorageError::protocol(
+                    "HEAD does not accept a mutation precondition",
+                )),
+            });
+            return;
+        }
+        let callback = if let Some(reservation) = request.reservation {
+            match crate::storage::retained_callback::retain(callback.clone(), reservation) {
+                Ok(retained) => retained,
+                Err(error) => {
+                    let _ = callback.send(StorageEvent::HeadComplete {
+                        key,
+                        result: StorageOutcome::Err(crate::storage::StorageError::from(error)),
+                    });
+                    return;
+                }
+            }
+        } else {
+            callback
+        };
+        self.submit_head_with_timeout(&key, timeout, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,

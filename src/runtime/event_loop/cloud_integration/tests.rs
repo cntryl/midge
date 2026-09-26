@@ -676,6 +676,14 @@ impl PostRetirementDependencyChangeBackend {
 }
 
 impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -837,6 +845,14 @@ impl ArmedDelayedHeadStorageBackend {
 }
 
 impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_range_head(
         &self,
         key: &str,
@@ -891,6 +907,14 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
 }
 
 impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -996,6 +1020,14 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
 }
 
 impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1113,6 +1145,14 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
 }
 
 impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1257,6 +1297,14 @@ impl BlockingDeleteStorageBackend {
 }
 
 impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     crate::storage::forward_storage_backend!(
         inner;
         submit_write_request, submit_range_head,
@@ -1329,6 +1377,14 @@ impl FailOnceDeleteStorageBackend {
 }
 
 impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     crate::storage::forward_storage_backend!(
         inner;
         submit_write_request, submit_range_head,
@@ -8978,7 +9034,7 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_write_request, submit_delete_request, submit_read_range,
+        submit_write_request, submit_delete_request, submit_head_request, submit_read_range,
         submit_read_with_metadata,
         submit_write,
         submit_write_with_headers,

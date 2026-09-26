@@ -1346,6 +1346,14 @@ impl PanickingWriteBackend {
 }
 
 impl StorageBackend for PanickingWriteBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1387,6 +1395,14 @@ impl StorageBackend for PanickingWriteBackend {
 }
 
 impl StorageBackend for AlwaysFailingWriteBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1463,6 +1479,14 @@ impl BudgetConsumingSstPublicationBackend {
 }
 
 impl StorageBackend for BudgetConsumingSstPublicationBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1542,6 +1566,14 @@ impl RacingReadDeleteBackend {
 }
 
 impl StorageBackend for RacingReadDeleteBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1630,6 +1662,14 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
     fn submit_delete_request(
         &self,
         request: crate::storage::StorageRequest,
