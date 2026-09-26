@@ -140,3 +140,29 @@ fn should_route_compaction_output_checks_through_injected_fs() {
     assert!(!flush.contains("file_identity(&task.staging_path)"));
     assert!(!reader.contains("summarize_with_real_fs_for_compaction"));
 }
+
+#[test]
+fn should_include_range_tombstones_in_skippable_sst_sequence_bounds() {
+    // Arrange
+    let flush = include_str!("../src/runtime/actors/flush/build.rs");
+    let summary = include_str!("../src/sst/fs/reader_io/mod.rs");
+    let compaction = include_str!("../src/runtime/actors/compaction.rs");
+    let backfill = include_str!("../src/runtime/event_loop/read_path.rs");
+    let snapshot = include_str!("../src/runtime/read_snapshot.rs");
+
+    // Act / Assert
+    assert!(flush.contains("largest_seq = largest_seq.max(range.seq)"));
+    assert!(summary.contains("accumulator.observe(size_bytes, &range.start, range.seq"));
+    assert!(summary.contains("accumulator.observe(size_bytes, &range.end, range.seq"));
+    assert!(compaction.contains("largest_seq: Some(summary.largest_seq)"));
+    assert!(backfill.contains("updated.largest_seq = Some(summary.largest_seq)"));
+    let conflict_check = snapshot
+        .split("pub fn any_sequence_after_in_range(")
+        .nth(1)
+        .unwrap()
+        .split("/// Perform a range scan")
+        .next()
+        .unwrap();
+    assert!(conflict_check.contains("reader.raw_state_scan("));
+    assert!(!conflict_check.contains("scan_range_state_with_time("));
+}

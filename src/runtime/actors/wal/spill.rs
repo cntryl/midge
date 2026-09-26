@@ -252,8 +252,14 @@ impl WalActor {
                 start_key,
                 end_key,
             } => {
-                if Self::latest_range_sequence(snapshots, *cf_id, start_key, end_key)?
-                    .is_some_and(|sequence| sequence > start_sequence)
+                if Self::any_range_sequence_after(
+                    snapshots,
+                    *cf_id,
+                    start_key,
+                    end_key,
+                    start_sequence,
+                )?
+                .is_some()
                     || state
                         .latest_overlapping_delete_range_sequence(*cf_id, start_key, end_key)
                         .is_some_and(|sequence| sequence > start_sequence)

@@ -853,6 +853,22 @@ impl SstFileIo {
         scan
     }
 
+    pub(crate) fn newer_overlapping_range_tombstone_seq(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        threshold: u64,
+    ) -> Option<u64> {
+        self.range_tombstones
+            .iter()
+            .find(|range| {
+                range.seq > threshold
+                    && end.is_none_or(|end| range.start.as_slice() < end)
+                    && start.is_none_or(|start| range.end.as_slice() > start)
+            })
+            .map(|range| range.seq)
+    }
+
     fn into_streaming_summary(self) -> MidgeResult<SstFileSummary> {
         use crate::sst::traits::SstStateReader;
 

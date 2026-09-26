@@ -936,14 +936,17 @@ impl ReadSnapshot {
         }
     }
 
-    /// Return the latest sequence touching any key in [start, end).
-    ///
-    /// Includes value/tombstone state and overlapping range tombstones.
-    pub fn latest_sequence_in_range(&self, start: &[u8], end: &[u8]) -> MidgeResult<Option<u64>> {
+    /// Find one sequence newer than `threshold` touching [start, end).
+    /// Includes point state and overlapping range tombstones. A complete
+    /// manifest sequence bound can rule out a file before it is opened.
+    pub fn any_sequence_after_in_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        threshold: u64,
+    ) -> MidgeResult<Option<u64>> {
         let start_opt = if start.is_empty() { None } else { Some(start) };
         let end_opt = if end.is_empty() { None } else { Some(end) };
-
-        let mut max_seq = 0u64;
 
         for (_key, state) in self.memtable.range_state_at_with_time(
             start_opt,
@@ -951,8 +954,8 @@ impl ReadSnapshot {
             u64::MAX,
             self.read_time_millis,
         ) {
-            if let Some(seq) = Self::state_sequence(&state) {
-                max_seq = max_seq.max(seq);
+            if let Some(seq) = Self::state_sequence(&state).filter(|seq| *seq > threshold) {
+                return Ok(Some(seq));
             }
         }
 
@@ -960,20 +963,24 @@ impl ReadSnapshot {
             for (_key, state) in
                 imm.range_state_at_with_time(start_opt, end_opt, u64::MAX, self.read_time_millis)
             {
-                if let Some(seq) = Self::state_sequence(&state) {
-                    max_seq = max_seq.max(seq);
+                if let Some(seq) = Self::state_sequence(&state).filter(|seq| *seq > threshold) {
+                    return Ok(Some(seq));
                 }
             }
             for tombstone in imm.range_tombstones_at(u64::MAX) {
                 if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
-                    max_seq = max_seq.max(tombstone.seq);
+                    if tombstone.seq > threshold {
+                        return Ok(Some(tombstone.seq));
+                    }
                 }
             }
         }
 
         for tombstone in self.memtable.range_tombstones_at(u64::MAX) {
             if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
-                max_seq = max_seq.max(tombstone.seq);
+                if tombstone.seq > threshold {
+                    return Ok(Some(tombstone.seq));
+                }
             }
         }
 
@@ -985,27 +992,31 @@ impl ReadSnapshot {
                     .flat_map(|level| level.ordered.into_iter().chain(level.fallback)),
             );
             for file_meta in files {
-                let reader = self.sst_reader(&file_meta)?;
-                let entries = reader.scan_range_raw_state(start_opt, end_opt)?;
-                for (_key, state) in entries {
-                    if let Some(seq) = Self::state_sequence(&state) {
-                        max_seq = max_seq.max(seq);
-                    }
+                if file_meta.key_bounds_complete
+                    && file_meta.largest_seq.is_some_and(|seq| seq <= threshold)
+                {
+                    continue;
                 }
-
-                for tombstone in reader.range_tombstones() {
-                    if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
-                        max_seq = max_seq.max(tombstone.seq);
+                let reader = self.sst_reader(&file_meta)?;
+                if let Some(seq) =
+                    reader.newer_overlapping_range_tombstone_seq(start_opt, end_opt, threshold)
+                {
+                    return Ok(Some(seq));
+                }
+                for entry in reader.raw_state_scan(
+                    start_opt.map(<[u8]>::to_vec),
+                    end_opt.map(<[u8]>::to_vec),
+                    false,
+                    u64::MAX,
+                ) {
+                    let (_, state) = entry?;
+                    if let Some(seq) = Self::state_sequence(&state).filter(|seq| *seq > threshold) {
+                        return Ok(Some(seq));
                     }
                 }
             }
         }
-
-        if max_seq == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(max_seq))
-        }
+        Ok(None)
     }
 
     /// Perform a range scan on this snapshot
@@ -1124,6 +1135,91 @@ mod l0_scan_tests;
 mod tests {
     use super::*;
     use crate::sst::traits::SstFactory;
+
+    #[test]
+    fn should_not_open_older_ssts_when_checking_delete_range_conflict() -> MidgeResult<()> {
+        // Arrange: an absent file makes an accidental open observable.
+        let dir = tempfile::tempdir()?;
+        let file = FileMeta {
+            name: "absent-old.sst".into(),
+            level: 0,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(5),
+            key_bounds_complete: true,
+            ..Default::default()
+        };
+        let snapshot = ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            vec![file.clone()],
+            Arc::new(crate::io::RealFs::new(dir.path())?),
+            std::path::PathBuf::new(),
+            false,
+            0,
+        );
+
+        // Act / Assert
+        assert_eq!(snapshot.any_sequence_after_in_range(b"b", b"y", 10)?, None);
+
+        // Incomplete legacy metadata cannot justify the skip.
+        let legacy = ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            vec![FileMeta {
+                key_bounds_complete: false,
+                ..file
+            }],
+            Arc::new(crate::io::RealFs::new(dir.path())?),
+            std::path::PathBuf::new(),
+            false,
+            0,
+        );
+        assert!(legacy.any_sequence_after_in_range(b"b", b"y", 10).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn should_detect_range_conflict_from_newer_range_tombstone_in_sst() -> MidgeResult<()> {
+        // Arrange
+        let dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"m", Some(b"old"), 5, EntryType::Put, None)?;
+        writer.add_range_tombstone(b"a", b"z", 15)?;
+        crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("range.sst"))?;
+        let summary = crate::sst::fs::SstFileIo::summarize_with_fs("range.sst", Arc::clone(&fs))?;
+        assert_eq!(summary.largest_seq, 15);
+        let snapshot = ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            vec![FileMeta {
+                name: "range.sst".into(),
+                level: 0,
+                cf_id: 0,
+                smallest_key: Some(summary.smallest_key),
+                largest_key: Some(summary.largest_key),
+                smallest_seq: Some(summary.smallest_seq),
+                largest_seq: Some(summary.largest_seq),
+                key_bounds_complete: true,
+                ..Default::default()
+            }],
+            fs,
+            std::path::PathBuf::new(),
+            false,
+            0,
+        );
+
+        // Act / Assert
+        assert_eq!(
+            snapshot.any_sequence_after_in_range(b"b", b"y", 10)?,
+            Some(15)
+        );
+        Ok(())
+    }
 
     #[test]
     fn should_reject_conflicting_equal_sequence_ssts_for_point_and_scans(

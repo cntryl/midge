@@ -225,20 +225,19 @@ impl WalActor {
                     start_key,
                     end_key,
                 } => {
-                    if let Some(latest_seq) = Self::latest_range_sequence(
+                    if let Some(latest_seq) = Self::any_range_sequence_after(
                         snapshots,
                         *cf_id,
                         start_key.as_ref(),
                         end_key.as_ref(),
+                        start_sequence,
                     )? {
-                        if latest_seq > start_sequence {
-                            state
-                                .diagnostics
-                                .record(crate::telemetry::Metrics::record_write_conflict_range);
-                            return Err(MidgeError::WriteConflict(format!(
+                        state
+                            .diagnostics
+                            .record(crate::telemetry::Metrics::record_write_conflict_range);
+                        return Err(MidgeError::WriteConflict(format!(
                                 "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): latest seq {latest_seq} > tx start {start_sequence}"
                             )));
-                        }
                     }
 
                     if let Some(range_seq) = state.latest_overlapping_delete_range_sequence(
@@ -385,16 +384,17 @@ impl WalActor {
         ASSERTION_SNAPSHOT_BUILD_COUNT.with(std::cell::Cell::get)
     }
 
-    pub(super) fn latest_range_sequence(
+    pub(super) fn any_range_sequence_after(
         snapshots: &mut ValidationSnapshots<'_>,
         cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
+        threshold: u64,
     ) -> MidgeResult<Option<u64>> {
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
         };
-        snapshot.latest_sequence_in_range(start_key, end_key)
+        snapshot.any_sequence_after_in_range(start_key, end_key, threshold)
     }
 
     pub(super) fn build_apply_ops(
