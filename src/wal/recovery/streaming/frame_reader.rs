@@ -7,16 +7,24 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, FsPath};
 use crate::wal::{encoding, frame};
 
+pub(super) fn source<'a>(
+    file: &'a dyn File,
+    path: &'a FsPath,
+    limits: StreamingReplayLimits,
+) -> frame::FileFrames<'a> {
+    frame::FileFrames::with_read_ahead(file, path, limits.max_frame_bytes.min(1024 * 1024))
+}
+
 pub(super) fn next_frame(
-    file: &dyn File,
+    source: &frame::FileFrames<'_>,
     path: &FsPath,
     pos: u64,
     limits: StreamingReplayLimits,
     read_ns: &mut u128,
 ) -> Result<NextWalFrame, ReplayFailure> {
-    let source = frame::FileFrames::new(file, path);
+    let before_read_ns = source.read_ns();
     let step = frame::next_frame(
-        &source,
+        source,
         &path,
         pos,
         frame::FrameLimits {
@@ -26,7 +34,7 @@ pub(super) fn next_frame(
             zero_tail_scan_bytes: Some(limits.max_frame_bytes.min(1024 * 1024)),
         },
     );
-    *read_ns = read_ns.saturating_add(source.read_ns());
+    *read_ns = read_ns.saturating_add(source.read_ns().saturating_sub(before_read_ns));
     match step? {
         frame::FrameStep::Eof => Ok(NextWalFrame::Eof),
         frame::FrameStep::Frame { payload, next_pos } => {
