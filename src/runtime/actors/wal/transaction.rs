@@ -61,19 +61,6 @@ impl WalActor {
             return Ok((state.sequence, 0, false));
         }
 
-        for op in &params.ops {
-            let cf_id = match op {
-                crate::runtime::TransactionOp::Put { cf_id, .. }
-                | crate::runtime::TransactionOp::Delete { cf_id, .. }
-                | crate::runtime::TransactionOp::DeleteRange { cf_id, .. } => *cf_id,
-            };
-            if !state.column_families.contains_key(&cf_id) {
-                return Err(MidgeError::InvalidArgument(format!(
-                    "column family {cf_id} does not exist"
-                )));
-            }
-        }
-
         let prepared = self.prepare_transaction_append(state, params)?;
         let last_sequence = prepared.sequence_plan.commit_seq;
         let apply_op_count = prepared.apply_ops.len();
@@ -414,61 +401,10 @@ impl WalActor {
         if !encode_wal {
             return Ok(None);
         }
-        let mut nested_records = Vec::with_capacity(apply_ops.len());
-        for apply_op in apply_ops {
-            let record = match apply_op {
-                TransactionApplyOp::Put {
-                    op,
-                    cf_id,
-                    key,
-                    value,
-                    expiration,
-                    sequence,
-                } => crate::wal::encoding::TxnBatchEncodeRecord {
-                    cf_id: *cf_id,
-                    op: *op,
-                    key: key.as_ref(),
-                    value: Some(value.as_ref()),
-                    seq: *sequence,
-                    expiration: *expiration,
-                    range_end: None,
-                    txn_id: Some(sequence_plan.txn_id),
-                    writer_epoch: self.current_epoch,
-                },
-                TransactionApplyOp::Delete {
-                    cf_id,
-                    key,
-                    sequence,
-                } => crate::wal::encoding::TxnBatchEncodeRecord {
-                    cf_id: *cf_id,
-                    op: WalOpKind::Delete,
-                    key: key.as_ref(),
-                    value: None,
-                    seq: *sequence,
-                    expiration: None,
-                    range_end: None,
-                    txn_id: Some(sequence_plan.txn_id),
-                    writer_epoch: self.current_epoch,
-                },
-                TransactionApplyOp::DeleteRange {
-                    cf_id,
-                    start_key,
-                    end_key,
-                    sequence,
-                } => crate::wal::encoding::TxnBatchEncodeRecord {
-                    cf_id: *cf_id,
-                    op: WalOpKind::DeleteRange,
-                    key: start_key.as_ref(),
-                    value: None,
-                    seq: *sequence,
-                    expiration: None,
-                    range_end: Some(end_key.as_ref()),
-                    txn_id: Some(sequence_plan.txn_id),
-                    writer_epoch: self.current_epoch,
-                },
-            };
-            nested_records.push(record);
-        }
+        let nested_records = apply_ops
+            .iter()
+            .map(|op| op.batch_record(sequence_plan.txn_id, self.current_epoch))
+            .collect::<Vec<_>>();
 
         let payload = crate::wal::encoding::encode_txn_batch_payload_records(
             sequence_plan.txn_id,

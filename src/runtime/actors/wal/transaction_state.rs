@@ -3,7 +3,7 @@
 use super::{TransactionApplyOp, WalActor};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
-use crate::wal::{DurabilityPolicy, WalOpKind};
+use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -60,28 +60,44 @@ impl WalActor {
     ) -> MidgeResult<()> {
         let mut batch_pairs = HashSet::new();
         for apply_op in apply_ops {
-            let (cf_id, point) = match apply_op {
-                TransactionApplyOp::Put {
-                    cf_id,
-                    key,
-                    sequence,
-                    ..
-                }
-                | TransactionApplyOp::Delete {
-                    cf_id,
-                    key,
-                    sequence,
-                } => (*cf_id, Some((key.as_ref(), *sequence))),
-                TransactionApplyOp::DeleteRange { cf_id, .. } => (*cf_id, None),
-            };
-            let cf_state = state.column_families.get(&cf_id).ok_or_else(|| {
-                MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
-            })?;
+            let (cf_id, point) = Self::preflight_point(state, apply_op)?;
             let Some((key, sequence)) = point else {
                 continue;
             };
-            if !batch_pairs.insert((cf_id, key.to_vec(), sequence))
-                || cf_state.memtable.contains_key_sequence(key, sequence)
+            if !batch_pairs.insert((cf_id, key.to_vec(), sequence)) {
+                return Err(MidgeError::Corruption(format!(
+                    "duplicate memtable key/sequence pair for column family {cf_id} at sequence {sequence}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Streamed transactions use this one-operation check before their first
+    /// WAL frame without collecting the whole spilled write set in memory.
+    pub(super) fn preflight_point<'a>(
+        state: &RuntimeState,
+        apply_op: &'a TransactionApplyOp,
+    ) -> MidgeResult<(crate::types::ColumnFamilyId, Option<(&'a [u8], u64)>)> {
+        let (cf_id, point) = match apply_op {
+            TransactionApplyOp::Put {
+                cf_id,
+                key,
+                sequence,
+                ..
+            }
+            | TransactionApplyOp::Delete {
+                cf_id,
+                key,
+                sequence,
+            } => (*cf_id, Some((key.as_ref(), *sequence))),
+            TransactionApplyOp::DeleteRange { cf_id, .. } => (*cf_id, None),
+        };
+        let cf_state = state.column_families.get(&cf_id).ok_or_else(|| {
+            MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
+        })?;
+        if let Some((key, sequence)) = point {
+            if cf_state.memtable.contains_key_sequence(key, sequence)
                 || cf_state
                     .immutable_memtables
                     .iter()
@@ -92,7 +108,7 @@ impl WalActor {
                 )));
             }
         }
-        Ok(())
+        Ok((cf_id, point))
     }
 
     /// Apply an operation set that was completely validated before the WAL
@@ -387,59 +403,16 @@ impl WalActor {
         _txn_id: u64,
         commit_time_millis: u64,
     ) -> Vec<TransactionApplyOp> {
-        let mut apply_ops = Vec::with_capacity(ops.len());
-
-        for (i, op) in ops.into_iter().enumerate() {
-            let seq = first_op_seq + i as u64;
-            match op {
-                crate::runtime::TransactionOp::Put {
-                    cf_id,
-                    key,
-                    value,
-                    ttl_seconds,
-                    insert_only,
-                } => {
-                    let op_kind = if insert_only {
-                        WalOpKind::Insert
-                    } else {
-                        WalOpKind::Put
-                    };
-
-                    let expiration =
-                        crate::common::time::expiration_from_ttl(ttl_seconds, commit_time_millis);
-
-                    apply_ops.push(TransactionApplyOp::Put {
-                        op: op_kind,
-                        cf_id,
-                        key,
-                        value,
-                        expiration,
-                        sequence: seq,
-                    });
-                }
-                crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                    apply_ops.push(TransactionApplyOp::Delete {
-                        cf_id,
-                        key,
-                        sequence: seq,
-                    });
-                }
-                crate::runtime::TransactionOp::DeleteRange {
-                    cf_id,
-                    start_key,
-                    end_key,
-                } => {
-                    apply_ops.push(TransactionApplyOp::DeleteRange {
-                        cf_id,
-                        start_key,
-                        end_key,
-                        sequence: seq,
-                    });
-                }
-            }
-        }
-
-        apply_ops
+        ops.into_iter()
+            .enumerate()
+            .map(|(ordinal, op)| {
+                TransactionApplyOp::from_source(
+                    op,
+                    first_op_seq + ordinal as u64,
+                    commit_time_millis,
+                )
+            })
+            .collect()
     }
 
     fn apply_ops_to_memtables(

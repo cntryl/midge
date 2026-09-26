@@ -5,7 +5,7 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::wal::DurabilityPolicy;
-use crate::wal::{types::WalOpRole, WalOpKind, WalRecord};
+use crate::wal::{WalOpKind, WalRecord};
 use bytes::Bytes;
 use std::time::Instant;
 
@@ -86,6 +86,18 @@ impl WalActor {
         }
         let sequence_plan = Self::allocate_transaction_sequences(state, source.len())?;
         let commit_time_millis = state.observed_time_millis();
+        source.for_each(|ordinal, op| {
+            let sequence = sequence_plan
+                .first_op_seq
+                .checked_add(ordinal)
+                .ok_or_else(|| {
+                    MidgeError::ResourceLimit(
+                        "transaction spill sequence allocation overflow".into(),
+                    )
+                })?;
+            let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
+            Self::preflight_point(state, &apply_op).map(|_| ())
+        })?;
         let mut wal_may_have_changed = false;
         let (wal_bytes, wal_records) = match self.append_spilled_wal_records(
             request_id,
@@ -294,13 +306,8 @@ impl WalActor {
                         "transaction spill sequence allocation overflow".to_string(),
                     )
                 })?;
-            let record = Self::wal_record_for_transaction_op(
-                op,
-                sequence,
-                sequence_plan.txn_id,
-                epoch,
-                commit_time_millis,
-            );
+            let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
+            let record = apply_op.wal_record(sequence_plan.txn_id, epoch);
             total_bytes = total_bytes.saturating_add(record.estimated_size());
             self.append_spilled_record(&record, wal_may_have_changed)
         })?;
@@ -355,61 +362,6 @@ impl WalActor {
         Ok(())
     }
 
-    fn wal_record_for_transaction_op(
-        op: crate::runtime::TransactionOp,
-        sequence: u64,
-        txn_id: u64,
-        writer_epoch: u64,
-        commit_time_millis: u64,
-    ) -> WalRecord {
-        let mut record = match op {
-            crate::runtime::TransactionOp::Put {
-                cf_id,
-                key,
-                value,
-                ttl_seconds,
-                insert_only,
-            } => {
-                let mut record = WalRecord::new_cf(
-                    cf_id,
-                    if insert_only {
-                        WalOpKind::Insert
-                    } else {
-                        WalOpKind::Put
-                    },
-                    key,
-                    Some(value),
-                    sequence,
-                    writer_epoch,
-                );
-                record.expiration =
-                    crate::common::time::expiration_from_ttl(ttl_seconds, commit_time_millis);
-                record
-            }
-            crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                WalRecord::new_cf(cf_id, WalOpKind::Delete, key, None, sequence, writer_epoch)
-            }
-            crate::runtime::TransactionOp::DeleteRange {
-                cf_id,
-                start_key,
-                end_key,
-            } => {
-                let mut record = WalRecord::new_cf(
-                    cf_id,
-                    WalOpKind::DeleteRange,
-                    start_key,
-                    None,
-                    sequence,
-                    writer_epoch,
-                );
-                record.range_end = Some(end_key);
-                record
-            }
-        };
-        record.txn_id = Some(txn_id);
-        record
-    }
-
     fn apply_spilled_transaction_ops(
         &mut self,
         state: &mut RuntimeState,
@@ -418,7 +370,6 @@ impl WalActor {
         effective_durability: DurabilityPolicy,
         commit_time_millis: u64,
     ) -> MidgeResult<()> {
-        let epoch = self.current_epoch;
         source.for_each(|ordinal, op| {
             crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
                 MidgeError::Io(std::io::Error::other(
@@ -426,47 +377,7 @@ impl WalActor {
                 ))
             ));
             let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);
-            let record = Self::wal_record_for_transaction_op(
-                op,
-                sequence,
-                sequence_plan.txn_id,
-                epoch,
-                commit_time_millis,
-            );
-            let apply_op = match record.op.role() {
-                WalOpRole::ValueWrite => TransactionApplyOp::Put {
-                    op: record.op,
-                    cf_id: record.cf_id,
-                    key: record.key,
-                    value: record.value.ok_or_else(|| {
-                        MidgeError::Corruption("spilled transaction put lost its value".to_string())
-                    })?,
-                    expiration: record.expiration,
-                    sequence,
-                },
-                WalOpRole::PointDelete => TransactionApplyOp::Delete {
-                    cf_id: record.cf_id,
-                    key: record.key,
-                    sequence,
-                },
-                WalOpRole::RangeDelete => TransactionApplyOp::DeleteRange {
-                    cf_id: record.cf_id,
-                    start_key: record.key,
-                    end_key: record.range_end.ok_or_else(|| {
-                        MidgeError::Corruption(
-                            "spilled transaction range delete lost its end key".to_string(),
-                        )
-                    })?,
-                    sequence,
-                },
-                WalOpRole::TransactionBegin
-                | WalOpRole::TransactionCommit
-                | WalOpRole::TransactionBatch => {
-                    return Err(MidgeError::Internal(
-                        "transaction source produced a marker operation".to_string(),
-                    ));
-                }
-            };
+            let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
             Self::apply_transaction_op_to_memtable(state, apply_op)
         })?;
         tracing::trace!(
