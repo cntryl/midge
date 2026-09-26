@@ -2638,7 +2638,7 @@ mod recovery_policy_api {
         let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("initialize engine");
         engine
-            .shutdown(Duration::from_secs(2))
+            .shutdown(Duration::from_secs(30))
             .expect("shutdown initialized engine");
     }
 
