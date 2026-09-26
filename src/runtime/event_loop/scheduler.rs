@@ -81,12 +81,7 @@ impl EventLoop {
 
         [
             self.wal_actor.sync_deadline_timeout(),
-            self.durability
-                .cloud_seal_deadline_timeout(self.state.wal.pending_writes),
-            self.gc_actor.retry_deadline_timeout(),
-            self.cloud_coordinator
-                .cloud_wal
-                .upload_retry_deadline_timeout(),
+            self.retry_deadlines().min(),
             self.cloud_coordinator
                 .hybrid_storage
                 .as_ref()
@@ -100,7 +95,6 @@ impl EventLoop {
                 .cloud_wal_prune_worker
                 .as_ref()
                 .map(|_| HYBRID_STORAGE_POLL_INTERVAL),
-            self.state.flush_retry_deadline_timeout(),
             self.flush_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
@@ -112,6 +106,21 @@ impl EventLoop {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// All runtime-owned retry schedules observed by the idle run loop.
+    fn retry_deadlines(&self) -> impl Iterator<Item = Duration> + '_ {
+        [
+            self.durability
+                .cloud_seal_deadline_timeout(self.state.wal.pending_writes),
+            self.gc_actor.retry_deadline_timeout(),
+            self.cloud_coordinator
+                .cloud_wal
+                .upload_retry_deadline_timeout(),
+            self.state.flush_retry_deadline_timeout(),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     pub(super) fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {

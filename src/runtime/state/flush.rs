@@ -2,7 +2,7 @@
 
 use super::{
     Arc, Duration, EventualFlush, FlushCandidate, FlushReason, HashSet, ImmutableFlush,
-    ImmutableFlushPhase, Instant, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF,
+    ImmutableFlushPhase, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF,
     LOCAL_EVENTUAL_FLUSH_TRIGGER_MULTIPLE, MAX_FLUSH_RETRY_BACKOFF,
 };
 
@@ -29,7 +29,7 @@ impl RuntimeState {
             phase: ImmutableFlushPhase::Queued,
             built: None,
             failures: 0,
-            retry_at: Instant::now(),
+            retry: crate::runtime::retry_schedule::RetrySchedule::new(INITIAL_FLUSH_RETRY_BACKOFF),
         };
         cf_state.immutable_flushes.push(flush.clone());
         self.flush_metrics.enqueued_total = self.flush_metrics.enqueued_total.saturating_add(1);
@@ -37,7 +37,6 @@ impl RuntimeState {
     }
 
     pub(crate) fn begin_next_immutable_flush(&mut self) -> Option<ImmutableFlush> {
-        let now = Instant::now();
         let (cf_id, flush_id) = self
             .column_families
             .iter()
@@ -58,7 +57,7 @@ impl RuntimeState {
             .immutable_flushes
             .iter_mut()
             .find(|flush| flush.flush_id == flush_id)?;
-        if flush.phase == ImmutableFlushPhase::RetryPending && flush.retry_at > now {
+        if flush.phase == ImmutableFlushPhase::RetryPending && !flush.retry.is_ready() {
             return None;
         }
         if flush.failures > 0 {
@@ -97,7 +96,7 @@ impl RuntimeState {
         let (_, flush) = self.immutable_flush_by_id_mut(flush_id)?;
 
         if flush.phase == ImmutableFlushPhase::RetryPending {
-            return Some(flush.retry_at.saturating_duration_since(Instant::now()));
+            return flush.retry.remaining();
         }
 
         flush.failures = flush.failures.saturating_add(1);
@@ -106,7 +105,7 @@ impl RuntimeState {
             .saturating_mul(u32::try_from(multiplier).unwrap_or(u32::MAX))
             .min(MAX_FLUSH_RETRY_BACKOFF);
         flush.phase = ImmutableFlushPhase::RetryPending;
-        flush.retry_at = Instant::now() + delay;
+        flush.retry.defer_for(delay);
         self.flush_metrics.failures_total = self.flush_metrics.failures_total.saturating_add(1);
         Some(delay)
     }
@@ -135,7 +134,6 @@ impl RuntimeState {
     }
 
     pub(crate) fn has_due_immutable_flush(&self) -> bool {
-        let now = Instant::now();
         self.column_families
             .values()
             .flat_map(|cf_state| cf_state.immutable_flushes.iter())
@@ -147,17 +145,16 @@ impl RuntimeState {
             })
             .min_by_key(|flush| (flush.sequence, flush.flush_id))
             .is_some_and(|flush| {
-                flush.phase == ImmutableFlushPhase::Queued || flush.retry_at <= now
+                flush.phase == ImmutableFlushPhase::Queued || flush.retry.is_ready()
             })
     }
 
     pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {
-        let now = Instant::now();
         self.column_families
             .values()
             .flat_map(|cf_state| cf_state.immutable_flushes.iter())
             .filter(|flush| flush.phase == ImmutableFlushPhase::RetryPending)
-            .map(|flush| flush.retry_at.saturating_duration_since(now))
+            .filter_map(|flush| flush.retry.remaining())
             .min()
     }
 
@@ -166,7 +163,7 @@ impl RuntimeState {
         if let Some(cf_state) = self.column_families.get_mut(&cf_id) {
             for flush in &mut cf_state.immutable_flushes {
                 if flush.phase == ImmutableFlushPhase::RetryPending {
-                    flush.retry_at = Instant::now();
+                    flush.retry.mark_due();
                 }
             }
         }
@@ -428,14 +425,13 @@ impl RuntimeState {
         rule: EventualFlush,
         attempted_cfs: &HashSet<crate::types::ColumnFamilyId>,
     ) -> Option<FlushCandidate> {
-        let now = Instant::now();
         let retry_candidate = self
             .column_families
             .iter()
             .filter(|(cf_id, _)| !attempted_cfs.contains(cf_id))
             .filter(|(_, cf_state)| {
                 cf_state.immutable_flushes.iter().any(|flush| {
-                    flush.phase == ImmutableFlushPhase::RetryPending && flush.retry_at <= now
+                    flush.phase == ImmutableFlushPhase::RetryPending && flush.retry.is_ready()
                 })
             })
             .map(|(cf_id, _)| *cf_id)

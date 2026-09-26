@@ -20,6 +20,7 @@ pub mod intent_persistence;
 pub(crate) mod keyed_group_commit;
 pub(crate) mod read_resources;
 pub mod read_snapshot;
+pub(crate) mod retry_schedule;
 pub mod snapshot_cache;
 pub(crate) mod snapshot_pins;
 pub(crate) mod sst_read_view;

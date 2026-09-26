@@ -57,7 +57,7 @@ pub(crate) struct ImmutableFlush {
     pub phase: ImmutableFlushPhase,
     pub built: Option<crate::runtime::actors::flush::FlushBuildOutput>,
     pub failures: u32,
-    pub retry_at: Instant,
+    pub retry: crate::runtime::retry_schedule::RetrySchedule,
 }
 
 #[derive(Debug, Default)]

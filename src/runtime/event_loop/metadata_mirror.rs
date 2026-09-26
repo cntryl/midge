@@ -9,14 +9,9 @@ impl EventLoop {
         &self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let Some(cloud) = self.cloud_coordinator.cloud_metadata_storage.as_ref() else {
-            return Ok(());
-        };
-        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-            cloud,
+        self.cloud_coordinator.mirror_metadata_within(
             self.state.fs.as_ref(),
             &self.metadata_publication_lock,
-            std::time::Duration::ZERO,
             self.state.manifest.last_persisted_sequence,
             deadline,
             |deadline| self.validate_runtime_writer_lease_within(deadline),

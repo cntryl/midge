@@ -244,7 +244,8 @@ impl EventLoop {
 /// summary keeps failing does not block every other legacy file.
 #[derive(Default)]
 pub(super) struct LegacyBoundBackfill {
-    failures: std::collections::HashMap<String, (u32, std::time::Instant)>,
+    failures:
+        std::collections::HashMap<String, (u32, crate::runtime::retry_schedule::RetrySchedule)>,
     /// Bound edits have been journaled since the last manifest checkpoint.
     uncheckpointed: bool,
 }
@@ -257,17 +258,22 @@ impl LegacyBoundBackfill {
     fn is_eligible(&self, name: &str, now: std::time::Instant) -> bool {
         self.failures
             .get(name)
-            .is_none_or(|(_, retry_at)| *retry_at <= now)
+            .is_none_or(|(_, retry)| retry.is_ready_at(now))
     }
 
     /// Record a failed summary and return the file's failure count.
     fn record_failure(&mut self, name: &str, now: std::time::Instant) -> u32 {
-        let entry = self.failures.entry(name.to_string()).or_insert((0, now));
+        let entry = self.failures.entry(name.to_string()).or_insert_with(|| {
+            (
+                0,
+                crate::runtime::retry_schedule::RetrySchedule::new(Self::BASE_BACKOFF),
+            )
+        });
         entry.0 = entry.0.saturating_add(1);
         let backoff = Self::BASE_BACKOFF
             .saturating_mul(1_u32 << entry.0.saturating_sub(1).min(16))
             .min(Self::MAX_BACKOFF);
-        entry.1 = now + backoff;
+        entry.1.defer_from(now, backoff);
         entry.0
     }
 

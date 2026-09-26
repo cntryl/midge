@@ -28,13 +28,8 @@ pub(super) struct CloudMaintenance {
 
 impl EventLoop {
     pub(super) fn cloud_maintenance_enabled(&self) -> bool {
-        self.wal_actor.is_cloud_async()
-            && !self.state.is_memory_mode()
-            && self
-                .cloud_coordinator
-                .hybrid_storage
-                .as_ref()
-                .is_some_and(|storage| storage.ephemeral_sst_cache_enabled())
+        self.cloud_coordinator
+            .maintenance_enabled(self.wal_actor.is_cloud_async(), self.state.is_memory_mode())
     }
 
     /// Dispatch at most one ready worker. A missing or retry-delayed task does

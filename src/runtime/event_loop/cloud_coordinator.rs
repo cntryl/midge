@@ -28,4 +28,35 @@ impl CloudCoordinator {
             cloud_maintenance: CloudMaintenance::default(),
         }
     }
+
+    pub(super) fn maintenance_enabled(&self, is_cloud_async: bool, is_memory_mode: bool) -> bool {
+        is_cloud_async
+            && !is_memory_mode
+            && self
+                .hybrid_storage
+                .as_ref()
+                .is_some_and(|storage| storage.ephemeral_sst_cache_enabled())
+    }
+
+    pub(super) fn mirror_metadata_within(
+        &self,
+        fs: &dyn crate::io::Fs,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+        last_persisted_sequence: u64,
+        deadline: &crate::common::OperationDeadline,
+        validate_lease: impl FnMut(&crate::common::OperationDeadline) -> crate::common::MidgeResult<()>,
+    ) -> crate::common::MidgeResult<()> {
+        let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
+            return Ok(());
+        };
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            cloud,
+            fs,
+            publication_lock,
+            std::time::Duration::ZERO,
+            last_persisted_sequence,
+            deadline,
+            validate_lease,
+        )
+    }
 }
