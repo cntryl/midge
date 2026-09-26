@@ -39,6 +39,78 @@ fn should_reject_typed_write_when_callback_budget_is_zero() {
 }
 
 #[test]
+fn should_preserve_existing_object_when_typed_create_finds_a_match() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/create-guard");
+        let (seed_tx, seed_rx) = mpsc::channel();
+        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        let _ = seed_rx.recv().expect("seed callback");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        )
+        .with_precondition(super::StoragePrecondition::IfAbsent);
+
+        // Act
+        let (write_tx, write_rx) = mpsc::channel();
+        backend.submit_write_request(request, b"new".to_vec(), write_tx);
+
+        // Assert
+        assert!(matches!(
+            write_rx.recv().expect("write callback"),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(_),
+                ..
+            }
+        ));
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+        let (bytes, _) = read_rx.recv().expect("read callback").expect("read object");
+        assert_eq!(bytes, b"old", "{name}");
+    }
+}
+
+#[test]
+fn should_replace_matching_object_when_typed_write_uses_current_identity() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/match-guard");
+        let (seed_tx, seed_rx) = mpsc::channel();
+        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        let _ = seed_rx.recv().expect("seed callback");
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+        let (_, identity) = read_rx.recv().expect("read callback").expect("read object");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        )
+        .with_precondition(super::StoragePrecondition::IfMatch(identity));
+
+        // Act
+        let (write_tx, write_rx) = mpsc::channel();
+        backend.submit_write_request(request, b"new".to_vec(), write_tx);
+
+        // Assert
+        assert!(
+            matches!(
+                write_rx.recv().expect("write callback"),
+                StorageEvent::WriteComplete {
+                    result: StorageOutcome::Ok(()),
+                    ..
+                }
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn should_keep_existing_bytes_when_generation_precondition_is_unsupported_or_stale() {
     // Arrange
     let root = tempfile::tempdir().expect("temp dir");

@@ -86,6 +86,27 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        let headers = match request.precondition.headers() {
+            Ok(headers) => headers,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key,
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        self.write_admitted(&key, data, headers, timeout, request.reservation, &callback);
+    }
+
     fn submit_range_head(
         &self,
         key: &str,
