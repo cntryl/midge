@@ -983,55 +983,52 @@ fn soft_roll_due(
         || range_only_roll
 }
 
-/// Newest version in one key group, ignoring range events. Merge inputs order
-/// versions by descending sequence within a key.
+/// Newest version in one key group, ignoring range events.
 ///
-/// Two versions at the same sequence must be identical. If they differ, the
-/// inputs disagree about what was written at that sequence, and compaction must
-/// not paper over that by picking one.
+/// Inputs do not guarantee sequence order within a key: a chained level cursor
+/// can yield an older version from one file before a newer one from the next.
+/// Versions are therefore sorted here rather than trusted to arrive newest
+/// first.
+///
+/// Two versions at the same sequence must be identical, including shadowed
+/// ones. If they differ, the inputs disagree about what was written at that
+/// sequence, and compaction must not paper over that by picking one.
 fn select_newest_version<'a>(
     events: impl Iterator<Item = &'a CompactionEvent>,
 ) -> MidgeResult<Option<&'a CompactionVersion>> {
-    let mut selected: Option<&CompactionVersion> = None;
-    let mut previous: Option<&CompactionVersion> = None;
-    for event in events {
-        let CompactionEvent::Version(version) = event else {
+    let mut versions: Vec<&CompactionVersion> = events
+        .filter_map(|event| match event {
+            CompactionEvent::Version(version) => Some(version),
+            CompactionEvent::RangeStart(_) | CompactionEvent::RangeEnd(_) => None,
+        })
+        .collect();
+    versions.sort_by_key(|version| std::cmp::Reverse(version.seq));
+    for pair in versions.windows(2) {
+        let (newer, older) = (pair[0], pair[1]);
+        if newer.seq != older.seq {
             continue;
-        };
-        match previous {
-            None => selected = Some(version),
-            Some(current) if current.seq == version.seq => {
-                crate::types::resolve_same_sequence(
-                    crate::types::VersionContent {
-                        is_tombstone: current.is_tombstone,
-                        value: current.value.as_deref(),
-                        expiration: current.expiration,
-                    },
-                    crate::types::VersionContent {
-                        is_tombstone: version.is_tombstone,
-                        value: version.value.as_deref(),
-                        expiration: version.expiration,
-                    },
-                )
-                .map_err(|()| {
-                    crate::common::MidgeError::Corruption(format!(
-                        "conflicting compaction versions for key {:?} at sequence {}",
-                        String::from_utf8_lossy(&version.key),
-                        version.seq
-                    ))
-                })?;
-            }
-            Some(current) if version.seq > current.seq => {
-                return Err(crate::common::MidgeError::Corruption(format!(
-                    "compaction versions for key {:?} are out of sequence order",
-                    String::from_utf8_lossy(&version.key)
-                )));
-            }
-            Some(_) => {}
         }
-        previous = Some(version);
+        crate::types::resolve_same_sequence(
+            crate::types::VersionContent {
+                is_tombstone: newer.is_tombstone,
+                value: newer.value.as_deref(),
+                expiration: newer.expiration,
+            },
+            crate::types::VersionContent {
+                is_tombstone: older.is_tombstone,
+                value: older.value.as_deref(),
+                expiration: older.expiration,
+            },
+        )
+        .map_err(|()| {
+            crate::common::MidgeError::Corruption(format!(
+                "conflicting compaction versions for key {:?} at sequence {}",
+                String::from_utf8_lossy(&older.key),
+                older.seq
+            ))
+        })?;
     }
-    Ok(selected)
+    Ok(versions.first().copied())
 }
 
 /// Whether a key group's newest version survives tombstone GC.
@@ -2261,9 +2258,9 @@ mod tests {
         fn should_select_highest_sequence_when_key_group_has_several_versions() {
             // Arrange
             let events = [
+                version_event("k", 3, false, "old"),
                 version_event("k", 9, false, "new"),
                 version_event("k", 5, false, "mid"),
-                version_event("k", 3, false, "old"),
             ];
 
             // Act
@@ -2343,11 +2340,28 @@ mod tests {
         }
 
         #[test]
-        fn should_reject_out_of_order_versions_before_compaction_selects_a_winner() {
+        fn should_select_newest_version_when_chained_files_yield_older_version_first() {
             // Arrange
             let events = [
-                version_event("k", 5, false, "older"),
-                version_event("k", 10, false, "newer"),
+                version_event("k", 3, false, "source"),
+                version_event("k", 1, false, "left-target"),
+                version_event("k", 5, false, "right-target"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), Some(5));
+        }
+
+        #[test]
+        fn should_reject_shadowed_equal_sequence_conflict_when_versions_arrive_unordered() {
+            // Arrange
+            let events = [
+                version_event("k", 5, false, "left"),
+                version_event("k", 10, false, "newest"),
+                version_event("k", 5, false, "right"),
             ];
 
             // Act
