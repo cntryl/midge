@@ -9,6 +9,14 @@ struct SlowWalRanges {
 }
 
 impl StorageBackend for SlowWalRanges {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        self.inner.submit_range_head_request(request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,

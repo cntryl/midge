@@ -374,6 +374,51 @@ fn should_reject_expired_or_conditional_typed_head_for_every_storage_backend() {
 }
 
 #[test]
+fn should_reject_expired_or_conditional_typed_range_head_for_every_storage_backend() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        for (case, request, expected_kind) in [
+            (
+                "expired",
+                super::StorageRequest::new(
+                    "missing/range-head",
+                    crate::common::OperationDeadline::unbounded(),
+                    std::time::Duration::ZERO,
+                ),
+                super::StorageErrorKind::Timeout,
+            ),
+            (
+                "conditional",
+                super::StorageRequest::new(
+                    "missing/range-head",
+                    crate::common::OperationDeadline::unbounded(),
+                    std::time::Duration::from_secs(1),
+                )
+                .with_precondition(super::StoragePrecondition::IfAbsent),
+                super::StorageErrorKind::Protocol,
+            ),
+        ] {
+            // Act
+            let (tx, rx) = mpsc::channel();
+            backend.submit_range_head_request(request, tx);
+
+            // Assert
+            match rx.recv().expect("range HEAD callback") {
+                StorageEvent::HeadComplete {
+                    key,
+                    result: StorageOutcome::Err(error),
+                } => {
+                    assert_eq!(key, "missing/range-head", "{name}/{case}");
+                    assert_eq!(error.kind(), expected_kind, "{name}/{case}");
+                }
+                other => panic!("{name}/{case}: unexpected range HEAD event {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn should_reject_expired_or_conditional_typed_metadata_read_for_every_storage_backend() {
     // Arrange
     let root = tempfile::tempdir().expect("temp dir");

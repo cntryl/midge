@@ -213,7 +213,14 @@ impl HybridStorage {
         timeout: Duration,
     ) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
         let (tx, rx) = mpsc::channel();
-        backend.submit_range_head(key, timeout, tx);
+        backend.submit_range_head_request(
+            crate::storage::StorageRequest::new(
+                key,
+                OperationDeadline::from_budget(timeout),
+                timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(metadata),

@@ -571,6 +571,46 @@ pub(crate) fn dispatch_metadata_read_request(
     submit(&request.key, timeout, callback);
 }
 
+/// Preserve deadline, precondition rejection and reservation for either HEAD verb.
+pub(crate) fn dispatch_head_request(
+    request: StorageRequest,
+    callback: StorageCallback,
+    submit: impl FnOnce(&str, std::time::Duration, StorageCallback),
+) {
+    let timeout = request.remaining_timeout();
+    if timeout.is_zero() {
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: request.key,
+            result: StorageOutcome::Err(storage_timeout_error("head timed out")),
+        });
+        return;
+    }
+    if !matches!(request.precondition, StoragePrecondition::None) {
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: request.key,
+            result: StorageOutcome::Err(StorageError::protocol(
+                "HEAD does not accept a mutation precondition",
+            )),
+        });
+        return;
+    }
+    let callback = if let Some(reservation) = request.reservation {
+        match retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => retained,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::HeadComplete {
+                    key: request.key,
+                    result: StorageOutcome::Err(StorageError::from(error)),
+                });
+                return;
+            }
+        }
+    } else {
+        callback
+    };
+    submit(&request.key, timeout, callback);
+}
+
 /// Version-aware object I/O required by engine persistence paths.
 ///
 /// CRITICAL DESIGN:
@@ -598,6 +638,9 @@ pub(crate) fn dispatch_metadata_read_request(
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Look up a cheap identity for exact range reads under one typed request.
+    fn submit_range_head_request(&self, request: StorageRequest, callback: StorageCallback);
+
     /// Read the body and identity from one version under one typed request.
     fn submit_metadata_read_request(&self, request: StorageRequest, callback: MetadataReadCallback);
 

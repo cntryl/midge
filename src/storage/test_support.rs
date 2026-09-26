@@ -113,39 +113,20 @@ pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
     request: super::StorageRequest,
     callback: super::StorageCallback,
 ) {
-    let timeout = request.remaining_timeout();
-    let key = request.key;
-    if timeout.is_zero() {
-        let _ = callback.send(super::StorageEvent::HeadComplete {
-            key,
-            result: super::StorageOutcome::Err(super::storage_timeout_error("head timed out")),
-        });
-        return;
-    }
-    if !matches!(request.precondition, super::StoragePrecondition::None) {
-        let _ = callback.send(super::StorageEvent::HeadComplete {
-            key,
-            result: super::StorageOutcome::Err(super::StorageError::protocol(
-                "HEAD does not accept a mutation precondition",
-            )),
-        });
-        return;
-    }
-    let callback = if let Some(reservation) = request.reservation {
-        match super::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => retained,
-            Err(error) => {
-                let _ = callback.send(super::StorageEvent::HeadComplete {
-                    key,
-                    result: super::StorageOutcome::Err(super::StorageError::from(error)),
-                });
-                return;
-            }
-        }
-    } else {
-        callback
-    };
-    backend.submit_head_with_timeout(&key, timeout, callback);
+    super::dispatch_head_request(request, callback, |key, timeout, callback| {
+        backend.submit_head_with_timeout(key, timeout, callback);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn forward_typed_range_head_to_legacy<B: super::StorageBackend + ?Sized>(
+    backend: &B,
+    request: super::StorageRequest,
+    callback: super::StorageCallback,
+) {
+    super::dispatch_head_request(request, callback, |key, timeout, callback| {
+        backend.submit_range_head(key, timeout, callback);
+    });
 }
 
 #[cfg(test)]
@@ -180,6 +161,12 @@ macro_rules! forward_storage_backend {
         fn submit_head_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::StorageCallback) {
             self.$inner.submit_head_request(request, callback);
+        }
+    };
+    (@method $inner:ident, submit_range_head_request) => {
+        fn submit_range_head_request(&self, request: $crate::storage::StorageRequest,
+            callback: $crate::storage::StorageCallback) {
+            self.$inner.submit_range_head_request(request, callback);
         }
     };
     (@method $inner:ident, submit_metadata_read_request) => {

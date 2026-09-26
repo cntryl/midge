@@ -676,6 +676,14 @@ impl PostRetirementDependencyChangeBackend {
 }
 
 impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -853,6 +861,14 @@ impl ArmedDelayedHeadStorageBackend {
 }
 
 impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_head_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -915,6 +931,14 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
 }
 
 impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1036,6 +1060,14 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
 }
 
 impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1169,6 +1201,14 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
 }
 
 impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1329,6 +1369,14 @@ impl BlockingDeleteStorageBackend {
 }
 
 impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1417,6 +1465,14 @@ impl FailOnceDeleteStorageBackend {
 }
 
 impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -9063,6 +9119,14 @@ struct CountingSstHeadBackend {
 }
 
 impl crate::storage::StorageBackend for CountingSstHeadBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+    }
+
     fn submit_range_head(
         &self,
         key: &str,
