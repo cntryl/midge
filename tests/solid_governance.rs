@@ -166,3 +166,22 @@ fn should_include_range_tombstones_in_skippable_sst_sequence_bounds() {
     assert!(conflict_check.contains("reader.raw_state_scan("));
     assert!(!conflict_check.contains("scan_range_state_with_time("));
 }
+
+#[test]
+fn should_copy_file_meta_proofs_only_in_central_conversions() {
+    // Arrange
+    let producers = [
+        include_str!("../src/runtime/actors/manifest.rs"),
+        include_str!("../src/runtime/state/manifest.rs"),
+        include_str!("../src/runtime/actors/flush.rs"),
+        include_str!("../src/runtime/event_loop/flush_pipeline.rs"),
+        include_str!("../src/engine/startup/storage.rs"),
+    ];
+
+    // Act / Assert
+    for source in producers {
+        assert!(source.lines().all(|line| {
+            !(line.contains("key_bounds_complete:") && line.contains(".key_bounds_complete"))
+        }));
+    }
+}

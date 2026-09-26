@@ -82,6 +82,104 @@ impl FileMeta {
     }
 }
 
+impl From<&FileMeta> for crate::metadata::FileMeta {
+    fn from(value: &FileMeta) -> Self {
+        let FileMeta {
+            name,
+            level,
+            size_bytes,
+            content_crc32c,
+            cf_id,
+            smallest_key,
+            largest_key,
+            smallest_seq,
+            largest_seq,
+            key_bounds_complete,
+        } = value;
+        Self {
+            name: name.clone(),
+            level: *level,
+            size_bytes: *size_bytes,
+            content_crc32c: *content_crc32c,
+            cf_id: *cf_id,
+            smallest_key: smallest_key.clone(),
+            largest_key: largest_key.clone(),
+            smallest_seq: *smallest_seq,
+            largest_seq: *largest_seq,
+            key_bounds_complete: *key_bounds_complete,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<&crate::metadata::FileMeta> for FileMeta {
+    fn from(value: &crate::metadata::FileMeta) -> Self {
+        let crate::metadata::FileMeta {
+            name,
+            level,
+            size_bytes,
+            content_crc32c,
+            cf_id,
+            sst_seq: _,
+            smallest_key,
+            largest_key,
+            smallest_seq,
+            largest_seq,
+            key_bounds_complete,
+            sublevel: _,
+            read_count: _,
+        } = value;
+        Self {
+            name: name.clone(),
+            level: *level,
+            size_bytes: *size_bytes,
+            content_crc32c: *content_crc32c,
+            cf_id: *cf_id,
+            smallest_key: smallest_key.clone(),
+            largest_key: largest_key.clone(),
+            smallest_seq: *smallest_seq,
+            largest_seq: *largest_seq,
+            key_bounds_complete: *key_bounds_complete,
+        }
+    }
+}
+
+#[cfg(test)]
+mod file_meta_conversion_tests {
+    use super::FileMeta;
+
+    #[test]
+    fn should_round_trip_every_proof_field_between_runtime_and_manifest_file_meta() {
+        // Arrange
+        let runtime = FileMeta {
+            name: "proof.sst".into(),
+            level: 3,
+            size_bytes: 1234,
+            content_crc32c: Some(0x1234_5678),
+            cf_id: 7,
+            smallest_key: Some(b"alpha".to_vec()),
+            largest_key: Some(b"omega".to_vec()),
+            smallest_seq: Some(11),
+            largest_seq: Some(99),
+            key_bounds_complete: true,
+        };
+
+        // Act
+        let manifest = crate::metadata::FileMeta::from(&runtime);
+        let round_trip = FileMeta::from(&manifest);
+
+        // Assert
+        assert_eq!(
+            serde_json::to_value(&runtime).unwrap(),
+            serde_json::to_value(&round_trip).unwrap()
+        );
+        assert!(manifest.same_identity(&crate::metadata::FileMeta::from(&round_trip)));
+        let mut different = manifest.clone();
+        different.content_crc32c = Some(0);
+        assert!(!manifest.same_identity(&different));
+    }
+}
+
 /// A single operation within an atomic transaction apply.
 ///
 /// This type lives in the runtime layer so higher layers can submit a

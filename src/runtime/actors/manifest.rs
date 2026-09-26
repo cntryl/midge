@@ -48,19 +48,7 @@ impl ManifestActor {
         // Append to manifest journal (durable edit log) - skip in memory mode
         let mut journaled_id = None;
         if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-                name: file_meta.name.clone(),
-                level: file_meta.level,
-                size_bytes: file_meta.size_bytes,
-                content_crc32c: file_meta.content_crc32c,
-                cf_id: file_meta.cf_id,
-                smallest_key: file_meta.smallest_key.clone(),
-                largest_key: file_meta.largest_key.clone(),
-                smallest_seq: file_meta.smallest_seq,
-                largest_seq: file_meta.largest_seq,
-                key_bounds_complete: file_meta.key_bounds_complete,
-                ..Default::default()
-            });
+            let edit = crate::metadata::ManifestEdit::AddSst((&file_meta).into());
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_add_sst_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
@@ -72,19 +60,7 @@ impl ManifestActor {
 
         // Now that intent is durable, apply mutation to in-memory manifest
         // Convert to manifest FileMeta
-        let manifest_meta = crate::metadata::FileMeta {
-            name: file_meta.name.clone(),
-            level: file_meta.level,
-            size_bytes: file_meta.size_bytes,
-            content_crc32c: file_meta.content_crc32c,
-            cf_id: file_meta.cf_id,
-            smallest_key: file_meta.smallest_key,
-            largest_key: file_meta.largest_key,
-            smallest_seq: file_meta.smallest_seq,
-            largest_seq: file_meta.largest_seq,
-            key_bounds_complete: file_meta.key_bounds_complete,
-            ..Default::default()
-        };
+        let manifest_meta = (&file_meta).into();
 
         state.manifest.add_file(manifest_meta);
         if let Some(edit_id) = journaled_id {
@@ -115,21 +91,7 @@ impl ManifestActor {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
         for f in added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(
-                crate::metadata::FileMeta {
-                    name: f.name.clone(),
-                    level: f.level,
-                    size_bytes: f.size_bytes,
-                    content_crc32c: f.content_crc32c,
-                    cf_id: f.cf_id,
-                    smallest_key: f.smallest_key.clone(),
-                    largest_key: f.largest_key.clone(),
-                    smallest_seq: f.smallest_seq,
-                    largest_seq: f.largest_seq,
-                    key_bounds_complete: f.key_bounds_complete,
-                    ..Default::default()
-                },
-            ));
+            edits.push(crate::metadata::ManifestEdit::AddSst(f.into()));
         }
         let mut journaled_id = None;
         if !edits.is_empty() {
@@ -148,19 +110,7 @@ impl ManifestActor {
 
         // Add new files
         for file_meta in added {
-            let manifest_meta = crate::metadata::FileMeta {
-                name: file_meta.name.clone(),
-                level: file_meta.level,
-                size_bytes: file_meta.size_bytes,
-                content_crc32c: file_meta.content_crc32c,
-                cf_id: file_meta.cf_id,
-                smallest_key: file_meta.smallest_key.clone(),
-                largest_key: file_meta.largest_key.clone(),
-                smallest_seq: file_meta.smallest_seq,
-                largest_seq: file_meta.largest_seq,
-                key_bounds_complete: file_meta.key_bounds_complete,
-                ..Default::default()
-            };
+            let manifest_meta = file_meta.into();
             state.manifest.add_file(manifest_meta);
         }
         if let Some(edit_id) = journaled_id {

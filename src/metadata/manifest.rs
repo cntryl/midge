@@ -160,6 +160,22 @@ pub struct FileMeta {
 }
 
 impl FileMeta {
+    /// Compare the persisted identity fields shared with runtime messages.
+    /// Scheduling metadata and read counts do not change SST content.
+    #[must_use]
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.level == other.level
+            && self.size_bytes == other.size_bytes
+            && self.content_crc32c == other.content_crc32c
+            && self.cf_id == other.cf_id
+            && self.smallest_key == other.smallest_key
+            && self.largest_key == other.largest_key
+            && self.smallest_seq == other.smallest_seq
+            && self.largest_seq == other.largest_seq
+            && self.key_bounds_complete == other.key_bounds_complete
+    }
+
     /// Borrow this entry's recorded proofs for the SST identity checker.
     pub(crate) fn expected_sst(&self) -> crate::types::ExpectedSst<'_> {
         crate::types::ExpectedSst {
