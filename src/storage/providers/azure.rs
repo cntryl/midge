@@ -13,7 +13,7 @@ use super::super::cloud::{
 };
 use super::rest::{
     conditional_range_request, finish_paged_list, map_response, object_metadata_from_response,
-    ListPageParser, PagedList, ProviderDialect,
+    split_request_timeout, ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -878,16 +878,19 @@ impl CloudBackend for AzureBackend {
         let key = key.to_string();
         let url = self.object_url(&key);
         let len = data.len();
-        let conditional_mutation = headers.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-        });
-        let mut request = CloudRequest::new(Method::PUT, url)
+        let request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
             .with_reservation(reservation)
             .with_header("x-ms-blob-type", "BlockBlob")
             .with_header("Content-Length", len.to_string());
-        let (headers, timeout) = match crate::storage::cloud::split_request_timeout_header(headers)
-        {
+        let (request, conditional_mutation) = match super::rest::apply_caller_headers(
+            request,
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            },
+            |request, name, value| Ok(request.with_header(name, value)),
+        ) {
             Ok(parts) => parts,
             Err(error) => {
                 let _ = callback.send(CloudEvent::Put {
@@ -897,12 +900,6 @@ impl CloudBackend for AzureBackend {
                 return;
             }
         };
-        if let Some(timeout) = timeout {
-            request = request.with_timeout(timeout);
-        }
-        for (name, value) in headers {
-            request = request.with_header(name, value);
-        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
             key: ctx,
             result: map_response(
@@ -1043,29 +1040,25 @@ impl CloudBackend for AzureBackend {
     }
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
-        let (headers, request_timeout) =
-            match crate::storage::cloud::split_request_timeout_header(headers) {
-                Ok(split) => split,
-                Err(error) => {
-                    let _ = callback.send(CloudEvent::Delete {
-                        key: key.to_string(),
-                        result: CloudOutcome::Err(CloudError::Protocol(error)),
-                    });
-                    return;
-                }
-            };
         let key = key.to_string();
         let url = self.object_url(&key);
-        let conditional_mutation = headers.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-        });
-        let mut request = CloudRequest::new(Method::DELETE, url);
-        if let Some(timeout) = request_timeout {
-            request = request.with_timeout(timeout);
-        }
-        for (name, value) in headers {
-            request = request.with_header(name, value);
-        }
+        let (request, conditional_mutation) = match super::rest::apply_caller_headers(
+            CloudRequest::new(Method::DELETE, url),
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            },
+            |request, name, value| Ok(request.with_header(name, value)),
+        ) {
+            Ok(parts) => parts,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::Delete {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol(error)),
+                });
+                return;
+            }
+        };
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
             key: ctx,
             result: map_response(
@@ -1909,25 +1902,6 @@ impl CloudSigner for ManagedIdentitySigner {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-/// Split the internal request-timeout header off HEAD/LIST headers.
-/// Returns `None` after reporting a malformed value through `callback`.
-fn split_request_timeout(
-    key: &str,
-    headers: &[(String, String)],
-    callback: &CloudCallback,
-) -> std::ops::ControlFlow<(), Option<std::time::Duration>> {
-    match crate::storage::cloud::split_request_timeout_header(headers.to_vec()) {
-        Ok((_, timeout)) => std::ops::ControlFlow::Continue(timeout),
-        Err(error) => {
-            let _ = callback.send(CloudEvent::Head {
-                key: key.to_string(),
-                result: CloudOutcome::Err(CloudError::Protocol(error)),
-            });
-            std::ops::ControlFlow::Break(())
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

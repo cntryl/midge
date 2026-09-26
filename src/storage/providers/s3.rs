@@ -11,7 +11,8 @@ use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudRespon
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
     conditional_range_request, current_unix_secs, finish_paged_list, map_response,
-    object_metadata_from_response, ListPageParser, PagedList, ProviderDialect,
+    object_metadata_from_response, split_request_timeout, ListPageParser, PagedList,
+    ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1087,18 +1088,18 @@ impl CloudBackend for S3Backend {
         let key = key.to_string();
         let url = self.object_url(&key);
         let content_length = data.len();
-        let conditional_mutation = headers.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-        });
-        let mut request = CloudRequest::new(Method::PUT, url)
+        let request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
             .with_reservation(reservation)
             .with_header("Content-Length", content_length.to_string());
-        if conditional_mutation {
-            request = request.with_conditional_conflict_retries();
-        }
-        let (headers, timeout) = match crate::storage::cloud::split_request_timeout_header(headers)
-        {
+        let (mut request, conditional_mutation) = match super::rest::apply_caller_headers(
+            request,
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            },
+            |request, name, value| Ok(request.with_header(name, value)),
+        ) {
             Ok(parts) => parts,
             Err(error) => {
                 let _ = callback.send(CloudEvent::Put {
@@ -1108,11 +1109,8 @@ impl CloudBackend for S3Backend {
                 return;
             }
         };
-        if let Some(timeout) = timeout {
-            request = request.with_timeout(timeout);
-        }
-        for (name, value) in headers {
-            request = request.with_header(name, value);
+        if conditional_mutation {
+            request = request.with_conditional_conflict_retries();
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
             key: ctx,
@@ -1255,31 +1253,27 @@ impl CloudBackend for S3Backend {
     }
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
-        let (headers, request_timeout) =
-            match crate::storage::cloud::split_request_timeout_header(headers) {
-                Ok(split) => split,
-                Err(error) => {
-                    let _ = callback.send(CloudEvent::Delete {
-                        key: key.to_string(),
-                        result: CloudOutcome::Err(CloudError::Protocol(error)),
-                    });
-                    return;
-                }
-            };
         let key = key.to_string();
         let url = self.object_url(&key);
-        let conditional_mutation = headers.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-        });
-        let mut request = CloudRequest::new(Method::DELETE, url);
-        if let Some(timeout) = request_timeout {
-            request = request.with_timeout(timeout);
-        }
+        let (mut request, conditional_mutation) = match super::rest::apply_caller_headers(
+            CloudRequest::new(Method::DELETE, url),
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            },
+            |request, name, value| Ok(request.with_header(name, value)),
+        ) {
+            Ok(parts) => parts,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::Delete {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol(error)),
+                });
+                return;
+            }
+        };
         if conditional_mutation {
             request = request.with_conditional_conflict_retries();
-        }
-        for (name, value) in headers {
-            request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
             key: ctx,
@@ -1604,25 +1598,6 @@ fn canonicalize_query(query: &str) -> String {
         .collect();
     pairs.sort();
     pairs.join("&")
-}
-
-/// Split the internal request-timeout header off HEAD/LIST headers.
-/// Returns `None` after reporting a malformed value through `callback`.
-fn split_request_timeout(
-    key: &str,
-    headers: &[(String, String)],
-    callback: &CloudCallback,
-) -> std::ops::ControlFlow<(), Option<std::time::Duration>> {
-    match crate::storage::cloud::split_request_timeout_header(headers.to_vec()) {
-        Ok((_, timeout)) => std::ops::ControlFlow::Continue(timeout),
-        Err(error) => {
-            let _ = callback.send(CloudEvent::Head {
-                key: key.to_string(),
-                result: CloudOutcome::Err(CloudError::Protocol(error)),
-            });
-            std::ops::ControlFlow::Break(())
-        }
-    }
 }
 
 #[cfg(test)]

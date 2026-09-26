@@ -11,8 +11,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner, ObjectMetadata,
 };
 use super::rest::{
-    conditional_range_request, current_unix_secs, finish_paged_list, map_response, ListPageParser,
-    PagedList, ProviderDialect,
+    conditional_range_request, current_unix_secs, finish_paged_list, map_response,
+    split_request_timeout, ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1171,14 +1171,9 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Xml => Method::PUT,
         };
         let mode = self.mode;
-        let conditional_mutation = headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("x-goog-if-generation-match")
-                || name.eq_ignore_ascii_case("if-match")
-                || (name.eq_ignore_ascii_case("if-none-match") && value.trim() == "*")
-        });
         let mut url = self.upload_url(&key);
         let content_length = data.len();
-        let mut request = CloudRequest::new(method, String::new())
+        let request = CloudRequest::new(method, String::new())
             .with_body(data)
             .with_reservation(reservation)
             .with_header("Content-Type", "application/octet-stream")
@@ -1186,8 +1181,47 @@ impl CloudBackend for GcsBackend {
         // JSON uploads express mutation preconditions as query parameters. The
         // standard ETag headers are read-only in GCS JSON mode, so never forward
         // them on a write where they could be ignored.
-        let (headers, timeout) = match crate::storage::cloud::split_request_timeout_header(headers)
-        {
+        let (mut request, conditional_mutation) = match super::rest::apply_caller_headers(
+            request,
+            headers,
+            |name, value| {
+                name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                    || name.eq_ignore_ascii_case("if-match")
+                    || (name.eq_ignore_ascii_case("if-none-match") && value.trim() == "*")
+            },
+            |request, name, value| {
+                if name.eq_ignore_ascii_case("x-goog-if-generation-match") {
+                    if mode == GcsBackendMode::Json {
+                        url = append_query_param(&url, "ifGenerationMatch", &value);
+                        Ok(request)
+                    } else {
+                        Ok(request.with_header(name, value))
+                    }
+                } else if name.eq_ignore_ascii_case("x-goog-if-generation-not-match") {
+                    if mode == GcsBackendMode::Json {
+                        url = append_query_param(&url, "ifGenerationNotMatch", &value);
+                        Ok(request)
+                    } else {
+                        Ok(request.with_header(name, value))
+                    }
+                } else if name.eq_ignore_ascii_case("if-none-match") && value.trim() == "*" {
+                    if mode == GcsBackendMode::Json {
+                        url = append_query_param(&url, "ifGenerationMatch", "0");
+                        Ok(request)
+                    } else {
+                        Ok(request.with_header("x-goog-if-generation-match", "0".to_string()))
+                    }
+                } else if name.eq_ignore_ascii_case("if-match")
+                    || name.eq_ignore_ascii_case("if-none-match")
+                {
+                    Err(format!(
+                        "GCS PUT cannot enforce {name}; use a generation precondition"
+                    ))
+                } else {
+                    Ok(request.with_header(name, value))
+                }
+            },
+        ) {
             Ok(parts) => parts,
             Err(error) => {
                 let _ = callback.send(CloudEvent::Put {
@@ -1197,42 +1231,6 @@ impl CloudBackend for GcsBackend {
                 return;
             }
         };
-        if let Some(timeout) = timeout {
-            request = request.with_timeout(timeout);
-        }
-        for (name, value) in headers {
-            if name.eq_ignore_ascii_case("x-goog-if-generation-match") {
-                if self.mode == GcsBackendMode::Json {
-                    url = append_query_param(&url, "ifGenerationMatch", &value);
-                } else {
-                    request = request.with_header(name, value);
-                }
-            } else if name.eq_ignore_ascii_case("x-goog-if-generation-not-match") {
-                if self.mode == GcsBackendMode::Json {
-                    url = append_query_param(&url, "ifGenerationNotMatch", &value);
-                } else {
-                    request = request.with_header(name, value);
-                }
-            } else if name.eq_ignore_ascii_case("if-none-match") && value.trim() == "*" {
-                if self.mode == GcsBackendMode::Json {
-                    url = append_query_param(&url, "ifGenerationMatch", "0");
-                } else {
-                    request = request.with_header("x-goog-if-generation-match", "0".to_string());
-                }
-            } else if name.eq_ignore_ascii_case("if-match")
-                || name.eq_ignore_ascii_case("if-none-match")
-            {
-                let _ = callback.send(CloudEvent::Put {
-                    key,
-                    result: CloudOutcome::Err(CloudError::Protocol(format!(
-                        "GCS PUT cannot enforce {name}; use a generation precondition"
-                    ))),
-                });
-                return;
-            } else {
-                request = request.with_header(name, value);
-            }
-        }
         request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
             key: ctx,
@@ -1382,51 +1380,47 @@ impl CloudBackend for GcsBackend {
     }
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
-        let (headers, request_timeout) =
-            match crate::storage::cloud::split_request_timeout_header(headers) {
-                Ok(split) => split,
-                Err(error) => {
-                    let _ = callback.send(CloudEvent::Delete {
-                        key: key.to_string(),
-                        result: CloudOutcome::Err(CloudError::Protocol(error)),
-                    });
-                    return;
-                }
-            };
         let key = key.to_string();
         let mode = self.mode;
-        let conditional_mutation = headers.iter().any(|(name, _)| {
-            name.eq_ignore_ascii_case("x-goog-if-generation-match")
-                || name.eq_ignore_ascii_case("if-match")
-        });
         let mut url = self.metadata_url(&key);
-        let mut request = Self::bodyless_request(mode, Method::DELETE, String::new());
-        if let Some(timeout) = request_timeout {
-            request = request.with_timeout(timeout);
-        }
-        for (name, value) in headers {
-            if self.mode == GcsBackendMode::Json
-                && name.eq_ignore_ascii_case("x-goog-if-generation-match")
-            {
-                url = append_query_param(&url, "ifGenerationMatch", &value);
-            } else if self.mode == GcsBackendMode::Json
-                && name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
-            {
-                url = append_query_param(&url, "ifGenerationNotMatch", &value);
-            } else if name.eq_ignore_ascii_case("if-match")
-                || name.eq_ignore_ascii_case("if-none-match")
-            {
+        let (mut request, conditional_mutation) = match super::rest::apply_caller_headers(
+            Self::bodyless_request(mode, Method::DELETE, String::new()),
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                    || name.eq_ignore_ascii_case("if-match")
+            },
+            |request, name, value| {
+                if mode == GcsBackendMode::Json
+                    && name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                {
+                    url = append_query_param(&url, "ifGenerationMatch", &value);
+                    Ok(request)
+                } else if mode == GcsBackendMode::Json
+                    && name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
+                {
+                    url = append_query_param(&url, "ifGenerationNotMatch", &value);
+                    Ok(request)
+                } else if name.eq_ignore_ascii_case("if-match")
+                    || name.eq_ignore_ascii_case("if-none-match")
+                {
+                    Err(format!(
+                        "GCS DELETE cannot enforce {name}; use a generation precondition"
+                    ))
+                } else {
+                    Ok(request.with_header(name, value))
+                }
+            },
+        ) {
+            Ok(parts) => parts,
+            Err(error) => {
                 let _ = callback.send(CloudEvent::Delete {
                     key,
-                    result: CloudOutcome::Err(CloudError::Protocol(format!(
-                        "GCS DELETE cannot enforce {name}; use a generation precondition"
-                    ))),
+                    result: CloudOutcome::Err(CloudError::Protocol(error)),
                 });
                 return;
-            } else {
-                request = request.with_header(name, value);
             }
-        }
+        };
         request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
             key: ctx,
@@ -1930,25 +1924,6 @@ impl CloudSigner for Goog1HmacSigner {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-/// Split the internal request-timeout header off HEAD/LIST headers.
-/// Returns `None` after reporting a malformed value through `callback`.
-fn split_request_timeout(
-    key: &str,
-    headers: &[(String, String)],
-    callback: &CloudCallback,
-) -> std::ops::ControlFlow<(), Option<std::time::Duration>> {
-    match crate::storage::cloud::split_request_timeout_header(headers.to_vec()) {
-        Ok((_, timeout)) => std::ops::ControlFlow::Continue(timeout),
-        Err(error) => {
-            let _ = callback.send(CloudEvent::Head {
-                key: key.to_string(),
-                result: CloudOutcome::Err(CloudError::Protocol(error)),
-            });
-            std::ops::ControlFlow::Break(())
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

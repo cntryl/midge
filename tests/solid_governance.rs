@@ -26,7 +26,7 @@ fn should_keep_metric_verification_delegates_off_engine() {
 #[test]
 fn should_keep_rest_pagination_state_in_shared_provider_core() {
     // Arrange
-    let rest = include_str!("../src/storage/providers/rest.rs");
+    let rest = include_str!("../src/storage/providers/rest/mod.rs");
     let providers = [
         include_str!("../src/storage/providers/s3.rs"),
         include_str!("../src/storage/providers/azure.rs"),
@@ -48,7 +48,7 @@ fn should_keep_rest_pagination_state_in_shared_provider_core() {
 #[test]
 fn should_keep_rest_error_detail_in_shared_provider_core() {
     // Arrange
-    let rest = include_str!("../src/storage/providers/rest.rs");
+    let rest = include_str!("../src/storage/providers/rest/mod.rs");
     let providers = [
         include_str!("../src/storage/providers/s3.rs"),
         include_str!("../src/storage/providers/azure.rs"),
@@ -69,6 +69,7 @@ fn should_keep_rest_error_detail_in_shared_provider_core() {
 fn should_keep_request_timeout_parser_in_cloud_core() {
     // Arrange
     let cloud = include_str!("../src/storage/cloud/mod.rs");
+    let rest = include_str!("../src/storage/providers/rest/mod.rs");
     let providers = [
         include_str!("../src/storage/providers/s3.rs"),
         include_str!("../src/storage/providers/azure.rs"),
@@ -78,9 +79,13 @@ fn should_keep_request_timeout_parser_in_cloud_core() {
     // Act
     // Assert
     assert!(cloud.contains("fn parse_request_timeout"));
+    assert!(rest.contains("pub(super) fn apply_caller_headers"));
+    assert!(rest.contains("pub(super) fn split_request_timeout"));
     for source in providers {
         assert!(!source.contains("fn parse_request_timeout"));
         assert!(!source.contains("REQUEST_TIMEOUT_HEADER"));
+        assert!(!source.contains("split_request_timeout_header"));
+        assert!(source.matches("super::rest::apply_caller_headers(").count() >= 2);
     }
 }
 

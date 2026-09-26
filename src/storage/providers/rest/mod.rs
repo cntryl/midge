@@ -16,6 +16,13 @@ use crate::storage::cloud::CloudError;
     feature = "cloud-azure",
     feature = "cloud-gcp"
 ))]
+use crate::storage::cloud::CloudRequest;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
 use crate::storage::cloud::{CloudEvent, CloudListBudget};
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
 use crate::storage::cloud::{CloudOutcome, CloudResponse, ObjectMetadata};
@@ -233,6 +240,57 @@ pub(super) fn map_response<T>(
         Ok(response) if accepts(response.status) => success(response),
         Ok(response) => Err(error(&response)),
         Err(error) => Err(CloudError::from_transport_error(error)),
+    }
+}
+
+/// Apply caller-supplied timeout and mutation headers before signing. The
+/// provider chooses which headers express a conditional mutation and how each
+/// header is encoded (GCS JSON uses URL query parameters).
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn apply_caller_headers(
+    mut request: CloudRequest,
+    headers: Vec<(String, String)>,
+    conditional: impl Fn(&str, &str) -> bool,
+    mut apply: impl FnMut(CloudRequest, String, String) -> Result<CloudRequest, String>,
+) -> Result<(CloudRequest, bool), String> {
+    let (headers, timeout) = crate::storage::cloud::split_request_timeout_header(headers)?;
+    let conditional_mutation = headers.iter().any(|(name, value)| conditional(name, value));
+    if let Some(timeout) = timeout {
+        request = request.with_timeout(timeout);
+    }
+    for (name, value) in headers {
+        request = apply(request, name, value)?;
+    }
+    Ok((request, conditional_mutation))
+}
+
+/// HEAD and LIST carry only an internal timeout header. Preserve their
+/// existing protocol callback on a malformed value.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn split_request_timeout(
+    key: &str,
+    headers: &[(String, String)],
+    callback: &crate::storage::cloud::CloudCallback,
+) -> std::ops::ControlFlow<(), Option<std::time::Duration>> {
+    match crate::storage::cloud::split_request_timeout_header(headers.to_vec()) {
+        Ok((_, timeout)) => std::ops::ControlFlow::Continue(timeout),
+        Err(error) => {
+            let _ = callback.send(CloudEvent::Head {
+                key: key.to_string(),
+                result: crate::storage::cloud::CloudOutcome::Err(CloudError::Protocol(error)),
+            });
+            std::ops::ControlFlow::Break(())
+        }
     }
 }
 
