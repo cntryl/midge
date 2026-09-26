@@ -46,12 +46,6 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo check --workspace --all-targets --all-features
 
-      - name: Test workspace
-        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
-
-      - name: Fault injection suite (serial; failpoints are process-global)
-        run: cargo test --test fault_injection --all-features -- --test-threads=1
-
       - name: Test cloud WAL salvage on Windows
         if: matrix.os == 'windows-latest'
         run: cargo test --lib streaming_wal_plan::tests --all-features
@@ -73,3 +67,9 @@ jobs:
       - name: Clippy on Windows
         if: matrix.os == 'windows-latest'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+
+      - name: Test workspace
+        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
+
+      - name: Fault injection suite (serial; failpoints are process-global)
+        run: cargo test --test fault_injection --all-features -- --test-threads=1

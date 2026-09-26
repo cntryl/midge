@@ -19,6 +19,7 @@ jobs:
       - name: Prune old workflow runs
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           cutoff="$(date -u -d '30 days ago' +%Y-%m-%d)"
           while true; do
