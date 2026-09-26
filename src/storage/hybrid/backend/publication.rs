@@ -3,7 +3,6 @@
 use super::{mpsc, HybridStorage, StorageEvent, StorageOutcome};
 #[cfg(test)]
 use super::{Arc, StorageBackend};
-#[cfg(test)]
 use crate::common::OperationDeadline;
 use crate::common::{MidgeError, MidgeResult};
 
@@ -15,7 +14,14 @@ impl HybridStorage {
             return Ok(true);
         };
         let (tx, rx) = mpsc::channel();
-        local.submit_range_head(key, self.callback_timeout, tx);
+        local.submit_range_head_request(
+            crate::storage::StorageRequest::new(
+                key,
+                OperationDeadline::from_budget(self.callback_timeout),
+                self.callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(self.callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,

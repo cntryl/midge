@@ -498,6 +498,33 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl FileSystem {
+    fn range_head_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: &StorageCallback,
+    ) {
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error(
+                    "range HEAD timed out",
+                ));
+            }
+            let path = self.full_path(key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            range_path_metadata(&path)
+        })();
+        let result = match result {
+            Ok(metadata) => StorageOutcome::Ok(metadata),
+            Err(error) => StorageOutcome::Err(error),
+        };
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
     fn metadata_read_within(
         &self,
         key: &str,
@@ -583,7 +610,7 @@ impl StorageBackend for FileSystem {
 
     fn submit_range_head_request(&self, request: StorageRequest, callback: StorageCallback) {
         crate::storage::dispatch_head_request(request, callback, |key, timeout, callback| {
-            self.submit_range_head(key, timeout, callback);
+            self.range_head_within(key, timeout, &callback);
         });
     }
 
@@ -721,33 +748,6 @@ impl StorageBackend for FileSystem {
             Err(error) => StorageOutcome::Err(error),
         };
         let _ = callback.send(StorageEvent::WriteComplete { key, result });
-    }
-
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        let result = (|| {
-            if timeout.is_zero() {
-                return Err(crate::storage::storage_timeout_error(
-                    "range HEAD timed out",
-                ));
-            }
-            let path = self.full_path(key)?;
-            let _lock = mutation_lock(&path);
-            let _process_lock = self.acquire_process_lock(&path)?;
-            range_path_metadata(&path)
-        })();
-        let result = match result {
-            Ok(metadata) => StorageOutcome::Ok(metadata),
-            Err(error) => StorageOutcome::Err(error),
-        };
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result,
-        });
     }
 
     fn submit_read_range(
@@ -1535,7 +1535,14 @@ mod tests {
         );
         let write = write_rx.recv().unwrap();
         let (head_tx, head_rx) = mpsc::channel();
-        fs.submit_range_head("object.bin", std::time::Duration::from_secs(5), head_tx);
+        fs.submit_range_head_request(
+            StorageRequest::new(
+                "object.bin",
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            ),
+            head_tx,
+        );
         let StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(metadata),
             ..

@@ -294,14 +294,6 @@ mod tests {
         fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
             panic!("replay cannot delete cloud objects");
         }
-        fn submit_range_head(
-            &self,
-            key: &str,
-            timeout: Duration,
-            callback: crate::storage::StorageCallback,
-        ) {
-            self.inner.submit_range_head(key, timeout, callback);
-        }
         fn submit_read_range(
             &self,
             key: &str,
@@ -345,7 +337,14 @@ mod tests {
                 .collect();
             std::fs::write(&full_path, &bytes)?;
             let (tx, rx) = std::sync::mpsc::channel();
-            backend.submit_range_head(&key, Duration::from_secs(5), tx);
+            backend.submit_range_head_request(
+                crate::storage::StorageRequest::new(
+                    &key,
+                    crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+                    Duration::from_secs(5),
+                ),
+                tx,
+            );
             let metadata = match rx.recv_timeout(Duration::from_secs(5)).expect("range HEAD") {
                 StorageEvent::HeadComplete {
                     result: StorageOutcome::Ok(metadata),

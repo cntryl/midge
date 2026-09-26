@@ -85,10 +85,6 @@ impl StorageBackend for SlowWalRanges {
         }
     }
 
-    fn submit_range_head(&self, key: &str, timeout: Duration, callback: StorageCallback) {
-        self.inner.submit_range_head(key, timeout, callback);
-    }
-
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         self.inner.submit_write(key, data, callback);
     }

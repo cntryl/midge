@@ -26,7 +26,8 @@ impl StorageBackend for PanicLocalBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        let _ = (request, callback);
+        panic!("ephemeral lookup called the retired local backend");
     }
 
     fn submit_metadata_read_request(
@@ -69,15 +70,6 @@ impl StorageBackend for PanicLocalBackend {
 
     fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
         panic!("ephemeral deletion called the retired local backend");
-    }
-
-    fn submit_range_head(
-        &self,
-        _key: &str,
-        _timeout: Duration,
-        _callback: crate::storage::StorageCallback,
-    ) {
-        panic!("ephemeral lookup called the retired local backend");
     }
 }
 

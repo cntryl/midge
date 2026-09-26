@@ -666,20 +666,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         callback: StorageCallback,
     );
 
-    /// Return a version usable by exact range reads without reading the body.
-    /// Unsupported backends must not fall back to whole-object reads.
-    #[cfg(not(test))]
-    fn submit_range_head(&self, key: &str, timeout: std::time::Duration, callback: StorageCallback);
-    #[cfg(test)]
-    fn submit_range_head(
-        &self,
-        _key: &str,
-        _timeout: std::time::Duration,
-        _callback: StorageCallback,
-    ) {
-        panic!("test backend received undeclared range HEAD capability");
-    }
-
     /// Read precisely [start, end) from the expected immutable object version.
     /// Implementations must reject unsupported conditions and short responses.
     #[cfg(not(test))]

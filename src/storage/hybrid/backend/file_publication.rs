@@ -171,7 +171,14 @@ impl HybridStorage {
     ) -> MidgeResult<Option<StorageObjectMetadata>> {
         let timeout = admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
-        backend.submit_range_head(key, timeout, tx);
+        backend.submit_range_head_request(
+            crate::storage::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(timeout),
+                timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,

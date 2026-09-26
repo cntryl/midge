@@ -208,7 +208,10 @@ fn control_head(
 ) -> MidgeResult<Option<StorageObjectMetadata>> {
     let timeout = HybridStorage::deadline_timeout(key, "control HEAD", callback_timeout, deadline)?;
     let (tx, rx) = mpsc::channel();
-    backend.submit_range_head(key, timeout, tx);
+    backend.submit_range_head_request(
+        crate::storage::StorageRequest::new(key, *deadline, timeout),
+        tx,
+    );
     match rx.recv_timeout(timeout) {
         Ok(StorageEvent::HeadComplete {
             key: actual,

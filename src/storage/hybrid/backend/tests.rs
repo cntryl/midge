@@ -605,7 +605,8 @@ impl StorageBackend for BudgetConsumingProofBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
     }
 
     fn submit_metadata_read_request(
@@ -709,7 +710,8 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
     }
 
     fn submit_metadata_read_request(

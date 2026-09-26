@@ -109,17 +109,6 @@ pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
 }
 
 #[cfg(test)]
-pub(crate) fn forward_typed_range_head_to_legacy<B: super::StorageBackend + ?Sized>(
-    backend: &B,
-    request: super::StorageRequest,
-    callback: super::StorageCallback,
-) {
-    super::dispatch_head_request(request, callback, |key, timeout, callback| {
-        backend.submit_range_head(key, timeout, callback);
-    });
-}
-
-#[cfg(test)]
 pub(crate) fn forward_typed_range_read_to_legacy<B: super::StorageBackend + ?Sized>(
     backend: &B,
     request: super::StorageRequest,
@@ -204,11 +193,6 @@ macro_rules! forward_storage_backend {
             expected: $crate::storage::StorageObjectMetadata, timeout: std::time::Duration,
             callback: $crate::storage::RangeReadCallback) {
             self.$inner.submit_read_range(key, start, end, expected, timeout, callback);
-        }
-    };
-    (@method $inner:ident, submit_range_head) => {
-        fn submit_range_head(&self, key: &str, timeout: std::time::Duration, callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_range_head(key, timeout, callback);
         }
     };
     (@method $inner:ident, submit_write) => {

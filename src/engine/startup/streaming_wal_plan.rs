@@ -261,7 +261,14 @@ fn remote_source(
     limits: StreamingReplayLimits,
 ) -> MidgeResult<ReplaySource> {
     let (tx, rx) = std::sync::mpsc::channel();
-    remote.submit_range_head(&publication.object_key, timeout, tx);
+    remote.submit_range_head_request(
+        crate::storage::StorageRequest::new(
+            &publication.object_key,
+            crate::common::OperationDeadline::from_budget(timeout),
+            timeout,
+        ),
+        tx,
+    );
     let metadata = match rx.recv_timeout(timeout) {
         Ok(StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(metadata),

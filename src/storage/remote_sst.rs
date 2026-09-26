@@ -135,7 +135,15 @@ impl RemoteSstFs {
         let timeout = self
             .deadline
             .map_or(self.timeout, |deadline| deadline.clamp(self.timeout));
-        self.cloud.submit_range_head(&key, timeout, tx);
+        self.cloud.submit_range_head_request(
+            super::StorageRequest::new(
+                &key,
+                self.deadline
+                    .unwrap_or_else(|| crate::common::OperationDeadline::from_budget(timeout)),
+                timeout,
+            ),
+            tx,
+        );
         let metadata = match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(metadata),
@@ -498,14 +506,6 @@ mod tests {
         }
         fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
             self.inner.submit_delete(key, callback);
-        }
-        fn submit_range_head(
-            &self,
-            key: &str,
-            timeout: Duration,
-            callback: super::super::StorageCallback,
-        ) {
-            self.inner.submit_range_head(key, timeout, callback);
         }
         fn submit_read_range(
             &self,

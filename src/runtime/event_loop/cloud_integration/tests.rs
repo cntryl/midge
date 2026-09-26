@@ -692,7 +692,7 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        self.inner.submit_range_head_request(request, callback);
     }
 
     fn submit_metadata_read_request(
@@ -721,7 +721,7 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_range_head,
+
         submit_read_range,
 
         submit_write,
@@ -888,7 +888,16 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        if self.delay_next_head.swap(false, Ordering::SeqCst) {
+            let inner = Arc::clone(&self.inner);
+            let delay = self.delay;
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                inner.submit_range_head_request(request, callback);
+            });
+        } else {
+            self.inner.submit_range_head_request(request, callback);
+        }
     }
 
     fn submit_head_request(
@@ -899,34 +908,6 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
         crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
     }
 
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if self.delay_next_head.swap(false, Ordering::SeqCst) {
-            let inner = Arc::clone(&self.inner);
-            let key = key.to_string();
-            let delay = self.delay;
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                crate::storage::StorageBackend::submit_range_head(
-                    inner.as_ref(),
-                    &key,
-                    timeout,
-                    callback,
-                );
-            });
-            return;
-        }
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
     crate::storage::forward_storage_backend!(
     inner;
     submit_write_request, submit_delete_request, submit_metadata_read_request, submit_read_range,
@@ -969,7 +950,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        self.inner.submit_range_head_request(request, callback);
     }
 
     fn submit_metadata_read_request(
@@ -998,7 +979,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_range_head,
+
         submit_read_range,
 
         submit_write,
@@ -1109,7 +1090,7 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        self.inner.submit_range_head_request(request, callback);
     }
 
     fn submit_metadata_read_request(
@@ -1138,7 +1119,7 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_range_head,
+
         submit_read_range,
 
         submit_write,
@@ -1237,7 +1218,7 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        self.inner.submit_range_head_request(request, callback);
     }
 
     fn submit_metadata_read_request(
@@ -1266,7 +1247,7 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_range_head,
+
         submit_read_range,
 
         submit_write,
@@ -1365,7 +1346,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        self.inner.submit_range_head_request(request, callback);
     }
 
     fn submit_metadata_read_request(
@@ -1386,7 +1367,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_write_request, submit_range_head,
+        submit_write_request,
         submit_read_range,
 
         submit_write,
@@ -1472,7 +1453,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
+        self.inner.submit_range_head_request(request, callback);
     }
 
     fn submit_metadata_read_request(
@@ -1493,7 +1474,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_write_request, submit_range_head,
+        submit_write_request,
         submit_read_range,
 
         submit_write,
@@ -9137,24 +9118,10 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_head_to_legacy(self, request, callback);
-    }
-
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if key == self.sst_key {
+        if request.key == self.sst_key {
             self.sst_range_heads.fetch_add(1, Ordering::SeqCst);
         }
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
+        self.inner.submit_range_head_request(request, callback);
     }
 
     crate::storage::forward_storage_backend!(
@@ -9209,10 +9176,13 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
     // proof matches and the turn publishes. Going through `inner` keeps this
     // setup HEAD out of the count.
     let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
-    crate::storage::StorageBackend::submit_range_head(
+    crate::storage::StorageBackend::submit_range_head_request(
         counting.inner.as_ref(),
-        &crate::cloud_layout::object_key(&output_sst),
-        Duration::from_secs(5),
+        crate::storage::StorageRequest::new(
+            crate::cloud_layout::object_key(&output_sst),
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+            Duration::from_secs(5),
+        ),
         metadata_tx,
     );
     let metadata = match metadata_rx.recv_timeout(Duration::from_secs(5)) {

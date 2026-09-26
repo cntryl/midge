@@ -86,6 +86,30 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
 }
 
 impl CloudStorage {
+    fn range_head_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: &StorageCallback,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.head_with_timeout(key, timeout, &tx);
+        let result = match rx.recv_timeout(timeout) {
+            Ok(StorageEvent::HeadComplete {
+                key: actual,
+                result,
+            }) if actual == key => result,
+            Ok(event) => StorageOutcome::Err(
+                format!("range HEAD returned a different object: {event:?}").into(),
+            ),
+            Err(error) => StorageOutcome::Err(crate::storage::storage_timeout_error(error)),
+        };
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
     fn metadata_read_within(
         &self,
         key: &str,
@@ -166,7 +190,7 @@ impl StorageBackend for CloudStorage {
         callback: StorageCallback,
     ) {
         crate::storage::dispatch_head_request(request, callback, |key, timeout, callback| {
-            self.submit_range_head(key, timeout, callback);
+            self.range_head_within(key, timeout, &callback);
         });
     }
 
@@ -222,30 +246,6 @@ impl StorageBackend for CloudStorage {
             }
         };
         self.write_admitted(&key, data, headers, timeout, request.reservation, &callback);
-    }
-
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.head_with_timeout(key, timeout, &tx);
-        let result = match rx.recv_timeout(timeout) {
-            Ok(StorageEvent::HeadComplete {
-                key: actual,
-                result,
-            }) if actual == key => result,
-            Ok(event) => StorageOutcome::Err(
-                format!("range HEAD returned a different object: {event:?}").into(),
-            ),
-            Err(error) => StorageOutcome::Err(crate::storage::storage_timeout_error(error)),
-        };
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result,
-        });
     }
 
     fn submit_read_range(
