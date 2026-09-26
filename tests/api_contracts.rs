@@ -29,7 +29,10 @@ fn should_expose_typed_storage_pressure_when_transaction_spill_exceeds_local_cap
 
     // Act
     let result = transaction.put(b"oversized".to_vec(), vec![1; 2 * 1024 * 1024], None);
-    let snapshot = engine.get_runtime_metrics().expect("runtime metrics");
+    let snapshot = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("runtime metrics");
     let storage: HybridStorageBudgetSnapshot = snapshot.local_storage.expect("cloud disk budget");
     let usage: LocalStorageUsage = storage.usage;
     let pressure: StorageAdmissionBlock = storage.blocked_admission.expect("rejected admission");
@@ -70,8 +73,10 @@ fn should_reexport_shared_public_types_from_crate_root() {
     let _: EngineHealth = EngineHealth::Healthy;
     let _: Storage = Storage::InMemory;
     let _: ColumnFamilyId = 0;
-    let _: fn(&Engine) -> MidgeResult<RuntimeMetricsSnapshot> = Engine::get_runtime_metrics;
-    let _: fn(&Engine) -> MidgeResult<StorageLayoutSnapshot> = Engine::get_storage_layout;
+    let _: fn(&cntryl_midge::EngineMetrics) -> MidgeResult<RuntimeMetricsSnapshot> =
+        cntryl_midge::EngineMetrics::get_runtime_metrics;
+    let _: fn(&cntryl_midge::EngineMetrics) -> MidgeResult<StorageLayoutSnapshot> =
+        cntryl_midge::EngineMetrics::get_storage_layout;
 
     // Act
     let provider = CloudProviderConfig::gcs("bucket")

@@ -41,8 +41,8 @@ fn should_report_compactions_run_per_engine_when_telemetry_not_initialized() {
 
     // Act
     a.compact_all().expect("compact engine A");
-    let a_metrics = a.get_runtime_metrics().expect("engine A metrics");
-    let b_metrics = b.get_runtime_metrics().expect("engine B metrics");
+    let a_metrics = a.metrics().get_runtime_metrics().expect("engine A metrics");
+    let b_metrics = b.metrics().get_runtime_metrics().expect("engine B metrics");
 
     // Assert
     assert!(a_metrics.compactions_run > 0, "{a_metrics:?}");

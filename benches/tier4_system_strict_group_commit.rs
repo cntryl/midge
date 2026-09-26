@@ -201,6 +201,7 @@ fn execute_system_workload() -> SystemOutcome {
         .get_column_family("default")
         .expect("default column family");
     let start_metrics = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("capture starting strict system metrics");
     let total_started_at = Instant::now();
@@ -223,6 +224,7 @@ fn execute_system_workload() -> SystemOutcome {
         .compact_all()
         .expect("complete any compaction exposed by the first pass");
     let end_metrics = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("capture ending strict system metrics");
     let wal_appends = end_metrics

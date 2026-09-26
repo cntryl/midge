@@ -1,6 +1,8 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse};
-use crate::types::{ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot};
+use crate::types::{
+    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, StorageLayoutSnapshot,
+};
 use std::time::Duration;
 
 /// Runtime-backed observability façade for an open engine.
@@ -26,30 +28,7 @@ impl EngineMetrics {
                 request_id: next_request_id()?,
             })?;
         match response {
-            RuntimeResponse::ReadAmpMetricsSnapshot {
-                reads_total,
-                ssts_touched_total,
-                l0_ssts_touched_total,
-                blocks_read_total,
-                avg_ssts_per_read,
-                avg_l0_ssts_per_read,
-                avg_blocks_per_read,
-                l0_overlap_rate,
-                sst_budget_violation_rate,
-                block_budget_violation_rate,
-                ..
-            } => Ok(ReadAmpMetricsSnapshot {
-                reads_total,
-                ssts_touched_total,
-                l0_ssts_touched_total,
-                blocks_read_total,
-                avg_ssts_per_read,
-                avg_l0_ssts_per_read,
-                avg_blocks_per_read,
-                l0_overlap_rate,
-                sst_budget_violation_rate,
-                block_budget_violation_rate,
-            }),
+            RuntimeResponse::ReadAmpMetricsSnapshot { snapshot, .. } => Ok(snapshot),
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
                 "Unexpected response from GetReadAmpMetrics".to_string(),
@@ -69,21 +48,30 @@ impl EngineMetrics {
                 request_id: next_request_id()?,
             })?;
         match response {
-            RuntimeResponse::RecoveryMetricsSnapshot {
-                wal_recovery_records_replayed,
-                wal_recovery_bytes_replayed,
-                intent_log_replay_runs,
-                intent_log_entries_replayed,
-                ..
-            } => Ok(RecoveryMetricsSnapshot {
-                wal_recovery_records_replayed,
-                wal_recovery_bytes_replayed,
-                intent_log_replay_runs,
-                intent_log_entries_replayed,
-            }),
+            RuntimeResponse::RecoveryMetricsSnapshot { snapshot, .. } => Ok(snapshot),
             RuntimeResponse::Error { error, .. } => Err(error),
             _ => Err(MidgeError::Internal(
                 "Unexpected response from GetRecoveryMetrics".to_string(),
+            )),
+        }
+    }
+
+    /// Return the current SST layout and pinned snapshot state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot provide a storage-layout snapshot.
+    pub fn get_storage_layout(&self) -> MidgeResult<StorageLayoutSnapshot> {
+        let response = self
+            .runtime_handle
+            .send_and_wait(RuntimeMsg::GetStorageLayout {
+                request_id: next_request_id()?,
+            })?;
+        match response {
+            RuntimeResponse::StorageLayoutSnapshot { snapshot, .. } => Ok(snapshot),
+            RuntimeResponse::Error { error, .. } => Err(error),
+            _ => Err(MidgeError::Internal(
+                "Unexpected response from GetStorageLayout".to_string(),
             )),
         }
     }

@@ -259,6 +259,7 @@ fn add_base_record(transaction: &mut cntryl_midge::Transaction, id: u64) -> Midg
 
 fn total_sst_bytes(engine: &Engine) -> MidgeResult<u64> {
     Ok(engine
+        .metrics()
         .get_storage_layout()?
         .levels
         .iter()
@@ -353,7 +354,7 @@ fn validate_partition_layout(
     target: usize,
     block_size: usize,
 ) -> MidgeResult<(Vec<u64>, u64, usize, u64)> {
-    let layout = engine.get_storage_layout()?;
+    let layout = engine.metrics().get_storage_layout()?;
     let files: Vec<_> = layout
         .levels
         .iter()
@@ -441,12 +442,12 @@ fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResul
     engine.flush_cf(&cf)?;
     let ingest_seconds = ingest_started.elapsed().as_secs_f64();
     let pre_compaction_sst_bytes = total_sst_bytes(&engine)?;
-    let metrics_before = engine.get_runtime_metrics()?;
+    let metrics_before = engine.metrics().get_runtime_metrics()?;
 
     let compaction_started = Instant::now();
     engine.compact_all()?;
     let compaction_seconds = compaction_started.elapsed().as_secs_f64();
-    let metrics_after = engine.get_runtime_metrics()?;
+    let metrics_after = engine.metrics().get_runtime_metrics()?;
     let (output_sizes, post_compaction_sst_bytes, remaining_l0_file_count, remaining_l0_bytes) =
         validate_partition_layout(&engine, cf.id(), target_sst_size, block_size)?;
     let digest_before_crash = digest_engine(&engine, cf.id())?;

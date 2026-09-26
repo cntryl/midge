@@ -19,7 +19,7 @@ pub fn write_relative(path: &Path, relative: &str, data: &[u8]) {
 }
 
 pub fn exercise_open_and_verify(path: &Path) {
-    let _ = Engine::verify_path(path);
+    let _ = cntryl_midge::StorageVerifier::verify_path(path);
     let _ = Engine::open(
         OpenOptions::local(path)
             .recovery_policy(RecoveryPolicy::Strict)

@@ -203,6 +203,7 @@ fn assert_complete_state(engine: &Engine, campaign: &Campaign, has_workload: boo
     );
     assert!(
         engine
+            .metrics()
             .get_runtime_metrics()
             .expect("recovered inventory")
             .sst_bytes

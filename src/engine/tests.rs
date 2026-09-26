@@ -266,7 +266,7 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    Engine::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
+    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -535,7 +535,7 @@ fn assert_partitioned_compaction_reads(
     engine: &Engine,
     cf: &ColumnFamilyHandle,
 ) -> MidgeResult<()> {
-    let layout = engine.get_storage_layout()?;
+    let layout = engine.metrics().get_storage_layout()?;
     let output_files: Vec<_> = layout
         .levels
         .iter()
@@ -608,7 +608,7 @@ fn assert_partitioned_compaction_reopen(mut reopened: Engine) -> MidgeResult<()>
         Some(partitioned_compaction_value(96).as_slice())
     );
     drop(read);
-    let reopened_layout = reopened.get_storage_layout()?;
+    let reopened_layout = reopened.metrics().get_storage_layout()?;
     let reopened_names: Vec<_> = reopened_layout
         .levels
         .iter()
@@ -1702,7 +1702,7 @@ fn should_report_error_when_lease_release_keeps_failing() {
     let started = std::time::Instant::now();
 
     // Act
-    let result = Engine::release_fencing_parts(None, Some(engine_lease), None);
+    let result = super::LeaseState::release_fencing_parts(None, Some(engine_lease), None);
 
     // Assert
     assert!(

@@ -83,6 +83,7 @@ pub(super) fn exercise(
     progress: &mut workload::WorkloadProgress,
 ) {
     let before = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("initial stress metrics");
     let families = seed(engine);
@@ -144,6 +145,7 @@ pub(super) fn exercise(
         workload::compact_all(engine, progress);
     });
     let after = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("completed stress metrics");
     let flushes = after.flush_publish_count - before.flush_publish_count;
@@ -194,7 +196,10 @@ fn observe(
 ) {
     while !stopped.load(Ordering::Acquire) {
         assert!(Instant::now() < deadline, "stress scan deadline");
-        let metrics = engine.get_runtime_metrics().expect("stress metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("stress metrics");
         if metrics.active_compactions > 0 && metrics.flush_inflight > 0 {
             overlap.fetch_add(1, Ordering::Relaxed);
         }

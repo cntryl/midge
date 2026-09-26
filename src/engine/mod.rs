@@ -35,10 +35,7 @@ mod metrics;
 mod startup;
 mod verification;
 
-pub use crate::types::{
-    ColumnFamilyId, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot,
-    StorageLayoutSnapshot, StorageVerificationReport,
-};
+pub use crate::types::ColumnFamilyId;
 pub use api::{
     BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, DurabilityPolicy, Goal,
     IteratorState, Key, MemoryBudget, OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy,
@@ -48,7 +45,7 @@ pub use backup::{BackupManifest, BackupObject, BackupStorageKind};
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
 
-use lease_state::{FencingResources, LeaseState, PendingFencingCleanup};
+use lease_state::LeaseState;
 pub use metrics::EngineMetrics;
 pub use verification::StorageVerifier;
 
@@ -116,33 +113,11 @@ impl Drop for Engine {
         self.ingest_coordinators.clear();
         tracing::trace!(count = ingest_count, "Engine: ingest coordinators dropped");
 
-        let runtime = self.runtime.take();
-        let (lease_heartbeat, lease, lease_guard) = self.lease_state.take_resources();
-        if runtime.is_none()
-            && lease_heartbeat.is_none()
-            && lease.is_none()
-            && lease_guard.is_none()
-        {
-            return;
-        }
-
         // Runtime teardown can legitimately wait for a transaction owned by
         // the dropping thread or for a blocked storage worker. Hand that wait
         // to a detached reaper and move all fencing resources with it. The
         // lease remains renewed and owned until every runtime worker exits.
-        let spawn_result = std::thread::Builder::new()
-            .name("midge-engine-reaper".to_string())
-            .spawn(move || {
-                drop(runtime);
-                if let Err(error) = Self::release_fencing_parts(lease_heartbeat, lease, lease_guard)
-                {
-                    tracing::debug!(%error, "Engine reaper finished without releasing the lease");
-                }
-                tracing::debug!("Engine reaper cleanup complete");
-            });
-        if let Err(error) = spawn_result {
-            tracing::error!(%error, "failed to spawn engine cleanup reaper");
-        }
+        self.lease_state.detach_reaper(self.runtime.take());
     }
 }
 
@@ -150,230 +125,6 @@ impl Drop for Engine {
 type CloudSstRecoveryProof = startup::CloudSstRecoveryProof;
 
 impl Engine {
-    fn release_fencing_parts(
-        lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
-        lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
-        lease_guard: Option<crate::lease::LeaseGuard>,
-    ) -> MidgeResult<()> {
-        if let Some(heartbeat_mutex) = lease_heartbeat {
-            let mut heartbeat = heartbeat_mutex
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            heartbeat.stop();
-            tracing::trace!("Engine: lease heartbeat stopped");
-        }
-        let result = lease.map_or(Ok(()), |lease| Self::release_lease_bounded(lease.as_ref()));
-        drop(lease_guard);
-        result
-    }
-
-    /// Release the primary lease, retrying with backoff for at most its TTL.
-    /// The heartbeat has already stopped, so an unreleased lease expires on
-    /// its own by then; retrying longer would only spin and flood the log.
-    fn release_lease_bounded(lease: &dyn crate::lease::PrimaryLease) -> MidgeResult<()> {
-        const MAX_BACKOFF: Duration = Duration::from_secs(1);
-        let deadline = std::time::Instant::now() + lease.ttl();
-        let mut backoff = Duration::from_millis(1);
-        loop {
-            match lease.release() {
-                Ok(()) => {
-                    tracing::trace!("Engine: lease released");
-                    return Ok(());
-                }
-                Err(error) => {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() || matches!(error, crate::lease::LeaseError::Internal(_))
-                    {
-                        tracing::warn!(%error, "primary lease release failed; it will expire at its TTL");
-                        return Err(MidgeError::LeaseUnavailable(format!(
-                            "primary lease release failed; the lease expires at its TTL: {error}"
-                        )));
-                    }
-                    tracing::debug!(%error, ?backoff, "primary lease release failed; retrying");
-                    std::thread::sleep(backoff.min(remaining));
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                }
-            }
-        }
-    }
-
-    fn has_fencing_resources(&self) -> bool {
-        self.lease_state.has_resources()
-    }
-
-    fn schedule_fencing_cleanup(&mut self, terminal_result: MidgeResult<()>) -> MidgeResult<()> {
-        debug_assert!(self.lease_state.pending_cleanup.is_none());
-
-        let resources: FencingResources = self.lease_state.take_resources();
-        let retained_resources = Arc::new(std::sync::Mutex::new(Some(resources)));
-        let worker_resources = Arc::clone(&retained_resources);
-        let (completion_tx, completion_rx) = crossbeam::channel::bounded(1);
-        let spawn_result = std::thread::Builder::new()
-            .name("midge-fencing-reaper".to_string())
-            .spawn(move || {
-                let resources = worker_resources
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                let released = resources.map_or(Ok(()), |(lease_heartbeat, lease, lease_guard)| {
-                    Self::release_fencing_parts(lease_heartbeat, lease, lease_guard)
-                });
-                let _ = completion_tx.send(released);
-                tracing::debug!("Engine fencing reaper cleanup complete");
-            });
-
-        match spawn_result {
-            Ok(worker) => {
-                drop(worker);
-                self.lease_state.pending_cleanup = Some(PendingFencingCleanup::Known {
-                    completion: completion_rx,
-                    terminal_result,
-                });
-                Ok(())
-            }
-            Err(error) => {
-                let (lease_heartbeat, lease, lease_guard) = retained_resources
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                    .ok_or_else(|| {
-                        MidgeError::Internal(
-                            "fencing resources disappeared after cleanup reaper spawn failure"
-                                .to_string(),
-                        )
-                    })?;
-                self.lease_state
-                    .restore_resources((lease_heartbeat, lease, lease_guard));
-                tracing::error!(%error, "failed to spawn fencing cleanup reaper");
-                match terminal_result {
-                    Ok(()) => Err(MidgeError::ResourceLimit(format!(
-                        "failed to spawn fencing cleanup reaper: {error}"
-                    ))),
-                    Err(terminal_error) => Err(terminal_error),
-                }
-            }
-        }
-    }
-
-    fn schedule_runtime_fencing_cleanup(&mut self) -> MidgeResult<()> {
-        debug_assert!(self.lease_state.pending_cleanup.is_none());
-        let runtime = self.runtime.take().ok_or_else(|| {
-            MidgeError::Internal("runtime cleanup requested without a runtime".to_string())
-        })?;
-        self.ingest_coordinators.clear();
-        let resources: FencingResources = self.lease_state.take_resources();
-        let retained_cleanup = Arc::new(std::sync::Mutex::new(Some((runtime, resources))));
-        let worker_cleanup = Arc::clone(&retained_cleanup);
-        let runtime_handle = self.runtime_handle.clone();
-        let (completion_tx, completion_rx) = crossbeam::channel::bounded(1);
-        let spawn_result = std::thread::Builder::new()
-            .name("midge-runtime-fencing-reaper".to_string())
-            .spawn(move || {
-                let cleanup = worker_cleanup
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                let Some((runtime, resources)) = cleanup else {
-                    return;
-                };
-                let terminal_result = runtime_handle.shutdown(Duration::MAX);
-                drop(runtime);
-                let released = Self::release_fencing_parts(resources.0, resources.1, resources.2);
-                let _ = completion_tx.send(terminal_result.and(released));
-                tracing::debug!("Engine runtime and fencing reaper cleanup complete");
-            });
-        match spawn_result {
-            Ok(worker) => {
-                drop(worker);
-                self.lease_state.pending_cleanup = Some(PendingFencingCleanup::Runtime {
-                    completion: completion_rx,
-                });
-                Ok(())
-            }
-            Err(error) => {
-                let (runtime, resources) = retained_cleanup
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                    .ok_or_else(|| {
-                        MidgeError::Internal(
-                            "runtime fencing resources disappeared after cleanup reaper spawn failure"
-                                .to_string(),
-                        )
-                    })?;
-                self.runtime = Some(runtime);
-                self.lease_state.restore_resources(resources);
-                Err(MidgeError::ResourceLimit(format!(
-                    "failed to spawn runtime fencing cleanup reaper: {error}"
-                )))
-            }
-        }
-    }
-
-    fn wait_for_fencing_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
-        enum CleanupWait {
-            KnownComplete(MidgeResult<()>),
-            RuntimeComplete(MidgeResult<()>),
-            Timeout,
-            Disconnected,
-        }
-
-        let cleanup =
-            self.lease_state.pending_cleanup.as_ref().ok_or_else(|| {
-                MidgeError::Internal("fencing cleanup was not scheduled".to_string())
-            })?;
-        let wait_result = match cleanup {
-            PendingFencingCleanup::Known { completion, .. } => {
-                match completion.recv_timeout(timeout) {
-                    Ok(released) => CleanupWait::KnownComplete(released),
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => CleanupWait::Timeout,
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                        CleanupWait::Disconnected
-                    }
-                }
-            }
-            PendingFencingCleanup::Runtime { completion } => {
-                match completion.recv_timeout(timeout) {
-                    Ok(result) => CleanupWait::RuntimeComplete(result),
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => CleanupWait::Timeout,
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                        CleanupWait::Disconnected
-                    }
-                }
-            }
-        };
-
-        match wait_result {
-            CleanupWait::KnownComplete(released) => {
-                let cleanup = self.lease_state.pending_cleanup.take().ok_or_else(|| {
-                    MidgeError::Internal("fencing cleanup result was lost".to_string())
-                })?;
-                let PendingFencingCleanup::Known {
-                    terminal_result, ..
-                } = cleanup
-                else {
-                    return Err(MidgeError::Internal(
-                        "fencing cleanup result kind changed while waiting".to_string(),
-                    ));
-                };
-                terminal_result.and(released)
-            }
-            CleanupWait::RuntimeComplete(result) => {
-                self.lease_state.pending_cleanup.take();
-                result
-            }
-            CleanupWait::Timeout => Err(MidgeError::Timeout(
-                "fencing cleanup did not complete before shutdown deadline".to_string(),
-            )),
-            CleanupWait::Disconnected => {
-                self.lease_state.pending_cleanup.take();
-                Err(MidgeError::Internal(
-                    "fencing cleanup reaper terminated without reporting completion".to_string(),
-                ))
-            }
-        }
-    }
-
     #[cfg(test)]
     fn blocking_cloud_get(
         cloud: &crate::storage::cloud::CloudStorage,
@@ -738,17 +489,19 @@ impl Engine {
     pub fn shutdown(&mut self, timeout: Duration) -> MidgeResult<()> {
         let started = std::time::Instant::now();
         if self.lease_state.pending_cleanup.is_some() {
-            return self.wait_for_fencing_cleanup(timeout);
+            return self.lease_state.wait_for_cleanup(timeout);
         }
 
         let Some(runtime) = self.runtime.as_mut() else {
-            if !self.has_fencing_resources() {
+            if !self.lease_state.has_resources() {
                 return self
                     .runtime_handle
                     .shutdown(timeout.saturating_sub(started.elapsed()));
             }
-            self.schedule_fencing_cleanup(Ok(()))?;
-            return self.wait_for_fencing_cleanup(timeout.saturating_sub(started.elapsed()));
+            self.lease_state.schedule_cleanup(Ok(()))?;
+            return self
+                .lease_state
+                .wait_for_cleanup(timeout.saturating_sub(started.elapsed()));
         };
         let shutdown_result = self.runtime_handle.shutdown(timeout);
         if matches!(&shutdown_result, Err(MidgeError::Busy(_))) {
@@ -757,7 +510,17 @@ impl Engine {
         let remaining = timeout.saturating_sub(started.elapsed());
         if !runtime.wait_for_exit(remaining) {
             if matches!(&shutdown_result, Err(MidgeError::Timeout(_))) {
-                self.schedule_runtime_fencing_cleanup()?;
+                let runtime = self.runtime.take().ok_or_else(|| {
+                    MidgeError::Internal("runtime cleanup requested without a runtime".to_string())
+                })?;
+                self.ingest_coordinators.clear();
+                if let Err((error, runtime)) = self
+                    .lease_state
+                    .schedule_runtime_cleanup(runtime, self.runtime_handle.clone())
+                {
+                    self.runtime = Some(runtime);
+                    return Err(error);
+                }
                 return shutdown_result;
             }
             return Err(MidgeError::Timeout(
@@ -767,11 +530,12 @@ impl Engine {
 
         self.runtime.take();
         self.ingest_coordinators.clear();
-        if !self.has_fencing_resources() {
+        if !self.lease_state.has_resources() {
             return shutdown_result;
         }
-        self.schedule_fencing_cleanup(shutdown_result)?;
-        self.wait_for_fencing_cleanup(timeout.saturating_sub(started.elapsed()))
+        self.lease_state.schedule_cleanup(shutdown_result)?;
+        self.lease_state
+            .wait_for_cleanup(timeout.saturating_sub(started.elapsed()))
     }
 
     // === Column Family Lifecycle ===
@@ -960,108 +724,10 @@ impl Engine {
         }
     }
 
-    /// Get read amplification metrics snapshot
-    ///
-    /// Returns current read amplification statistics including:
-    /// - SSTs touched per read
-    /// - L0 overlap patterns
-    /// - Budget violation rates
-    ///
-    /// Use this for monitoring read performance and tuning compaction triggers.
-    /// Get read amplification metrics (used by tests)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the runtime cannot provide a metrics snapshot.
-    pub fn get_read_amp_metrics(&self) -> MidgeResult<ReadAmpMetricsSnapshot> {
-        self.metrics().get_read_amp_metrics()
-    }
-
-    /// Get startup recovery metrics snapshot.
-    ///
-    /// Returns counters from the runtime's recovery phase executed during engine open.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the runtime cannot provide a recovery snapshot.
-    pub fn get_recovery_metrics(&self) -> MidgeResult<RecoveryMetricsSnapshot> {
-        self.metrics().get_recovery_metrics()
-    }
-
-    /// Get an operator-facing snapshot of runtime metrics and health.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the runtime cannot provide a metrics snapshot.
-    pub fn get_runtime_metrics(&self) -> MidgeResult<RuntimeMetricsSnapshot> {
-        self.metrics().get_runtime_metrics()
-    }
-
-    /// Get an operator-facing snapshot of runtime metrics and health, bounded by `timeout`.
-    ///
-    /// Unlike [`Engine::get_runtime_metrics`], this never blocks past `timeout`: if the
-    /// runtime cannot respond in time, the pending response slot is unregistered (so it
-    /// cannot leak) and `MidgeError::Timeout` is returned.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the runtime cannot provide a metrics snapshot, or
-    /// `MidgeError::Timeout` if `timeout` elapses first.
-    pub fn get_runtime_metrics_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> MidgeResult<RuntimeMetricsSnapshot> {
-        self.metrics().get_runtime_metrics_with_timeout(timeout)
-    }
-
     /// Return the dedicated runtime observability façade.
     #[must_use]
     pub fn metrics(&self) -> EngineMetrics {
         EngineMetrics::new(self.runtime_handle.clone())
-    }
-
-    /// Get a stable snapshot of the current SST layout and pinned snapshot state.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the runtime cannot provide a storage-layout snapshot.
-    pub fn get_storage_layout(&self) -> MidgeResult<StorageLayoutSnapshot> {
-        let response = self
-            .runtime_handle
-            .send_and_wait(RuntimeMsg::GetStorageLayout {
-                request_id: next_request_id()?,
-            })?;
-
-        match response {
-            RuntimeResponse::StorageLayoutSnapshot { snapshot, .. } => Ok(snapshot),
-            RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "Unexpected response from GetStorageLayout".to_string(),
-            )),
-        }
-    }
-
-    /// Run a non-mutating integrity pass over manifest, intent-log, WAL, and SST files.
-    ///
-    /// The caller-provided timeout covers runtime health capture, verification-barrier
-    /// acquisition, the storage pass, and barrier release. If the storage pass itself
-    /// outlives the deadline, a background verifier retains the barrier until it can
-    /// release it safely.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when verification is unsupported, times out, or fails.
-    pub fn verify_storage(&self, timeout: Duration) -> MidgeResult<StorageVerificationReport> {
-        self.storage_verifier().verify_storage(timeout)
-    }
-
-    /// Verify a storage directory without opening a runtime.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the verification pass fails.
-    pub fn verify_path(path: impl Into<PathBuf>) -> MidgeResult<StorageVerificationReport> {
-        StorageVerifier::verify_path(path)
     }
 
     /// Return the dedicated online storage-integrity façade.

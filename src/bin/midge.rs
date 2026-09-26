@@ -1,4 +1,4 @@
-use cntryl_midge::{Engine, EngineHealth, MidgeError, Severity, StorageVerificationReport};
+use cntryl_midge::{EngineHealth, MidgeError, Severity, StorageVerificationReport};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -156,7 +156,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> CliOutcome {
             if let Err(message) = validate_storage_path(&path) {
                 return CliOutcome::error(EXIT_STORAGE, format, ErrorKind::Storage, message);
             }
-            match Engine::verify_path(&path) {
+            match cntryl_midge::StorageVerifier::verify_path(&path) {
                 Ok(report) => CliOutcome::report(report, format),
                 Err(error) => outcome_for_verification_error(&error, format),
             }

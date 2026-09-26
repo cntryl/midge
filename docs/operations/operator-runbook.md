@@ -30,7 +30,7 @@ do not treat dropping the engine as an acknowledgement of shutdown.
 On open, Midge validates metadata and replays recoverable WAL state according to
 the configured `RecoveryPolicy`. Preserve the complete database directory and
 its WAL when recovery reports an error. Copy it for diagnosis, record the exact
-error, and use `Engine::verify_path` on a copy when verification is appropriate.
+error, and use `StorageVerifier::verify_path` on a copy when verification is appropriate.
 Do not delete a database directory, WAL, manifest, or lock as a generic recovery
 step.
 
