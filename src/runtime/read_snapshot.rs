@@ -1324,7 +1324,8 @@ mod tests {
     fn should_accept_identical_expired_value_replayed_in_memtable() -> MidgeResult<()> {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 5, EntryType::Put, Some(1))?;
