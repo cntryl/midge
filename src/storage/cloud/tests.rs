@@ -4,6 +4,56 @@ use std::sync::{
     mpsc,
 };
 
+#[test]
+fn should_fail_closed_when_mock_cannot_match_generation_precondition() {
+    // Arrange
+    let storage = CloudStorage::new(Arc::new(MockCloudBackend::new()), "tenant".into());
+    let (seed_tx, seed_rx) = mpsc::channel();
+    storage.submit_put("object", b"old".to_vec(), Vec::new(), seed_tx);
+    assert!(matches!(
+        seed_rx.recv().expect("seed completion"),
+        CloudEvent::Put {
+            result: CloudOutcome::Ok(()),
+            ..
+        }
+    ));
+    let request = crate::storage::StorageRequest::new(
+        "object",
+        crate::common::OperationDeadline::unbounded(),
+        std::time::Duration::from_secs(1),
+    )
+    .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+        crate::storage::StorageObjectMetadata {
+            size: 3,
+            etag: "ignored-when-generation-is-present".into(),
+            generation: Some("42".into()),
+        },
+    ));
+
+    // Act
+    let (write_tx, write_rx) = mpsc::channel();
+    StorageBackend::submit_write_request(&storage, request, b"new".to_vec(), write_tx);
+    let write = write_rx.recv().expect("conditional write completion");
+    let (read_tx, read_rx) = mpsc::channel();
+    storage.submit_get("object", read_tx);
+
+    // Assert
+    assert!(matches!(
+        write,
+        StorageEvent::WriteComplete {
+            result: StorageOutcome::Err(ref error),
+            ..
+        } if error.kind() == crate::storage::StorageErrorKind::PreconditionFailed
+    ));
+    assert!(matches!(
+        read_rx.recv().expect("read completion"),
+        CloudEvent::Get {
+            result: CloudOutcome::Ok(ref bytes),
+            ..
+        } if bytes == b"old"
+    ));
+}
+
 #[derive(Default)]
 struct ConditionalPutOnlyBackend {
     puts: AtomicUsize,

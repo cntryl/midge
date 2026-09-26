@@ -134,6 +134,81 @@ pub struct StorageObjectMetadata {
     pub generation: Option<String>,
 }
 
+/// A mutation condition interpreted by the storage adapter, never by callers
+/// constructing provider-specific HTTP header names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoragePrecondition {
+    None,
+    IfAbsent,
+    IfMatch(StorageObjectMetadata),
+}
+
+impl StoragePrecondition {
+    fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
+        match self {
+            Self::None => Ok(Vec::new()),
+            Self::IfAbsent => Ok(vec![("If-None-Match".into(), "*".into())]),
+            Self::IfMatch(metadata) => {
+                let (name, value) =
+                    conditional_object_identity(&metadata.etag, metadata.generation.as_deref())
+                        .ok_or_else(|| {
+                            StorageError::precondition_failed("object identity is missing")
+                        })?;
+                Ok(vec![(name.into(), value.into())])
+            }
+        }
+    }
+}
+
+/// Shared context for one storage operation. The absolute deadline remains
+/// valid across queueing and callback waits; a reservation stays owned until
+/// the backend's terminal completion.
+#[derive(Clone)]
+pub struct StorageRequest {
+    pub key: String,
+    pub deadline: crate::common::OperationDeadline,
+    pub timeout: std::time::Duration,
+    pub precondition: StoragePrecondition,
+    pub reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+}
+
+impl StorageRequest {
+    #[must_use]
+    pub fn new(
+        key: impl Into<String>,
+        deadline: crate::common::OperationDeadline,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            deadline,
+            timeout,
+            precondition: StoragePrecondition::None,
+            reservation: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_precondition(mut self, precondition: StoragePrecondition) -> Self {
+        self.precondition = precondition;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reservation(
+        mut self,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    ) -> Self {
+        self.reservation = Some(reservation);
+        self
+    }
+
+    #[must_use]
+    pub fn remaining_timeout(&self) -> std::time::Duration {
+        self.deadline.clamp(self.timeout)
+    }
+}
+
 impl StorageObjectMetadata {
     /// Metadata for a provider that reports no object generation.
     #[cfg(any(
@@ -481,6 +556,45 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Submit one typed write while preserving the caller's deadline and
+    /// retention reservation through the existing callback adapter.
+    fn submit_write_request(
+        &self,
+        request: StorageRequest,
+        data: Vec<u8>,
+        callback: StorageCallback,
+    ) {
+        let headers = match request.precondition.headers() {
+            Ok(headers) => headers,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: request.key,
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        let timeout = request.remaining_timeout();
+        if let Some(reservation) = request.reservation {
+            self.submit_write_with_reservation(
+                &request.key,
+                data,
+                headers,
+                timeout,
+                reservation,
+                callback,
+            );
+        } else {
+            self.submit_write_with_headers_and_timeout(
+                &request.key,
+                data,
+                headers,
+                timeout,
+                callback,
+            );
+        }
+    }
+
     /// Keep a publication allowance alive until backend completion. Async
     /// adapters must override this if their ordinary callback can time out
     /// before the underlying upload has released its payload.

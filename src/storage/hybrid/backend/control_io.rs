@@ -112,13 +112,18 @@ impl HybridStorage {
         budget: &ResourceBudget,
         deadline: &OperationDeadline,
     ) -> MidgeResult<ControlObject> {
-        let headers = match expected {
-            Some(metadata) => crate::storage::cloud::object_match_precondition_headers(
-                &metadata.etag,
-                metadata.generation.as_deref(),
-            )
-            .ok_or_else(|| MidgeError::Corruption("control CAS has no pinned identity".into()))?,
-            None => vec![("If-None-Match".into(), "*".into())],
+        let precondition = match expected {
+            Some(metadata) => {
+                crate::storage::conditional_object_identity(
+                    &metadata.etag,
+                    metadata.generation.as_deref(),
+                )
+                .ok_or_else(|| {
+                    MidgeError::Corruption("control CAS has no pinned identity".into())
+                })?;
+                crate::storage::StoragePrecondition::IfMatch(metadata.clone())
+            }
+            None => crate::storage::StoragePrecondition::IfAbsent,
         };
         let memory = Arc::new(budget.reserve(
             bytes.len().saturating_mul(4),
@@ -126,15 +131,13 @@ impl HybridStorage {
         )?);
         let timeout = Self::deadline_timeout(key, "control CAS", self.callback_timeout, deadline)?;
         let (tx, rx) = mpsc::channel();
-        self.cloud_backend_for_key(key)
-            .submit_write_with_reservation(
-                key,
-                bytes.to_vec(),
-                headers,
-                timeout,
-                Arc::clone(&memory),
-                tx,
-            );
+        self.cloud_backend_for_key(key).submit_write_request(
+            crate::storage::StorageRequest::new(key, *deadline, self.callback_timeout)
+                .with_precondition(precondition)
+                .with_reservation(Arc::clone(&memory)),
+            bytes.to_vec(),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),

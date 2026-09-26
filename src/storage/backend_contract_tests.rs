@@ -8,6 +8,53 @@ use super::filesystem::FileSystem;
 use super::{StorageBackend, StorageEvent, StorageOutcome};
 use std::sync::mpsc;
 
+#[test]
+fn should_keep_existing_bytes_when_generation_precondition_is_unsupported_or_stale() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/generation-guard");
+        let (seed_tx, seed_rx) = mpsc::channel();
+        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        assert!(matches!(
+            seed_rx.recv().expect("seed write"),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }
+        ));
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        )
+        .with_precondition(super::StoragePrecondition::IfMatch(
+            super::StorageObjectMetadata {
+                size: 3,
+                etag: "ignored-when-generation-is-present".into(),
+                generation: Some("42".into()),
+            },
+        ));
+
+        // Act
+        let (write_tx, write_rx) = mpsc::channel();
+        backend.submit_write_request(request, b"new".to_vec(), write_tx);
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+
+        // Assert
+        assert!(matches!(
+            write_rx.recv().expect("conditional write"),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(_),
+                ..
+            }
+        ));
+        let (bytes, _) = read_rx.recv().expect("read callback").expect("read object");
+        assert_eq!(bytes, b"old", "{name} overwrote a guarded object");
+    }
+}
+
 /// Every backend under the contract, named for assertion messages.
 fn backends(root: &std::path::Path) -> Vec<(&'static str, Box<dyn StorageBackend>)> {
     vec![

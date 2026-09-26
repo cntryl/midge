@@ -120,12 +120,11 @@ impl HybridStorage {
         }
         let timeout = admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
-        backend.submit_write_with_reservation(
-            key,
+        backend.submit_write_request(
+            crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout)
+                .with_precondition(crate::storage::StoragePrecondition::IfAbsent)
+                .with_reservation(Arc::clone(&admission.memory)),
             bytes.to_vec(),
-            vec![("If-None-Match".into(), "*".into())],
-            timeout,
-            Arc::clone(&admission.memory),
             tx,
         );
         match rx.recv_timeout(timeout) {
