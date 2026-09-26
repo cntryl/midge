@@ -10,7 +10,7 @@
 use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, finish_paged_list,
+    conditional_range_preconditions, current_unix_secs, finish_paged_list, map_response,
     object_metadata_from_response, ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
@@ -1114,19 +1114,14 @@ impl CloudBackend for S3Backend {
         for (name, value) in headers {
             request = request.with_header(name, value);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if S3Dialect.put_ok(resp.status) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(s3_put_response_error(&resp, conditional_mutation)),
-            },
-            Err(err) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| S3Dialect.put_ok(status),
+                |_| Ok(()),
+                |resp| s3_put_response_error(resp, conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1135,19 +1130,14 @@ impl CloudBackend for S3Backend {
         let key = key.to_string();
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(s3_response_error(&resp, "S3 GET", false)),
-            },
-            Err(err) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| s3_response_error(resp, "S3 GET", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1155,27 +1145,23 @@ impl CloudBackend for S3Backend {
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let metadata = object_metadata_from_response(
-                    &resp,
-                    Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
-                    "S3",
-                );
-                CloudEvent::GetWithMetadata {
-                    key: ctx,
-                    result: metadata.map(|metadata| (resp.body, metadata)),
-                }
-            }
-            Ok(resp) => CloudEvent::GetWithMetadata {
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(s3_response_error(&resp, "S3 GET", false)),
-            },
-            Err(err) => CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
-        };
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        object_metadata_from_response(
+                            &resp,
+                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                            "S3",
+                        )
+                        .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| s3_response_error(resp, "S3 GET", false),
+                ),
+            };
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
@@ -1225,16 +1211,17 @@ impl CloudBackend for S3Backend {
             .with_timeout(timeout)
             .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
-            let result = match result {
-                Ok(resp) if resp.status == 206 => {
+            let result = map_response(
+                result,
+                |status| status == 206,
+                |resp| {
                     crate::storage::cloud::range::validate_range_response(
                         &resp, start, end, &expected,
                     )
                     .map(|()| resp.body)
-                }
-                Ok(resp) => Err(s3_response_error(&resp, "S3 conditional RANGE", true)),
-                Err(error) => Err(CloudError::from_transport_error(error)),
-            };
+                },
+                |resp| s3_response_error(resp, "S3 conditional RANGE", true),
+            );
             CloudEvent::GetRange {
                 key: ctx,
                 start,
@@ -1255,25 +1242,16 @@ impl CloudBackend for S3Backend {
             None => format!("bytes={start}-"),
         };
         request = request.with_header("Range", range);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(s3_response_error(&resp, "S3 GET_RANGE", false)),
-            },
-            Err(err) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetRange {
+            key: ctx,
+            start,
+            end,
+            result: map_response(
+                result,
+                |status| matches!(status, 200 | 206),
+                |resp| Ok(resp.body),
+                |resp| s3_response_error(resp, "S3 GET_RANGE", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1305,23 +1283,14 @@ impl CloudBackend for S3Backend {
         for (name, value) in headers {
             request = request.with_header(name, value);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if S3Dialect.delete_ok(resp.status) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(s3_response_error(
-                    &resp,
-                    "S3 DELETE",
-                    conditional_mutation,
-                )),
-            },
-            Err(err) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| S3Dialect.delete_ok(status),
+                |_| Ok(()),
+                |resp| s3_response_error(resp, "S3 DELETE", conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1381,19 +1350,14 @@ impl CloudBackend for S3Backend {
         if let Some(timeout) = request_timeout {
             request = request.with_timeout(timeout);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Head {
-                key: ctx,
-                result: object_metadata_from_response(&resp, None, "S3"),
-            },
-            Ok(resp) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(s3_response_error(&resp, "S3 HEAD", false)),
-            },
-            Err(err) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Head {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| object_metadata_from_response(&resp, None, "S3"),
+                |resp| s3_response_error(resp, "S3 HEAD", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }

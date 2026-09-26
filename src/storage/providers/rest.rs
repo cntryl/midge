@@ -214,6 +214,28 @@ pub(super) trait ProviderDialect {
     }
 }
 
+/// Map a completed HTTP request into the operation result. Provider modules
+/// keep URL/signing and event construction; this owns the common status and
+/// transport branches.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn map_response<T>(
+    result: crate::common::MidgeResult<crate::storage::cloud::CloudResponse>,
+    accepts: impl FnOnce(u16) -> bool,
+    success: impl FnOnce(crate::storage::cloud::CloudResponse) -> Result<T, CloudError>,
+    error: impl FnOnce(&crate::storage::cloud::CloudResponse) -> CloudError,
+) -> Result<T, CloudError> {
+    match result {
+        Ok(response) if accepts(response.status) => success(response),
+        Ok(response) => Err(error(&response)),
+        Err(error) => Err(CloudError::from_transport_error(error)),
+    }
+}
+
 /// Current Unix time in whole seconds, or zero if the clock is before the epoch.
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-gcp"))]
 pub(super) fn current_unix_secs() -> u64 {

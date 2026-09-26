@@ -189,7 +189,9 @@ impl SkipListMemtable {
     }
 
     /// Get key state using the caller's fixed snapshot clock.
-    #[cfg(test)]
+    // Benchmarks exercise this precise lookup, but the library-only dead-code
+    // gate cannot see their external use.
+    #[allow(dead_code)]
     pub fn get_key_state_at_with_time(
         &self,
         key: &[u8],

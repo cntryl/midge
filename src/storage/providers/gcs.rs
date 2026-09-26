@@ -11,8 +11,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner, ObjectMetadata,
 };
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, finish_paged_list, ListPageParser,
-    PagedList, ProviderDialect,
+    conditional_range_preconditions, current_unix_secs, finish_paged_list, map_response,
+    ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1234,24 +1234,14 @@ impl CloudBackend for GcsBackend {
             }
         }
         request.url = url;
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if GcsDialect(mode).put_ok(resp.status) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(gcs_response_error(
-                    &resp,
-                    "GCS PUT",
-                    mode,
-                    conditional_mutation,
-                )),
-            },
-            Err(err) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| GcsDialect(mode).put_ok(status),
+                |_| Ok(()),
+                |resp| gcs_response_error(resp, "GCS PUT", mode, conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1261,19 +1251,14 @@ impl CloudBackend for GcsBackend {
         let mode = self.mode;
         let url = self.download_url(&key);
         let request = Self::bodyless_request(mode, Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS GET", mode, false)),
-            },
-            Err(err) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| gcs_response_error(resp, "GCS GET", mode, false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1282,23 +1267,19 @@ impl CloudBackend for GcsBackend {
         let key = key.to_string();
         let mode = self.mode;
         let request = Self::bodyless_request(mode, Method::GET, self.download_url(&key));
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let metadata = parse_gcs_media_object_metadata(&resp, mode);
-                CloudEvent::GetWithMetadata {
-                    key: ctx,
-                    result: metadata.map(|metadata| (resp.body, metadata)),
-                }
-            }
-            Ok(resp) => CloudEvent::GetWithMetadata {
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS GET", mode, false)),
-            },
-            Err(err) => CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
-        };
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        parse_gcs_media_object_metadata(&resp, mode)
+                            .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| gcs_response_error(resp, "GCS GET", mode, false),
+                ),
+            };
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
@@ -1357,21 +1338,17 @@ impl CloudBackend for GcsBackend {
             .with_timeout(timeout)
             .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
-            let result = match result {
-                Ok(resp) if resp.status == 206 => {
+            let result = map_response(
+                result,
+                |status| status == 206,
+                |resp| {
                     crate::storage::cloud::range::validate_range_response(
                         &resp, start, end, &expected,
                     )
                     .map(|()| resp.body)
-                }
-                Ok(resp) => Err(gcs_response_error(
-                    &resp,
-                    "GCS conditional RANGE",
-                    mode,
-                    true,
-                )),
-                Err(error) => Err(CloudError::from_transport_error(error)),
-            };
+                },
+                |resp| gcs_response_error(resp, "GCS conditional RANGE", mode, true),
+            );
             CloudEvent::GetRange {
                 key: ctx,
                 start,
@@ -1392,25 +1369,16 @@ impl CloudBackend for GcsBackend {
             None => format!("bytes={start}-"),
         };
         let request = Self::bodyless_request(mode, Method::GET, url).with_header("Range", range);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS GET_RANGE", mode, false)),
-            },
-            Err(err) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetRange {
+            key: ctx,
+            start,
+            end,
+            result: map_response(
+                result,
+                |status| matches!(status, 200 | 206),
+                |resp| Ok(resp.body),
+                |resp| gcs_response_error(resp, "GCS GET_RANGE", mode, false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1462,24 +1430,14 @@ impl CloudBackend for GcsBackend {
             }
         }
         request.url = url;
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if GcsDialect(mode).delete_ok(resp.status) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Ok(()), // idempotent delete
-            },
-            Ok(resp) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(gcs_response_error(
-                    &resp,
-                    "GCS DELETE",
-                    mode,
-                    conditional_mutation,
-                )),
-            },
-            Err(err) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| GcsDialect(mode).delete_ok(status),
+                |_| Ok(()), // idempotent delete
+                |resp| gcs_response_error(resp, "GCS DELETE", mode, conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1552,25 +1510,17 @@ impl CloudBackend for GcsBackend {
         if let Some(timeout) = request_timeout {
             request = request.with_timeout(timeout);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let metadata = match mode {
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Head {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| match mode {
                     GcsBackendMode::Json => parse_gcs_json_object_metadata(&resp.body),
                     GcsBackendMode::Xml => parse_gcs_xml_object_metadata(&resp),
-                };
-                CloudEvent::Head {
-                    key: ctx,
-                    result: metadata,
-                }
-            }
-            Ok(resp) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS HEAD", mode, false)),
-            },
-            Err(err) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+                },
+                |resp| gcs_response_error(resp, "GCS HEAD", mode, false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }

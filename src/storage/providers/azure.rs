@@ -12,8 +12,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner,
 };
 use super::rest::{
-    conditional_range_preconditions, finish_paged_list, object_metadata_from_response,
-    ListPageParser, PagedList, ProviderDialect,
+    conditional_range_preconditions, finish_paged_list, map_response,
+    object_metadata_from_response, ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -903,19 +903,14 @@ impl CloudBackend for AzureBackend {
         for (name, value) in headers {
             request = request.with_header(name, value);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if AzureDialect.put_ok(resp.status) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(azure_put_response_error(&resp, conditional_mutation)),
-            },
-            Err(err) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| AzureDialect.put_ok(status),
+                |_| Ok(()),
+                |resp| azure_put_response_error(resp, conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -924,19 +919,14 @@ impl CloudBackend for AzureBackend {
         let key = key.to_string();
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET", false)),
-            },
-            Err(err) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| azure_response_error(resp, "Azure GET", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -944,27 +934,23 @@ impl CloudBackend for AzureBackend {
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let metadata = object_metadata_from_response(
-                    &resp,
-                    Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
-                    "Azure",
-                );
-                CloudEvent::GetWithMetadata {
-                    key: ctx,
-                    result: metadata.map(|metadata| (resp.body, metadata)),
-                }
-            }
-            Ok(resp) => CloudEvent::GetWithMetadata {
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET", false)),
-            },
-            Err(err) => CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
-        };
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        object_metadata_from_response(
+                            &resp,
+                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                            "Azure",
+                        )
+                        .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| azure_response_error(resp, "Azure GET", false),
+                ),
+            };
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
@@ -1014,16 +1000,17 @@ impl CloudBackend for AzureBackend {
             .with_timeout(timeout)
             .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
-            let result = match result {
-                Ok(resp) if resp.status == 206 => {
+            let result = map_response(
+                result,
+                |status| status == 206,
+                |resp| {
                     crate::storage::cloud::range::validate_range_response(
                         &resp, start, end, &expected,
                     )
                     .map(|()| resp.body)
-                }
-                Ok(resp) => Err(azure_response_error(&resp, "AZURE conditional RANGE", true)),
-                Err(error) => Err(CloudError::from_transport_error(error)),
-            };
+                },
+                |resp| azure_response_error(resp, "AZURE conditional RANGE", true),
+            );
             CloudEvent::GetRange {
                 key: ctx,
                 start,
@@ -1043,25 +1030,16 @@ impl CloudBackend for AzureBackend {
             None => format!("bytes={start}-"),
         };
         let request = CloudRequest::new(Method::GET, url).with_header("x-ms-range", range);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET_RANGE", false)),
-            },
-            Err(err) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetRange {
+            key: ctx,
+            start,
+            end,
+            result: map_response(
+                result,
+                |status| matches!(status, 200 | 206),
+                |resp| Ok(resp.body),
+                |resp| azure_response_error(resp, "Azure GET_RANGE", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1090,23 +1068,14 @@ impl CloudBackend for AzureBackend {
         for (name, value) in headers {
             request = request.with_header(name, value);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if AzureDialect.delete_ok(resp.status) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(azure_response_error(
-                    &resp,
-                    "Azure DELETE",
-                    conditional_mutation,
-                )),
-            },
-            Err(err) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| AzureDialect.delete_ok(status),
+                |_| Ok(()),
+                |resp| azure_response_error(resp, "Azure DELETE", conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1171,19 +1140,14 @@ impl CloudBackend for AzureBackend {
         if let Some(timeout) = request_timeout {
             request = request.with_timeout(timeout);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Head {
-                key: ctx,
-                result: object_metadata_from_response(&resp, None, "Azure"),
-            },
-            Ok(resp) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure HEAD", false)),
-            },
-            Err(err) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Head {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| object_metadata_from_response(&resp, None, "Azure"),
+                |resp| azure_response_error(resp, "Azure HEAD", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
