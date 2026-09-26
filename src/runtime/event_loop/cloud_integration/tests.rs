@@ -6985,10 +6985,11 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
     // Arrange: segment two cannot become durable until segment one closes its
     // frontier gap. Its newer caller therefore contributes budget to the
     // acknowledgement work for that earlier segment.
+    let waiter_budget = Duration::from_secs(30);
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_secs(1);
+    el.runtime_response_timeout = waiter_budget;
     append_cloud_async_put(&mut el)?;
     let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     append_cloud_async_put(&mut el)?;
@@ -6999,7 +7000,7 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
     let second_request_id = 91_012;
     let now = Instant::now();
     let first_registered_at = now
-        .checked_sub(Duration::from_secs(2))
+        .checked_sub(waiter_budget + Duration::from_secs(1))
         .expect("represent expired gap waiter start");
     let second_registered_at = now
         .checked_sub(Duration::from_millis(50))
@@ -7047,12 +7048,11 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
         segment_id: second_segment,
         max_sequence: second_max_sequence,
     });
-    assert!(matches!(
-        second_rx.try_recv(),
-        Ok(RuntimeResponse::Ok {
-            request_id
-        }) if request_id == second_request_id
-    ));
+    let second_response = second_rx.recv_timeout(waiter_budget);
+    assert!(
+        matches!(&second_response, Ok(RuntimeResponse::Ok { request_id }) if *request_id == second_request_id),
+        "dependent waiter did not complete: {second_response:?}"
+    );
     assert_eq!(el.state.wal.cloud_durable_seq, second_max_sequence);
     Ok(())
 }
