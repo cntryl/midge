@@ -34,15 +34,6 @@ use std::sync::Arc;
 ///
 ///     fn submit_get_with_metadata(&self, _key: &str, _callback: CloudCallback) {}
 ///
-///     fn submit_get_range(
-///         &self,
-///         _key: &str,
-///         _start: u64,
-///         _end: Option<u64>,
-///         _callback: CloudCallback,
-///     ) {
-///     }
-///
 ///     fn submit_delete(
 ///         &self,
 ///         _key: &str,
@@ -65,7 +56,6 @@ use std::sync::Arc;
 /// impl CloudBackend for MissingMetadataGet {
 ///     fn submit_put(&self, _key: &str, _data: Vec<u8>, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_get(&self, _key: &str, _callback: CloudCallback) {}
-///     fn submit_get_range(&self, _key: &str, _start: u64, _end: Option<u64>, _callback: CloudCallback) {}
 ///     fn submit_delete(&self, _key: &str, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_list(&self, _prefix: &str, _callback: CloudCallback) {}
 ///     fn submit_head(&self, _key: &str, _callback: CloudCallback) {}
@@ -81,7 +71,6 @@ use std::sync::Arc;
 ///     fn submit_put(&self, _key: &str, _data: Vec<u8>, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_get(&self, _key: &str, _callback: CloudCallback) {}
 ///     fn submit_get_with_metadata(&self, _key: &str, _callback: CloudCallback) {}
-///     fn submit_get_range(&self, _key: &str, _start: u64, _end: Option<u64>, _callback: CloudCallback) {}
 ///     fn submit_list(&self, _prefix: &str, _callback: CloudCallback) {}
 ///     fn submit_head(&self, _key: &str, _callback: CloudCallback) {}
 /// }
@@ -96,7 +85,6 @@ use std::sync::Arc;
 ///     fn submit_put(&self, _key: &str, _data: Vec<u8>, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_get(&self, _key: &str, _callback: CloudCallback) {}
 ///     fn submit_get_with_metadata(&self, _key: &str, _callback: CloudCallback) {}
-///     fn submit_get_range(&self, _key: &str, _start: u64, _end: Option<u64>, _callback: CloudCallback) {}
 ///     fn submit_delete(&self, _key: &str, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_head(&self, _key: &str, _callback: CloudCallback) {}
 /// }
@@ -111,7 +99,6 @@ use std::sync::Arc;
 ///     fn submit_put(&self, _key: &str, _data: Vec<u8>, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_get(&self, _key: &str, _callback: CloudCallback) {}
 ///     fn submit_get_with_metadata(&self, _key: &str, _callback: CloudCallback) {}
-///     fn submit_get_range(&self, _key: &str, _start: u64, _end: Option<u64>, _callback: CloudCallback) {}
 ///     fn submit_delete(&self, _key: &str, _headers: Vec<(String, String)>, _callback: CloudCallback) {}
 ///     fn submit_list(&self, _prefix: &str, _callback: CloudCallback) {}
 /// }
@@ -221,8 +208,8 @@ pub trait CloudBackend: Send + Sync + 'static {
     /// Submit an object GET that also returns the observed object identity.
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback);
 
-    /// Submit a ranged GET. `end` is an exclusive byte offset.
-    #[cfg(any(test, feature = "cloud-common"))]
+    /// Submit a ranged GET for provider tests. `end` is an exclusive byte offset.
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
 
     /// Submit an idempotent delete. Implementations must report success when
