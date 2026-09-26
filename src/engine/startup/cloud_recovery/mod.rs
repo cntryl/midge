@@ -287,7 +287,6 @@ impl CloudStartupRecovery {
             if let Err(error) = Self::blocking_conditional_cloud_metadata_put(
                 cloud,
                 file_name,
-                &key,
                 data,
                 local_manifest_sequence,
             ) {

@@ -229,9 +229,9 @@ pub(crate) fn conditional_metadata_mirror_put(
 ) -> MidgeResult<()> {
     let io = crate::storage::cloud::BlockingCloud::new(cloud, deadline);
     let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-    let headers = match io.head_optional(&key)? {
+    let precondition = match io.head_optional(&key)? {
         Some(metadata) => {
-            let headers = crate::storage::cloud::object_match_precondition_headers(
+            crate::storage::conditional_object_identity(
                 &metadata.etag,
                 metadata.generation.as_deref(),
             )
@@ -253,11 +253,11 @@ pub(crate) fn conditional_metadata_mirror_put(
             if current == data {
                 return Ok(());
             }
-            headers
+            crate::storage::StoragePrecondition::IfMatch(metadata)
         }
-        None => vec![("If-None-Match".to_string(), "*".to_string())],
+        None => crate::storage::StoragePrecondition::IfAbsent,
     };
-    io.put_with_headers(&key, data, headers)
+    io.put_with_precondition(&key, data, &precondition)
 }
 
 /// Mirror the local control files under one shared, bounded publication turn.

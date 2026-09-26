@@ -144,7 +144,7 @@ pub enum StoragePrecondition {
 }
 
 impl StoragePrecondition {
-    fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
+    pub(crate) fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
         match self {
             Self::None => Ok(Vec::new()),
             Self::IfAbsent => Ok(vec![("If-None-Match".into(), "*".into())]),

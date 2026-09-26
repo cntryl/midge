@@ -390,6 +390,32 @@ fn should_require_only_typed_storage_backend_methods_in_every_build_mode() {
 }
 
 #[test]
+fn should_keep_conditional_http_headers_at_the_cloud_boundary() {
+    // Arrange
+    let callers = [
+        include_str!("../src/runtime/hybrid_persistence/metadata_snapshot.rs"),
+        include_str!("../src/engine/startup/cloud_recovery/metadata.rs"),
+        include_str!("../src/storage/hybrid/backend/proofs.rs"),
+    ];
+
+    // Act
+    let raw_header_count = callers
+        .iter()
+        .flat_map(|source| {
+            [
+                "\"If-Match\"",
+                "\"If-None-Match\"",
+                "\"x-goog-if-generation-match\"",
+            ]
+            .map(|header| source.matches(header).count())
+        })
+        .sum::<usize>();
+
+    // Assert
+    assert_eq!(raw_header_count, 0);
+}
+
+#[test]
 fn should_keep_filesystem_error_conversion_out_of_public_api() {
     // Arrange
     let source = include_str!("../src/io/traits.rs");

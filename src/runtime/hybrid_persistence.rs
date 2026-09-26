@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 mod catalog;
 mod metadata_snapshot;
-#[cfg(test)]
 pub(crate) use metadata_snapshot::conditional_metadata_mirror_put;
 pub(crate) use metadata_snapshot::{mirror_control_metadata_within, CloudMetadataPruneSnapshot};
 mod streaming_prune;

@@ -31,40 +31,15 @@ impl CloudStartupRecovery {
     pub(super) fn blocking_conditional_cloud_metadata_put(
         cloud: &crate::storage::cloud::CloudStorage,
         file_name: &str,
-        key: &str,
         data: Vec<u8>,
         local_manifest_sequence: u64,
     ) -> MidgeResult<()> {
-        let io = BlockingCloudIo::new(cloud);
-        let headers = match io.head_optional(key)? {
-            Some(metadata) => {
-                let headers = crate::storage::cloud::object_match_precondition_headers(
-                    &metadata.etag,
-                    metadata.generation.as_deref(),
-                )
-                .ok_or_else(|| {
-                    MidgeError::Internal(format!(
-                        "cloud metadata '{key}' cannot be conditionally updated without an identity token"
-                    ))
-                })?;
-                let current = io.get_optional(key)?.ok_or_else(|| {
-                    MidgeError::Internal(format!(
-                        "cloud metadata '{key}' disappeared after HEAD precondition"
-                    ))
-                })?;
-                crate::metadata::files::ensure_remote_not_ahead(
-                    file_name,
-                    &current,
-                    local_manifest_sequence,
-                )?;
-                if current == data {
-                    return Ok(());
-                }
-                headers
-            }
-            None => vec![("If-None-Match".to_string(), "*".to_string())],
-        };
-
-        io.put_with_headers(key, data, headers)
+        crate::runtime::hybrid_persistence::conditional_metadata_mirror_put(
+            cloud,
+            file_name,
+            data,
+            local_manifest_sequence,
+            &crate::common::OperationDeadline::unbounded(),
+        )
     }
 }
