@@ -12,8 +12,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner,
 };
 use super::rest::{
-    conditional_range_preconditions, finish_paged_list, map_response,
-    object_metadata_from_response, ListPageParser, PagedList, ProviderDialect,
+    conditional_range_request, finish_paged_list, map_response, object_metadata_from_response,
+    ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -978,8 +978,15 @@ impl CloudBackend for AzureBackend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let conditions = match conditional_range_preconditions(&range, &expected) {
-            Ok(conditions) => conditions,
+        let request = match conditional_range_request(&range, &expected, timeout, |conditions| {
+            let mut request =
+                CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
+            for (name, value) in conditions {
+                request = request.with_header(name, value);
+            }
+            request
+        }) {
+            Ok(request) => request,
             Err(error) => {
                 let _ = callback.send(CloudEvent::GetRange {
                     key,
@@ -990,15 +997,6 @@ impl CloudBackend for AzureBackend {
                 return;
             }
         };
-        let mut request =
-            CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
-        for (name, value) in conditions {
-            request = request.with_header(name, value);
-        }
-        request = request
-            .with_header("Range", format!("bytes={start}-{}", end - 1))
-            .with_timeout(timeout)
-            .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
             let result = map_response(
                 result,

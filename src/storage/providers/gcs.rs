@@ -11,8 +11,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner, ObjectMetadata,
 };
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, finish_paged_list, map_response,
-    ListPageParser, PagedList, ProviderDialect,
+    conditional_range_request, current_unix_secs, finish_paged_list, map_response, ListPageParser,
+    PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1307,8 +1307,24 @@ impl CloudBackend for GcsBackend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let conditions = match conditional_range_preconditions(&range, &expected) {
-            Ok(conditions) => conditions,
+        let mode = self.mode;
+        let request = match conditional_range_request(&range, &expected, timeout, |conditions| {
+            let mut url = self.download_url(&key);
+            let mut request = Self::bodyless_request(mode, Method::GET, String::new())
+                .with_reservation(reservation);
+            for (name, value) in conditions {
+                if mode == GcsBackendMode::Json
+                    && name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                {
+                    url = append_query_param(&url, "ifGenerationMatch", &value);
+                } else {
+                    request = request.with_header(name, value);
+                }
+            }
+            request.url = url;
+            request
+        }) {
+            Ok(request) => request,
             Err(error) => {
                 let _ = callback.send(CloudEvent::GetRange {
                     key,
@@ -1319,24 +1335,6 @@ impl CloudBackend for GcsBackend {
                 return;
             }
         };
-        let mode = self.mode;
-        let mut url = self.download_url(&key);
-        let mut request =
-            Self::bodyless_request(mode, Method::GET, String::new()).with_reservation(reservation);
-        for (name, value) in conditions {
-            if mode == GcsBackendMode::Json
-                && name.eq_ignore_ascii_case("x-goog-if-generation-match")
-            {
-                url = append_query_param(&url, "ifGenerationMatch", &value);
-            } else {
-                request = request.with_header(name, value);
-            }
-        }
-        request.url = url;
-        request = request
-            .with_header("Range", format!("bytes={start}-{}", end - 1))
-            .with_timeout(timeout)
-            .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
             let result = map_response(
                 result,

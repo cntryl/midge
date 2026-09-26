@@ -24,6 +24,67 @@ fn should_keep_metric_verification_delegates_off_engine() {
 }
 
 #[test]
+fn should_keep_rest_pagination_state_in_shared_provider_core() {
+    // Arrange
+    let rest = include_str!("../src/storage/providers/rest.rs");
+    let providers = [
+        include_str!("../src/storage/providers/s3.rs"),
+        include_str!("../src/storage/providers/azure.rs"),
+        include_str!("../src/storage/providers/gcs.rs"),
+    ];
+
+    // Act
+    // Assert
+    assert!(rest.contains("pub(super) struct PagedList"));
+    assert!(rest.contains("pub(super) fn finish_paged_list"));
+    for source in providers {
+        assert!(!source.contains("struct S3ListState"));
+        assert!(!source.contains("struct AzureListState"));
+        assert!(!source.contains("struct GcsListState"));
+        assert!(!source.contains("checked list error"));
+    }
+}
+
+#[test]
+fn should_keep_rest_error_detail_in_shared_provider_core() {
+    // Arrange
+    let rest = include_str!("../src/storage/providers/rest.rs");
+    let providers = [
+        include_str!("../src/storage/providers/s3.rs"),
+        include_str!("../src/storage/providers/azure.rs"),
+        include_str!("../src/storage/providers/gcs.rs"),
+    ];
+
+    // Act
+    // Assert
+    assert!(rest.contains("pub(super) fn response_error_detail"));
+    assert!(rest.contains("pub(super) fn map_response"));
+    for source in providers {
+        assert!(!source.contains("format!(\"{operation}: {code}: {message}\")"));
+        assert!(!source.contains("format!(\"{operation}: {reason}: {message}\")"));
+    }
+}
+
+#[test]
+fn should_keep_request_timeout_parser_in_cloud_core() {
+    // Arrange
+    let cloud = include_str!("../src/storage/cloud/mod.rs");
+    let providers = [
+        include_str!("../src/storage/providers/s3.rs"),
+        include_str!("../src/storage/providers/azure.rs"),
+        include_str!("../src/storage/providers/gcs.rs"),
+    ];
+
+    // Act
+    // Assert
+    assert!(cloud.contains("fn parse_request_timeout"));
+    for source in providers {
+        assert!(!source.contains("fn parse_request_timeout"));
+        assert!(!source.contains("REQUEST_TIMEOUT_HEADER"));
+    }
+}
+
+#[test]
 fn should_keep_test_only_protocols_out_of_runtime() {
     // Arrange
     let state = include_str!("../src/runtime/state.rs");

@@ -10,7 +10,7 @@
 use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, finish_paged_list, map_response,
+    conditional_range_request, current_unix_secs, finish_paged_list, map_response,
     object_metadata_from_response, ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
@@ -1189,8 +1189,15 @@ impl CloudBackend for S3Backend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let conditions = match conditional_range_preconditions(&range, &expected) {
-            Ok(conditions) => conditions,
+        let request = match conditional_range_request(&range, &expected, timeout, |conditions| {
+            let mut request =
+                CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
+            for (name, value) in conditions {
+                request = request.with_header(name, value);
+            }
+            request
+        }) {
+            Ok(request) => request,
             Err(error) => {
                 let _ = callback.send(CloudEvent::GetRange {
                     key,
@@ -1201,15 +1208,6 @@ impl CloudBackend for S3Backend {
                 return;
             }
         };
-        let mut request =
-            CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
-        for (name, value) in conditions {
-            request = request.with_header(name, value);
-        }
-        request = request
-            .with_header("Range", format!("bytes={start}-{}", end - 1))
-            .with_timeout(timeout)
-            .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
             let result = map_response(
                 result,

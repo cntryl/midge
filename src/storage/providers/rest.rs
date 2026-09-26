@@ -271,6 +271,27 @@ pub(super) fn conditional_range_preconditions(
     Ok(conditions)
 }
 
+/// Prepare an exact range request after the caller has placed its identity
+/// condition in the provider's required header or query location.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn conditional_range_request(
+    range: &std::ops::Range<u64>,
+    expected: &crate::storage::StorageObjectMetadata,
+    timeout: std::time::Duration,
+    make_request: impl FnOnce(Vec<(String, String)>) -> crate::storage::cloud::CloudRequest,
+) -> Result<crate::storage::cloud::CloudRequest, CloudError> {
+    let conditions = conditional_range_preconditions(range, expected)?;
+    Ok(make_request(conditions)
+        .with_header("Range", format!("bytes={}-{}", range.start, range.end - 1))
+        .with_timeout(timeout)
+        .with_response_limit(usize::try_from(range.end - range.start).unwrap_or(usize::MAX)))
+}
+
 /// Object size and `ETag` from a metadata (HEAD or GET) response.
 ///
 /// With `known_size` the body length is validated against `Content-Length`;
