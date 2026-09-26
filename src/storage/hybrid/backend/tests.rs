@@ -6,6 +6,7 @@
 //! `hybrid_persistence` module and tested beside it.
 
 use super::*;
+use crate::storage::test_support::StorageBackendTestExt;
 
 use crate::storage::cloud::{CloudStorage, MockCloudBackend};
 use crate::storage::StorageCallback;
@@ -658,18 +659,21 @@ impl StorageBackend for BudgetConsumingProofBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "writes are not used by this proof fixture"
-                    .to_string()
-                    .into(),
-            ),
-        });
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |key, _precondition, _data, callback| {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(
+                        "writes are not used by this proof fixture"
+                            .to_string()
+                            .into(),
+                    ),
+                });
+            },
+        );
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
@@ -743,21 +747,14 @@ impl StorageBackend for NeverCompletesBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.retain_callback(callback);
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |_key, _precondition, _data, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 
     fn submit_delete(&self, _key: &str, callback: StorageCallback) {
@@ -776,7 +773,7 @@ impl StorageBackend for NeverCompletesBackend {
 
 fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.stores.sst.submit_write(key, data, tx);
+    storage.stores.sst.write_for_test(key, data, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::WriteComplete {
             result: StorageOutcome::Ok(()),

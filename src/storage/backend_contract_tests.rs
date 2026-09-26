@@ -5,6 +5,7 @@
 
 use super::cloud::CloudStorage;
 use super::filesystem::FileSystem;
+use super::test_support::StorageBackendTestExt;
 use super::{StorageBackend, StorageEvent, StorageOutcome};
 use std::sync::mpsc;
 
@@ -52,7 +53,7 @@ fn should_preserve_existing_object_when_typed_create_finds_a_match() {
     for (name, backend) in backends(root.path()) {
         let key = format!("{name}/create-guard");
         let (seed_tx, seed_rx) = mpsc::channel();
-        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        backend.write_for_test(&key, b"old".to_vec(), seed_tx);
         let _ = seed_rx.recv().expect("seed callback");
         let request = super::StorageRequest::new(
             &key,
@@ -94,7 +95,7 @@ fn should_replace_matching_object_when_typed_write_uses_current_identity() {
     for (name, backend) in backends(root.path()) {
         let key = format!("{name}/match-guard");
         let (seed_tx, seed_rx) = mpsc::channel();
-        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        backend.write_for_test(&key, b"old".to_vec(), seed_tx);
         let _ = seed_rx.recv().expect("seed callback");
         let (read_tx, read_rx) = mpsc::channel();
         backend.submit_metadata_read_request(
@@ -138,7 +139,7 @@ fn should_preserve_replaced_object_when_typed_delete_uses_stale_identity() {
     for (name, backend) in backends(root.path()) {
         let key = format!("{name}/delete-guard");
         let (seed_tx, seed_rx) = mpsc::channel();
-        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        backend.write_for_test(&key, b"old".to_vec(), seed_tx);
         let _ = seed_rx.recv().expect("seed callback");
         let (head_tx, head_rx) = mpsc::channel();
         backend.submit_head_request(
@@ -157,7 +158,7 @@ fn should_preserve_replaced_object_when_typed_delete_uses_stale_identity() {
             panic!("{name}: expected a current identity");
         };
         let (replace_tx, replace_rx) = mpsc::channel();
-        backend.submit_write(&key, b"new".to_vec(), replace_tx);
+        backend.write_for_test(&key, b"new".to_vec(), replace_tx);
         let _ = replace_rx.recv().expect("replace callback");
         let request = super::StorageRequest::new(
             &key,
@@ -202,7 +203,7 @@ fn should_reject_typed_delete_when_callback_budget_is_zero() {
     for (name, backend) in backends(root.path()) {
         let key = format!("{name}/expired-delete");
         let (seed_tx, seed_rx) = mpsc::channel();
-        backend.submit_write(&key, b"value".to_vec(), seed_tx);
+        backend.write_for_test(&key, b"value".to_vec(), seed_tx);
         let _ = seed_rx.recv().expect("seed callback");
         let request = super::StorageRequest::new(
             &key,
@@ -245,7 +246,7 @@ fn should_preserve_object_when_typed_delete_uses_absence_precondition() {
     for (name, backend) in backends(root.path()) {
         let key = format!("{name}/delete-absence-guard");
         let (seed_tx, seed_rx) = mpsc::channel();
-        backend.submit_write(&key, b"value".to_vec(), seed_tx);
+        backend.write_for_test(&key, b"value".to_vec(), seed_tx);
         let _ = seed_rx.recv().expect("seed callback");
         let request = super::StorageRequest::new(
             &key,
@@ -326,7 +327,7 @@ fn should_keep_existing_bytes_when_generation_precondition_is_unsupported_or_sta
     for (name, backend) in backends(root.path()) {
         let key = format!("{name}/generation-guard");
         let (seed_tx, seed_rx) = mpsc::channel();
-        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        backend.write_for_test(&key, b"old".to_vec(), seed_tx);
         assert!(matches!(
             seed_rx.recv().expect("seed write"),
             StorageEvent::WriteComplete {
@@ -693,7 +694,7 @@ fn should_echo_caller_key_when_completing_operations_through_every_storage_backe
         let keys = [
             (
                 "write",
-                run(&|tx| backend.submit_write(key, b"value".to_vec(), tx)),
+                run(&|tx| backend.write_for_test(key, b"value".to_vec(), tx)),
             ),
             (
                 "head",

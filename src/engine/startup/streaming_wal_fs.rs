@@ -277,15 +277,14 @@ mod tests {
 
         crate::storage::forward_storage_backend!(
             inner;
-            submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
-            submit_write_with_headers,
+            submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
             submit_delete_with_headers,
 
         );
 
-        fn submit_write(
+        fn submit_write_request(
             &self,
-            _key: &str,
+            _request: crate::storage::StorageRequest,
             _bytes: Vec<u8>,
             _callback: crate::storage::StorageCallback,
         ) {

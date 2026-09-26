@@ -5,6 +5,7 @@
 //! those formats rather than inside the format-neutral storage backend.
 
 use super::*;
+use crate::storage::test_support::StorageBackendTestExt;
 
 use crate::sst::SstFactory;
 
@@ -1397,22 +1398,15 @@ impl StorageBackend for PanickingWriteBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: StorageCallback) {
-        self.write_attempts.fetch_add(1, Ordering::SeqCst);
-        panic!("injected cloud upload worker panic");
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.submit_write(key, data, callback);
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |_key, _precondition, _data, _callback| {
+                self.write_attempts.fetch_add(1, Ordering::SeqCst);
+                panic!("injected cloud upload worker panic");
+            },
+        );
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
@@ -1479,25 +1473,18 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        self.write_attempts.fetch_add(1, Ordering::SeqCst);
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err("write unavailable".to_string().into()),
-        });
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.submit_write(key, data, callback);
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |key, _precondition, _data, callback| {
+                self.write_attempts.fetch_add(1, Ordering::SeqCst);
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err("write unavailable".to_string().into()),
+                });
+            },
+        );
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
@@ -1600,21 +1587,14 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.retain_callback(callback);
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |_key, _precondition, _data, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 
     fn submit_delete(&self, _key: &str, callback: StorageCallback) {
@@ -1716,15 +1696,29 @@ impl StorageBackend for RacingReadDeleteBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        *self.object.lock() = Some(data);
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Ok(()),
-        });
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |key, precondition, data, callback| {
+                if !matches!(precondition, crate::storage::StoragePrecondition::None) {
+                    let _ = callback.send(StorageEvent::WriteComplete {
+                        key: key.to_string(),
+                        result: StorageOutcome::Err(
+                            crate::storage::StorageError::precondition_failed(
+                                "racing fixture cannot enforce a write precondition",
+                            ),
+                        ),
+                    });
+                    return;
+                }
+                *self.object.lock() = Some(data);
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Ok(()),
+                });
+            },
+        );
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
@@ -1813,21 +1807,14 @@ impl StorageBackend for NeverCompletesBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.retain_callback(callback);
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |_key, _precondition, _data, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 
     fn submit_delete(&self, _key: &str, callback: StorageCallback) {
@@ -1846,7 +1833,7 @@ impl StorageBackend for NeverCompletesBackend {
 
 fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.sst_store().submit_write(key, data, tx);
+    storage.sst_store().write_for_test(key, data, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::WriteComplete {
             result: StorageOutcome::Ok(()),
@@ -1858,7 +1845,7 @@ fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
 
 fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.local_store().submit_write(key, data, tx);
+    storage.local_store().write_for_test(key, data, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::WriteComplete {
             result: StorageOutcome::Ok(()),

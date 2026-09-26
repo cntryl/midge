@@ -666,30 +666,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         callback: StorageCallback,
     );
 
-    /// Submit a write operation. Returns immediately.
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
-
-    /// Submit a conditional write operation. Backends that cannot enforce the
-    /// supplied preconditions must fail closed rather than writing.
-    #[cfg(not(test))]
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    );
-    #[cfg(test)]
-    fn submit_write_with_headers(
-        &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        _callback: StorageCallback,
-    ) {
-        panic!("test backend received undeclared conditional-write capability");
-    }
-
     /// Submit a delete operation. Returns immediately.
     fn submit_delete(&self, key: &str, callback: StorageCallback);
 

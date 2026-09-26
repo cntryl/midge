@@ -67,22 +67,7 @@ impl StorageBackend for SlowWalRanges {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        self.inner.submit_write(key, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.inner
-            .submit_write_with_headers(key, data, headers, callback);
+        self.inner.submit_write_request(request, data, callback);
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {

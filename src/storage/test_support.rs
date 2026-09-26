@@ -5,48 +5,52 @@
 /// `StorageBackend` trait. `$inner` names a field holding the delegate; both
 /// `T` and `Arc<T>` work, because forwarding uses method-call syntax.
 #[cfg(test)]
-pub(crate) fn forward_typed_write_to_legacy<B: super::StorageBackend + ?Sized>(
-    backend: &B,
+pub(crate) trait StorageBackendTestExt: super::StorageBackend {
+    fn write_for_test(&self, key: &str, data: Vec<u8>, callback: super::StorageCallback) {
+        self.submit_write_request(
+            super::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            ),
+            data,
+            callback,
+        );
+    }
+}
+
+#[cfg(test)]
+impl<T: super::StorageBackend + ?Sized> StorageBackendTestExt for T {}
+
+#[cfg(test)]
+pub(crate) fn dispatch_test_write_request(
     request: super::StorageRequest,
     data: Vec<u8>,
     callback: super::StorageCallback,
+    submit: impl FnOnce(&str, super::StoragePrecondition, Vec<u8>, super::StorageCallback),
 ) {
-    let timeout = request.remaining_timeout();
-    if timeout.is_zero() {
+    if request.remaining_timeout().is_zero() {
         let _ = callback.send(super::StorageEvent::WriteComplete {
             key: request.key,
             result: super::StorageOutcome::Err(super::storage_timeout_error("write timed out")),
         });
         return;
     }
-    let headers = match request.precondition.headers() {
-        Ok(headers) => headers,
-        Err(error) => {
-            let _ = callback.send(super::StorageEvent::WriteComplete {
-                key: request.key,
-                result: super::StorageOutcome::Err(error),
-            });
-            return;
-        }
-    };
-    if let Some(reservation) = request.reservation {
+    let callback = if let Some(reservation) = request.reservation {
         match super::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => {
-                backend.submit_write_with_headers(&request.key, data, headers, retained);
-            }
+            Ok(retained) => retained,
             Err(error) => {
                 let _ = callback.send(super::StorageEvent::WriteComplete {
                     key: request.key,
-                    result: super::StorageOutcome::Err(super::StorageError::new(
-                        super::StorageErrorKind::of(&error),
-                        format!("retain upload completion: {error}"),
-                    )),
+                    result: super::StorageOutcome::Err(super::StorageError::from(error)),
                 });
+                return;
             }
         }
     } else {
-        backend.submit_write_with_headers(&request.key, data, headers, callback);
-    }
+        callback
+    };
+    submit(&request.key, request.precondition, data, callback);
 }
 
 #[cfg(test)]
@@ -136,17 +140,6 @@ macro_rules! forward_storage_backend {
         fn submit_metadata_read_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::MetadataReadCallback) {
             self.$inner.submit_metadata_read_request(request, callback);
-        }
-    };
-    (@method $inner:ident, submit_write) => {
-        fn submit_write(&self, key: &str, data: Vec<u8>, callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_write(key, data, callback);
-        }
-    };
-    (@method $inner:ident, submit_write_with_headers) => {
-        fn submit_write_with_headers(&self, key: &str, data: Vec<u8>,
-            headers: Vec<(String, String)>, callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_write_with_headers(key, data, headers, callback);
         }
     };
     (@method $inner:ident, submit_delete) => {

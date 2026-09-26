@@ -439,6 +439,7 @@ impl Fs for VerifiedLocalSstFs {
 mod tests {
     use super::*;
     use crate::sst::traits::{SstFactory, SstStateReader};
+    use crate::storage::test_support::StorageBackendTestExt;
     use crate::types::EntryType;
 
     #[test]
@@ -514,14 +515,10 @@ mod tests {
         crate::storage::forward_storage_backend!(
             inner;
             submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
-            submit_write_with_headers,
             submit_delete_with_headers,
 
         );
 
-        fn submit_write(&self, key: &str, bytes: Vec<u8>, callback: super::super::StorageCallback) {
-            self.inner.submit_write(key, bytes, callback);
-        }
         fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
             self.inner.submit_delete(key, callback);
         }
@@ -549,7 +546,7 @@ mod tests {
             ..Default::default()
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_write("sst/remote.sst", bytes, tx);
+        cloud.write_for_test("sst/remote.sst", bytes, tx);
         rx.recv().expect("remote write");
         let diagnostics = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
         let unrelated = crate::diagnostics::RuntimeDiagnostics::default();
@@ -768,7 +765,7 @@ mod tests {
         let bytes = writer.finish_bytes()?;
         let size = bytes.len() as u64;
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_write("sst/remote.sst", bytes, tx);
+        cloud.write_for_test("sst/remote.sst", bytes, tx);
         rx.recv().unwrap();
         std::fs::write(local.path().join("remote.sst"), b"corrupt local cache")?;
         let fs = Arc::new(RemoteSstFs::new(
@@ -866,7 +863,7 @@ mod tests {
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_write("sst/remote.sst", writer.finish_bytes()?, tx);
+        cloud.write_for_test("sst/remote.sst", writer.finish_bytes()?, tx);
         rx.recv().expect("write completion");
         let ranges = Arc::new(RemoteSstFs::new(fs, cloud, Duration::from_secs(5)));
         // Act

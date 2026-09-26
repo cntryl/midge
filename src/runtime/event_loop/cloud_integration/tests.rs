@@ -731,14 +731,6 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         self.inner.submit_delete_request(request, callback);
     }
 
-    crate::storage::forward_storage_backend!(
-        inner;
-
-
-
-        submit_write,
-    );
-
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -750,25 +742,6 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
             self.catalog_retired.store(true, Ordering::SeqCst);
         }
         self.inner.submit_write_request(request, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if self.armed.load(Ordering::SeqCst) && key == crate::wal::cloud_catalog::OBJECT_KEY {
-            self.catalog_retired.store(true, Ordering::SeqCst);
-        }
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
     }
 
     crate::storage::forward_storage_backend!(
@@ -915,8 +888,8 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
     inner;
     submit_write_request, submit_delete_request, submit_metadata_read_request,
 
-    submit_write,
-    submit_write_with_headers,
+
+
     submit_delete,
     submit_delete_with_headers,
     );
@@ -965,14 +938,6 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         self.inner.submit_delete_request(request, callback);
     }
 
-    crate::storage::forward_storage_backend!(
-        inner;
-
-
-
-        submit_write,
-    );
-
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1004,53 +969,6 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
             return;
         }
         self.inner.submit_write_request(request, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if key == crate::wal::cloud_catalog::OBJECT_KEY
-            && self.arm_catalog_write.swap(false, Ordering::SeqCst)
-        {
-            let (inner_tx, inner_rx) = std::sync::mpsc::channel();
-            crate::storage::StorageBackend::submit_write_with_headers(
-                self.inner.as_ref(),
-                key,
-                data,
-                headers,
-                inner_tx,
-            );
-            let event = inner_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("catalog CAS fixture completion");
-            if matches!(
-                event,
-                crate::storage::StorageEvent::WriteComplete {
-                    result: crate::storage::StorageOutcome::Ok(()),
-                    ..
-                }
-            ) {
-                self.retained_callbacks
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(callback);
-                return;
-            }
-            let _ = callback.send(event);
-            return;
-        }
-
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
     }
 
     crate::storage::forward_storage_backend!(
@@ -1115,14 +1033,6 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         self.inner.submit_delete_request(request, callback);
     }
 
-    crate::storage::forward_storage_backend!(
-        inner;
-
-
-
-        submit_write,
-    );
-
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1143,37 +1053,6 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
             return;
         }
         self.inner.submit_write_request(request, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
-            let inner = Arc::clone(&self.inner);
-            let key = key.to_string();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(250));
-                crate::storage::StorageBackend::submit_write_with_headers(
-                    inner.as_ref(),
-                    &key,
-                    data,
-                    headers,
-                    callback,
-                );
-            });
-            return;
-        }
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
     }
 
     crate::storage::forward_storage_backend!(
@@ -1225,15 +1104,6 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
     ) {
         self.inner.submit_delete_request(request, callback);
     }
-
-    crate::storage::forward_storage_backend!(
-        inner;
-
-
-
-        submit_write,
-        submit_write_with_headers,
-    );
 
     fn submit_write_request(
         &self,
@@ -1350,8 +1220,8 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         submit_write_request,
 
 
-        submit_write,
-        submit_write_with_headers,
+
+
     );
 
     fn submit_delete_request(
@@ -1451,8 +1321,8 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         submit_write_request,
 
 
-        submit_write,
-        submit_write_with_headers,
+
+
     );
 
     fn submit_delete_request(
@@ -9099,8 +8969,8 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
         inner;
         submit_write_request, submit_delete_request, submit_head_request, submit_metadata_read_request,
 
-        submit_write,
-        submit_write_with_headers,
+
+
         submit_delete,
         submit_delete_with_headers,
 

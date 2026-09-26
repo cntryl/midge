@@ -248,27 +248,6 @@ impl StorageBackend for CloudStorage {
         self.write_admitted(&key, data, headers, timeout, request.reservation, &callback);
     }
 
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        self.write_admitted(
-            key,
-            data,
-            Vec::new(),
-            self.callback_timeout,
-            None,
-            &callback,
-        );
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.write_admitted(key, data, headers, self.callback_timeout, None, &callback);
-    }
-
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         if self.callback_timeout.is_zero() {
             let _ = callback.send(StorageEvent::DeleteComplete {

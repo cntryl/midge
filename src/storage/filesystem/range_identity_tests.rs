@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::test_support::StorageBackendTestExt;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -117,7 +118,7 @@ fn should_reject_stale_range_authority_when_in_place_write_preserves_size_and_mo
     let before = head(&backend);
     let (tx, rx) = mpsc::channel();
     // Act
-    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    backend.write_for_test(KEY, b"newer".to_vec(), tx);
     let write = rx.recv().expect("in-place write response");
     fs::File::options()
         .write(true)
@@ -183,7 +184,7 @@ fn should_advance_modified_time_when_replacing_object_stamped_ahead_of_the_clock
     let backend = FileSystem::new(directory.path())?;
     let path = directory.path().join(KEY);
     let (tx, rx) = mpsc::channel();
-    backend.submit_write(KEY, b"older".to_vec(), tx);
+    backend.write_for_test(KEY, b"older".to_vec(), tx);
     rx.recv().expect("first write response");
     let ahead = std::time::SystemTime::now() + Duration::from_hours(1);
     fs::File::options()
@@ -193,7 +194,7 @@ fn should_advance_modified_time_when_replacing_object_stamped_ahead_of_the_clock
     let (tx, rx) = mpsc::channel();
 
     // Act
-    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    backend.write_for_test(KEY, b"newer".to_vec(), tx);
     rx.recv().expect("replacement write response");
 
     // Assert
@@ -209,7 +210,7 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
     let backend = FileSystem::new(directory.path())?;
     let path = directory.path().join(KEY);
     let (tx, rx) = mpsc::channel();
-    backend.submit_write(KEY, b"older".to_vec(), tx);
+    backend.write_for_test(KEY, b"older".to_vec(), tx);
     rx.recv().expect("first write response");
     let ahead = std::time::SystemTime::now() + Duration::from_hours(2);
     fs::File::options()
@@ -217,7 +218,7 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
         .open(&path)?
         .set_modified(ahead)?;
     let (tx, rx) = mpsc::channel();
-    backend.submit_write(KEY, b"middle".to_vec(), tx);
+    backend.write_for_test(KEY, b"middle".to_vec(), tx);
     rx.recv().expect("second write response");
     let middle = fs::metadata(&path)?.modified()?;
     let (tx, rx) = mpsc::channel();
@@ -226,7 +227,7 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
     let (tx, rx) = mpsc::channel();
 
     // Act
-    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    backend.write_for_test(KEY, b"newer".to_vec(), tx);
     rx.recv().expect("recreate write response");
 
     // Assert

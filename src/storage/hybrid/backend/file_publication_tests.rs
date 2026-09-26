@@ -61,10 +61,7 @@ impl StorageBackend for PanicLocalBackend {
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: crate::storage::StorageCallback) {
+        let _ = (request, data, callback);
         panic!("ephemeral publication called the retired local backend");
     }
 

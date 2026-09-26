@@ -831,124 +831,6 @@ impl StorageBackend for FileSystem {
         let _ = callback.send(StorageEvent::WriteComplete { key, result });
     }
 
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        let full_path = match self.full_path(key) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let _lock = mutation_lock(&full_path);
-        let _process_lock = match self.acquire_process_lock(&full_path) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-
-        let outcome =
-            publish_object_atomically(&self.base_path, &full_path, &data, Publish::Replace);
-
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: outcome,
-        });
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        if headers.is_empty() {
-            self.submit_write(key, data, callback);
-            return;
-        }
-
-        let full_path = match self.full_path(key) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let if_none_match = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
-            .map(|(_, value)| value.trim().to_string());
-        let if_match = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
-            .map(|(_, value)| value.trim().trim_matches('"').to_string());
-
-        let _lock = mutation_lock(&full_path);
-        let _process_lock = match self.acquire_process_lock(&full_path) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let outcome = if let Some(expected) = if_match {
-            let identity = if expected.starts_with("fs:") {
-                range_path_metadata(&full_path).map(|metadata| metadata.etag)
-            } else {
-                fs::read(&full_path)
-                    .map_err(crate::storage::StorageError::from)
-                    .map(|data| StorageObjectMetadata::content_crc(data.len() as u64, &data).etag)
-            };
-            match identity {
-                Ok(current) => {
-                    if current == expected {
-                        publish_object_atomically(
-                            &self.base_path,
-                            &full_path,
-                            &data,
-                            Publish::Replace,
-                        )
-                    } else {
-                        StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
-                            "etag mismatch",
-                        ))
-                    }
-                }
-                Err(error) => StorageOutcome::Err(crate::storage::StorageError::new(
-                    error.kind(),
-                    format!("read {}: {error}", full_path.display()),
-                )),
-            }
-        } else if if_none_match.as_deref() == Some("*") {
-            publish_object_atomically(&self.base_path, &full_path, &data, Publish::CreateNew)
-        } else {
-            StorageOutcome::Err(
-                "conditional write requires a supported precondition"
-                    .to_string()
-                    .into(),
-            )
-        };
-
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: outcome,
-        });
-    }
-
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let full_path = match self.full_path(key) {
             Ok(path) => path,
@@ -1072,6 +954,7 @@ impl StorageBackend for FileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::test_support::StorageBackendTestExt;
     use std::sync::{mpsc, Arc, Barrier};
     use tempfile::TempDir;
 
@@ -1086,7 +969,7 @@ mod tests {
         let data = b"test data".to_vec();
 
         // Act
-        fs.submit_write("test.txt", data.clone(), tx);
+        fs.write_for_test("test.txt", data.clone(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1110,7 +993,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("empty.txt", vec![], tx);
+        fs.write_for_test("empty.txt", vec![], tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1133,7 +1016,7 @@ mod tests {
         let large_data = vec![42u8; 1_000_000];
 
         // Act
-        fs.submit_write("large.bin", large_data.clone(), tx);
+        fs.write_for_test("large.bin", large_data.clone(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1155,7 +1038,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("subdir/nested/file.txt", b"data".to_vec(), tx);
+        fs.write_for_test("subdir/nested/file.txt", b"data".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1178,7 +1061,7 @@ mod tests {
 
         // Act
         let (tx, rx) = mpsc::channel();
-        fs.submit_write("file.txt", b"new".to_vec(), tx);
+        fs.write_for_test("file.txt", b"new".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1201,7 +1084,7 @@ mod tests {
         let binary_data = vec![0u8, 1u8, 255u8, 254u8];
 
         // Act
-        fs.submit_write("binary.bin", binary_data.clone(), tx);
+        fs.write_for_test("binary.bin", binary_data.clone(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1224,10 +1107,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write_with_headers(
-            "conditional-create.txt",
+        fs.submit_write_request(
+            StorageRequest::new(
+                "conditional-create.txt",
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(StoragePrecondition::IfAbsent),
             b"new".to_vec(),
-            vec![("If-None-Match".into(), "*".into())],
             tx,
         );
         let event = rx.recv().unwrap();
@@ -1252,10 +1139,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write_with_headers(
-            "conditional-existing.txt",
+        fs.submit_write_request(
+            StorageRequest::new(
+                "conditional-existing.txt",
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(StoragePrecondition::IfAbsent),
             b"new".to_vec(),
-            vec![("If-None-Match".into(), "*".into())],
             tx,
         );
         let event = rx.recv().unwrap();
@@ -1286,10 +1177,16 @@ mod tests {
                 std::thread::spawn(move || {
                     let (tx, rx) = mpsc::channel();
                     barrier.wait();
-                    backend.submit_write_with_headers(
-                        "racing-create.txt",
+                    backend.submit_write_request(
+                        StorageRequest::new(
+                            "racing-create.txt",
+                            crate::common::OperationDeadline::from_budget(
+                                std::time::Duration::from_secs(5),
+                            ),
+                            std::time::Duration::from_secs(5),
+                        )
+                        .with_precondition(StoragePrecondition::IfAbsent),
                         format!("writer-{index}").into_bytes(),
-                        vec![("If-None-Match".into(), "*".into())],
                         tx,
                     );
                     match rx.recv().expect("conditional create response") {
@@ -1315,6 +1212,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let key = "racing-cas.txt";
         let initial = b"initial".to_vec();
+        let initial_size = initial.len() as u64;
         std::fs::write(temp_dir.path().join(key), &initial).unwrap();
         let etag = StorageObjectMetadata::content_crc(initial.len() as u64, &initial).etag;
         let backend = Arc::new(FileSystem::new(temp_dir.path()).unwrap());
@@ -1330,10 +1228,22 @@ mod tests {
                 std::thread::spawn(move || {
                     let (tx, rx) = mpsc::channel();
                     barrier.wait();
-                    backend.submit_write_with_headers(
-                        key,
+                    backend.submit_write_request(
+                        StorageRequest::new(
+                            key,
+                            crate::common::OperationDeadline::from_budget(
+                                std::time::Duration::from_secs(5),
+                            ),
+                            std::time::Duration::from_secs(5),
+                        )
+                        .with_precondition(StoragePrecondition::IfMatch(
+                            StorageObjectMetadata {
+                                size: initial_size,
+                                etag,
+                                generation: None,
+                            },
+                        )),
                         format!("writer-{index}").into_bytes(),
-                        vec![("If-Match".into(), etag)],
                         tx,
                     );
                     match rx.recv().expect("conditional update response") {
@@ -1496,7 +1406,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("sst/000001.sst", b"table".to_vec(), tx);
+        fs.write_for_test("sst/000001.sst", b"table".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1712,7 +1622,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act - Try to use path traversal
-        fs.submit_write("../escape_dir/evil.txt", b"x".to_vec(), tx);
+        fs.write_for_test("../escape_dir/evil.txt", b"x".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert - Should succeed but write inside base_path
@@ -1734,7 +1644,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act - Try absolute path
-        fs.submit_write("/etc/passwd", b"x".to_vec(), tx);
+        fs.write_for_test("/etc/passwd", b"x".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert - Should sanitize
@@ -1758,7 +1668,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("link/escaped.txt", b"must stay inside".to_vec(), tx);
+        fs.write_for_test("link/escaped.txt", b"must stay inside".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1777,7 +1687,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_write("marker.txt", b"custom base path".to_vec(), tx);
+        fs.write_for_test("marker.txt", b"custom base path".to_vec(), tx);
         let event = rx.recv().unwrap();
 
         // Assert: the write must land under the base path passed to `new`, not some default.
@@ -1815,10 +1725,19 @@ mod atomic_publish_tests {
         fs: &FileSystem,
         key: &str,
         data: &[u8],
-        headers: Vec<(String, String)>,
+        precondition: StoragePrecondition,
     ) -> StorageOutcome<()> {
         let (tx, rx) = std::sync::mpsc::channel();
-        fs.submit_write_with_headers(key, data.to_vec(), headers, tx);
+        fs.submit_write_request(
+            StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(precondition),
+            data.to_vec(),
+            tx,
+        );
         match rx.recv().expect("write completion") {
             StorageEvent::WriteComplete { result, .. } => result,
             other => panic!("unexpected event {other:?}"),
@@ -1847,7 +1766,7 @@ mod atomic_publish_tests {
         let _guard = crate::failpoints::test_failpoint_guard();
         let dir = tempfile::tempdir().expect("temp dir");
         let fs = FileSystem::new(dir.path()).expect("filesystem backend");
-        let create = || vec![("If-None-Match".to_string(), "*".to_string())];
+        let create = || StoragePrecondition::IfAbsent;
         fail::cfg("midge::storage::fs_after_temp_object_write", "return").expect("failpoint");
 
         // Act
@@ -1873,13 +1792,23 @@ mod atomic_publish_tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let fs = FileSystem::new(dir.path()).expect("filesystem backend");
         assert!(matches!(
-            write(&fs, "meta/manifest.json", b"previous", Vec::new()),
+            write(
+                &fs,
+                "meta/manifest.json",
+                b"previous",
+                StoragePrecondition::None
+            ),
             StorageOutcome::Ok(())
         ));
         fail::cfg("midge::storage::fs_after_temp_object_write", "return").expect("failpoint");
 
         // Act
-        let interrupted = write(&fs, "meta/manifest.json", b"replacement-bytes", Vec::new());
+        let interrupted = write(
+            &fs,
+            "meta/manifest.json",
+            b"replacement-bytes",
+            StoragePrecondition::None,
+        );
         fail::remove("midge::storage::fs_after_temp_object_write");
 
         // Assert
