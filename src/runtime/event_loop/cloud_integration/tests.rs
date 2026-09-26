@@ -676,6 +676,14 @@ impl PostRetirementDependencyChangeBackend {
 }
 
 impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.inner.submit_delete_request(request, callback);
+    }
+
     crate::storage::forward_storage_backend!(
         inner;
         submit_range_head,
@@ -859,7 +867,7 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
     }
     crate::storage::forward_storage_backend!(
     inner;
-    submit_write_request, submit_read_range,
+    submit_write_request, submit_delete_request, submit_read_range,
     submit_read_with_metadata,
     submit_write,
     submit_write_with_headers,
@@ -883,6 +891,14 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
 }
 
 impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.inner.submit_delete_request(request, callback);
+    }
+
     crate::storage::forward_storage_backend!(
         inner;
         submit_range_head,
@@ -980,6 +996,14 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
 }
 
 impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.inner.submit_delete_request(request, callback);
+    }
+
     crate::storage::forward_storage_backend!(
         inner;
         submit_range_head,
@@ -1089,6 +1113,14 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
 }
 
 impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.inner.submit_delete_request(request, callback);
+    }
+
     crate::storage::forward_storage_backend!(
         inner;
         submit_range_head,
@@ -1234,6 +1266,15 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         submit_write_with_headers,
     );
 
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.block_matching_delete(&request.key);
+        self.inner.submit_delete_request(request, callback);
+    }
+
     fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
         self.block_matching_delete(key);
         crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
@@ -1296,6 +1337,23 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         submit_write,
         submit_write_with_headers,
     );
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if self.should_fail_delete(&request.key) {
+            let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
+                key: request.key,
+                result: crate::storage::StorageOutcome::Err(
+                    "injected first cloud WAL delete failure".to_string().into(),
+                ),
+            });
+            return;
+        }
+        self.inner.submit_delete_request(request, callback);
+    }
 
     fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
         if self.should_fail_delete(key) {
@@ -8920,7 +8978,7 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_write_request, submit_read_range,
+        submit_write_request, submit_delete_request, submit_read_range,
         submit_read_with_metadata,
         submit_write,
         submit_write_with_headers,

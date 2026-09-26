@@ -9,6 +9,14 @@ struct SlowWalRanges {
 }
 
 impl StorageBackend for SlowWalRanges {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        self.inner.submit_delete_request(request, callback);
+    }
+
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,

@@ -266,7 +266,7 @@ mod tests {
     impl StorageBackend for RecordingBackend {
         crate::storage::forward_storage_backend!(
             inner;
-            submit_write_request, submit_read_with_metadata,
+            submit_write_request, submit_delete_request, submit_read_with_metadata,
             submit_write_with_headers,
             submit_delete_with_headers,
             submit_head,

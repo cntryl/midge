@@ -60,6 +60,54 @@ pub(crate) fn forward_typed_write_to_legacy<B: super::StorageBackend + ?Sized>(
 }
 
 #[cfg(test)]
+pub(crate) fn forward_typed_delete_to_legacy<B: super::StorageBackend + ?Sized>(
+    backend: &B,
+    request: super::StorageRequest,
+    callback: super::StorageCallback,
+) {
+    if request.remaining_timeout().is_zero() {
+        let _ = callback.send(super::StorageEvent::DeleteComplete {
+            key: request.key,
+            result: super::StorageOutcome::Err(super::storage_timeout_error("delete timed out")),
+        });
+        return;
+    }
+    let headers = match request.precondition.delete_headers() {
+        Ok(headers) => headers,
+        Err(error) => {
+            let _ = callback.send(super::StorageEvent::DeleteComplete {
+                key: request.key,
+                result: super::StorageOutcome::Err(error),
+            });
+            return;
+        }
+    };
+    let submit = |callback| {
+        if headers.is_empty() {
+            backend.submit_delete(&request.key, callback);
+        } else {
+            backend.submit_delete_with_headers(&request.key, headers, callback);
+        }
+    };
+    if let Some(reservation) = request.reservation {
+        match super::retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => submit(retained),
+            Err(error) => {
+                let _ = callback.send(super::StorageEvent::DeleteComplete {
+                    key: request.key,
+                    result: super::StorageOutcome::Err(super::StorageError::new(
+                        super::StorageErrorKind::of(&error),
+                        format!("retain delete completion: {error}"),
+                    )),
+                });
+            }
+        }
+    } else {
+        submit(callback);
+    }
+}
+
+#[cfg(test)]
 macro_rules! forward_storage_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::storage::forward_storage_backend!(@method $inner, $method);)+
@@ -68,6 +116,12 @@ macro_rules! forward_storage_backend {
         fn submit_write_request(&self, request: $crate::storage::StorageRequest,
             data: Vec<u8>, callback: $crate::storage::StorageCallback) {
             self.$inner.submit_write_request(request, data, callback);
+        }
+    };
+    (@method $inner:ident, submit_delete_request) => {
+        fn submit_delete_request(&self, request: $crate::storage::StorageRequest,
+            callback: $crate::storage::StorageCallback) {
+            self.$inner.submit_delete_request(request, callback);
         }
     };
     (@method $inner:ident, submit_read_with_metadata) => {

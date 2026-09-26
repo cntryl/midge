@@ -589,6 +589,14 @@ impl BudgetConsumingProofBackend {
 }
 
 impl StorageBackend for BudgetConsumingProofBackend {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -657,6 +665,14 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,
