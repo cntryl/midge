@@ -98,17 +98,6 @@ pub(crate) fn forward_typed_delete_to_legacy<B: super::StorageBackend + ?Sized>(
 }
 
 #[cfg(test)]
-pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
-    backend: &B,
-    request: super::StorageRequest,
-    callback: super::StorageCallback,
-) {
-    super::dispatch_head_request(request, callback, |key, _, callback| {
-        backend.submit_head(key, callback);
-    });
-}
-
-#[cfg(test)]
 macro_rules! forward_storage_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::storage::forward_storage_backend!(@method $inner, $method);)+
@@ -169,11 +158,6 @@ macro_rules! forward_storage_backend {
         fn submit_delete_with_headers(&self, key: &str, headers: Vec<(String, String)>,
             callback: $crate::storage::StorageCallback) {
             self.$inner.submit_delete_with_headers(key, headers, callback);
-        }
-    };
-    (@method $inner:ident, submit_head) => {
-        fn submit_head(&self, key: &str, callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_head(key, callback);
         }
     };
 }

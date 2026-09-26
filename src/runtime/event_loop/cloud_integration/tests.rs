@@ -707,7 +707,20 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        if self.catalog_retired.load(Ordering::SeqCst) && request.key.starts_with("sst/") {
+            self.post_retirement_sst_heads
+                .fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(crate::storage::StorageEvent::HeadComplete {
+                key: request.key,
+                result: crate::storage::StorageOutcome::Err(
+                    "injected post-retirement SST identity change"
+                        .to_string()
+                        .into(),
+                ),
+            });
+            return;
+        }
+        self.inner.submit_head_request(request, callback);
     }
 
     fn submit_delete_request(
@@ -763,23 +776,6 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
     submit_delete,
     submit_delete_with_headers,
     );
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        if self.catalog_retired.load(Ordering::SeqCst) && key.starts_with("sst/") {
-            self.post_retirement_sst_heads
-                .fetch_add(1, Ordering::SeqCst);
-            let _ = callback.send(crate::storage::StorageEvent::HeadComplete {
-                key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(
-                    "injected post-retirement SST identity change"
-                        .to_string()
-                        .into(),
-                ),
-            });
-            return;
-        }
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
 }
 
 struct ArmedDelayedHeadStorageBackend {
@@ -903,7 +899,16 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        if self.delay_next_head.swap(false, Ordering::SeqCst) {
+            let inner = Arc::clone(&self.inner);
+            let delay = self.delay;
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                inner.submit_head_request(request, callback);
+            });
+        } else {
+            self.inner.submit_head_request(request, callback);
+        }
     }
 
     crate::storage::forward_storage_backend!(
@@ -915,20 +920,6 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
     submit_delete,
     submit_delete_with_headers,
     );
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        if self.delay_next_head.swap(false, Ordering::SeqCst) {
-            let inner = Arc::clone(&self.inner);
-            let key = key.to_string();
-            let delay = self.delay;
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                crate::storage::StorageBackend::submit_head(inner.as_ref(), &key, callback);
-            });
-            return;
-        }
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
 }
 
 impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend {
@@ -963,7 +954,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        self.inner.submit_head_request(request, callback);
     }
 
     fn submit_delete_request(
@@ -1066,7 +1057,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         inner;
         submit_delete,
         submit_delete_with_headers,
-        submit_head,
+
     );
 }
 
@@ -1102,7 +1093,18 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        if request.key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
+            && self.registry_head_calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            let inner = Arc::clone(&self.inner);
+            let delay = self.registry_head_delay;
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                inner.submit_head_request(request, callback);
+            });
+        } else {
+            self.inner.submit_head_request(request, callback);
+        }
     }
 
     fn submit_delete_request(
@@ -1179,22 +1181,6 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
     submit_delete,
     submit_delete_with_headers,
     );
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
-            && self.registry_head_calls.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            let inner = Arc::clone(&self.inner);
-            let key = key.to_string();
-            let delay = self.registry_head_delay;
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                crate::storage::StorageBackend::submit_head(inner.as_ref(), &key, callback);
-            });
-            return;
-        }
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
 }
 
 impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
@@ -1229,7 +1215,7 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        self.inner.submit_head_request(request, callback);
     }
 
     fn submit_delete_request(
@@ -1290,7 +1276,7 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         inner;
         submit_delete,
         submit_delete_with_headers,
-        submit_head,
+
     );
 }
 
@@ -1356,7 +1342,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        self.inner.submit_head_request(request, callback);
     }
 
     crate::storage::forward_storage_backend!(
@@ -1396,11 +1382,6 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
             callback,
         );
     }
-
-    crate::storage::forward_storage_backend!(
-        inner;
-        submit_head,
-    );
 }
 
 struct FailOnceDeleteStorageBackend {
@@ -1462,7 +1443,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        self.inner.submit_head_request(request, callback);
     }
 
     crate::storage::forward_storage_backend!(
@@ -1528,8 +1509,6 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
             callback,
         );
     }
-
-    crate::storage::forward_storage_backend!(inner; submit_head);
 }
 
 fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
@@ -9124,7 +9103,7 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
         submit_write_with_headers,
         submit_delete,
         submit_delete_with_headers,
-        submit_head,
+
     );
 }
 

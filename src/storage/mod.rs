@@ -711,14 +711,6 @@ pub trait StorageBackend: Send + Sync + 'static {
     ) {
         panic!("test backend received undeclared conditional-delete capability");
     }
-
-    /// Submit an object metadata lookup.
-    #[cfg(not(test))]
-    fn submit_head(&self, key: &str, callback: StorageCallback);
-    #[cfg(test)]
-    fn submit_head(&self, _key: &str, _callback: StorageCallback) {
-        panic!("test backend received undeclared HEAD capability");
-    }
 }
 
 #[cfg(test)]

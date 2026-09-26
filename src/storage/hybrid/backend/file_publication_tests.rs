@@ -43,7 +43,8 @@ impl StorageBackend for PanicLocalBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        let _ = (request, callback);
+        panic!("test backend received undeclared HEAD capability");
     }
 
     fn submit_delete_request(

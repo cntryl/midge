@@ -734,7 +734,15 @@ fn should_report_storage_callback_timeout_when_cloud_backend_is_slow() {
     let (sender, receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_head(&storage, "metadata/manifest.json", sender);
+    StorageBackend::submit_head_request(
+        &storage,
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(5)),
+            std::time::Duration::from_millis(5),
+        ),
+        sender,
+    );
     let event = receiver.recv().expect("receive bounded adapter result");
 
     // Assert

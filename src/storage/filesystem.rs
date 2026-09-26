@@ -575,6 +575,37 @@ impl FileSystem {
         let _ = callback.send(result);
     }
 
+    fn head_within(&self, key: &str, callback: &StorageCallback) {
+        let result = self
+            .full_path(key)
+            .and_then(|path| {
+                let _lock = mutation_lock(&path);
+                let _process_lock = self.acquire_process_lock(&path)?;
+                let bytes = fs::read(&path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        crate::storage::StorageError::not_found(format!(
+                            "read {}: {error}",
+                            path.display()
+                        ))
+                    } else {
+                        crate::storage::StorageError::io(format!(
+                            "read {}: {error}",
+                            path.display()
+                        ))
+                    }
+                })?;
+                Ok(StorageObjectMetadata::content_crc(
+                    bytes.len() as u64,
+                    &bytes,
+                ))
+            })
+            .map_or_else(StorageOutcome::Err, StorageOutcome::Ok);
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
     fn metadata_read_within(
         &self,
         key: &str,
@@ -654,7 +685,7 @@ impl StorageBackend for FileSystem {
 
     fn submit_head_request(&self, request: StorageRequest, callback: StorageCallback) {
         crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
-            self.submit_head(key, callback);
+            self.head_within(key, &callback);
         });
     }
 
@@ -1034,37 +1065,6 @@ impl StorageBackend for FileSystem {
         let _ = callback.send(StorageEvent::DeleteComplete {
             key: key.to_string(),
             result: outcome,
-        });
-    }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        let result = self
-            .full_path(key)
-            .and_then(|path| {
-                let _lock = mutation_lock(&path);
-                let _process_lock = self.acquire_process_lock(&path)?;
-                let bytes = fs::read(&path).map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        crate::storage::StorageError::not_found(format!(
-                            "read {}: {error}",
-                            path.display()
-                        ))
-                    } else {
-                        crate::storage::StorageError::io(format!(
-                            "read {}: {error}",
-                            path.display()
-                        ))
-                    }
-                })?;
-                Ok(StorageObjectMetadata::content_crc(
-                    bytes.len() as u64,
-                    &bytes,
-                ))
-            })
-            .map_or_else(StorageOutcome::Err, StorageOutcome::Ok);
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result,
         });
     }
 }

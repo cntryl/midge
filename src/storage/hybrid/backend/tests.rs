@@ -623,7 +623,25 @@ impl StorageBackend for BudgetConsumingProofBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
+            if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let delay = self.first_head_delay;
+                let key = key.to_string();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    let _ = callback.send(StorageEvent::HeadComplete {
+                        key,
+                        result: StorageOutcome::Ok(StorageObjectMetadata {
+                            size: 7,
+                            etag: "slow-first-head".to_string(),
+                            generation: None,
+                        }),
+                    });
+                });
+            } else {
+                self.retain_callback(callback);
+            }
+        });
     }
 
     fn submit_delete_request(
@@ -663,26 +681,6 @@ impl StorageBackend for BudgetConsumingProofBackend {
                     .into(),
             ),
         });
-    }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            let delay = self.first_head_delay;
-            let key = key.to_string();
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                let _ = callback.send(StorageEvent::HeadComplete {
-                    key,
-                    result: StorageOutcome::Ok(StorageObjectMetadata {
-                        size: 7,
-                        etag: "slow-first-head".to_string(),
-                        generation: None,
-                    }),
-                });
-            });
-        } else {
-            self.retain_callback(callback);
-        }
     }
 }
 
@@ -726,7 +724,9 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        crate::storage::dispatch_head_request(request, callback, |_key, _, callback| {
+            self.retain_callback(callback);
+        });
     }
 
     fn submit_delete_request(
@@ -770,10 +770,6 @@ impl StorageBackend for NeverCompletesBackend {
         _headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_head(&self, _key: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
 }

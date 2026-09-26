@@ -305,10 +305,6 @@ impl StorageBackend for CloudStorage {
         CloudStorage::submit_delete_with_headers(self, key, headers, tx);
         deliver_delete_outcome(key, &rx, self.callback_timeout, &callback);
     }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        self.head_with_timeout(key, self.callback_timeout, &callback);
-    }
 }
 
 impl CloudStorage {

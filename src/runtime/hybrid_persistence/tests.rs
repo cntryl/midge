@@ -1379,7 +1379,8 @@ impl StorageBackend for PanickingWriteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        let _ = (request, callback);
+        panic!("test backend received undeclared HEAD capability");
     }
 
     fn submit_delete_request(
@@ -1456,7 +1457,12 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
+            let _ = callback.send(StorageEvent::HeadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err("head unavailable".to_string().into()),
+            });
+        });
     }
 
     fn submit_delete_request(
@@ -1498,13 +1504,6 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         let _ = callback.send(StorageEvent::DeleteComplete {
             key: key.to_string(),
             result: StorageOutcome::Ok(()),
-        });
-    }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err("head unavailable".to_string().into()),
         });
     }
 }
@@ -1568,7 +1567,23 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
+            if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let delay = self.first_head_delay;
+                let key = key.to_string();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    let _ = callback.send(StorageEvent::HeadComplete {
+                        key,
+                        result: StorageOutcome::Err(crate::storage::StorageError::not_found(
+                            "delayed miss",
+                        )),
+                    });
+                });
+            } else {
+                self.retain_callback(callback);
+            }
+        });
     }
 
     fn submit_delete_request(
@@ -1604,24 +1619,6 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
 
     fn submit_delete(&self, _key: &str, callback: StorageCallback) {
         self.retain_callback(callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            let delay = self.first_head_delay;
-            let key = key.to_string();
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                let _ = callback.send(StorageEvent::HeadComplete {
-                    key,
-                    result: StorageOutcome::Err(crate::storage::StorageError::not_found(
-                        "delayed miss",
-                    )),
-                });
-            });
-        } else {
-            self.retain_callback(callback);
-        }
     }
 }
 
@@ -1693,7 +1690,16 @@ impl StorageBackend for RacingReadDeleteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
+            let result = self.object.lock().as_deref().map_or_else(
+                || StorageOutcome::Err("object not found".to_string().into()),
+                |bytes| StorageOutcome::Ok(Self::metadata(bytes)),
+            );
+            let _ = callback.send(StorageEvent::HeadComplete {
+                key: key.to_string(),
+                result,
+            });
+        });
     }
 
     fn submit_delete_request(
@@ -1746,17 +1752,6 @@ impl StorageBackend for RacingReadDeleteBackend {
             result,
         });
     }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        let result = self.object.lock().as_deref().map_or_else(
-            || StorageOutcome::Err("object not found".to_string().into()),
-            |bytes| StorageOutcome::Ok(Self::metadata(bytes)),
-        );
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result,
-        });
-    }
 }
 
 impl NeverCompletesBackend {
@@ -1799,7 +1794,9 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+        crate::storage::dispatch_head_request(request, callback, |_key, _, callback| {
+            self.retain_callback(callback);
+        });
     }
 
     fn submit_delete_request(
@@ -1843,10 +1840,6 @@ impl StorageBackend for NeverCompletesBackend {
         _headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_head(&self, _key: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
 }
@@ -1949,7 +1942,14 @@ fn head_cloud_metadata_object(cloud: &CloudStorage, key: &str) -> StorageObjectM
 
 fn assert_cloud_object_exists(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.sst_store().submit_head(key, tx);
+    storage.sst_store().submit_head_request(
+        crate::storage::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+            Duration::from_secs(1),
+        ),
+        tx,
+    );
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(_),
@@ -1961,7 +1961,14 @@ fn assert_cloud_object_exists(storage: &HybridStorage, key: &str) {
 
 fn assert_cloud_object_missing(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.sst_store().submit_head(key, tx);
+    storage.sst_store().submit_head_request(
+        crate::storage::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+            Duration::from_secs(1),
+        ),
+        tx,
+    );
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::HeadComplete {
             result: StorageOutcome::Err(_),

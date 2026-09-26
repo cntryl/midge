@@ -141,7 +141,14 @@ fn should_preserve_replaced_object_when_typed_delete_uses_stale_identity() {
         backend.submit_write(&key, b"old".to_vec(), seed_tx);
         let _ = seed_rx.recv().expect("seed callback");
         let (head_tx, head_rx) = mpsc::channel();
-        backend.submit_head(&key, head_tx);
+        backend.submit_head_request(
+            super::StorageRequest::new(
+                &key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(1),
+            ),
+            head_tx,
+        );
         let StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(identity),
             ..
@@ -688,7 +695,19 @@ fn should_echo_caller_key_when_completing_operations_through_every_storage_backe
                 "write",
                 run(&|tx| backend.submit_write(key, b"value".to_vec(), tx)),
             ),
-            ("head", run(&|tx| backend.submit_head(key, tx))),
+            (
+                "head",
+                run(&|tx| {
+                    backend.submit_head_request(
+                        super::StorageRequest::new(
+                            key,
+                            crate::common::OperationDeadline::unbounded(),
+                            std::time::Duration::from_secs(1),
+                        ),
+                        tx,
+                    );
+                }),
+            ),
             ("delete", run(&|tx| backend.submit_delete(key, tx))),
         ];
 
