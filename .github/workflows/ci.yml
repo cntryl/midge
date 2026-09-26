@@ -34,19 +34,19 @@ jobs:
           shared-key: "ci-core"
 
       - name: Install test validator
-        run: cargo install --git https://github.com/cntryl/tools --rev 1ceecf1a6501793080235d2d46b2982f1424727c --locked
-
-      - name: Rustfmt
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+        run: cargo install --git https://github.com/cntryl/tools
 
       - name: Validate test contracts
         run: cntryl-tools validate-tests
 
+      - name: Rustfmt
+        run: cargo fmt --check
+
       - name: Check telemetry without a cloud provider
-        run: cargo check --lib --no-default-features --features telemetry
+        run: cargo check --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
       - name: Full mock-backed test suite
         run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
