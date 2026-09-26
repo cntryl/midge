@@ -1244,6 +1244,10 @@ mod tests {
         }
 
         impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
+            fn estimated_size_bytes(&self) -> usize {
+                self.inner.estimated_size_bytes()
+            }
+
             fn encoded_size_upper_bound(&self) -> Option<usize> {
                 self.inner.encoded_size_upper_bound()
             }
@@ -1315,6 +1319,27 @@ mod tests {
         }
 
         impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
+            fn create_for_compaction(
+                &self,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Ok(Box::new(RejectFinishBytesWriter {
+                    inner: self.inner.create_for_compaction(budget)?,
+                }))
+            }
+
+            fn open_for_compaction(
+                &self,
+                path: &Path,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open_for_compaction(path, budget)
+            }
+
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 Ok(Box::new(RejectFinishBytesWriter {
                     inner: self.inner.create()?,
@@ -1733,6 +1758,18 @@ mod tests {
         }
 
         impl crate::sst::traits::SstFactory for CountingFactory {
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
+            fn open_for_compaction(
+                &self,
+                path: &Path,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open_for_compaction(path, budget)
+            }
+
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 Ok(Box::new(CountingWriter {
                     inner: self.inner.create()?,
@@ -1933,6 +1970,10 @@ mod tests {
         }
 
         impl crate::sst::SstFactory for TransitionFactory<'_> {
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 self.inner.create()
             }

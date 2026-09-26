@@ -1175,6 +1175,29 @@ mod tests {
     }
 
     impl crate::sst::SstFactory for BlockingFinalizeFactory {
+        fn compaction_scratch_cleanup_verified(&self) -> bool {
+            self.delegate.compaction_scratch_cleanup_verified()
+        }
+
+        fn create_for_compaction(
+            &self,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(BlockingFinalizeWriter {
+                inner: self.delegate.create_for_compaction(budget)?,
+                reached_finalize: self.reached_finalize.clone(),
+                cancel_probe: Arc::clone(&self.cancel_probe),
+            }))
+        }
+
+        fn open_for_compaction(
+            &self,
+            path: &std::path::Path,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.delegate.open_for_compaction(path, budget)
+        }
+
         fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Ok(Box::new(BlockingFinalizeWriter {
                 inner: self.delegate.create()?,
@@ -1198,6 +1221,30 @@ mod tests {
     }
 
     impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
+        fn estimated_size_bytes(&self) -> usize {
+            self.inner.estimated_size_bytes()
+        }
+
+        fn finish_to_path(self: Box<Self>, path: &std::path::Path) -> MidgeResult<()> {
+            let Self {
+                inner,
+                reached_finalize,
+                cancel_probe,
+            } = *self;
+            let result = inner.finish_to_path(path);
+            let _ = reached_finalize.try_send(());
+            let cancel = cancel_probe
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .cloned()
+                .expect("install worker cancellation probe before compaction");
+            while !cancel.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            result
+        }
+
         fn encoded_size_upper_bound(&self) -> Option<usize> {
             self.inner.encoded_size_upper_bound()
         }

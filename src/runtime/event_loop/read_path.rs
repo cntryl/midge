@@ -306,6 +306,16 @@ mod tests {
     }
 
     impl crate::sst::traits::SstStateReader for FakeReader {
+        crate::sst::traits::test_reader_required_methods!();
+
+        fn range_tombstones(&self) -> Vec<crate::types::RangeTombstone> {
+            Vec::new()
+        }
+
+        fn range_tombstone_memory_usage(&self) -> usize {
+            0
+        }
+
         fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::types::KeyState> {
             Ok(if key == b"a" {
                 crate::types::KeyState::Value(
@@ -353,6 +363,27 @@ mod tests {
     struct TestFactory;
 
     impl crate::sst::traits::SstFactory for TestFactory {
+        fn compaction_scratch_cleanup_verified(&self) -> bool {
+            false
+        }
+
+        fn create_for_compaction(
+            &self,
+            _budget: crate::common::resource_budget::ResourceBudget,
+        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Err(crate::common::MidgeError::NotSupported(
+                "create not supported in test".into(),
+            ))
+        }
+
+        fn open_for_compaction(
+            &self,
+            path: &std::path::Path,
+            _budget: crate::common::resource_budget::ResourceBudget,
+        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.open(path)
+        }
+
         fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Err(crate::common::MidgeError::NotSupported(
                 "create not supported in test".into(),

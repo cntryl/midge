@@ -154,29 +154,6 @@ pub(crate) fn persist_sst_bytes_to_path(
     persist_sst_stream_to_path(fs, &mut source, path)
 }
 
-/// Atomically persist finalized SST bytes for a writer that carries no
-/// injected filesystem.
-///
-/// Only writers created outside [`FsSstFactoryIo`] reach this: production
-/// writers carry their factory's `Arc<dyn Fs>` and persist through it. The
-/// staging, fsync, rename, and parent-directory sync sequence is the same one
-/// [`persist_sst_stream_to_path`] performs; only the filesystem differs.
-pub(crate) fn persist_sst_bytes_with_host_fs(bytes: &[u8], path: &Path) -> MidgeResult<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().ok_or_else(|| {
-        MidgeError::Internal(format!("SST target {} names no file", path.display()))
-    })?;
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(parent).map_err(MidgeError::from)?);
-    // Address the SST inside the root just created for its parent. Re-using
-    // `path` verbatim would re-resolve a relative target against the root's
-    // own anchor and double the parent prefix.
-    let target = fs.host_addressing().map_or_else(
-        || path.to_path_buf(),
-        |addressing| addressing.root.join(name),
-    );
-    persist_sst_bytes_to_path(&fs, bytes, &target)
-}
-
 /// Atomically persist a finalized SST byte stream through `fs`.
 pub(crate) fn persist_sst_stream_to_path(
     fs: &Arc<dyn Fs>,

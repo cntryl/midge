@@ -1659,6 +1659,19 @@ mod tests {
         }
 
         impl SstStateReader for FakeReader {
+            crate::sst::traits::test_reader_required_methods!();
+
+            fn range_tombstone_memory_usage(&self) -> usize {
+                self.range_tombstones()
+                    .iter()
+                    .map(|range| {
+                        range.start.capacity()
+                            + range.end.capacity()
+                            + std::mem::size_of::<RangeTombstone>()
+                    })
+                    .sum()
+            }
+
             fn get_state(&self, _key: &[u8]) -> MidgeResult<KeyState> {
                 Ok(KeyState::Absent)
             }
@@ -1748,6 +1761,16 @@ mod tests {
         }
 
         impl crate::sst::traits::DynSstWriter for CountingWriter {
+            fn estimated_size_bytes(&self) -> usize {
+                0
+            }
+
+            fn finish_to_path(self: Box<Self>, _path: &std::path::Path) -> MidgeResult<()> {
+                Err(crate::common::MidgeError::NotSupported(
+                    "counting writer has no filesystem".into(),
+                ))
+            }
+
             fn encoded_size_upper_bound(&self) -> Option<usize> {
                 Some(0)
             }

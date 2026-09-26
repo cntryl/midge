@@ -52,3 +52,18 @@ fn should_keep_test_only_ingest_and_idempotency_protocols_out_of_runtime() {
     assert!(state.contains("HashMap<u64, CompactionWait>"));
     assert!(!state.contains("HashMap<u64, String>"));
 }
+
+#[test]
+fn should_require_explicit_sst_tombstone_and_filesystem_behavior() {
+    // Arrange
+    let traits = include_str!("../src/sst/traits.rs");
+
+    // Act / Assert
+    let reader_contract = traits
+        .split("/// Materializing cursor for explicit test doubles.")
+        .next()
+        .expect("reader contract");
+    assert!(!reader_contract.contains("fn range_tombstones(&self) -> Vec<RangeTombstone> {"));
+    assert!(!traits.contains("persist_sst_bytes_with_host_fs"));
+    assert!(traits.contains("fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()>;"));
+}
