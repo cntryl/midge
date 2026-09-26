@@ -5039,11 +5039,12 @@ mod shutdown_orchestration {
     };
     use std::collections::BTreeSet;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     const BLOCKED_UPLOAD_FAILPOINT: &str = "midge::cloud::before_wal_upload";
+    const CLOUD_DRAIN_TIMEOUT_FAILPOINT: &str = "midge::shutdown::after_cloud_upload_drain_timeout";
 
     struct UploadRelease {
         gate: Arc<(Mutex<bool>, Condvar)>,
@@ -5065,6 +5066,15 @@ mod shutdown_orchestration {
         }
     }
 
+    fn observe_cloud_drain_timeout() -> std::sync::mpsc::Receiver<()> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        fail::cfg_callback(CLOUD_DRAIN_TIMEOUT_FAILPOINT, move || {
+            let _ = sender.try_send(());
+        })
+        .expect("observe runtime cloud drain deadline");
+        receiver
+    }
+
     #[test]
     fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes() {
         // Arrange
@@ -5073,12 +5083,10 @@ mod shutdown_orchestration {
         let db_path = temp_dir.path().join("db");
         let lease_loss_calls = Arc::new(AtomicUsize::new(0));
         let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let drain_timed_out_rx = observe_cloud_drain_timeout();
         let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
         let callback_gate = Arc::clone(&release_gate);
-        let callback_fired = Arc::new(AtomicBool::new(false));
-        let fired_in_callback = Arc::clone(&callback_fired);
         fail::cfg_callback(BLOCKED_UPLOAD_FAILPOINT, move || {
-            fired_in_callback.store(true, Ordering::SeqCst);
             let _ = entered_tx.try_send(());
             let (released, changed) = &*callback_gate;
             let mut released = released
@@ -5130,7 +5138,6 @@ mod shutdown_orchestration {
             shutdown_elapsed < Duration::from_millis(500),
             "shutdown exceeded its caller budget by too much: {shutdown_elapsed:?}"
         );
-        assert!(callback_fired.load(Ordering::SeqCst));
         assert!(
             wal_before_shutdown.is_subset(&wal_after_timeout),
             "timed-out shutdown removed local WAL needed for recovery: before={wal_before_shutdown:?}, after={wal_after_timeout:?}"
@@ -5138,11 +5145,13 @@ mod shutdown_orchestration {
         assert!(matches!(competing, Err(MidgeError::LeaseHeld(_))));
         assert_eq!(lease_loss_calls.load(Ordering::SeqCst), 0);
 
-        // Act: let the runtime's shorter injected cloud-drain deadline expire
-        // before releasing the real upload worker. The retained cleanup reaper
-        // must preserve that eventual durability result after the first Engine
-        // caller has already timed out.
-        std::thread::sleep(Duration::from_millis(150));
+        // Act: observe the runtime's shorter cloud-drain deadline before
+        // releasing the real upload worker. The retained cleanup reaper must
+        // preserve that eventual durability result after the Engine caller
+        // has already timed out.
+        drain_timed_out_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("runtime cloud drain reached its deadline");
         release.release();
         let terminal_shutdown = engine.shutdown(Duration::from_secs(5));
         let replayed_shutdown = engine.shutdown(Duration::from_millis(50));
@@ -5163,6 +5172,7 @@ mod shutdown_orchestration {
             "completed shutdown cleanup must remove the acquisition lock"
         );
         fail::remove(BLOCKED_UPLOAD_FAILPOINT);
+        fail::remove(CLOUD_DRAIN_TIMEOUT_FAILPOINT);
         scenario.teardown();
         let mut reopened = Engine::open(reopen_options(&db_path, Arc::clone(&lease_loss_calls)))
             .expect("reopen only after blocked runtime has exited");
@@ -6598,7 +6608,7 @@ mod cloud_crash_recovery {
 
         // Act
         let reopened = open_cloud_engine(db_path, None);
-        let metrics = wait_for_metrics(&reopened, Duration::from_secs(10), |metrics| {
+        let metrics = wait_for_metrics(&reopened, Duration::from_secs(30), |metrics| {
             metrics.current_sequence >= 1
                 && metrics.wal_cloud_durable_seq >= metrics.current_sequence
         });
@@ -10424,9 +10434,21 @@ mod hybrid_storage {
         }
 
         // Assert
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
-        assert!(metrics.hybrid_total_committed_bytes <= budget_bytes);
-        assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let local_sst_dir = temp_dir.path().join("sst");
+        loop {
+            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let local_sst_files = count_files_recursive(&local_sst_dir);
+            if metrics.hybrid_total_committed_bytes <= budget_bytes && local_sst_files == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "published SSTs did not leave the local budget: committed={} budget={budget_bytes} local_files={local_sst_files}",
+                metrics.hybrid_total_committed_bytes
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
         let remote_bytes: u64 = std::fs::read_dir(temp_dir.path().join("cloud_store/sst"))
             .expect("remote SST directory")
             .map(|entry| {

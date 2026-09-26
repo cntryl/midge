@@ -192,6 +192,7 @@ impl EventLoop {
         let storage_pending = storage.pending_upload_count();
         let runtime_pending = self.cloud_wal.upload_backlog.len();
         if storage_pending > 0 || runtime_pending > 0 {
+            crate::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
             tracing::warn!(
                 storage_pending,
                 runtime_pending,
