@@ -450,11 +450,29 @@ fn should_not_submit_delete_given_configured_callback_timeout_is_zero() {
     let (conditional_delete_sender, conditional_delete_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_delete(&storage, "metadata/manifest.json", delete_sender);
-    StorageBackend::submit_delete_with_headers(
+    StorageBackend::submit_delete_request(
         &storage,
-        "metadata/manifest.json",
-        vec![("If-Match".to_string(), "etag".to_string())],
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        ),
+        delete_sender,
+    );
+    StorageBackend::submit_delete_request(
+        &storage,
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+            crate::storage::StorageObjectMetadata {
+                size: 0,
+                etag: "etag".to_string(),
+                generation: None,
+            },
+        )),
         conditional_delete_sender,
     );
     let delete = delete_receiver
@@ -1628,11 +1646,29 @@ fn should_bound_provider_delete_by_callback_timeout_when_deleting() {
     let (conditional_sender, conditional_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_delete(&storage, "sst/000001.sst", plain_sender);
-    StorageBackend::submit_delete_with_headers(
+    StorageBackend::submit_delete_request(
         &storage,
-        "sst/000002.sst",
-        vec![("If-Match".to_string(), "\"e1\"".to_string())],
+        crate::storage::StorageRequest::new(
+            "sst/000001.sst",
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(750)),
+            std::time::Duration::from_millis(750),
+        ),
+        plain_sender,
+    );
+    StorageBackend::submit_delete_request(
+        &storage,
+        crate::storage::StorageRequest::new(
+            "sst/000002.sst",
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(750)),
+            std::time::Duration::from_millis(750),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+            crate::storage::StorageObjectMetadata {
+                size: 0,
+                etag: "\"e1\"".to_string(),
+                generation: None,
+            },
+        )),
         conditional_sender,
     );
 
@@ -1649,10 +1685,11 @@ fn should_bound_provider_delete_by_callback_timeout_when_deleting() {
     let delete_headers = backend.deletes.lock();
     assert_eq!(delete_headers.len(), 2);
     for headers in delete_headers.iter() {
-        assert_eq!(
-            HeaderRecordingBackend::timeout_header(headers).as_deref(),
-            Some("750")
-        );
+        let timeout = HeaderRecordingBackend::timeout_header(headers)
+            .expect("provider DELETE receives a timeout")
+            .parse::<u64>()
+            .expect("timeout is milliseconds");
+        assert!((1..=750).contains(&timeout));
     }
 }
 #[test]

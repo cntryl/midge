@@ -650,7 +650,20 @@ impl StorageBackend for BudgetConsumingProofBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |key, _precondition, callback| {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(
+                        "deletes are not used by this proof fixture"
+                            .to_string()
+                            .into(),
+                    ),
+                });
+            },
+        );
     }
 
     fn submit_write_request(
@@ -674,17 +687,6 @@ impl StorageBackend for BudgetConsumingProofBackend {
                 });
             },
         );
-    }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "deletes are not used by this proof fixture"
-                    .to_string()
-                    .into(),
-            ),
-        });
     }
 }
 
@@ -738,7 +740,13 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |_key, _precondition, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 
     fn submit_write_request(
@@ -755,19 +763,6 @@ impl StorageBackend for NeverCompletesBackend {
                 self.retain_callback(callback);
             },
         );
-    }
-
-    fn submit_delete(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        _key: &str,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.retain_callback(callback);
     }
 }
 

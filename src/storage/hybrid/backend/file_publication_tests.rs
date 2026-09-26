@@ -52,7 +52,8 @@ impl StorageBackend for PanicLocalBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        let _ = (request, callback);
+        panic!("ephemeral deletion called the retired local backend");
     }
 
     fn submit_write_request(
@@ -63,10 +64,6 @@ impl StorageBackend for PanicLocalBackend {
     ) {
         let _ = (request, data, callback);
         panic!("ephemeral publication called the retired local backend");
-    }
-
-    fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
-        panic!("ephemeral deletion called the retired local backend");
     }
 }
 

@@ -305,6 +305,85 @@ fn should_keep_dead_storage_verbs_out_of_backend() {
     }
 }
 
+fn assert_typed_storage_backend_contract() -> usize {
+    let source = include_str!("../src/storage/mod.rs");
+    let contract_end = std::str::from_utf8(&[10, 125, 10]).expect("trait closing delimiter");
+    let contract = source
+        .split("pub trait StorageBackend:")
+        .nth(1)
+        .expect("StorageBackend declaration")
+        .split(contract_end)
+        .next()
+        .expect("StorageBackend body");
+
+    let methods: Vec<_> = contract
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("fn submit_"))
+        .map(|line| line.split('(').next().expect("method name"))
+        .collect();
+
+    assert_eq!(
+        methods,
+        [
+            "range_read_request",
+            "range_head_request",
+            "metadata_read_request",
+            "head_request",
+            "delete_request",
+            "write_request",
+        ]
+    );
+    assert!(
+        !contract.contains("#[cfg("),
+        "test builds must see the same trait"
+    );
+    assert!(
+        !contract.contains(") {"),
+        "storage methods must be required"
+    );
+    for source in [
+        include_str!("../src/storage/cloud/adapter.rs"),
+        include_str!("../src/storage/filesystem.rs"),
+        include_str!("../src/storage/test_support.rs"),
+    ] {
+        for old in [
+            "fn submit_write(",
+            "fn submit_write_with_headers(",
+            "fn submit_delete(",
+            "fn submit_delete_with_headers(",
+            "fn submit_head(",
+            "fn submit_range_head(",
+            "fn submit_read_range(",
+            "fn submit_read_with_metadata(",
+        ] {
+            assert!(
+                !source.contains(old),
+                "legacy storage method remains: {old}"
+            );
+        }
+    }
+    for source in [
+        include_str!("../src/storage/hybrid/backend/proofs.rs"),
+        include_str!("../src/storage/hybrid/backend/uploads.rs"),
+    ] {
+        assert!(!source.contains("\"If-Match\""));
+        assert!(!source.contains("\"If-None-Match\""));
+    }
+    methods.len()
+}
+
+#[test]
+fn should_require_only_typed_storage_backend_methods_in_every_build_mode() {
+    // Arrange
+    let required_method_count = 6;
+
+    // Act
+    let actual_method_count = assert_typed_storage_backend_contract();
+
+    // Assert
+    assert_eq!(actual_method_count, required_method_count);
+}
+
 #[test]
 fn should_keep_filesystem_error_conversion_out_of_public_api() {
     // Arrange

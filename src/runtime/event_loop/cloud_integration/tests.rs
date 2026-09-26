@@ -743,12 +743,6 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         }
         self.inner.submit_write_request(request, data, callback);
     }
-
-    crate::storage::forward_storage_backend!(
-    inner;
-    submit_delete,
-    submit_delete_with_headers,
-    );
 }
 
 struct ArmedDelayedHeadStorageBackend {
@@ -890,8 +884,8 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
 
 
 
-    submit_delete,
-    submit_delete_with_headers,
+
+
     );
 }
 
@@ -970,13 +964,6 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         }
         self.inner.submit_write_request(request, data, callback);
     }
-
-    crate::storage::forward_storage_backend!(
-        inner;
-        submit_delete,
-        submit_delete_with_headers,
-
-    );
 }
 
 impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
@@ -1054,12 +1041,6 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         }
         self.inner.submit_write_request(request, data, callback);
     }
-
-    crate::storage::forward_storage_backend!(
-    inner;
-    submit_delete,
-    submit_delete_with_headers,
-    );
 }
 
 impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
@@ -1141,13 +1122,6 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         }
         self.inner.submit_write_request(request, data, callback);
     }
-
-    crate::storage::forward_storage_backend!(
-        inner;
-        submit_delete,
-        submit_delete_with_headers,
-
-    );
 }
 
 impl BlockingDeleteStorageBackend {
@@ -1231,26 +1205,6 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
     ) {
         self.block_matching_delete(&request.key);
         self.inner.submit_delete_request(request, callback);
-    }
-
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        self.block_matching_delete(key);
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        self.block_matching_delete(key);
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
     }
 }
 
@@ -1340,44 +1294,6 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
             return;
         }
         self.inner.submit_delete_request(request, callback);
-    }
-
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        if self.should_fail_delete(key) {
-            let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(
-                    "injected first cloud SST delete failure".to_string().into(),
-                ),
-            });
-            return;
-        }
-
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if self.should_fail_delete(key) {
-            let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(
-                    "injected first cloud WAL delete failure".to_string().into(),
-                ),
-            });
-            return;
-        }
-
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
     }
 }
 
@@ -8971,8 +8887,8 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
 
 
 
-        submit_delete,
-        submit_delete_with_headers,
+
+
 
     );
 }

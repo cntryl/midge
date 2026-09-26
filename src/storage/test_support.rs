@@ -17,6 +17,17 @@ pub(crate) trait StorageBackendTestExt: super::StorageBackend {
             callback,
         );
     }
+
+    fn delete_for_test(&self, key: &str, callback: super::StorageCallback) {
+        self.submit_delete_request(
+            super::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            ),
+            callback,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -54,10 +65,10 @@ pub(crate) fn dispatch_test_write_request(
 }
 
 #[cfg(test)]
-pub(crate) fn forward_typed_delete_to_legacy<B: super::StorageBackend + ?Sized>(
-    backend: &B,
+pub(crate) fn dispatch_test_delete_request(
     request: super::StorageRequest,
     callback: super::StorageCallback,
+    submit: impl FnOnce(&str, super::StoragePrecondition, super::StorageCallback),
 ) {
     if request.remaining_timeout().is_zero() {
         let _ = callback.send(super::StorageEvent::DeleteComplete {
@@ -66,26 +77,18 @@ pub(crate) fn forward_typed_delete_to_legacy<B: super::StorageBackend + ?Sized>(
         });
         return;
     }
-    let headers = match request.precondition.delete_headers() {
-        Ok(headers) => headers,
-        Err(error) => {
-            let _ = callback.send(super::StorageEvent::DeleteComplete {
-                key: request.key,
-                result: super::StorageOutcome::Err(error),
-            });
-            return;
-        }
-    };
-    let submit = |callback| {
-        if headers.is_empty() {
-            backend.submit_delete(&request.key, callback);
-        } else {
-            backend.submit_delete_with_headers(&request.key, headers, callback);
-        }
-    };
+    if matches!(&request.precondition, super::StoragePrecondition::IfAbsent) {
+        let _ = callback.send(super::StorageEvent::DeleteComplete {
+            key: request.key,
+            result: super::StorageOutcome::Err(super::StorageError::precondition_failed(
+                "delete cannot enforce absence precondition",
+            )),
+        });
+        return;
+    }
     if let Some(reservation) = request.reservation {
         match super::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => submit(retained),
+            Ok(retained) => submit(&request.key, request.precondition, retained),
             Err(error) => {
                 let _ = callback.send(super::StorageEvent::DeleteComplete {
                     key: request.key,
@@ -97,7 +100,7 @@ pub(crate) fn forward_typed_delete_to_legacy<B: super::StorageBackend + ?Sized>(
             }
         }
     } else {
-        submit(callback);
+        submit(&request.key, request.precondition, callback);
     }
 }
 
@@ -140,17 +143,6 @@ macro_rules! forward_storage_backend {
         fn submit_metadata_read_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::MetadataReadCallback) {
             self.$inner.submit_metadata_read_request(request, callback);
-        }
-    };
-    (@method $inner:ident, submit_delete) => {
-        fn submit_delete(&self, key: &str, callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_delete(key, callback);
-        }
-    };
-    (@method $inner:ident, submit_delete_with_headers) => {
-        fn submit_delete_with_headers(&self, key: &str, headers: Vec<(String, String)>,
-            callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_delete_with_headers(key, headers, callback);
         }
     };
 }

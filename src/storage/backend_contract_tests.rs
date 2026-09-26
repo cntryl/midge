@@ -612,14 +612,18 @@ fn should_reject_expired_or_conditional_typed_metadata_read_for_every_storage_ba
 fn delete_outcome(
     backend: &dyn StorageBackend,
     key: &str,
-    headers: Vec<(String, String)>,
+    precondition: super::StoragePrecondition,
 ) -> StorageOutcome<()> {
     let (tx, rx) = mpsc::channel();
-    if headers.is_empty() {
-        backend.submit_delete(key, tx);
-    } else {
-        backend.submit_delete_with_headers(key, headers, tx);
-    }
+    backend.submit_delete_request(
+        super::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            std::time::Duration::from_secs(5),
+        )
+        .with_precondition(precondition),
+        tx,
+    );
     match rx.recv().expect("delete callback") {
         StorageEvent::DeleteComplete { result, .. } => result,
         other => panic!("expected DeleteComplete, got {other:?}"),
@@ -633,7 +637,11 @@ fn should_report_success_when_deleting_missing_object_through_every_storage_back
 
     for (name, backend) in backends(root.path()) {
         // Act
-        let outcome = delete_outcome(backend.as_ref(), "absent/object", Vec::new());
+        let outcome = delete_outcome(
+            backend.as_ref(),
+            "absent/object",
+            super::StoragePrecondition::None,
+        );
 
         // Assert
         assert!(
@@ -655,7 +663,11 @@ fn should_report_success_when_conditionally_deleting_missing_object_through_ever
         let outcome = delete_outcome(
             backend.as_ref(),
             "absent/object",
-            vec![("If-Match".to_string(), "\"stale-etag\"".to_string())],
+            super::StoragePrecondition::IfMatch(super::StorageObjectMetadata {
+                size: 0,
+                etag: "stale-etag".to_string(),
+                generation: None,
+            }),
         );
 
         // Assert
@@ -709,7 +721,7 @@ fn should_echo_caller_key_when_completing_operations_through_every_storage_backe
                     );
                 }),
             ),
-            ("delete", run(&|tx| backend.submit_delete(key, tx))),
+            ("delete", run(&|tx| backend.delete_for_test(key, tx))),
         ];
 
         // Assert

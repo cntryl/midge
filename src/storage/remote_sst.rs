@@ -515,13 +515,8 @@ mod tests {
         crate::storage::forward_storage_backend!(
             inner;
             submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
-            submit_delete_with_headers,
 
         );
-
-        fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
-            self.inner.submit_delete(key, callback);
-        }
     }
 
     #[test]

@@ -1389,7 +1389,23 @@ impl StorageBackend for PanickingWriteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |key, precondition, callback| {
+                let result = if matches!(precondition, crate::storage::StoragePrecondition::None) {
+                    StorageOutcome::Ok(())
+                } else {
+                    StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
+                        "fixture cannot enforce a delete precondition",
+                    ))
+                };
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result,
+                });
+            },
+        );
     }
 
     fn submit_write_request(
@@ -1407,13 +1423,6 @@ impl StorageBackend for PanickingWriteBackend {
                 panic!("injected cloud upload worker panic");
             },
         );
-    }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Ok(()),
-        });
     }
 }
 
@@ -1464,7 +1473,23 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |key, precondition, callback| {
+                let result = if matches!(precondition, crate::storage::StoragePrecondition::None) {
+                    StorageOutcome::Ok(())
+                } else {
+                    StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
+                        "fixture cannot enforce a delete precondition",
+                    ))
+                };
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result,
+                });
+            },
+        );
     }
 
     fn submit_write_request(
@@ -1485,13 +1510,6 @@ impl StorageBackend for AlwaysFailingWriteBackend {
                 });
             },
         );
-    }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Ok(()),
-        });
     }
 }
 
@@ -1578,7 +1596,13 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |_key, _precondition, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 
     fn submit_write_request(
@@ -1595,10 +1619,6 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
                 self.retain_callback(callback);
             },
         );
-    }
-
-    fn submit_delete(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
     }
 }
 
@@ -1687,7 +1707,32 @@ impl StorageBackend for RacingReadDeleteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |key, precondition, callback| {
+                let matches = match precondition {
+                    crate::storage::StoragePrecondition::None => true,
+                    crate::storage::StoragePrecondition::IfAbsent => false,
+                    crate::storage::StoragePrecondition::IfMatch(expected) => {
+                        expected.generation.is_none()
+                            && expected.etag.trim_matches('"') == "race-etag"
+                    }
+                };
+                let result = if matches {
+                    self.object.lock().take();
+                    StorageOutcome::Ok(())
+                } else {
+                    StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
+                        "racing fixture identity mismatch",
+                    ))
+                };
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result,
+                });
+            },
+        );
     }
 
     fn submit_write_request(
@@ -1719,32 +1764,6 @@ impl StorageBackend for RacingReadDeleteBackend {
                 });
             },
         );
-    }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        self.submit_delete_with_headers(key, Vec::new(), callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        let expected = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
-            .map(|(_, value)| value.trim_matches('"'));
-        let result = if expected.is_none_or(|value| value == "race-etag") {
-            self.object.lock().take();
-            StorageOutcome::Ok(())
-        } else {
-            StorageOutcome::Err(crate::storage::StorageError::precondition_failed(""))
-        };
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result,
-        });
     }
 }
 
@@ -1798,7 +1817,13 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |_key, _precondition, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 
     fn submit_write_request(
@@ -1815,19 +1840,6 @@ impl StorageBackend for NeverCompletesBackend {
                 self.retain_callback(callback);
             },
         );
-    }
-
-    fn submit_delete(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        _key: &str,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.retain_callback(callback);
     }
 }
 
@@ -1889,7 +1901,7 @@ fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
 
 fn delete_cloud_object(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.sst_store().submit_delete(key, tx);
+    storage.sst_store().delete_for_test(key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::DeleteComplete {
             result: StorageOutcome::Ok(()),

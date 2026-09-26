@@ -69,20 +69,6 @@ impl StorageBackend for SlowWalRanges {
     ) {
         self.inner.submit_write_request(request, data, callback);
     }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        self.inner.submit_delete(key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        self.inner
-            .submit_delete_with_headers(key, headers, callback);
-    }
 }
 
 #[test]

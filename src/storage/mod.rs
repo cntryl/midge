@@ -665,28 +665,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         data: Vec<u8>,
         callback: StorageCallback,
     );
-
-    /// Submit a delete operation. Returns immediately.
-    fn submit_delete(&self, key: &str, callback: StorageCallback);
-
-    /// Submit a conditional delete operation. Backends that cannot enforce the
-    /// supplied preconditions must fail closed rather than deleting.
-    #[cfg(not(test))]
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    );
-    #[cfg(test)]
-    fn submit_delete_with_headers(
-        &self,
-        _key: &str,
-        _headers: Vec<(String, String)>,
-        _callback: StorageCallback,
-    ) {
-        panic!("test backend received undeclared conditional-delete capability");
-    }
 }
 
 #[cfg(test)]

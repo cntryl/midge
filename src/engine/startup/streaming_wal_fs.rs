@@ -277,8 +277,7 @@ mod tests {
 
         crate::storage::forward_storage_backend!(
             inner;
-            submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
-            submit_delete_with_headers,
+            submit_head_request, submit_range_head_request, submit_metadata_read_request,
 
         );
 
@@ -290,7 +289,11 @@ mod tests {
         ) {
             panic!("replay cannot write cloud objects");
         }
-        fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
+        fn submit_delete_request(
+            &self,
+            _request: crate::storage::StorageRequest,
+            _callback: crate::storage::StorageCallback,
+        ) {
             panic!("replay cannot delete cloud objects");
         }
     }

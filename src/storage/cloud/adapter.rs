@@ -221,9 +221,13 @@ impl StorageBackend for CloudStorage {
             }
         };
         let _reservation = request.reservation;
-        set_request_timeout_header(&mut headers, timeout);
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete_with_headers(self, &key, headers, tx);
+        if headers.is_empty() && timeout == self.callback_timeout {
+            CloudStorage::submit_delete(self, &key, tx);
+        } else {
+            set_request_timeout_header(&mut headers, timeout);
+            CloudStorage::submit_delete_with_headers(self, &key, headers, tx);
+        }
         deliver_delete_outcome(&key, &rx, timeout, &callback);
     }
 
@@ -246,43 +250,6 @@ impl StorageBackend for CloudStorage {
             }
         };
         self.write_admitted(&key, data, headers, timeout, request.reservation, &callback);
-    }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        if self.callback_timeout.is_zero() {
-            let _ = callback.send(StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud DELETE refused because no callback budget remained",
-                )),
-            });
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_delete(self, key, tx);
-        deliver_delete_outcome(key, &rx, self.callback_timeout, &callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        if self.callback_timeout.is_zero() {
-            let _ = callback.send(StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud DELETE refused because no callback budget remained",
-                )),
-            });
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut headers = headers;
-        set_request_timeout_header(&mut headers, self.callback_timeout);
-        CloudStorage::submit_delete_with_headers(self, key, headers, tx);
-        deliver_delete_outcome(key, &rx, self.callback_timeout, &callback);
     }
 }
 

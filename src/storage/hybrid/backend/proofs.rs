@@ -133,7 +133,7 @@ struct PreparedGuardedDelete {
     cloud: Arc<dyn StorageBackend>,
     target_guard: GuardedObjectProof,
     target_key: String,
-    delete_headers: Vec<(String, String)>,
+    delete_identity: StorageObjectMetadata,
 }
 
 impl PruneWorkerRegistry {
@@ -668,7 +668,7 @@ impl HybridStorage {
         targets
             .into_iter()
             .map(|(request_id, target)| {
-                let delete_headers = crate::storage::cloud::object_match_precondition_headers(
+                crate::storage::conditional_object_identity(
                     &target.metadata.etag,
                     target.metadata.generation.as_deref(),
                 )
@@ -683,7 +683,7 @@ impl HybridStorage {
                     cloud: Arc::clone(self.cloud_backend_for_key(&target.key)),
                     target_guard: self.remote_identity_guard(&target),
                     target_key: target.key,
-                    delete_headers,
+                    delete_identity: target.metadata,
                 })
             })
             .collect()
@@ -777,7 +777,7 @@ impl HybridStorage {
                     cloud,
                     target_guard,
                     target_key,
-                    delete_headers,
+                    delete_identity,
                 } in prepared
                 {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -797,7 +797,13 @@ impl HybridStorage {
                         .map_err(|error| error.to_string())?;
 
                         let (tx, rx) = std::sync::mpsc::channel();
-                        cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
+                        cloud.submit_delete_request(
+                            crate::storage::StorageRequest::new(&target_key, deadline, timeout)
+                                .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+                                    delete_identity,
+                                )),
+                            tx,
+                        );
                         match rx.recv_timeout(timeout) {
                             Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
                                 StorageOutcome::Ok(()) => Ok(()),
@@ -859,15 +865,12 @@ impl HybridStorage {
         metadata: &StorageObjectMetadata,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let delete_headers = crate::storage::cloud::object_match_precondition_headers(
-            &metadata.etag,
-            metadata.generation.as_deref(),
-        )
-        .ok_or_else(|| {
-            crate::common::MidgeError::Internal(format!(
-                "cannot conditionally delete remote object '{key}' without an identity token"
-            ))
-        })?;
+        crate::storage::conditional_object_identity(&metadata.etag, metadata.generation.as_deref())
+            .ok_or_else(|| {
+                crate::common::MidgeError::Internal(format!(
+                    "cannot conditionally delete remote object '{key}' without an identity token"
+                ))
+            })?;
         let cloud = Arc::clone(self.cloud_backend_for_key(key));
         let target_key = key.to_string();
         let timeout = Self::deadline_timeout(
@@ -882,7 +885,12 @@ impl HybridStorage {
         crate::failpoints::fail_point!("midge::cloud::before_compaction_orphan_delete");
 
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
+        cloud.submit_delete_request(
+            crate::storage::StorageRequest::new(&target_key, *deadline, timeout).with_precondition(
+                crate::storage::StoragePrecondition::IfMatch(metadata.clone()),
+            ),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
                 StorageOutcome::Ok(()) => Ok(()),

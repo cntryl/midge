@@ -830,125 +830,6 @@ impl StorageBackend for FileSystem {
         };
         let _ = callback.send(StorageEvent::WriteComplete { key, result });
     }
-
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        let full_path = match self.full_path(key) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::DeleteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let _lock = mutation_lock(&full_path);
-        let _process_lock = match self.acquire_process_lock(&full_path) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::DeleteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-
-        // Deleting an absent object succeeds, as on every cloud provider.
-        let outcome = match fs::remove_file(&full_path) {
-            Ok(()) => StorageOutcome::Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StorageOutcome::Ok(()),
-            Err(e) => StorageOutcome::Err(format!("delete {}: {e}", full_path.display()).into()),
-        };
-
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: outcome,
-        });
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: StorageCallback,
-    ) {
-        if headers.is_empty() {
-            self.submit_delete(key, callback);
-            return;
-        }
-
-        let full_path = match self.full_path(key) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::DeleteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let _lock = mutation_lock(&full_path);
-        let _process_lock = match self.acquire_process_lock(&full_path) {
-            Ok(lock) => lock,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::DeleteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let outcome = if let Some((_, expected)) = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
-        {
-            let identity = if expected.trim_matches('"').starts_with("fs:") {
-                range_path_metadata(&full_path).map(|metadata| metadata.etag)
-            } else {
-                fs::read(&full_path)
-                    .map_err(crate::storage::StorageError::from)
-                    .map(|data| StorageObjectMetadata::content_crc(data.len() as u64, &data).etag)
-            };
-            match identity {
-                Ok(current) => {
-                    if current == expected.trim_matches('"') {
-                        match fs::remove_file(&full_path) {
-                            Ok(()) => StorageOutcome::Ok(()),
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                StorageOutcome::Ok(())
-                            }
-                            Err(error) => StorageOutcome::Err(
-                                format!("delete {}: {error}", full_path.display()).into(),
-                            ),
-                        }
-                    } else {
-                        StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
-                            "etag mismatch",
-                        ))
-                    }
-                }
-                // The targeted version is already gone, so no other version
-                // can be deleted by mistake.
-                Err(error) if error.is_not_found() => StorageOutcome::Ok(()),
-                Err(error) => StorageOutcome::Err(crate::storage::StorageError::new(
-                    error.kind(),
-                    format!("read {}: {error}", full_path.display()),
-                )),
-            }
-        } else {
-            StorageOutcome::Err(
-                "conditional delete requires a supported If-Match precondition"
-                    .to_string()
-                    .into(),
-            )
-        };
-
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: outcome,
-        });
-    }
 }
 
 #[cfg(test)]
@@ -1503,7 +1384,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete("file.txt", tx);
+        fs.delete_for_test("file.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1524,7 +1405,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete("nonexistent.txt", tx);
+        fs.delete_for_test("nonexistent.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1547,7 +1428,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete("subdir/file.txt", tx);
+        fs.delete_for_test("subdir/file.txt", tx);
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1572,7 +1453,19 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete_with_headers("conditional.txt", vec![("If-Match".into(), etag)], tx);
+        fs.submit_delete_request(
+            StorageRequest::new(
+                "conditional.txt",
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(StoragePrecondition::IfMatch(StorageObjectMetadata {
+                size: data.len() as u64,
+                etag,
+                generation: None,
+            })),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1595,9 +1488,17 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_delete_with_headers(
-            "conditional-stale.txt",
-            vec![("If-Match".into(), "crc32c:00000000".into())],
+        fs.submit_delete_request(
+            StorageRequest::new(
+                "conditional-stale.txt",
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(StoragePrecondition::IfMatch(StorageObjectMetadata {
+                size: 4,
+                etag: "crc32c:00000000".into(),
+                generation: None,
+            })),
             tx,
         );
         let event = rx.recv().unwrap();
@@ -1862,6 +1763,7 @@ mod mutation_lock_order_tests {
 #[cfg(test)]
 mod lock_stripe_tests {
     use super::*;
+    use crate::storage::test_support::StorageBackendTestExt;
 
     #[test]
     fn should_bound_lock_files_when_deleting_many_distinct_missing_keys() {
@@ -1873,7 +1775,7 @@ mod lock_stripe_tests {
         // Act
         for index in 0..1_000 {
             let (tx, rx) = std::sync::mpsc::channel();
-            fs.submit_delete(&format!("sst/{index}.sst"), tx);
+            fs.delete_for_test(&format!("sst/{index}.sst"), tx);
             let _ = rx.recv().expect("delete completion");
         }
 
