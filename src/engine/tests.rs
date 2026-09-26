@@ -517,6 +517,10 @@ fn should_treat_flush_compact_as_noop_in_memory_mode() {
         .expect("memory compact_all should succeed");
 }
 
+// These reopen qualifications wait for runtime shutdown, WAL drain, and lease
+// cleanup. Their assertions concern the recovered data, not caller deadlines.
+const PARTITIONED_COMPACTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(2);
+
 fn partitioned_compaction_value(index: usize) -> Vec<u8> {
     (0..512)
         .map(|offset| {
@@ -619,7 +623,7 @@ fn assert_partitioned_compaction_reopen(mut reopened: Engine) -> MidgeResult<()>
             .len(),
         reopened_names.len()
     );
-    reopened.shutdown(Duration::from_secs(5))
+    reopened.shutdown(PARTITIONED_COMPACTION_SHUTDOWN_TIMEOUT)
 }
 
 fn assert_partitioned_compaction_engine_round_trip(
@@ -666,7 +670,7 @@ fn assert_partitioned_compaction_engine_round_trip(
 
     // Assert
     assert_partitioned_compaction_reads(&engine, &cf)?;
-    engine.shutdown(Duration::from_secs(5))?;
+    engine.shutdown(PARTITIONED_COMPACTION_SHUTDOWN_TIMEOUT)?;
 
     let mut reopen_options = open_options()?;
     reopen_options.set_compaction_target_sst_size_for_test(TARGET_SST_SIZE);
