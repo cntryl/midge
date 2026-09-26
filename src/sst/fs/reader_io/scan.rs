@@ -1,91 +1,6 @@
-use super::{BlockHandle, KeyState, SstEntry, SstFileIo, SstPointReadStats};
+use super::{KeyState, SstFileIo, SstPointReadStats};
 use crate::common::MidgeResult;
 use bytes::Bytes;
-
-impl crate::sst::SstReader for SstFileIo {
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-        let now_millis = crate::common::time::unix_time_millis();
-        let state = <Self as crate::sst::SstStateReader>::get_state_at_with_time(
-            self,
-            key,
-            u64::MAX,
-            now_millis,
-        )?;
-        Ok(match state {
-            KeyState::Value(value, _, _, _) => Some(value),
-            KeyState::Absent | KeyState::Tombstone(_) => None,
-        })
-    }
-
-    fn scan_range(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
-        if self.range_outside_persisted_bounds(start, end) {
-            return Ok(Vec::new());
-        }
-
-        let index = self.index_entries()?;
-        let mut latest_by_key: std::collections::BTreeMap<Vec<u8>, SstEntry> =
-            std::collections::BTreeMap::new();
-        let now_millis = crate::common::time::unix_time_millis();
-
-        let Some(span) = self.block_span(index.as_ref(), start, end) else {
-            return Ok(Vec::new());
-        };
-
-        let handles: Vec<BlockHandle> = index[span].iter().map(|(_, handle)| *handle).collect();
-        self.diagnostics
-            .sst_metrics()
-            .record_candidate_blocks_checked(handles.len());
-
-        // Process blocks in readahead windows for cold-cache efficiency
-        for window_start in (0..handles.len()).step_by(Self::READAHEAD_WINDOW_BLOCKS) {
-            let window_end = (window_start + Self::READAHEAD_WINDOW_BLOCKS).min(handles.len());
-            let window_handles = &handles[window_start..window_end];
-
-            // Single contiguous IO for entire window
-            let block_data_vec = self.read_blocks_contiguous(window_handles)?;
-
-            // Process each block's data
-            for block_data in block_data_vec {
-                let entries = self.scan_block_entries_from_bytes(&block_data)?;
-                for entry in entries {
-                    if let Some(s) = start {
-                        if entry.key.as_slice() < s {
-                            continue;
-                        }
-                    }
-                    if let Some(e) = end {
-                        if entry.key.as_slice() >= e {
-                            continue;
-                        }
-                    }
-
-                    let replace = latest_by_key.get(&entry.key).is_none_or(|current| {
-                        entry.sequence > current.sequence
-                            || (entry.sequence == current.sequence
-                                && entry.is_tombstone()
-                                && !current.is_tombstone())
-                    });
-                    if replace {
-                        latest_by_key.insert(entry.key.clone(), entry);
-                    }
-                }
-            }
-        }
-
-        Ok(latest_by_key
-            .into_iter()
-            .filter_map(|(key, entry)| {
-                (!entry.is_tombstone() && !entry.is_expired(now_millis))
-                    .then(|| entry.value.map(|value| (Bytes::from(key), value)))
-                    .flatten()
-            })
-            .collect())
-    }
-}
 
 impl SstFileIo {
     pub(crate) fn get_state_at_with_time_and_stats(
@@ -94,8 +9,24 @@ impl SstFileIo {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> MidgeResult<(crate::types::KeyState, SstPointReadStats)> {
+        let (raw_state, read_stats) = self.get_raw_state_at_with_stats(key, snapshot_seq)?;
+        let visible_state = match raw_state {
+            KeyState::Value(_, sequence, expiration, _)
+                if crate::common::time::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            other_state => other_state,
+        };
+        Ok((visible_state, read_stats))
+    }
+
+    pub(crate) fn get_raw_state_at_with_stats(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<(crate::types::KeyState, SstPointReadStats)> {
         if self.key_outside_persisted_range(key) {
-            self.read_amp_metrics.record_read(0, 0, 0);
             return Ok((KeyState::Absent, SstPointReadStats::default()));
         }
 
@@ -116,20 +47,11 @@ impl SstFileIo {
             blocks_read = blocks_read.saturating_add(1);
             let block_data = self.read_cached_data_block(&handle)?;
             let candidate = self.key_state_from_encoded_block(&block_data, key, snapshot_seq)?;
-            Self::merge_newer_state(&mut best_state, candidate);
+            Self::merge_newer_state(&mut best_state, candidate)?;
         }
 
-        self.read_amp_metrics.record_read(1, 0, blocks_read);
-        let state = match best_state {
-            KeyState::Value(_, sequence, expiration, _)
-                if crate::common::time::is_expired_at(expiration, now_millis) =>
-            {
-                KeyState::Tombstone(sequence)
-            }
-            state => state,
-        };
         Ok((
-            state,
+            best_state,
             SstPointReadStats {
                 sst_touched: true,
                 blocks_read,
@@ -200,7 +122,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         for (_idx, handle) in candidate_blocks {
             let block_data = self.read_cached_data_block(&handle)?;
             let candidate = self.key_state_from_encoded_block(&block_data, key, u64::MAX)?;
-            Self::merge_newer_state(&mut best_state, candidate);
+            Self::merge_newer_state(&mut best_state, candidate)?;
         }
 
         let now_millis = crate::common::time::unix_time_millis();

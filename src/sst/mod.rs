@@ -47,4 +47,4 @@ pub use fs::FsSstFactoryIo;
 
 pub use read_amp_metrics::ReadAmpMetrics;
 
-pub use traits::{SstFactory, SstReader, SstStateReader};
+pub use traits::{SstFactory, SstStateReader};

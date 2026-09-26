@@ -496,13 +496,15 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
 }
 
 struct OutputSetCleanup {
+    fs: std::sync::Arc<dyn crate::io::Fs>,
     paths: Vec<std::path::PathBuf>,
     armed: bool,
 }
 
 impl OutputSetCleanup {
-    fn new() -> Self {
+    fn new(fs: std::sync::Arc<dyn crate::io::Fs>) -> Self {
         Self {
+            fs,
             paths: Vec::new(),
             armed: true,
         }
@@ -523,9 +525,10 @@ impl Drop for OutputSetCleanup {
             return;
         }
         for path in &self.paths {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            let result = crate::sst::fs::fs_relative_sst_path(&self.fs, path)
+                .and_then(|fs_path| self.fs.remove_file(&fs_path).map_err(Into::into));
+            match result {
+                Ok(()) | Err(crate::common::MidgeError::NotFound) => {}
                 Err(error) => tracing::warn!(
                     file = %path.display(),
                     %error,
@@ -582,6 +585,7 @@ fn finish_partition(
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
     output_size_limit: Option<usize>,
+    output_fs: &std::sync::Arc<dyn crate::io::Fs>,
 ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
     ensure_compaction_not_aborted(abort_check)?;
     let tombstone_count = add_partition_range_tombstones(
@@ -604,10 +608,18 @@ fn finish_partition(
     );
     let path = output_dir.join(&name);
     writer.finish_to_path(&path)?;
-    if output_size_limit.is_some_and(|limit| {
-        std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > limit as u64)
-    }) {
-        std::fs::remove_file(&path)?;
+    let fs_path = crate::sst::fs::fs_relative_sst_path(output_fs, &path)?;
+    let size = match output_fs.metadata(&fs_path) {
+        Ok(metadata) => metadata.len,
+        Err(error) => {
+            if let Err(cleanup_error) = output_fs.remove_file(&fs_path) {
+                tracing::warn!(file = %path.display(), %cleanup_error, "retaining unverified compaction output");
+            }
+            return Err(error.into());
+        }
+    };
+    if output_size_limit.is_some_and(|limit| size > limit as u64) {
+        output_fs.remove_file(&fs_path)?;
         return Err(crate::common::MidgeError::ResourceLimit(
             "encoded compaction partition exceeds its local staging limit".into(),
         ));
@@ -972,31 +984,50 @@ fn soft_roll_due(
 
 /// Newest version in one key group, ignoring range events.
 ///
-/// Two versions at the same sequence must be identical. If they differ, the
-/// inputs disagree about what was written at that sequence, and compaction must
-/// not paper over that by picking one.
+/// Inputs do not guarantee sequence order within a key: a chained level cursor
+/// can yield an older version from one file before a newer one from the next.
+/// Versions are therefore sorted here rather than trusted to arrive newest
+/// first.
+///
+/// Two versions at the same sequence must be identical, including shadowed
+/// ones. If they differ, the inputs disagree about what was written at that
+/// sequence, and compaction must not paper over that by picking one.
 fn select_newest_version<'a>(
     events: impl Iterator<Item = &'a CompactionEvent>,
 ) -> MidgeResult<Option<&'a CompactionVersion>> {
-    let mut selected: Option<&CompactionVersion> = None;
-    for event in events {
-        let CompactionEvent::Version(version) = event else {
+    let mut versions: Vec<&CompactionVersion> = events
+        .filter_map(|event| match event {
+            CompactionEvent::Version(version) => Some(version),
+            CompactionEvent::RangeStart(_) | CompactionEvent::RangeEnd(_) => None,
+        })
+        .collect();
+    versions.sort_by_key(|version| std::cmp::Reverse(version.seq));
+    for pair in versions.windows(2) {
+        let (newer, older) = (pair[0], pair[1]);
+        if newer.seq != older.seq {
             continue;
-        };
-        match selected {
-            None => selected = Some(version),
-            Some(current) if current.seq == version.seq && current != version => {
-                return Err(crate::common::MidgeError::Corruption(format!(
-                    "conflicting compaction versions for key {:?} at sequence {}",
-                    String::from_utf8_lossy(&version.key),
-                    version.seq
-                )));
-            }
-            Some(current) if version.seq > current.seq => selected = Some(version),
-            Some(_) => {}
         }
+        crate::types::resolve_same_sequence(
+            crate::types::VersionContent {
+                is_tombstone: newer.is_tombstone,
+                value: newer.value.as_deref(),
+                expiration: newer.expiration,
+            },
+            crate::types::VersionContent {
+                is_tombstone: older.is_tombstone,
+                value: older.value.as_deref(),
+                expiration: older.expiration,
+            },
+        )
+        .map_err(|()| {
+            crate::common::MidgeError::Corruption(format!(
+                "conflicting compaction versions for key {:?} at sequence {}",
+                String::from_utf8_lossy(&older.key),
+                older.seq
+            ))
+        })?;
     }
-    Ok(selected)
+    Ok(versions.first().copied())
 }
 
 /// Whether a key group's newest version survives tombstone GC.
@@ -1253,6 +1284,7 @@ impl<'a> PartitionRoller<'a> {
             .take()
             .expect("partition roller always owns a writer before finalization");
         let retained = tombstones.partition_tombstones().collect::<Vec<_>>();
+        let output_fs = self.sst_factory.output_fs();
         finish_partition(
             writer,
             self.partition_point_count,
@@ -1263,6 +1295,7 @@ impl<'a> PartitionRoller<'a> {
             self.output_dir,
             abort_check,
             self.output_size_limit,
+            &output_fs,
         )
     }
 
@@ -1355,7 +1388,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
         output_size_limit,
     )?;
     let mut output_names = Vec::new();
-    let mut cleanup = OutputSetCleanup::new();
+    let mut cleanup = OutputSetCleanup::new(sst_factory.output_fs());
     let mut tombstones = RangeTombstoneTracker::new();
 
     let mut merged = EventMergeIterator::new(cursors, budget.clone())?;
@@ -1494,6 +1527,149 @@ fn normalize_range_tombstones(mut tombstones: Vec<RangeTombstone>) -> Vec<RangeT
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MetadataFailFs {
+        inner: crate::io::MockFs,
+    }
+
+    impl crate::io::Fs for MetadataFailFs {
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            opts: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            self.inner.open(path, opts)
+        }
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+        fn metadata(
+            &self,
+            _path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            Err(crate::io::FsError::Io(
+                "injected output metadata failure".into(),
+            ))
+        }
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
+        }
+        fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(
+            &self,
+            path: &crate::io::FsPath,
+            durability: crate::io::Durability,
+        ) -> crate::io::FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+        fn rename_atomic(
+            &self,
+            from: &crate::io::FsPath,
+            to: &crate::io::FsPath,
+        ) -> crate::io::FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()> {
+        // Arrange
+        let mock = crate::io::MockFs::new();
+        let factory = crate::sst::FsSstFactoryIo::new(
+            std::sync::Arc::new(MetadataFailFs {
+                inner: mock.clone(),
+            }),
+            4096,
+        );
+        let mut writer = factory.create()?;
+        writer.add_with_meta(
+            b"key",
+            Some(b"value"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        let fs = factory.output_fs();
+
+        // Act
+        let result = finish_partition(
+            writer,
+            1,
+            &[],
+            None,
+            None,
+            PartitionIdentity {
+                cf_id: 0,
+                target_level: 1,
+                generation: 1,
+                ordinal: 0,
+            },
+            std::path::Path::new("output"),
+            None,
+            Some(usize::MAX),
+            &fs,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Io(_))));
+        let name = crate::cloud_layout::compaction_file_name(0, 1, 1, 0);
+        assert!(mock.get_file(&format!("output/{name}")).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> MidgeResult<()>
+    {
+        // Arrange
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let factory = crate::sst::FsSstFactoryIo::new(mock.clone(), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(
+            b"key",
+            Some(b"value"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        writer.finish_to_path(std::path::Path::new("input.sst"))?;
+        let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(2);
+        plan.add_test_source("input.sst");
+        let sink = |_name: &str,
+                    _path: &std::path::Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget| {
+            Err(crate::common::MidgeError::Aborted(
+                "injected after first output".into(),
+            ))
+        };
+
+        // Act
+        let result = crate::compaction::execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            std::path::Path::new("output"),
+            None,
+            Some(&sink),
+            None,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Aborted(_))));
+        assert!(mock.get_file("input.sst").is_some());
+        let output = crate::cloud_layout::compaction_file_name(0, 1, 2, 0);
+        assert!(mock.get_file(&format!("output/{output}")).is_none());
+        Ok(())
+    }
 
     #[test]
     fn should_initialize_merge_with_one_raw_version_per_input() {
@@ -1639,26 +1815,25 @@ mod tests {
 
     #[test]
     fn should_collect_tombstones_given_stateful_reader_input() {
-        use crate::sst::traits::{SstReader, SstStateReader};
+        use crate::sst::traits::SstStateReader;
 
         // Arrange
         struct FakeReader;
 
-        impl SstReader for FakeReader {
-            fn get(&self, _key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
-                Ok(None)
-            }
-
-            fn scan_range(
-                &self,
-                _start: Option<&[u8]>,
-                _end: Option<&[u8]>,
-            ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-                Ok(Vec::new())
-            }
-        }
-
         impl SstStateReader for FakeReader {
+            crate::sst::traits::test_reader_required_methods!();
+
+            fn range_tombstone_memory_usage(&self) -> usize {
+                self.range_tombstones()
+                    .iter()
+                    .map(|range| {
+                        range.start.capacity()
+                            + range.end.capacity()
+                            + std::mem::size_of::<RangeTombstone>()
+                    })
+                    .sum()
+            }
+
             fn get_state(&self, _key: &[u8]) -> MidgeResult<KeyState> {
                 Ok(KeyState::Absent)
             }
@@ -1748,6 +1923,16 @@ mod tests {
         }
 
         impl crate::sst::traits::DynSstWriter for CountingWriter {
+            fn estimated_size_bytes(&self) -> usize {
+                0
+            }
+
+            fn finish_to_path(self: Box<Self>, _path: &std::path::Path) -> MidgeResult<()> {
+                Err(crate::common::MidgeError::NotSupported(
+                    "counting writer has no filesystem".into(),
+                ))
+            }
+
             fn encoded_size_upper_bound(&self) -> Option<usize> {
                 Some(0)
             }
@@ -2115,6 +2300,76 @@ mod tests {
                 selected,
                 Err(crate::common::MidgeError::Corruption(message))
                     if message.contains("conflicting compaction versions")
+            ));
+        }
+
+        #[test]
+        fn should_reject_shadowed_equal_sequence_conflict_during_compaction() {
+            // Arrange
+            let events = [
+                version_event("k", 10, false, "newest"),
+                version_event("k", 5, false, "left"),
+                version_event("k", 5, false, "right"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert!(matches!(
+                selected,
+                Err(crate::common::MidgeError::Corruption(_))
+            ));
+        }
+
+        #[test]
+        fn should_keep_newest_version_when_shadowed_equal_sequence_copies_are_identical() {
+            // Arrange
+            let events = [
+                version_event("k", 10, false, "newest"),
+                version_event("k", 5, false, "same"),
+                version_event("k", 5, false, "same"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), Some(10));
+        }
+
+        #[test]
+        fn should_select_newest_version_when_chained_files_yield_older_version_first() {
+            // Arrange
+            let events = [
+                version_event("k", 3, false, "source"),
+                version_event("k", 1, false, "left-target"),
+                version_event("k", 5, false, "right-target"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), Some(5));
+        }
+
+        #[test]
+        fn should_reject_shadowed_equal_sequence_conflict_when_versions_arrive_unordered() {
+            // Arrange
+            let events = [
+                version_event("k", 5, false, "left"),
+                version_event("k", 10, false, "newest"),
+                version_event("k", 5, false, "right"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert!(matches!(
+                selected,
+                Err(crate::common::MidgeError::Corruption(_))
             ));
         }
 

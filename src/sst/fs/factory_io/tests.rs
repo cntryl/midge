@@ -1,7 +1,32 @@
 use super::*;
 use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
 use crate::io::FsPath;
+use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
+use crate::MidgeError;
+
+#[test]
+fn should_reject_valueless_put_when_writing_sst() -> MidgeResult<()> {
+    // Arrange
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    let factory = FsSstFactoryIo::new(fs, 4096);
+    let mut unordered = factory.create()?;
+    let mut sorted = factory.create_for_compaction(
+        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+    )?;
+
+    // Act
+    let unordered_result = unordered.add_with_meta(b"key", None, 1, EntryType::Put, None);
+    let sorted_result = sorted.add_sorted_with_meta(b"key", None, 1, EntryType::Put, None);
+
+    // Assert
+    assert!(matches!(
+        unordered_result,
+        Err(MidgeError::InvalidArgument(_))
+    ));
+    assert!(matches!(sorted_result, Err(MidgeError::InvalidArgument(_))));
+    Ok(())
+}
 
 /// Records every staging operation an SST publication performs and can
 /// fail the parent-directory sync, so tests observe that persistence runs
@@ -296,9 +321,8 @@ fn should_publish_sst_into_injected_mock_filesystem_when_finishing_writer() -> M
         .exists(&FsPath::new("mocked.sst.tmp"))
         .map_err(crate::common::MidgeError::from)?);
     let reader = super::super::SstFileIo::open("mocked.sst", Arc::clone(&fs) as Arc<dyn Fs>)?;
-    assert_eq!(
-        crate::sst::SstReader::get(&reader, b"key")?.as_deref(),
-        Some(b"value".as_slice())
+    assert!(
+        matches!(reader.get_state(b"key")?, KeyState::Value(value, _, _, _) if value.as_ref() == b"value")
     );
     Ok(())
 }
@@ -339,9 +363,8 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
     assert!(factory.compaction_scratch_cleanup_verified());
     let reader = super::super::SstFileIo::open_with_real_fs(&output)?;
     for sequence in 0_u64..1024 {
-        assert_eq!(
-            crate::sst::SstReader::get(&reader, &sequence.to_be_bytes())?.as_deref(),
-            Some(value.as_slice())
+        assert!(
+            matches!(reader.get_state(&sequence.to_be_bytes())?, KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
         );
     }
     Ok(())

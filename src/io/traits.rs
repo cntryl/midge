@@ -344,6 +344,13 @@ pub struct HostAddressing<'a> {
 
 /// Filesystem abstraction - agnostic of domain
 pub trait Fs: Send + Sync + 'static {
+    /// The filesystem that receives writes when this view also reads through
+    /// a remote fallback. Fresh SST outputs must be read back from this view
+    /// before their remote publication exists.
+    fn local_output_view(&self) -> Option<std::sync::Arc<dyn Fs>> {
+        None
+    }
+
     /// Return an equivalent view whose remote range reads report to this owner.
     /// Implementations without remote I/O keep their existing view.
     fn with_read_observer(

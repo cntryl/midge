@@ -124,6 +124,7 @@ impl SkipListMemtable {
     ///
     /// Returns every version in sorted key order and newest-first sequence
     /// order per key so flush/compaction paths can preserve metadata exactly.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn iter_all_with_meta(&self) -> Vec<MemtableEntryWithMeta> {
         self.skiplist
             .drain_with_meta_with_exp()
@@ -143,6 +144,7 @@ impl SkipListMemtable {
     /// Iterate over all entries in the memtable.
     /// Returns (key, value, sequence) tuples in sorted order.
     #[must_use]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn iter_all(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
         self.iter_all_with_meta()
             .into_iter()
@@ -192,26 +194,34 @@ impl SkipListMemtable {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> MidgeResult<KeyState> {
-        Ok(self
-            .skiplist
+        Ok(Self::normalize_expired_state(
+            self.get_raw_key_state_at(key, snapshot_seq),
+            now_millis,
+        ))
+    }
+
+    pub(crate) fn get_raw_key_state_at(&self, key: &[u8], snapshot_seq: u64) -> KeyState {
+        self.skiplist
             .get_visible_entry_with_exp(key, snapshot_seq)
             .map_or(KeyState::Absent, |entry| {
                 match (entry.value, entry.is_tombstone) {
                     (_, true) | (None, _) => KeyState::Tombstone(entry.seq),
                     (Some(value), false) => {
-                        if Self::is_expired_at(entry.expiration, now_millis) {
-                            KeyState::Tombstone(entry.seq)
-                        } else {
-                            KeyState::Value(
-                                value,
-                                entry.seq,
-                                entry.expiration,
-                                entry_type_of(entry.op),
-                            )
-                        }
+                        KeyState::Value(value, entry.seq, entry.expiration, entry_type_of(entry.op))
                     }
                 }
-            }))
+            })
+    }
+
+    fn normalize_expired_state(state: KeyState, now_millis: u64) -> KeyState {
+        match state {
+            KeyState::Value(_, sequence, expiration, _)
+                if Self::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            other => other,
+        }
     }
 
     /// Get value as Bytes (zero-copy, for performance-critical paths).
@@ -288,6 +298,18 @@ impl SkipListMemtable {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Vec<(Vec<u8>, KeyState)> {
+        self.range_raw_state_at(start, end, snapshot_seq)
+            .into_iter()
+            .map(|(key, state)| (key, Self::normalize_expired_state(state, now_millis)))
+            .collect()
+    }
+
+    pub(crate) fn range_raw_state_at(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        snapshot_seq: u64,
+    ) -> Vec<(Vec<u8>, KeyState)> {
         // Seek into the range instead of copying every version of the whole
         // memtable and filtering afterwards: a scan's cost follows its range.
         self.skiplist
@@ -296,13 +318,7 @@ impl SkipListMemtable {
             .map(|(key, value, seq, is_tombstone, exp, op)| {
                 let state = match (value, is_tombstone) {
                     (_, true) | (None, _) => KeyState::Tombstone(seq),
-                    (Some(value), false) => {
-                        if Self::is_expired_at(exp, now_millis) {
-                            KeyState::Tombstone(seq)
-                        } else {
-                            KeyState::Value(value, seq, exp, entry_type_of(op))
-                        }
-                    }
+                    (Some(value), false) => KeyState::Value(value, seq, exp, entry_type_of(op)),
                 };
                 (key.to_vec(), state)
             })

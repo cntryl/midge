@@ -956,6 +956,31 @@ mod tests {
     }
 
     #[test]
+    fn should_preserve_range_tombstone_sequence_bound_in_manifest_checkpoint() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let mut manifest = Manifest::default();
+        manifest.files.push(crate::metadata::FileMeta {
+            name: "range.sst".into(),
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(5),
+            largest_seq: Some(15),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save range tombstone sequence bound");
+        let recovered = ManifestPersistence::load(&test_dir).expect("load checkpoint");
+
+        // Assert
+        assert_eq!(recovered.files[0].largest_seq, Some(15));
+        assert!(recovered.files[0].key_bounds_complete);
+    }
+
+    #[test]
     fn should_recover_manifest_journal_consistently_given_snapshot_save_crash_before_journal_truncation(
     ) {
         // Arrange

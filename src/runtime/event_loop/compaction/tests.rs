@@ -8,6 +8,29 @@ const STAGING_BYTES: u64 = 500;
 struct UnknownScratchFactory;
 
 impl crate::sst::SstFactory for UnknownScratchFactory {
+    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+        Arc::new(crate::io::MockFs::new())
+    }
+
+    fn compaction_scratch_cleanup_verified(&self) -> bool {
+        false
+    }
+
+    fn create_for_compaction(
+        &self,
+        _budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+        unreachable!("completion fixture already ran its worker")
+    }
+
+    fn open_for_compaction(
+        &self,
+        _path: &std::path::Path,
+        _budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        unreachable!("completion fixture does not read inputs")
+    }
+
     fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
         unreachable!("completion fixture already ran its worker")
     }

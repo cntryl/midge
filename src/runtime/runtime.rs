@@ -59,7 +59,6 @@ impl Runtime {
         let handle = RuntimeHandle {
             msg_tx: msg_tx.clone(),
             router: router.clone(),
-            ingest_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             snapshot_cache,
             snapshot_pins,
             diagnostics: Arc::clone(&diagnostics),
@@ -98,7 +97,6 @@ impl Runtime {
         let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
-        let ingest_active = Arc::clone(&state.ingest_active);
         let snapshot_pins = Arc::clone(&state.snapshot_pins);
         // Startup recovery has already recorded counters into this diagnostics
         // instance. Hand the same instance to runtime handles and actors.
@@ -110,7 +108,6 @@ impl Runtime {
         let handle = RuntimeHandle {
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
-            ingest_active,
             snapshot_cache: snapshot_cache.clone(),
             snapshot_pins,
             diagnostics: Arc::clone(&self.diagnostics),

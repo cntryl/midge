@@ -21,32 +21,6 @@ impl BlockHandle {
     }
 }
 
-/// On-disk block tags encoded in an SST file.
-///
-/// This is intentionally distinct from
-/// [`crate::sst::cache::CacheBlockKind`], which categorizes cache admission
-/// and includes auxiliary filter objects that are not encoded with this tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum SstBlockType {
-    Data = 0,
-    Index = 1,
-    MetaIndex = 2,
-}
-
-/// A block in the SST file
-#[derive(Debug, Clone)]
-pub struct Block {
-    pub data: Bytes,
-    pub block_type: SstBlockType,
-}
-
-impl Block {
-    pub fn new(data: Bytes, block_type: SstBlockType) -> Self {
-        Self { data, block_type }
-    }
-}
-
 /// RocksDB-compatible magic number for SST footer validation
 pub const SST_FOOTER_MAGIC: u64 = 0xdb47_7524_8b80_fb57;
 
@@ -708,66 +682,6 @@ mod tests {
 
         // Assert
         assert_eq!(h1, h2);
-    }
-
-    // =========== SstBlockType Tests ===========
-
-    #[test]
-    fn should_block_type_data_has_correct_value() {
-        // Assert
-        assert_eq!(SstBlockType::Data as u8, 0);
-    }
-
-    #[test]
-    fn should_block_type_index_has_correct_value() {
-        // Assert
-        assert_eq!(SstBlockType::Index as u8, 1);
-    }
-
-    #[test]
-    fn should_block_type_meta_index_has_correct_value() {
-        // Assert
-        assert_eq!(SstBlockType::MetaIndex as u8, 2);
-    }
-
-    #[test]
-    fn should_block_type_equality() {
-        // Assert
-        assert_eq!(SstBlockType::Data, SstBlockType::Data);
-        assert_eq!(SstBlockType::Index, SstBlockType::Index);
-    }
-
-    #[test]
-    fn should_block_type_inequality() {
-        // Assert
-        assert_ne!(SstBlockType::Data, SstBlockType::Index);
-    }
-
-    // =========== Block Tests ===========
-
-    #[test]
-    fn should_create_block_with_data() {
-        // Arrange
-        let data = Bytes::from("test_data");
-
-        // Act
-        let block = Block::new(data.clone(), SstBlockType::Data);
-
-        // Assert
-        assert_eq!(block.data, data);
-        assert_eq!(block.block_type, SstBlockType::Data);
-    }
-
-    #[test]
-    fn should_create_block_with_empty_data() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        let block = Block::new(Bytes::new(), SstBlockType::Index);
-
-        // Assert
-        assert!(block.data.is_empty());
     }
 
     // =========== Footer Encoding/Decoding Tests ===========

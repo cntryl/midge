@@ -357,11 +357,7 @@ impl EventLoop {
                 .flat_map(|(_, waiters)| waiters)
                 .map(|waiter| waiter.request_id),
         );
-        {
-            let mut pending = self.state.pending_compaction_waits.lock();
-            routed_request_ids.extend(pending.keys().copied());
-            pending.clear();
-        }
+        routed_request_ids.extend(self.state.pending_compaction_waits.drain());
         routed_request_ids.extend(self.write_stall_waiters.drain());
         let durability_waiters = self.durability.drain_all_waiters();
         routed_request_ids.extend(

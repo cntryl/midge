@@ -411,6 +411,9 @@ pub(crate) struct FileFrames<'a> {
     file: &'a dyn crate::io::File,
     path: &'a crate::io::FsPath,
     read_ns: std::cell::Cell<u128>,
+    file_len: std::cell::Cell<Option<u64>>,
+    read_ahead_bytes: usize,
+    window: std::cell::RefCell<Option<(u64, bytes::Bytes)>>,
 }
 
 impl<'a> FileFrames<'a> {
@@ -419,21 +422,28 @@ impl<'a> FileFrames<'a> {
             file,
             path,
             read_ns: std::cell::Cell::new(0),
+            file_len: std::cell::Cell::new(None),
+            read_ahead_bytes: 0,
+            window: std::cell::RefCell::new(None),
         }
+    }
+
+    pub(crate) fn with_read_ahead(
+        file: &'a dyn crate::io::File,
+        path: &'a crate::io::FsPath,
+        bytes: usize,
+    ) -> Self {
+        let mut source = Self::new(file, path);
+        source.read_ahead_bytes = bytes;
+        source
     }
 
     /// Nanoseconds spent reading through this source.
     pub(crate) fn read_ns(&self) -> u128 {
         self.read_ns.get()
     }
-}
 
-impl FrameBytes for FileFrames<'_> {
-    fn len(&self) -> Result<u64, MidgeError> {
-        self.file.len().map_err(Into::into)
-    }
-
-    fn read(&self, pos: u64, len: u64) -> Result<bytes::Bytes, MidgeError> {
+    fn read_file(&self, pos: u64, len: u64) -> Result<bytes::Bytes, MidgeError> {
         let started = std::time::Instant::now();
         let bytes = self.file.read_at(pos, len).map_err(MidgeError::from)?;
         self.read_ns.set(
@@ -455,6 +465,52 @@ impl FrameBytes for FileFrames<'_> {
             )));
         }
         Ok(bytes)
+    }
+}
+
+impl FrameBytes for FileFrames<'_> {
+    fn len(&self) -> Result<u64, MidgeError> {
+        if let Some(len) = self.file_len.get() {
+            return Ok(len);
+        }
+        let len = self.file.len().map_err(MidgeError::from)?;
+        self.file_len.set(Some(len));
+        Ok(len)
+    }
+
+    fn read(&self, pos: u64, len: u64) -> Result<bytes::Bytes, MidgeError> {
+        let window_capacity = u64::try_from(self.read_ahead_bytes).unwrap_or(u64::MAX);
+        if window_capacity == 0 || len > window_capacity {
+            return self.read_file(pos, len);
+        }
+        let requested_len = usize::try_from(len).map_err(|_| {
+            MidgeError::Corruption(format!(
+                "WAL read length does not fit memory at offset {pos} in {}: {len}",
+                self.path
+            ))
+        })?;
+        let end = pos
+            .checked_add(len)
+            .ok_or_else(|| MidgeError::Corruption("WAL read-ahead offset overflow".to_string()))?;
+        if let Some((start, bytes)) = self.window.borrow().as_ref() {
+            if pos >= *start
+                && end <= start.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            {
+                let offset = usize::try_from(pos - start).map_err(|_| {
+                    MidgeError::Corruption("WAL read-ahead offset does not fit memory".to_string())
+                })?;
+                return Ok(bytes.slice(offset..offset + requested_len));
+            }
+        }
+        let file_len = self.len()?;
+        let window_len = window_capacity.min(file_len.saturating_sub(pos));
+        if window_len < len {
+            return self.read_file(pos, len);
+        }
+        let bytes = self.read_file(pos, window_len)?;
+        let requested = bytes.slice(..requested_len);
+        *self.window.borrow_mut() = Some((pos, bytes));
+        Ok(requested)
     }
 }
 

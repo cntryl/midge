@@ -3349,10 +3349,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     let completion_rx = el.router.register(completion_request_id, "TestRequest");
     let waiter_request_id = 4344;
     let waiter_rx = el.router.register(waiter_request_id, "TestRequest");
-    el.state
-        .pending_compaction_waits
-        .lock()
-        .insert(waiter_request_id, "CompactAll".to_string());
+    el.state.pending_compaction_waits.insert(waiter_request_id);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -3405,7 +3402,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
         "compaction completion should still drain active count after mirror failure"
     );
     assert!(
-        el.state.pending_compaction_waits.lock().is_empty(),
+        el.state.pending_compaction_waits.is_empty(),
         "mirror failure must not leave pending compaction waiters stuck"
     );
 

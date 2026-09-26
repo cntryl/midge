@@ -390,24 +390,11 @@ pub struct RuntimeState {
     pub intent_log_replay_runs: u64,
     pub intent_log_entries_replayed: u64,
 
-    // === Ingest control & coordination ===
-    /// Ingest epoch counter used to cooperatively cancel long-running jobs.
-    /// Bumping this value invalidates currently running compactions which should
-    /// check the epoch and abort if it changes.
-    pub ingest_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
-
-    /// Number of active compaction jobs. Used so `BeginIngest` can wait until
-    /// the running compactions drain.
+    /// Number of active compaction jobs.
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
-    /// Whether an ingest barrier is currently active. This is set at `BeginIngest`
-    /// and cleared at `EndIngest` so tools and tests can detect when ingest mode
-    /// is enforced.
-    pub ingest_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-
-    /// Pending CompactAll/BeginIngest requests waiting for compactions to finish.
-    /// Maps `request_id` -> `completion_condition` (e.g., "`CompactAll`", "`BeginIngest`").
-    pub pending_compaction_waits: parking_lot::Mutex<std::collections::HashMap<u64, String>>,
+    /// Manual compaction requests awaiting a completed worker or cloud turn.
+    pub pending_compaction_waits: std::collections::HashSet<u64>,
 }
 
 impl RuntimeState {

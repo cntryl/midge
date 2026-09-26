@@ -24,39 +24,19 @@ pub struct RawSstVersion {
 pub type RawSstVersionCursor =
     Box<dyn Iterator<Item = MidgeResult<RawSstVersion>> + Send + 'static>;
 
+#[cfg(test)]
 struct MaterializedRawVersionCursor {
     versions: std::vec::IntoIter<RawSstVersion>,
     _reservation: Option<crate::common::resource_budget::ResourceReservation>,
 }
 
+#[cfg(test)]
 impl Iterator for MaterializedRawVersionCursor {
     type Item = MidgeResult<RawSstVersion>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.versions.next().map(Ok)
     }
-}
-
-/// Reader contract for SST implementations
-pub trait SstReader: Send + Sync {
-    /// Get the value for a specific key, if present
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be read or decoded.
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
-
-    /// Scan a key range [start, end) where either bound may be None
-    /// Returns list of (key, value) pairs
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be scanned or decoded.
-    fn scan_range(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, Bytes)>>;
 }
 
 /// Stateful reader contract exposing tombstones and metadata
@@ -84,10 +64,8 @@ pub trait SstStateReader: Send + Sync {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-        _now_millis: u64,
-    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
-        self.scan_range_state(start, end)
-    }
+        now_millis: u64,
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Scan persisted state without interpreting TTL expiration. Recovery and
     /// compaction use this to preserve raw value-plus-expiration metadata.
@@ -99,10 +77,6 @@ pub trait SstStateReader: Send + Sync {
 
     /// Consume this reader and stream persisted logical versions without
     /// interpreting TTL expiration.
-    ///
-    /// Filesystem readers override this compatibility implementation with a
-    /// block-at-a-time cursor. Implementations used only by compatibility
-    /// callers may retain the materializing fallback.
     ///
     /// # Errors
     ///
@@ -127,71 +101,25 @@ pub trait SstStateReader: Send + Sync {
         start: Option<Vec<u8>>,
         end: Option<Vec<u8>>,
         budget: Option<crate::common::resource_budget::ResourceBudget>,
-    ) -> MidgeResult<RawSstVersionCursor> {
-        let states = self.scan_range_raw_state(start.as_deref(), end.as_deref())?;
-        let versions = states
-            .into_iter()
-            .filter_map(|(key, state)| match state {
-                KeyState::Absent => None,
-                KeyState::Tombstone(seq) => Some(RawSstVersion {
-                    key: key.to_vec(),
-                    seq,
-                    is_tombstone: true,
-                    value: None,
-                    expiration: None,
-                }),
-                KeyState::Value(value, seq, expiration, _op_type) => Some(RawSstVersion {
-                    key: key.to_vec(),
-                    seq,
-                    is_tombstone: false,
-                    value: Some(value.to_vec()),
-                    expiration,
-                }),
-            })
-            .collect::<Vec<_>>();
-        let retained_bytes = versions.iter().fold(0usize, |total, version| {
-            total
-                .saturating_add(version.key.capacity())
-                .saturating_add(version.value.as_ref().map_or(0, Vec::capacity))
-                .saturating_add(std::mem::size_of::<RawSstVersion>())
-        });
-        let reservation = budget
-            .map(|budget| budget.reserve(retained_bytes, "compatibility raw-version cursor"))
-            .transpose()?;
-        Ok(Box::new(MaterializedRawVersionCursor {
-            versions: versions.into_iter(),
-            _reservation: reservation,
-        }))
-    }
+    ) -> MidgeResult<RawSstVersionCursor>;
 
     /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
     ///
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
-    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
-        let state = self.get_state(key)?;
-        match state {
-            KeyState::Value(_val, seq, _exp, _op) if seq > snapshot_seq => Ok(KeyState::Absent),
-            KeyState::Tombstone(seq) if seq > snapshot_seq => Ok(KeyState::Absent),
-            _ => Ok(state),
-        }
-    }
+    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState>;
 
     /// Snapshot-aware lookup with a caller-owned TTL clock.
     fn get_state_at_with_time(
         &self,
         key: &[u8],
         snapshot_seq: u64,
-        _now_millis: u64,
-    ) -> MidgeResult<KeyState> {
-        self.get_state_at(key, snapshot_seq)
-    }
+        now_millis: u64,
+    ) -> MidgeResult<KeyState>;
 
-    /// Return all range tombstones stored in this SST
-    fn range_tombstones(&self) -> Vec<RangeTombstone> {
-        Vec::new()
-    }
+    /// Return all range tombstones stored in this SST.
+    fn range_tombstones(&self) -> Vec<RangeTombstone>;
 
     /// The highest sequence of a range tombstone in this SST, visible at
     /// `snapshot_seq`, that covers `key`. Readers that hold their tombstones
@@ -200,26 +128,145 @@ pub trait SstStateReader: Send + Sync {
         crate::memtable::max_covering_seq(&self.range_tombstones(), key, snapshot_seq)
     }
 
-    /// Return the retained bytes required to clone this SST's range tombstones.
-    /// Budgeted compaction reserves this amount before requesting the clone.
-    fn range_tombstone_memory_usage(&self) -> usize {
-        0
+    /// Retained bytes required to clone this SST's range tombstones.
+    fn range_tombstone_memory_usage(&self) -> usize;
+}
+
+/// Materializing cursor for explicit test doubles. Production readers must
+/// implement bounded streaming in their own reader implementation.
+#[cfg(test)]
+pub(crate) fn materialized_raw_cursor_for_test<R: SstStateReader + ?Sized>(
+    reader: &R,
+    start: Option<&[u8]>,
+    end: Option<&[u8]>,
+    budget: Option<crate::common::resource_budget::ResourceBudget>,
+) -> MidgeResult<RawSstVersionCursor> {
+    let states = reader.scan_range_raw_state(start, end)?;
+    let versions = states
+        .into_iter()
+        .filter_map(|(key, state)| match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(seq) => Some(RawSstVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }),
+            KeyState::Value(value, seq, expiration, _op_type) => Some(RawSstVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: false,
+                value: Some(value.to_vec()),
+                expiration,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let retained_bytes = versions.iter().fold(0usize, |total, version| {
+        total
+            .saturating_add(version.key.capacity())
+            .saturating_add(version.value.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(std::mem::size_of::<RawSstVersion>())
+    });
+    let reservation = budget
+        .map(|budget| budget.reserve(retained_bytes, "compatibility raw-version cursor"))
+        .transpose()?;
+    Ok(Box::new(MaterializedRawVersionCursor {
+        versions: versions.into_iter(),
+        _reservation: reservation,
+    }))
+}
+
+#[cfg(test)]
+macro_rules! test_reader_required_methods {
+    () => {
+        fn scan_range_state_with_time(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+            now_millis: u64,
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
+            self.scan_range_state(start, end).map(|states| {
+                states
+                    .into_iter()
+                    .map(|(key, state)| {
+                        (
+                            key,
+                            crate::sst::traits::test_state_at_time(state, now_millis),
+                        )
+                    })
+                    .collect()
+            })
+        }
+
+        fn raw_version_cursor_with_budget(
+            self: Box<Self>,
+            start: Option<Vec<u8>>,
+            end: Option<Vec<u8>>,
+            budget: Option<crate::common::resource_budget::ResourceBudget>,
+        ) -> crate::common::MidgeResult<crate::sst::traits::RawSstVersionCursor> {
+            crate::sst::traits::materialized_raw_cursor_for_test(
+                self.as_ref(),
+                start.as_deref(),
+                end.as_deref(),
+                budget,
+            )
+        }
+
+        fn get_state_at(
+            &self,
+            key: &[u8],
+            snapshot_seq: u64,
+        ) -> crate::common::MidgeResult<crate::types::KeyState> {
+            self.get_state_at_with_time(key, snapshot_seq, crate::common::time::unix_time_millis())
+        }
+
+        fn get_state_at_with_time(
+            &self,
+            key: &[u8],
+            snapshot_seq: u64,
+            now_millis: u64,
+        ) -> crate::common::MidgeResult<crate::types::KeyState> {
+            self.get_state(key).map(|state| {
+                let sequence = match &state {
+                    crate::types::KeyState::Value(_, seq, _, _)
+                    | crate::types::KeyState::Tombstone(seq) => *seq,
+                    crate::types::KeyState::Absent => return crate::types::KeyState::Absent,
+                };
+                if sequence > snapshot_seq {
+                    crate::types::KeyState::Absent
+                } else {
+                    crate::sst::traits::test_state_at_time(state, now_millis)
+                }
+            })
+        }
+    };
+}
+
+#[cfg(test)]
+pub(crate) use test_reader_required_methods;
+
+#[cfg(test)]
+pub(crate) fn test_state_at_time(state: KeyState, now_millis: u64) -> KeyState {
+    match state {
+        KeyState::Value(_, sequence, expiration, _)
+            if crate::common::time::is_expired_at(expiration, now_millis) =>
+        {
+            KeyState::Tombstone(sequence)
+        }
+        other => other,
     }
 }
 
 /// Combined reader contract used by the SST factory.
-pub trait SstReaderExt: SstReader + SstStateReader {}
+pub trait SstReaderExt: SstStateReader {}
 
-impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
+impl<T> SstReaderExt for T where T: SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
-    /// Best-effort retained/encoded size used for soft compaction rollover.
-    /// Implementations that cannot estimate return zero and therefore retain
-    /// the compatibility single-output behavior.
-    fn estimated_size_bytes(&self) -> usize {
-        0
-    }
+    /// Retained/encoded size used for soft compaction rollover.
+    fn estimated_size_bytes(&self) -> usize;
 
     /// Conservative final file size, including all data, indexes, filters,
     /// tombstones and framing, or `None` when the writer cannot establish one.
@@ -290,22 +337,10 @@ pub trait DynSstWriter: Send {
 
     /// Finalize and atomically persist this SST directly to `path`.
     ///
-    /// Writers built by [`crate::sst::FsSstFactoryIo`] override this and
-    /// persist through the filesystem that factory was injected with, so
-    /// compaction never reconstructs the completed SST in one byte vector and
-    /// a mock or fault-injecting filesystem observes the staging writes.
-    ///
-    /// The default exists only for writers that carry no filesystem — test
-    /// doubles and adapters — and therefore has to open the host filesystem
-    /// itself. Implementations holding an `Arc<dyn Fs>` must not use it.
-    ///
     /// # Errors
     ///
     /// Returns an error when finalization or atomic persistence fails.
-    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-        let bytes = self.finish_bytes()?;
-        crate::sst::fs::persist_sst_bytes_with_host_fs(&bytes, path)
-    }
+    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()>;
 
     /// Finalize and get SST bytes
     ///
@@ -317,11 +352,12 @@ pub trait DynSstWriter: Send {
 
 /// Factory trait for creating SST writers and readers
 pub trait SstFactory: Send + Sync {
+    /// Filesystem that owns SST outputs and their metadata, identity and cleanup.
+    fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs>;
+
     /// Whether every temporary file created by compaction writers has been
     /// explicitly removed. Unknown cleanup retains ephemeral disk admission.
-    fn compaction_scratch_cleanup_verified(&self) -> bool {
-        false
-    }
+    fn compaction_scratch_cleanup_verified(&self) -> bool;
 
     /// Create a new dynamic SST writer
     ///
@@ -336,19 +372,12 @@ pub trait SstFactory: Send + Sync {
     /// admission limit for new writes. Such blocks remain uncompressed; entry
     /// buffers and compression workspaces still require budget reservations.
     ///
-    /// The default preserves compatibility for non-filesystem factories.
     fn create_for_compaction(
         &self,
-        _budget: crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<Box<dyn DynSstWriter>> {
-        self.create()
-    }
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Open a reader whose retained metadata is charged to compaction.
-    ///
-    /// Compatibility factories may use the ordinary reader path. Production
-    /// filesystem factories override this method and reserve before metadata
-    /// block reads and decoding.
     ///
     /// # Errors
     ///
@@ -356,10 +385,8 @@ pub trait SstFactory: Send + Sync {
     fn open_for_compaction(
         &self,
         path: &Path,
-        _budget: crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<Box<dyn SstReaderExt>> {
-        self.open(path)
-    }
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn SstReaderExt>>;
 
     /// Open an existing SST file for reading
     ///
@@ -393,16 +420,12 @@ mod tests {
         }
     }
 
-    impl SstReader for MockSstReader {
-        fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-            Ok(self.data.get(key).map(|v| Bytes::copy_from_slice(v)))
+    impl MockSstReader {
+        fn get(&self, key: &[u8]) -> Option<Bytes> {
+            self.data.get(key).map(|v| Bytes::copy_from_slice(v))
         }
 
-        fn scan_range(
-            &self,
-            start: Option<&[u8]>,
-            end: Option<&[u8]>,
-        ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+        fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {
             let mut results = Vec::new();
 
             for (k, v) in &self.data {
@@ -425,11 +448,21 @@ mod tests {
                 results.push((Bytes::copy_from_slice(k), Bytes::copy_from_slice(v)));
             }
 
-            Ok(results)
+            results
         }
     }
 
     impl SstStateReader for MockSstReader {
+        test_reader_required_methods!();
+
+        fn range_tombstones(&self) -> Vec<RangeTombstone> {
+            Vec::new()
+        }
+
+        fn range_tombstone_memory_usage(&self) -> usize {
+            0
+        }
+
         fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
             Ok(match self.data.get(key) {
                 Some(value) => {
@@ -445,7 +478,7 @@ mod tests {
             end: Option<&[u8]>,
         ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
             Ok(self
-                .scan_range(start, end)?
+                .scan_range(start, end)
                 .into_iter()
                 .map(|(key, value)| (key, KeyState::Value(value, 0, None, EntryType::Put)))
                 .collect())
@@ -476,6 +509,18 @@ mod tests {
     }
 
     impl DynSstWriter for MockSstWriter {
+        fn estimated_size_bytes(&self) -> usize {
+            self.data
+                .iter()
+                .map(|(key, value)| key.len() + value.len() + 2)
+                .sum()
+        }
+
+        fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+            std::fs::write(path, self.finish_bytes()?)?;
+            Ok(())
+        }
+
         fn encoded_size_upper_bound(&self) -> Option<usize> {
             None
         }
@@ -564,11 +609,11 @@ mod tests {
         let reader_ref: &dyn SstReaderExt = &reader;
 
         // Act
-        let result = reader_ref.get(b"any_key");
+        let result = reader_ref.get_state(b"any_key");
 
         // Assert
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(matches!(result.unwrap(), KeyState::Absent));
     }
 
     #[test]
@@ -579,15 +624,16 @@ mod tests {
         let reader_ref: &dyn SstReaderExt = &reader;
 
         // Act
-        let result = reader_ref.get(b"key1");
+        let result = reader_ref.get_state(b"key1");
 
         // Assert
         assert!(result.is_ok());
-        let value = result.expect("get failed").expect("key not found");
-        assert_eq!(value, Bytes::from("value1"));
+        assert!(
+            matches!(result.expect("get failed"), KeyState::Value(value, _, _, _) if value == "value1")
+        );
     }
 
-    // =========== SstReader Trait Behavior Tests ===========
+    // =========== Mock reader behavior tests ===========
 
     #[test]
     fn should_get_return_present_key() {
@@ -599,10 +645,7 @@ mod tests {
         let result = reader.get(b"key1");
 
         // Assert
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        assert!(value.is_some());
-        assert_eq!(value.unwrap(), Bytes::from("value1"));
+        assert_eq!(result, Some(Bytes::from("value1")));
     }
 
     #[test]
@@ -614,8 +657,7 @@ mod tests {
         let result = reader.get(b"nonexistent");
 
         // Assert
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -631,8 +673,7 @@ mod tests {
         let result = reader.scan_range(Some(b"b"), Some(b"d"));
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, Bytes::from("b"));
         assert_eq!(pairs[1].0, Bytes::from("c"));
@@ -650,8 +691,7 @@ mod tests {
         let result = reader.scan_range(Some(b"banana"), None);
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, Bytes::from("banana"));
     }
@@ -668,8 +708,7 @@ mod tests {
         let result = reader.scan_range(None, Some(b"cherry"));
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().all(|(k, _)| k.as_ref() < b"cherry".as_ref()));
     }
@@ -686,8 +725,7 @@ mod tests {
         let result = reader.scan_range(None, None);
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 3);
     }
 
@@ -700,8 +738,7 @@ mod tests {
         let result = reader.scan_range(Some(b"a"), Some(b"z"));
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert!(pairs.is_empty());
     }
 
@@ -714,7 +751,7 @@ mod tests {
         reader.insert(b"key2".to_vec(), b"v2".to_vec());
 
         // Act
-        let result = reader.scan_range(None, None).unwrap();
+        let result = reader.scan_range(None, None);
 
         // Assert - BTreeMap maintains sorted order
         assert_eq!(result.len(), 3);
@@ -735,7 +772,7 @@ mod tests {
         let result = reader.get(&binary_key).unwrap();
 
         // Assert
-        assert_eq!(result.unwrap().to_vec(), binary_value);
+        assert_eq!(result.to_vec(), binary_value);
     }
 
     #[test]
@@ -746,7 +783,7 @@ mod tests {
         reader.insert(b"key".to_vec(), large_value.clone());
 
         // Act
-        let result = reader.get(b"key").unwrap();
+        let result = reader.get(b"key");
 
         // Assert
         assert_eq!(result.unwrap().to_vec(), large_value);
@@ -853,7 +890,7 @@ mod tests {
         reader.insert(b"key1".to_vec(), b"v".to_vec());
 
         // Act - [key1, key1) should be empty
-        let result = reader.scan_range(Some(b"key1"), Some(b"key1")).unwrap();
+        let result = reader.scan_range(Some(b"key1"), Some(b"key1"));
 
         // Assert
         assert!(result.is_empty());
@@ -867,7 +904,7 @@ mod tests {
         reader.insert(b"z".to_vec(), b"v".to_vec());
 
         // Act - [z, a) is invalid range
-        let result = reader.scan_range(Some(b"z"), Some(b"a")).unwrap();
+        let result = reader.scan_range(Some(b"z"), Some(b"a"));
 
         // Assert
         assert!(result.is_empty());
@@ -881,10 +918,7 @@ mod tests {
         reader.insert(b"key".to_vec(), original_value.clone());
 
         // Act
-        let result = reader
-            .get(b"key")
-            .expect("get failed")
-            .expect("key not found");
+        let result = reader.get(b"key").expect("key not found");
 
         // Assert
         assert_eq!(result.to_vec(), original_value);

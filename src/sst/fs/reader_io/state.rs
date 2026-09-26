@@ -1,4 +1,4 @@
-use super::{KeyState, SstEntry, SstFileIo};
+use super::{BlockEntryDecoder, KeyState, SstEntry, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::bloom::writer::BloomTestResult;
 use crate::sst::encoding;
@@ -11,20 +11,11 @@ impl SstFileIo {
         block_data: &bytes::Bytes,
     ) -> MidgeResult<Vec<SstEntry>> {
         let mut result = Vec::new();
-        let mut offset = 0;
-        let mut previous_key = Vec::new();
+        let mut decoder = BlockEntryDecoder::default();
 
-        while offset < block_data.len() {
-            let (entry, next_offset) =
-                encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
-
-            let shared_len =
-                SstFileIo::shared_prefix_len(usize::from(entry.shared_len), previous_key.len())?;
-
-            let mut full_key = Vec::with_capacity(shared_len + entry.key_delta.len());
-            full_key.extend_from_slice(&previous_key[..shared_len]);
-            full_key.extend_from_slice(entry.key_delta);
-
+        while let Some(entry) =
+            decoder.next(block_data, self.format_version, None, "range decoder key")?
+        {
             let value_bytes = if let Some(val_off) = entry.value_offset {
                 let val_len = match entry.value {
                     Some(v) => v.len(),
@@ -39,15 +30,13 @@ impl SstFileIo {
                 None
             };
 
-            previous_key = full_key.clone();
             result.push(SstEntry::new(
-                full_key,
+                decoder.key().to_vec(),
                 value_bytes,
                 entry.sequence,
                 entry.entry_type,
                 entry.expiration,
             ));
-            offset = next_offset;
         }
 
         Ok(result)
@@ -88,17 +77,30 @@ impl SstFileIo {
         }
     }
 
-    pub(super) fn merge_newer_state(best_state: &mut KeyState, candidate: KeyState) {
+    pub(super) fn merge_newer_state(
+        best_state: &mut KeyState,
+        candidate: KeyState,
+    ) -> MidgeResult<()> {
         let candidate_sequence = Self::state_sequence(&candidate);
         let best_sequence = Self::state_sequence(best_state);
-        if matches!(best_state, KeyState::Absent)
-            || candidate_sequence > best_sequence
-            || (candidate_sequence == best_sequence
-                && matches!(&candidate, KeyState::Tombstone(_))
-                && !matches!(best_state, KeyState::Tombstone(_)))
+        if !matches!(best_state, KeyState::Absent)
+            && !matches!(candidate, KeyState::Absent)
+            && candidate_sequence == best_sequence
         {
+            crate::types::resolve_same_sequence(
+                crate::types::VersionContent::from_state(best_state).expect("present state"),
+                crate::types::VersionContent::from_state(&candidate).expect("present state"),
+            )
+            .map_err(|()| {
+                crate::common::MidgeError::Corruption(format!(
+                    "conflicting SST versions at sequence {candidate_sequence}"
+                ))
+            })?;
+        }
+        if matches!(best_state, KeyState::Absent) || candidate_sequence > best_sequence {
             *best_state = candidate;
         }
+        Ok(())
     }
 
     pub(super) fn key_state_from_encoded_block(
@@ -107,67 +109,41 @@ impl SstFileIo {
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<KeyState> {
-        let mut offset = 0usize;
-        let mut reconstructed_key = Vec::new();
-        let mut key_reservation = None;
+        let mut decoder = BlockEntryDecoder::default();
         let mut best_state = KeyState::Absent;
 
-        while offset < block_data.len() {
-            let (entry, next_offset) =
-                encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
-            let shared_len = SstFileIo::shared_prefix_len(
-                usize::from(entry.shared_len),
-                reconstructed_key.len(),
-            )?;
-
-            let key_len = shared_len
-                .checked_add(entry.key_delta.len())
-                .ok_or_else(|| {
-                    MidgeError::Corruption("SST reconstructed key length overflow".into())
-                })?;
-            if self.recovery_block.is_some() && key_len > reconstructed_key.capacity() {
-                let reservation = self
-                    .metadata_budget
-                    .as_ref()
-                    .map(|budget| budget.reserve(key_len, "recovery decoder key"))
-                    .transpose()?;
-                let mut replacement = Vec::with_capacity(key_len);
-                replacement.extend_from_slice(&reconstructed_key[..shared_len]);
-                reconstructed_key = replacement;
-                key_reservation = reservation;
-            }
-            reconstructed_key.truncate(shared_len);
-            reconstructed_key.extend_from_slice(entry.key_delta);
-
-            match reconstructed_key.as_slice().cmp(key) {
+        let budget = self
+            .recovery_block
+            .as_ref()
+            .and(self.metadata_budget.as_ref());
+        while let Some(entry) = decoder.next(
+            block_data,
+            self.format_version,
+            budget,
+            "recovery decoder key",
+        )? {
+            match decoder.key().cmp(key) {
                 std::cmp::Ordering::Less => {}
                 std::cmp::Ordering::Greater => break,
                 std::cmp::Ordering::Equal => {
                     if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
                         let candidate = Self::state_from_entry_view(block_data, entry);
-                        Self::merge_newer_state(&mut best_state, candidate);
+                        Self::merge_newer_state(&mut best_state, candidate)?;
                     }
                 }
             }
-
-            offset = next_offset;
         }
 
-        drop(reconstructed_key);
-        drop(key_reservation);
         Ok(best_state)
     }
 
     /// Check block bloom filter with proper metrics and failure-safe semantics
     pub(super) fn check_block_bloom(&self, block_idx: usize, key: &[u8]) -> bool {
         if let Some(ref block_bloom) = self.block_bloom_filter {
-            self.bloom_metrics.record_check();
             self.diagnostics.sst_metrics().record_bloom_check();
 
             match block_bloom.might_contain_in_block(block_idx, key) {
                 BloomTestResult::DefinitelyNotPresent => {
-                    self.bloom_metrics.record_negative();
-                    self.bloom_metrics.record_block_skipped();
                     self.diagnostics.sst_metrics().record_bloom_reject();
                     false
                 }

@@ -186,10 +186,8 @@ impl RuntimeState {
             wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
             intent_log_replay_runs: 0,
             intent_log_entries_replayed: 0,
-            ingest_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            pending_compaction_waits: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            pending_compaction_waits: std::collections::HashSet::new(),
         };
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)

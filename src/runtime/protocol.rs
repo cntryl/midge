@@ -82,6 +82,104 @@ impl FileMeta {
     }
 }
 
+impl From<&FileMeta> for crate::metadata::FileMeta {
+    fn from(value: &FileMeta) -> Self {
+        let FileMeta {
+            name,
+            level,
+            size_bytes,
+            content_crc32c,
+            cf_id,
+            smallest_key,
+            largest_key,
+            smallest_seq,
+            largest_seq,
+            key_bounds_complete,
+        } = value;
+        Self {
+            name: name.clone(),
+            level: *level,
+            size_bytes: *size_bytes,
+            content_crc32c: *content_crc32c,
+            cf_id: *cf_id,
+            smallest_key: smallest_key.clone(),
+            largest_key: largest_key.clone(),
+            smallest_seq: *smallest_seq,
+            largest_seq: *largest_seq,
+            key_bounds_complete: *key_bounds_complete,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<&crate::metadata::FileMeta> for FileMeta {
+    fn from(value: &crate::metadata::FileMeta) -> Self {
+        let crate::metadata::FileMeta {
+            name,
+            level,
+            size_bytes,
+            content_crc32c,
+            cf_id,
+            sst_seq: _,
+            smallest_key,
+            largest_key,
+            smallest_seq,
+            largest_seq,
+            key_bounds_complete,
+            sublevel: _,
+            read_count: _,
+        } = value;
+        Self {
+            name: name.clone(),
+            level: *level,
+            size_bytes: *size_bytes,
+            content_crc32c: *content_crc32c,
+            cf_id: *cf_id,
+            smallest_key: smallest_key.clone(),
+            largest_key: largest_key.clone(),
+            smallest_seq: *smallest_seq,
+            largest_seq: *largest_seq,
+            key_bounds_complete: *key_bounds_complete,
+        }
+    }
+}
+
+#[cfg(test)]
+mod file_meta_conversion_tests {
+    use super::FileMeta;
+
+    #[test]
+    fn should_round_trip_every_proof_field_across_file_meta_conversion() {
+        // Arrange
+        let runtime = FileMeta {
+            name: "proof.sst".into(),
+            level: 3,
+            size_bytes: 1234,
+            content_crc32c: Some(0x1234_5678),
+            cf_id: 7,
+            smallest_key: Some(b"alpha".to_vec()),
+            largest_key: Some(b"omega".to_vec()),
+            smallest_seq: Some(11),
+            largest_seq: Some(99),
+            key_bounds_complete: true,
+        };
+
+        // Act
+        let manifest = crate::metadata::FileMeta::from(&runtime);
+        let round_trip = FileMeta::from(&manifest);
+
+        // Assert
+        assert_eq!(
+            serde_json::to_value(&runtime).unwrap(),
+            serde_json::to_value(&round_trip).unwrap()
+        );
+        assert!(manifest.same_identity(&crate::metadata::FileMeta::from(&round_trip)));
+        let mut different = manifest.clone();
+        different.content_crc32c = Some(0);
+        assert!(!manifest.same_identity(&different));
+    }
+}
+
 /// A single operation within an atomic transaction apply.
 ///
 /// This type lives in the runtime layer so higher layers can submit a
@@ -458,16 +556,6 @@ pub enum TestRuntimeMsg {
         added: Vec<FileMeta>,
     },
 
-    // === Ingest Barrier ===
-    /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
-    /// and wait until in-flight compactions drain.
-    BeginIngest { request_id: u64 },
-    /// End an ingest barrier: flush outstanding memtables, bump epoch and
-    /// re-enable scheduling.
-    EndIngest { request_id: u64 },
-    /// Query whether an ingest barrier is currently active.
-    GetIngestState { request_id: u64 },
-
     /// Get runtime configuration snapshot.
     GetRuntimeConfig { request_id: u64 },
 
@@ -708,11 +796,11 @@ impl TestRuntimeMsg {
             | TestRuntimeMsg::WalAppendDeleteRange { request_id, .. }
             | TestRuntimeMsg::WalRotate { request_id }
             | TestRuntimeMsg::CheckGc { request_id }
-            | TestRuntimeMsg::RunCompaction { request_id, .. }
-            | TestRuntimeMsg::BeginIngest { request_id }
-            | TestRuntimeMsg::EndIngest { request_id } => VerificationBarrierAction::Reject {
-                request_id: *request_id,
-            },
+            | TestRuntimeMsg::RunCompaction { request_id, .. } => {
+                VerificationBarrierAction::Reject {
+                    request_id: *request_id,
+                }
+            }
             _ => VerificationBarrierAction::Allow,
         }
     }
@@ -735,9 +823,6 @@ impl TestRuntimeMsg {
             | TestRuntimeMsg::CaptureReadSnapshot { request_id, .. }
             | TestRuntimeMsg::RegisterSnapshot { request_id, .. }
             | TestRuntimeMsg::GetRuntimeConfig { request_id }
-            | TestRuntimeMsg::GetIngestState { request_id }
-            | TestRuntimeMsg::BeginIngest { request_id }
-            | TestRuntimeMsg::EndIngest { request_id }
             | TestRuntimeMsg::Noop { request_id }
             | TestRuntimeMsg::StartupPing { request_id } => Some(*request_id),
 
@@ -764,9 +849,6 @@ impl TestRuntimeMsg {
             TestRuntimeMsg::RegisterSnapshot { .. } => "RegisterSnapshot",
             TestRuntimeMsg::UnregisterSnapshot { .. } => "UnregisterSnapshot",
             TestRuntimeMsg::GetRuntimeConfig { .. } => "GetRuntimeConfig",
-            TestRuntimeMsg::GetIngestState { .. } => "GetIngestState",
-            TestRuntimeMsg::BeginIngest { .. } => "BeginIngest",
-            TestRuntimeMsg::EndIngest { .. } => "EndIngest",
             TestRuntimeMsg::Noop { .. } => "Noop",
             TestRuntimeMsg::StartupPing { .. } => "StartupPing",
         }
@@ -893,13 +975,6 @@ pub enum RuntimeResponse {
         wal_durability_policy: DurabilityPolicy,
         wal_batch_config: crate::wal::policy::BatchConfig,
     },
-    /// Simple ingest state response
-    #[cfg(test)]
-    IngestState {
-        request_id: u64,
-        ingest_active: bool,
-    },
-
     /// Write stall status response
     WriteStallStatus {
         request_id: u64,
@@ -929,8 +1004,7 @@ impl RuntimeResponse {
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
-            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. }
-            | RuntimeResponse::IngestState { request_id, .. } => *request_id,
+            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. } => *request_id,
         }
     }
 
@@ -963,8 +1037,6 @@ impl RuntimeResponse {
             RuntimeResponse::ReadSnapshot { .. } => "ReadSnapshot",
             #[cfg(test)]
             RuntimeResponse::RuntimeConfigSnapshot { .. } => "RuntimeConfigSnapshot",
-            #[cfg(test)]
-            RuntimeResponse::IngestState { .. } => "IngestState",
         }
     }
 }

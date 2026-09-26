@@ -313,10 +313,11 @@ fn max_verified_sequence_from_offset(
 ) -> Option<u64> {
     let mut read_ns = 0;
     let file = open_wal_replay_file(storage, path, &mut read_ns).ok()??;
+    let source = frame_reader::source(&*file, path, limits);
     let mut pos = offset;
     let mut max_sequence = None;
     while let Ok(NextWalFrame::Frame(frame)) =
-        frame_reader::next_frame(&*file, path, pos, limits, &mut read_ns)
+        frame_reader::next_frame(&source, path, pos, limits, &mut read_ns)
     {
         max_sequence = max_sequence.max(Some(frame.record.seq));
         pos = frame.next_pos;
@@ -436,10 +437,16 @@ fn inspect_file_from(
         super::wal_prefix_failure(super::VerifiedWalPrefix::default(), error.into())
     })?;
     let mut read_ns = 0;
+    let source = frame_reader::source(file, path, limits);
     loop {
-        let next =
-            frame_reader::next_frame(file, path, prefix.valid_bytes as u64, limits, &mut read_ns)
-                .map_err(|failure| super::wal_prefix_failure(prefix, failure))?;
+        let next = frame_reader::next_frame(
+            &source,
+            path,
+            prefix.valid_bytes as u64,
+            limits,
+            &mut read_ns,
+        )
+        .map_err(|failure| super::wal_prefix_failure(prefix, failure))?;
         let NextWalFrame::Frame(frame) = next else {
             return Ok(prefix);
         };
@@ -511,10 +518,11 @@ pub(super) fn discover_frontiers(
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut read_ns)? else {
             continue;
         };
+        let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
         loop {
             ensure_deadline(deadline)?;
-            match frame_reader::next_frame(&*file, &path.path, pos, limits, &mut read_ns) {
+            match frame_reader::next_frame(&source, &path.path, pos, limits, &mut read_ns) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
                     frontiers.record(&frame.record, ordinal);
@@ -548,12 +556,13 @@ fn replay_paths(
         else {
             continue;
         };
+        let source = frame_reader::source(&*file, &path.path, state.limits);
         // End of the last frame this file replayed: the verified prefix.
         let mut pos = 0;
         loop {
             ensure_deadline(state.options.deadline)?;
             let frame = match frame_reader::next_frame(
-                &*file,
+                &source,
                 &path.path,
                 pos,
                 state.limits,
@@ -713,10 +722,11 @@ fn duplicate_before(
         let Some(file) = open_wal_replay_file(storage, &path.path, read_ns)? else {
             continue;
         };
+        let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
         while !current_file || pos < current_pos {
             ensure_deadline(deadline)?;
-            let frame = match frame_reader::next_frame(&*file, &path.path, pos, limits, read_ns)
+            let frame = match frame_reader::next_frame(&source, &path.path, pos, limits, read_ns)
                 .map_err(super::ReplayFailure::into_error)?
             {
                 NextWalFrame::Eof => break,

@@ -578,12 +578,19 @@ mod tests {
     }
 
     fn create_verification_fixture() -> VerificationFixture {
+        create_verification_fixture_with_compression(crate::codec::CompressionPolicy::default())
+    }
+
+    fn create_verification_fixture_with_compression(
+        compression: crate::codec::CompressionPolicy,
+    ) -> VerificationFixture {
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
         crate::metadata::ensure_or_create_format_marker(&db_path).expect("create format marker");
         std::fs::create_dir_all(db_path.join("sst")).expect("create SST directory");
 
-        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 96);
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 96)
+            .with_compression_policy(compression);
         let mut writer = factory.create().expect("create SST writer");
         for index in 0..32_u64 {
             let key = format!("key-{index:04}");
@@ -741,7 +748,8 @@ mod tests {
     #[test]
     fn should_reject_corrupt_data_block_when_manifest_crc_matches_corrupt_bytes() {
         // Arrange
-        let fixture = create_verification_fixture();
+        let fixture =
+            create_verification_fixture_with_compression(crate::codec::CompressionPolicy::None);
         let mut bytes = std::fs::read(&fixture.sst_path).expect("read SST fixture");
         bytes[8] ^= 0x5a;
         std::fs::write(&fixture.sst_path, &bytes).expect("corrupt SST data block");

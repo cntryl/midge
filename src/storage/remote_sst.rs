@@ -262,6 +262,10 @@ impl File for Arc<RemoteSstFile> {
 }
 
 impl Fs for RemoteSstFs {
+    fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
+        Some(Arc::clone(&self.local))
+    }
+
     fn with_read_observer(
         &self,
         observer: Arc<dyn crate::io::traits::ReadObserver>,
@@ -422,6 +426,40 @@ mod tests {
     use super::*;
     use crate::sst::traits::{SstFactory, SstStateReader};
     use crate::types::EntryType;
+
+    #[test]
+    fn should_read_back_unpublished_sst_from_local_output_view() -> crate::common::MidgeResult<()> {
+        // Arrange: remote object has not been published when the writer finishes.
+        let remote = tempfile::tempdir()?;
+        let local = Arc::new(crate::io::MockFs::new());
+        let cloud = Arc::new(super::super::filesystem::FileSystem::new(remote.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(
+            Arc::new(RemoteSstFs::new(
+                local.clone(),
+                cloud,
+                Duration::from_secs(5),
+            )),
+            4096,
+        );
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
+        writer.finish_to_path(Path::new("unpublished.sst"))?;
+
+        // Act
+        let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
+            "unpublished.sst",
+            factory.output_fs(),
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        )?;
+
+        // Assert
+        assert_eq!(summary.largest_seq, 9);
+        assert_eq!(
+            usize::try_from(summary.size_bytes).unwrap(),
+            local.get_file("unpublished.sst").unwrap().len()
+        );
+        Ok(())
+    }
 
     struct RecordingBackend {
         inner: super::super::filesystem::FileSystem,

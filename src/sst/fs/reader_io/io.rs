@@ -293,11 +293,6 @@ impl SstFileIo {
             return self.read_block(handle);
         };
 
-        Self::validate_block_handle(*handle, self.block_region_end, resource)?;
-        let compressed_size = usize::try_from(handle.size).map_err(|_| {
-            MidgeError::ResourceLimit(format!("{resource} exceeds addressable memory"))
-        })?;
-        let compressed_reservation = budget.reserve(compressed_size, resource)?;
         let file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {
@@ -307,13 +302,14 @@ impl SstFileIo {
                 truncate: false,
             },
         )?;
-        let buffer = file.read_at(handle.offset, handle.size)?;
-        let raw = Self::split_block_frame(&buffer)?;
-        let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
-        let retained_size = decoded_size.saturating_mul(4).saturating_add(256);
-        let retained_reservation = budget.reserve(retained_size, resource)?;
-        let decoded = Self::decode_block_payload(raw, decoded_size)?;
-        drop(compressed_reservation);
+        let (decoded, retained_reservation) = self.read_framed_block(
+            file.as_ref(),
+            handle,
+            Some((&budget, resource)),
+            |decoded_size| {
+                budget.reserve(decoded_size.saturating_mul(4).saturating_add(256), resource)
+            },
+        )?;
         // The decoded bytes are transient, but their decoded reader structure
         // remains live (index, filter, trie, or range tombstones). Keep this
         // conservative reservation with the reader for that parsed structure.
@@ -326,9 +322,52 @@ impl SstFileIo {
         file: &dyn File,
         handle: &BlockHandle,
     ) -> MidgeResult<bytes::Bytes> {
+        self.read_framed_block(file, handle, None, |_| Ok(()))
+            .map(|(block, ())| block)
+    }
+
+    /// Read and decode one handle through the same checked framing as all
+    /// other SST readers. The caller reserves its retained decoded form before
+    /// decompression so metadata and recovery can keep different lifetimes.
+    pub(super) fn read_framed_block<R>(
+        &self,
+        file: &dyn File,
+        handle: &BlockHandle,
+        compressed_budget: Option<(
+            &crate::common::resource_budget::ResourceBudget,
+            &'static str,
+        )>,
+        reserve_decoded: impl FnOnce(usize) -> MidgeResult<R>,
+    ) -> MidgeResult<(bytes::Bytes, R)> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
+        let compressed_reservation = compressed_budget
+            .map(|(budget, resource)| {
+                let size = usize::try_from(handle.size).map_err(|_| {
+                    MidgeError::ResourceLimit(format!("{resource} exceeds addressable memory"))
+                })?;
+                budget.reserve(size, resource)
+            })
+            .transpose()?;
         let buffer = file.read_at(handle.offset, handle.size)?;
-        Self::decompress_raw_block(Self::split_block_frame(&buffer)?)
+        let result = Self::decode_framed_block(&buffer, reserve_decoded);
+        drop(compressed_reservation);
+        result
+    }
+
+    fn decode_framed_block<R>(
+        buffer: &[u8],
+        reserve_decoded: impl FnOnce(usize) -> MidgeResult<R>,
+    ) -> MidgeResult<(bytes::Bytes, R)> {
+        let raw = Self::split_block_frame(buffer)?;
+        let declared = crate::codec::decompressed_size_with_trailer(raw)?;
+        let reservation = reserve_decoded(declared)?;
+        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
+        if decoded.len() > declared {
+            return Err(MidgeError::Corruption(
+                "decoded SST block exceeded its declared size".into(),
+            ));
+        }
+        Ok((decoded, reservation))
     }
 
     /// Split a block frame read from its handle: a `u32` length prefix that
@@ -366,135 +405,5 @@ impl SstFileIo {
             ));
         }
         Ok(shared_len)
-    }
-
-    /// Decompress a block payload whose trailer declares `declared` decoded
-    /// bytes (from `crate::codec::decompressed_size_with_trailer`), rejecting
-    /// output that exceeds it.
-    pub(super) fn decode_block_payload(
-        payload: &[u8],
-        declared: usize,
-    ) -> MidgeResult<bytes::Bytes> {
-        let decoded = crate::codec::decompress_block_with_trailer(payload)?;
-        if decoded.len() > declared {
-            return Err(MidgeError::Corruption(
-                "decoded SST block exceeded its declared size".into(),
-            ));
-        }
-        Ok(decoded)
-    }
-
-    /// Decompress a raw block payload, stripping the block trailer if present.
-    ///
-    /// Every V4 block carries `[payload][algo:u8][crc32c:u32]` and is rejected
-    /// if that trailer cannot be verified and decoded.
-    fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
-        // Decode first: that verifies the trailer checksum, so the declared
-        // size is read only from bytes already proven intact.
-        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
-        if decoded.len() > crate::codec::decompressed_size_with_trailer(raw)? {
-            return Err(MidgeError::Corruption(
-                "decoded SST block exceeded its declared size".into(),
-            ));
-        }
-        Ok(decoded)
-    }
-
-    /// Read multiple contiguous blocks in a single IO operation for cold-cache scans.
-    ///
-    /// This is the core optimization for range scan readahead:
-    /// - Reads from `handles[0].offset` to `handles[last].offset + handles[last].size`
-    /// - Slices the buffer to extract individual block data
-    /// - Preserves existing error handling and alignment rules
-    ///
-    /// Returns a Vec of decoded block data (Bytes), one per handle.
-    pub(super) fn read_blocks_contiguous(
-        &self,
-        handles: &[BlockHandle],
-    ) -> MidgeResult<Vec<bytes::Bytes>> {
-        if handles.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Single block: use existing path
-        if handles.len() == 1 {
-            let block_data = self.read_block(&handles[0])?;
-            self.diagnostics.sst_metrics().record_data_block_read();
-            return Ok(vec![block_data]);
-        }
-
-        for handle in handles {
-            Self::validate_block_handle(*handle, self.block_region_end, "readahead")?;
-        }
-        if handles.windows(2).any(|pair| {
-            pair[0]
-                .offset
-                .checked_add(pair[0].size)
-                .is_none_or(|end| end > pair[1].offset)
-        }) {
-            return Err(MidgeError::Corruption(
-                "SST readahead handles are overlapping or out of order".into(),
-            ));
-        }
-
-        // Compute contiguous read range
-        let first = &handles[0];
-        let last = &handles[handles.len() - 1];
-        let read_start = first.offset;
-        let read_end = last.offset.checked_add(last.size).ok_or_else(|| {
-            MidgeError::Corruption("SST readahead range overflows file offsets".into())
-        })?;
-        let total_len = read_end
-            .checked_sub(read_start)
-            .ok_or_else(|| MidgeError::Corruption("SST readahead range is out of order".into()))?;
-
-        // Open file once for the entire window
-        let file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-
-        // Single contiguous read for all blocks in window
-        let buffer = file.read_at(read_start, total_len)?;
-        let read_metrics = self.diagnostics.sst_metrics();
-        for _ in handles {
-            read_metrics.record_data_block_read();
-        }
-
-        // Extract individual blocks from the buffer
-        let mut result = Vec::with_capacity(handles.len());
-        for handle in handles {
-            // Compute offset within the buffer
-            let relative_offset = handle.offset.checked_sub(read_start).ok_or_else(|| {
-                MidgeError::Corruption("Block offset precedes readahead buffer".into())
-            })?;
-            let buf_offset = usize::try_from(relative_offset).map_err(|_| {
-                MidgeError::Corruption("Block offset exceeds addressable memory".into())
-            })?;
-            let handle_size = usize::try_from(handle.size).map_err(|_| {
-                MidgeError::Corruption("Block size exceeds addressable memory".into())
-            })?;
-            let buf_end = buf_offset.checked_add(handle_size).ok_or_else(|| {
-                MidgeError::Corruption("Block extent exceeds addressable memory".into())
-            })?;
-
-            if buf_end > buffer.len() {
-                return Err(MidgeError::Corruption(
-                    "Block extends past read buffer".into(),
-                ));
-            }
-
-            let block_slice = &buffer[buf_offset..buf_end];
-            result.push(Self::decompress_raw_block(Self::split_block_frame(
-                block_slice,
-            )?)?);
-        }
-
-        Ok(result)
     }
 }

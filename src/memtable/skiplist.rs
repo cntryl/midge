@@ -311,6 +311,7 @@ impl SkipList {
     /// Returns `Some(value)` if a visible non-tombstone version exists,
     /// otherwise `None`.
     #[inline]
+    #[cfg(test)]
     pub fn get(&self, key: &[u8], snapshot_seq: u64) -> Option<Bytes> {
         let node_ptr = self.find_node(key);
 
@@ -412,6 +413,7 @@ impl SkipList {
         exp: Option<u64>,
         op: OpType,
     ) -> bool {
+        debug_assert_eq!(value.is_some(), op == OpType::Put);
         self.upsert_exp_internal(UpsertVersion {
             key,
             value,
@@ -644,6 +646,7 @@ impl SkipList {
 
     /// Insert or update with sequence number (Put).
     #[inline]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn upsert(&self, key: Bytes, value: Option<Bytes>, seq: u64) -> bool {
         self.upsert_exp(key, value, seq, None, OpType::Put)
     }
@@ -657,6 +660,7 @@ impl SkipList {
     /// Range scan returning visible entries at `snapshot_seq`.
     ///
     /// Returns newest visible non-tombstone value for each key in [start, end).
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn range_visible(
         &self,
         start: Option<&[u8]>,
@@ -738,6 +742,7 @@ impl SkipList {
     }
 
     /// Get all tombstoned keys in range visible at `snapshot_seq`.
+    #[cfg(test)]
     pub fn tombstones_range_visible(
         &self,
         start: Option<&[u8]>,
@@ -841,6 +846,7 @@ impl SkipList {
     ///
     /// This does *not* physically clear the skiplist; instead it walks all
     /// nodes and returns all versions newest-first for each key.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn drain_with_meta_with_exp(&self) -> Vec<SkipListEntryWithExp> {
         let mut out = Vec::with_capacity(256);
 
@@ -871,6 +877,7 @@ impl SkipList {
     }
 
     /// Get all keys currently in the skiplist (no snapshot filtering).
+    #[cfg(test)]
     pub fn get_all_keys(&self) -> Vec<Bytes> {
         let mut keys = Vec::with_capacity(128);
 
@@ -887,11 +894,13 @@ impl SkipList {
     /// Range scan returning latest visible non-tombstone entries (no snapshot filtering).
     ///
     /// This is used by the memtable for "current state" queries.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {
         self.range_visible(start, end, u64::MAX)
     }
 
     /// Get all tombstoned keys in range (no snapshot filtering).
+    #[cfg(test)]
     pub fn tombstones_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<Bytes> {
         self.tombstones_range_visible(start, end, u64::MAX)
     }
@@ -1169,7 +1178,7 @@ mod tests {
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
         sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 2);
-        sl.upsert(Bytes::from_static(b"c"), None, 3); // tombstone
+        sl.delete(Bytes::from_static(b"c"), 3); // tombstone
 
         // Act
         let rows = sl.range_visible(Some(b"a"), Some(b"z"), u64::MAX);
@@ -1189,8 +1198,8 @@ mod tests {
         // Arrange
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.upsert(Bytes::from_static(b"b"), None, 2);
-        sl.upsert(Bytes::from_static(b"c"), None, 3);
+        sl.delete(Bytes::from_static(b"b"), 2);
+        sl.delete(Bytes::from_static(b"c"), 3);
 
         // Act
         let t = sl.tombstones_range_visible(Some(b"a"), Some(b"z"), u64::MAX);
@@ -1292,7 +1301,7 @@ mod tests {
         // Arrange
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.upsert(Bytes::from_static(b"b"), None, 2);
+        sl.delete(Bytes::from_static(b"b"), 2);
         sl.upsert_exp(
             Bytes::from_static(b"c"),
             Some(Bytes::from_static(b"3")),
@@ -1664,7 +1673,7 @@ mod tests {
         // Arrange
         let sl = SkipList::new();
         sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.upsert(Bytes::from_static(b"b"), None, 2); // tombstone
+        sl.delete(Bytes::from_static(b"b"), 2); // tombstone
         sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
 
         // Act

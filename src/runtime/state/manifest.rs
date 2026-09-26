@@ -250,7 +250,7 @@ impl RuntimeState {
         require_snapshot: bool,
     ) -> MidgeResult<()> {
         self.ensure_metadata_current()?;
-        let manifest_meta = flush_manifest_meta(file_meta);
+        let manifest_meta: crate::metadata::FileMeta = file_meta.into();
         let next_sst_seq = self
             .manifest
             .next_sst_seqs
@@ -264,7 +264,7 @@ impl RuntimeState {
             .iter()
             .find(|file| file.name == manifest_meta.name)
         {
-            Some(existing) if same_flush_manifest_file(existing, &manifest_meta) => {}
+            Some(existing) if existing.same_identity(&manifest_meta) => {}
             Some(_) => {
                 return Err(crate::common::MidgeError::Corruption(format!(
                     "flush output conflicts with existing SST {}",
@@ -422,19 +422,7 @@ impl RuntimeState {
             return false;
         }
 
-        self.manifest.files.push(crate::metadata::FileMeta {
-            name: file_meta.name.clone(),
-            level: file_meta.level,
-            size_bytes: file_meta.size_bytes,
-            content_crc32c: file_meta.content_crc32c,
-            cf_id: file_meta.cf_id,
-            smallest_key: file_meta.smallest_key.clone(),
-            largest_key: file_meta.largest_key.clone(),
-            smallest_seq: file_meta.smallest_seq,
-            largest_seq: file_meta.largest_seq,
-            key_bounds_complete: file_meta.key_bounds_complete,
-            ..Default::default()
-        });
+        self.manifest.files.push(file_meta.into());
         true
     }
 
@@ -468,21 +456,7 @@ impl RuntimeState {
         }
 
         self.manifest_store
-            .append(&crate::metadata::ManifestEdit::AddSst(
-                crate::metadata::FileMeta {
-                    name: file_meta.name.clone(),
-                    level: file_meta.level,
-                    size_bytes: file_meta.size_bytes,
-                    content_crc32c: file_meta.content_crc32c,
-                    cf_id: file_meta.cf_id,
-                    smallest_key: file_meta.smallest_key.clone(),
-                    largest_key: file_meta.largest_key.clone(),
-                    smallest_seq: file_meta.smallest_seq,
-                    largest_seq: file_meta.largest_seq,
-                    key_bounds_complete: file_meta.key_bounds_complete,
-                    ..Default::default()
-                },
-            ))
+            .append(&crate::metadata::ManifestEdit::AddSst(file_meta.into()))
             .map(|_| ())
     }
 
@@ -500,21 +474,7 @@ impl RuntimeState {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: name.clone() });
         }
         for file_meta in added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(
-                crate::metadata::FileMeta {
-                    name: file_meta.name.clone(),
-                    level: file_meta.level,
-                    size_bytes: file_meta.size_bytes,
-                    content_crc32c: file_meta.content_crc32c,
-                    cf_id: file_meta.cf_id,
-                    smallest_key: file_meta.smallest_key.clone(),
-                    largest_key: file_meta.largest_key.clone(),
-                    smallest_seq: file_meta.smallest_seq,
-                    largest_seq: file_meta.largest_seq,
-                    key_bounds_complete: file_meta.key_bounds_complete,
-                    ..Default::default()
-                },
-            ));
+            edits.push(crate::metadata::ManifestEdit::AddSst(file_meta.into()));
         }
 
         if edits.is_empty() {
@@ -535,36 +495,4 @@ impl RuntimeState {
             .adopt_into(&mut self.manifest);
         Ok(())
     }
-}
-
-fn flush_manifest_meta(file: &crate::runtime::FileMeta) -> crate::metadata::FileMeta {
-    crate::metadata::FileMeta {
-        name: file.name.clone(),
-        level: file.level,
-        size_bytes: file.size_bytes,
-        content_crc32c: file.content_crc32c,
-        cf_id: file.cf_id,
-        smallest_key: file.smallest_key.clone(),
-        largest_key: file.largest_key.clone(),
-        smallest_seq: file.smallest_seq,
-        largest_seq: file.largest_seq,
-        key_bounds_complete: file.key_bounds_complete,
-        ..Default::default()
-    }
-}
-
-fn same_flush_manifest_file(
-    left: &crate::metadata::FileMeta,
-    right: &crate::metadata::FileMeta,
-) -> bool {
-    left.name == right.name
-        && left.level == right.level
-        && left.size_bytes == right.size_bytes
-        && left.content_crc32c == right.content_crc32c
-        && left.cf_id == right.cf_id
-        && left.smallest_key == right.smallest_key
-        && left.largest_key == right.largest_key
-        && left.smallest_seq == right.smallest_seq
-        && left.largest_seq == right.largest_seq
-        && left.key_bounds_complete == right.key_bounds_complete
 }

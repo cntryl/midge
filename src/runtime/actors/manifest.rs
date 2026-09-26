@@ -25,7 +25,7 @@ impl ManifestActor {
 
     /// Add a new SST file to the manifest
     #[cfg(test)]
-    pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: FileMeta) -> MidgeResult<()> {
+    pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: &FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
         if !state.is_memory_mode() {
             let sst_path = state.sst_dir.join(&file_meta.name);
@@ -48,19 +48,7 @@ impl ManifestActor {
         // Append to manifest journal (durable edit log) - skip in memory mode
         let mut journaled_id = None;
         if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-                name: file_meta.name.clone(),
-                level: file_meta.level,
-                size_bytes: file_meta.size_bytes,
-                content_crc32c: file_meta.content_crc32c,
-                cf_id: file_meta.cf_id,
-                smallest_key: file_meta.smallest_key.clone(),
-                largest_key: file_meta.largest_key.clone(),
-                smallest_seq: file_meta.smallest_seq,
-                largest_seq: file_meta.largest_seq,
-                key_bounds_complete: file_meta.key_bounds_complete,
-                ..Default::default()
-            });
+            let edit = crate::metadata::ManifestEdit::AddSst(file_meta.into());
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_add_sst_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
@@ -72,19 +60,7 @@ impl ManifestActor {
 
         // Now that intent is durable, apply mutation to in-memory manifest
         // Convert to manifest FileMeta
-        let manifest_meta = crate::metadata::FileMeta {
-            name: file_meta.name.clone(),
-            level: file_meta.level,
-            size_bytes: file_meta.size_bytes,
-            content_crc32c: file_meta.content_crc32c,
-            cf_id: file_meta.cf_id,
-            smallest_key: file_meta.smallest_key,
-            largest_key: file_meta.largest_key,
-            smallest_seq: file_meta.smallest_seq,
-            largest_seq: file_meta.largest_seq,
-            key_bounds_complete: file_meta.key_bounds_complete,
-            ..Default::default()
-        };
+        let manifest_meta = file_meta.into();
 
         state.manifest.add_file(manifest_meta);
         if let Some(edit_id) = journaled_id {
@@ -115,21 +91,7 @@ impl ManifestActor {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
         for f in added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(
-                crate::metadata::FileMeta {
-                    name: f.name.clone(),
-                    level: f.level,
-                    size_bytes: f.size_bytes,
-                    content_crc32c: f.content_crc32c,
-                    cf_id: f.cf_id,
-                    smallest_key: f.smallest_key.clone(),
-                    largest_key: f.largest_key.clone(),
-                    smallest_seq: f.smallest_seq,
-                    largest_seq: f.largest_seq,
-                    key_bounds_complete: f.key_bounds_complete,
-                    ..Default::default()
-                },
-            ));
+            edits.push(crate::metadata::ManifestEdit::AddSst(f.into()));
         }
         let mut journaled_id = None;
         if !edits.is_empty() {
@@ -148,19 +110,7 @@ impl ManifestActor {
 
         // Add new files
         for file_meta in added {
-            let manifest_meta = crate::metadata::FileMeta {
-                name: file_meta.name.clone(),
-                level: file_meta.level,
-                size_bytes: file_meta.size_bytes,
-                content_crc32c: file_meta.content_crc32c,
-                cf_id: file_meta.cf_id,
-                smallest_key: file_meta.smallest_key.clone(),
-                largest_key: file_meta.largest_key.clone(),
-                smallest_seq: file_meta.smallest_seq,
-                largest_seq: file_meta.largest_seq,
-                key_bounds_complete: file_meta.key_bounds_complete,
-                ..Default::default()
-            };
+            let manifest_meta = file_meta.into();
             state.manifest.add_file(manifest_meta);
         }
         if let Some(edit_id) = journaled_id {
@@ -295,7 +245,7 @@ mod tests {
 
         // Act - the real handler, not a direct field write
         actor
-            .add_sst(&mut state, memory_file_meta("a.sst"))
+            .add_sst(&mut state, &memory_file_meta("a.sst"))
             .expect("add_sst should succeed in memory mode");
 
         // Assert
@@ -311,13 +261,13 @@ mod tests {
 
         // Act - three real add_sst calls
         actor
-            .add_sst(&mut state, memory_file_meta("a.sst"))
+            .add_sst(&mut state, &memory_file_meta("a.sst"))
             .expect("add a.sst");
         actor
-            .add_sst(&mut state, memory_file_meta("b.sst"))
+            .add_sst(&mut state, &memory_file_meta("b.sst"))
             .expect("add b.sst");
         actor
-            .add_sst(&mut state, memory_file_meta("c.sst"))
+            .add_sst(&mut state, &memory_file_meta("c.sst"))
             .expect("add c.sst");
 
         // Assert
@@ -477,7 +427,7 @@ mod tests {
         let mut actor = ManifestActor::new();
 
         // Act: attempt to add the SST to manifest
-        let result = actor.add_sst(&mut state, file_meta);
+        let result = actor.add_sst(&mut state, &file_meta);
 
         // Assert: adding a manifest entry for a corrupt/unreadable SST MUST fail
         // (current behavior is to accept; this test should fail until we implement validation)
@@ -515,7 +465,7 @@ mod tests {
         let mut actor = ManifestActor::new();
 
         // Act: attempt to add the SST to manifest
-        let result = actor.add_sst(&mut state, file_meta);
+        let result = actor.add_sst(&mut state, &file_meta);
 
         // Assert: adding a manifest entry for a missing final SST (only tmp present) MUST fail
         assert!(
@@ -567,7 +517,7 @@ mod tests {
         let mut actor = ManifestActor::new();
 
         // Act: attempt to add the SST to manifest
-        let result = actor.add_sst(&mut state, file_meta);
+        let result = actor.add_sst(&mut state, &file_meta);
 
         // Assert: valid SST should be accepted
         assert!(result.is_ok(), "add_sst failed: {:?}", result.err());

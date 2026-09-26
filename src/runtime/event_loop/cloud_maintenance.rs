@@ -64,12 +64,7 @@ impl EventLoop {
                     self.flush_actor.is_inflight()
                 }
                 MaintenanceTask::Compaction => {
-                    if self.shutting_down
-                        || self
-                            .state
-                            .ingest_active
-                            .load(std::sync::atomic::Ordering::Acquire)
-                    {
+                    if self.shutting_down {
                         false
                     } else {
                         match self

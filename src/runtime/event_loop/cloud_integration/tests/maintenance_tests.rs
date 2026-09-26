@@ -149,7 +149,7 @@ fn should_keep_compact_all_pending_while_fair_turns_service_other_work(
         Ok(RuntimeResponse::Ok { request_id: 91_001 })
     ));
     assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
-    assert!(el.state.pending_compaction_waits.lock().is_empty());
+    assert!(el.state.pending_compaction_waits.is_empty());
     Ok(())
 }
 
@@ -175,86 +175,7 @@ fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn
             ..
         })
     ));
-    assert!(el.state.pending_compaction_waits.lock().is_empty());
-    Ok(())
-}
-
-#[test]
-fn should_abort_manual_obligation_when_ingest_interrupts_successful_worker_completion(
-) -> crate::common::MidgeResult<()> {
-    // Arrange: the result is ready before the ingest epoch changes, so the
-    // successful worker cannot observe the later cancellation itself.
-    let (mut el, worker, _) = cloud_debt(1)?;
-    let manual = el.router.register(91_003, "CompactAll");
-    CompactionCoordinator::compact_all(&mut el, 91_003);
-    let completion = worker
-        .recv_timeout(Duration::from_secs(3))
-        .expect("successful worker result before ingest");
-    assert!(matches!(
-        &completion,
-        RuntimeMsg::CompactionComplete {
-            succeeded: true,
-            ..
-        }
-    ));
-    let ingest = el.router.register(91_004, "BeginIngest");
-
-    // Act
-    el.handle_begin_ingest(91_004);
-    assert!(
-        ingest.try_recv().is_err(),
-        "the active worker must drain first"
-    );
-    let (_tx, rx) = crossbeam::channel::unbounded();
-    el.handle_runtime_msg(completion, &rx);
-
-    // Assert
-    assert!(matches!(
-        ingest.try_recv(),
-        Ok(RuntimeResponse::Ok { request_id: 91_004 })
-    ));
-    assert!(matches!(
-        manual.try_recv(),
-        Ok(RuntimeResponse::Error {
-            error: crate::common::MidgeError::Aborted(_),
-            ..
-        })
-    ));
-    assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    assert!(el.state.pending_compaction_waits.lock().is_empty());
-    assert!(el.state.manifest.files.iter().any(|file| file.level == 0));
-    assert!(worker.try_recv().is_err());
-    Ok(())
-}
-
-#[test]
-fn should_abort_queued_manual_obligation_when_ingest_precedes_its_first_worker(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let (mut el, _, _) = cloud_debt(1)?;
-    queue_generation_for_maintenance_test(&mut el, 82)?;
-    let manual = el.router.register(91_005, "CompactAll");
-    CompactionCoordinator::compact_all(&mut el, 91_005);
-    assert!(el.flush_actor.is_inflight());
-    let ingest = el.router.register(91_006, "BeginIngest");
-
-    // Act
-    el.handle_begin_ingest(91_006);
-
-    // Assert
-    assert!(matches!(
-        ingest.try_recv(),
-        Ok(RuntimeResponse::Ok { request_id: 91_006 })
-    ));
-    assert!(matches!(
-        manual.try_recv(),
-        Ok(RuntimeResponse::Error {
-            error: crate::common::MidgeError::Aborted(_),
-            ..
-        })
-    ));
-    assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    assert!(el.state.pending_compaction_waits.lock().is_empty());
+    assert!(el.state.pending_compaction_waits.is_empty());
     Ok(())
 }
 

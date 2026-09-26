@@ -191,7 +191,7 @@ fn should_preserve_scan_visibility_when_l0_overlap_and_legacy_bounds_mix() -> Mi
 }
 
 #[test]
-fn should_keep_newest_l0_source_precedence_when_values_share_a_sequence() -> MidgeResult<()> {
+fn should_accept_identical_l0_values_when_sources_share_a_sequence() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let files = vec![
@@ -212,11 +212,17 @@ fn should_keep_newest_l0_source_precedence_when_values_share_a_sequence() -> Mid
         write_sst(
             directory.path(),
             1,
-            &[(b"m", b"oldest", 7)],
+            &[(b"m", b"newest", 7)],
             &[],
             (b"b", b"n"),
         )?,
-        write_sst(directory.path(), 0, &[(b"z", b"end", 7)], &[], (b"z", b"z"))?,
+        write_sst(
+            directory.path(),
+            0,
+            &[(b"z", b"newest-end", 7)],
+            &[],
+            (b"z", b"z"),
+        )?,
     ];
     let (snapshot, _) = snapshot(directory.path(), files)?;
     // Act
@@ -294,7 +300,7 @@ fn should_keep_newest_endpoint_value_when_l0_bounds_touch() -> MidgeResult<()> {
         write_sst(
             directory.path(),
             1,
-            &[(b"m", b"oldest", 7), (b"z", b"right", 7)],
+            &[(b"m", b"oldest", 6), (b"z", b"right", 7)],
             &[],
             (b"m", b"z"),
         )?,

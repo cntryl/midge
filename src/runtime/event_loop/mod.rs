@@ -29,7 +29,6 @@ mod fencing;
 mod flush;
 mod flush_pipeline;
 mod gc;
-mod ingest;
 mod manifest;
 mod read_path;
 mod resources;
@@ -822,7 +821,7 @@ impl EventLoop {
         manual: bool,
     ) -> crate::common::MidgeResult<bool> {
         // Disabling ordinary background work must not permanently wedge L0
-        // admission. Use the same authority, ingest, and worker gates for
+        // admission. Use the same authority and worker gates for
         // pressure recovery at startup, after flush, and during live maintenance.
         let background_enabled = self.state.compaction_enabled();
         if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
@@ -840,30 +839,6 @@ impl EventLoop {
                 operation,
                 "Observed timed-out snapshots before compaction check; retaining pins"
             );
-        }
-
-        if self
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            let epoch = self
-                .state
-                .ingest_epoch
-                .load(std::sync::atomic::Ordering::SeqCst);
-            tracing::error!(
-                component = "compaction",
-                invariant = "no_compaction_during_ingest",
-                ingest_epoch = epoch,
-                operation,
-                "BUG: compaction scheduling attempted while ingest mode is active. \
-                 Violated invariant: compaction must not be scheduled during ingest. \
-                 Correct ordering: complete all compactions BEFORE begin_ingest."
-            );
-            return Err(crate::common::MidgeError::Internal(
-                "BUG: compaction scheduling attempted during ingest mode — violated invariant"
-                    .to_string(),
-            ));
         }
 
         let planned = if background_enabled && !manual {
@@ -919,17 +894,11 @@ impl EventLoop {
                 tracing::warn!(%error, "SST key-bound backfill maintenance failed; retaining conservative read fallback");
             }
         }
-        if !self
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
-                Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "Background compaction maintenance check failed");
-                }
+        match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
+            Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "Background compaction maintenance check failed");
             }
         }
         self.prune_cloud_wal_segments_covered_by_manifest();
@@ -1029,7 +998,7 @@ impl EventLoop {
             return Ok(());
         };
         if !self.state.manifest_has_file(sst_name) {
-            self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            self.manifest_actor.add_sst(&mut self.state, &file_meta)?;
             self.invalidate_sst_read_views();
         }
         self.state.transition_flush_publication_intent(

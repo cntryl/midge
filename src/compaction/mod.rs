@@ -177,12 +177,9 @@ mod tests {
         ] {
             let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096)
                 .with_compression_policy(CompressionPolicy::Fixed(algo));
-            assert_eq!(
-                factory
-                    .open(Path::new("legacy.sst"))?
-                    .get(b"legacy")?
-                    .as_deref(),
-                Some(value.as_slice())
+            assert!(
+                matches!(factory.open(Path::new("legacy.sst"))?.get_state(b"legacy")?,
+                crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
             );
             let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
             plan.compaction_memory_limit = 1024 * 1024 * 1024;
@@ -193,7 +190,8 @@ mod tests {
 
             // Assert
             let reader = factory.open(Path::new(&outputs[0]))?;
-            assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
+            assert!(matches!(reader.get_state(b"legacy")?,
+                crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice()));
             assert!(matches!(
                 reader.get_state(b"legacy")?,
                 crate::types::KeyState::Value(_, 7, Some(u64::MAX), _)
@@ -1236,96 +1234,120 @@ mod tests {
         Ok(())
     }
 
+    struct RejectFinishBytesWriter {
+        inner: Box<dyn crate::sst::traits::DynSstWriter>,
+    }
+
+    impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
+        fn estimated_size_bytes(&self) -> usize {
+            self.inner.estimated_size_bytes()
+        }
+
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            self.inner.encoded_size_upper_bound()
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Option<usize> {
+            self.inner
+                .encoded_size_upper_bound_after_sorted_entry(key, value)
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            start: &[u8],
+            end: &[u8],
+        ) -> Option<usize> {
+            self.inner
+                .additional_range_tombstone_size_upper_bound(start, end)
+        }
+
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_sorted_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
+            self.inner.add_range_tombstone(start, end, seq)
+        }
+
+        fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+            self.inner.finish_to_path(path)
+        }
+
+        fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+            Err(MidgeError::Internal(
+                "finish_bytes must not be used by compaction".to_string(),
+            ))
+        }
+    }
+
+    struct RejectFinishBytesFactory {
+        inner: crate::sst::FsSstFactoryIo,
+    }
+
+    impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
+        fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+            self.inner.output_fs()
+        }
+
+        fn compaction_scratch_cleanup_verified(&self) -> bool {
+            self.inner.compaction_scratch_cleanup_verified()
+        }
+
+        fn create_for_compaction(
+            &self,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(RejectFinishBytesWriter {
+                inner: self.inner.create_for_compaction(budget)?,
+            }))
+        }
+
+        fn open_for_compaction(
+            &self,
+            path: &Path,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.inner.open_for_compaction(path, budget)
+        }
+
+        fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(RejectFinishBytesWriter {
+                inner: self.inner.create()?,
+            }))
+        }
+
+        fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.inner.open(path)
+        }
+    }
+
     #[test]
     fn should_stream_compaction_finalization_when_finish_bytes_is_rejected() -> MidgeResult<()> {
         // Arrange
-        struct RejectFinishBytesWriter {
-            inner: Box<dyn crate::sst::traits::DynSstWriter>,
-        }
-
-        impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
-            fn encoded_size_upper_bound(&self) -> Option<usize> {
-                self.inner.encoded_size_upper_bound()
-            }
-
-            fn encoded_size_upper_bound_after_sorted_entry(
-                &self,
-                key: &[u8],
-                value: Option<&[u8]>,
-            ) -> Option<usize> {
-                self.inner
-                    .encoded_size_upper_bound_after_sorted_entry(key, value)
-            }
-
-            fn additional_range_tombstone_size_upper_bound(
-                &self,
-                start: &[u8],
-                end: &[u8],
-            ) -> Option<usize> {
-                self.inner
-                    .additional_range_tombstone_size_upper_bound(start, end)
-            }
-
-            fn add_with_meta(
-                &mut self,
-                key: &[u8],
-                value: Option<&[u8]>,
-                seq: u64,
-                op_type: EntryType,
-                expiration: Option<u64>,
-            ) -> MidgeResult<()> {
-                self.inner
-                    .add_with_meta(key, value, seq, op_type, expiration)
-            }
-
-            fn add_sorted_with_meta(
-                &mut self,
-                key: &[u8],
-                value: Option<&[u8]>,
-                seq: u64,
-                op_type: EntryType,
-                expiration: Option<u64>,
-            ) -> MidgeResult<()> {
-                self.inner
-                    .add_sorted_with_meta(key, value, seq, op_type, expiration)
-            }
-
-            fn add_range_tombstone(
-                &mut self,
-                start: &[u8],
-                end: &[u8],
-                seq: u64,
-            ) -> MidgeResult<()> {
-                self.inner.add_range_tombstone(start, end, seq)
-            }
-
-            fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-                self.inner.finish_to_path(path)
-            }
-
-            fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-                Err(MidgeError::Internal(
-                    "finish_bytes must not be used by compaction".to_string(),
-                ))
-            }
-        }
-
-        struct RejectFinishBytesFactory {
-            inner: crate::sst::FsSstFactoryIo,
-        }
-
-        impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
-            fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-                Ok(Box::new(RejectFinishBytesWriter {
-                    inner: self.inner.create()?,
-                }))
-            }
-
-            fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
-                self.inner.open(path)
-            }
-        }
-
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
@@ -1344,7 +1366,9 @@ mod tests {
         // Assert
         assert_eq!(outputs.len(), 1);
         let reader = factory.open(Path::new(&outputs[0]))?;
-        assert_eq!(reader.get(b"key")?.as_deref(), Some(b"value".as_slice()));
+        assert!(
+            matches!(reader.get_state(b"key")?, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"value")
+        );
         Ok(())
     }
 
@@ -1733,6 +1757,22 @@ mod tests {
         }
 
         impl crate::sst::traits::SstFactory for CountingFactory {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
+            fn open_for_compaction(
+                &self,
+                path: &Path,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open_for_compaction(path, budget)
+            }
+
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 Ok(Box::new(CountingWriter {
                     inner: self.inner.create()?,
@@ -1933,6 +1973,14 @@ mod tests {
         }
 
         impl crate::sst::SstFactory for TransitionFactory<'_> {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 self.inner.create()
             }

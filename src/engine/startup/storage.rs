@@ -596,18 +596,7 @@ impl RuntimeRecoveryMaterialization {
             // Retain the local bytes unless the remote publication proof holds.
             let validation = RuntimeState::validate_sst_fs_proof(
                 Arc::clone(fs),
-                &crate::runtime::FileMeta {
-                    name: meta.name.clone(),
-                    level: meta.level,
-                    size_bytes: meta.size_bytes,
-                    content_crc32c: meta.content_crc32c,
-                    cf_id: meta.cf_id,
-                    smallest_key: meta.smallest_key.clone(),
-                    largest_key: meta.largest_key.clone(),
-                    smallest_seq: meta.smallest_seq,
-                    largest_seq: meta.largest_seq,
-                    key_bounds_complete: meta.key_bounds_complete,
-                },
+                &crate::runtime::FileMeta::from(meta),
             );
             if let Err(error) = validation {
                 if materialized.state.recovery_policy() == RecoveryPolicy::Salvage

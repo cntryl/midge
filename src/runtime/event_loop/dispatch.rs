@@ -481,9 +481,6 @@ impl RuntimeDispatcher {
             TestRuntimeMsg::Noop { .. }
             | TestRuntimeMsg::StartupPing { .. }
             | TestRuntimeMsg::GetRuntimeConfig { .. }
-            | TestRuntimeMsg::GetIngestState { .. }
-            | TestRuntimeMsg::BeginIngest { .. }
-            | TestRuntimeMsg::EndIngest { .. }
             | TestRuntimeMsg::GetCurrentSequence { .. }
             | TestRuntimeMsg::WalRotate { .. }
             | TestRuntimeMsg::CheckCompaction { .. }
@@ -521,13 +518,6 @@ impl RuntimeDispatcher {
             TestRuntimeMsg::GetRuntimeConfig { request_id } => {
                 event_loop.handle_get_runtime_config(request_id);
             }
-            TestRuntimeMsg::GetIngestState { request_id } => {
-                event_loop.handle_get_ingest_state(request_id);
-            }
-            TestRuntimeMsg::BeginIngest { request_id } => {
-                event_loop.handle_begin_ingest(request_id);
-            }
-            TestRuntimeMsg::EndIngest { request_id } => event_loop.handle_end_ingest(request_id),
             TestRuntimeMsg::GetCurrentSequence { request_id } => {
                 event_loop.handle_get_current_sequence(request_id);
             }
@@ -641,7 +631,7 @@ impl RuntimeDispatcher {
             TestRuntimeMsg::ManifestAddSst {
                 request_id,
                 file_meta,
-            } => ManifestCoordinator::add_sst(event_loop, request_id, file_meta),
+            } => ManifestCoordinator::add_sst(event_loop, request_id, &file_meta),
             TestRuntimeMsg::ManifestCompactionComplete {
                 request_id,
                 removed,

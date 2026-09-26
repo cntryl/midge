@@ -459,10 +459,7 @@ fn validate_sst_object_bytes(
     temp.flush()
         .map_err(|error| format!("flush temp SST verifier for '{sst_name}': {error}"))?;
 
-    let reader = crate::sst::fs::SstFileIo::open_with_real_fs(temp.path())
-        .map_err(|error| format!("cloud SST '{sst_name}' failed validation: {error}"))?;
-    let summary = reader
-        .summary()
+    let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs(temp.path())
         .map_err(|error| format!("cloud SST '{sst_name}' summary validation: {error}"))?;
     if let Some(expected_file) = expected_file {
         verify_sst_summary_matches_manifest(sst_name, &summary, expected_file)?;
@@ -834,7 +831,15 @@ impl ExactCoverageState {
                 self.state = Some(state);
                 self.ambiguous = false;
             }
-            std::cmp::Ordering::Equal if current != &state => self.ambiguous = true,
+            std::cmp::Ordering::Equal
+                if crate::types::resolve_same_sequence(
+                    crate::types::VersionContent::from_state(current).expect("present state"),
+                    crate::types::VersionContent::from_state(&state).expect("present state"),
+                )
+                .is_err() =>
+            {
+                self.ambiguous = true;
+            }
             std::cmp::Ordering::Equal | std::cmp::Ordering::Less => {}
         }
     }
@@ -898,13 +903,38 @@ impl ExactCoverageState {
                 *sequence > record.seq
                     || *sequence == record.seq
                         && matches!(record.op.role(), WalOpRole::ValueWrite)
-                        && record.value.as_deref() == Some(value.as_ref())
-                        && record.expiration == *expiration
                         && op_type.is_value_write()
+                        && crate::types::resolve_same_sequence(
+                            crate::types::VersionContent {
+                                is_tombstone: false,
+                                value: Some(value.as_ref()),
+                                expiration: *expiration,
+                            },
+                            crate::types::VersionContent {
+                                is_tombstone: false,
+                                value: record.value.as_deref(),
+                                expiration: record.expiration,
+                            },
+                        )
+                        .is_ok()
             }
             Some(KeyState::Tombstone(sequence)) => {
                 *sequence > record.seq
-                    || *sequence == record.seq && matches!(record.op.role(), WalOpRole::PointDelete)
+                    || *sequence == record.seq
+                        && matches!(record.op.role(), WalOpRole::PointDelete)
+                        && crate::types::resolve_same_sequence(
+                            crate::types::VersionContent {
+                                is_tombstone: true,
+                                value: None,
+                                expiration: None,
+                            },
+                            crate::types::VersionContent {
+                                is_tombstone: true,
+                                value: record.value.as_deref(),
+                                expiration: record.expiration,
+                            },
+                        )
+                        .is_ok()
             }
             Some(KeyState::Absent) | None => false,
         }

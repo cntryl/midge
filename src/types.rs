@@ -96,6 +96,45 @@ pub enum KeyState {
     Value(Bytes, u64, Option<u64>, EntryType),
 }
 
+/// Persisted content at one sequence, independent of its source. Put and
+/// Insert have the same logical value identity; TTL metadata is part of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VersionContent<'a> {
+    pub(crate) is_tombstone: bool,
+    pub(crate) value: Option<&'a [u8]>,
+    pub(crate) expiration: Option<u64>,
+}
+
+impl<'a> VersionContent<'a> {
+    pub(crate) fn from_state(state: &'a KeyState) -> Option<Self> {
+        match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(_) => Some(Self {
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }),
+            KeyState::Value(value, _, expiration, _) => Some(Self {
+                is_tombstone: false,
+                value: Some(value.as_ref()),
+                expiration: *expiration,
+            }),
+        }
+    }
+}
+
+/// Identical copies are valid; differing content at one sequence is corrupt.
+pub(crate) fn resolve_same_sequence(
+    existing: VersionContent<'_>,
+    candidate: VersionContent<'_>,
+) -> Result<(), ()> {
+    if existing == candidate {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 impl fmt::Display for KeyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
