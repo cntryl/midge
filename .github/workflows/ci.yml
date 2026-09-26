@@ -94,5 +94,10 @@ jobs:
       - name: Test cloud SST salvage on Windows
         run: cargo test --lib salvage_removes_definitively_lost_ssts --all-features
 
+      - name: Test consistent-cut backup and restore on Windows
+        run: |
+          cargo test --lib engine::backup::tests --all-features
+          cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
