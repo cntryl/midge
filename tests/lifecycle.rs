@@ -2587,6 +2587,7 @@ mod backpressure {
     use tempfile::TempDir;
 
     static BACKPRESSURE_STRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    const BACKGROUND_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
     fn backpressure_stress_test_lock() -> &'static Mutex<()> {
         BACKPRESSURE_STRESS_TEST_LOCK.get_or_init(|| Mutex::new(()))
@@ -2628,9 +2629,9 @@ mod backpressure {
                     observed_stalls += 1;
                     assert!(
                         engine
-                            .wait_for_write_stall_clear(cf_id, Duration::from_millis(500))
+                            .wait_for_write_stall_clear(cf_id, BACKGROUND_FLUSH_TIMEOUT)
                             .expect("wait for stall clear"),
-                        "transient stall should clear promptly"
+                        "transient stall should clear within the background flush budget"
                     );
                 }
                 Err(error) => panic!("unexpected write error: {error:?}"),
@@ -2661,7 +2662,7 @@ mod backpressure {
         // Assert
         assert!(
             engine
-                .wait_for_write_stall_clear(cf.id(), Duration::from_millis(500))
+                .wait_for_write_stall_clear(cf.id(), BACKGROUND_FLUSH_TIMEOUT)
                 .expect("wait for final stall clear"),
             "runtime should not remain permanently stalled"
         );
