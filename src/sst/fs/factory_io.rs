@@ -486,6 +486,12 @@ impl DynSstWriter for FsSstWriter {
 }
 
 impl SstFactory for FsSstFactoryIo {
+    fn output_fs(&self) -> Arc<dyn Fs> {
+        self.fs
+            .local_output_view()
+            .unwrap_or_else(|| Arc::clone(&self.fs))
+    }
+
     fn compaction_scratch_cleanup_verified(&self) -> bool {
         self.scratch_outstanding
             .load(std::sync::atomic::Ordering::Acquire)

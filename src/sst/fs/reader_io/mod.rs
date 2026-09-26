@@ -768,29 +768,12 @@ impl SstFileIo {
         Self::open(path, fs)?.into_streaming_summary()
     }
 
-    #[cfg(test)]
     pub(crate) fn summarize_with_fs_for_compaction(
         path: &str,
         fs: Arc<dyn Fs>,
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<SstFileSummary> {
         Self::open_for_compaction(path, fs, budget)?.into_streaming_summary()
-    }
-
-    /// Stream a summary while charging reader metadata and decoded blocks to
-    /// the compaction publication budget.
-    pub(crate) fn summarize_with_real_fs_for_compaction(
-        path: &std::path::Path,
-        budget: crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<SstFileSummary> {
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fs = Arc::new(crate::io::RealFs::new(parent)?);
-        let path_str = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-            .to_string();
-        Self::open_for_compaction(&path_str, fs, budget)?.into_streaming_summary()
     }
 
     /// Enable block bloom filter for this reader

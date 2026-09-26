@@ -19,8 +19,26 @@ pub use factory_io::FsSstFactoryIo;
 pub use reader_io::{SstFileIo, SstFileSummary};
 
 /// Compute immutable SST length and CRC with fixed stack space.
+#[cfg(test)]
 pub(crate) fn file_identity(path: &Path) -> MidgeResult<(u64, u32)> {
     let identity = crate::sst::identity::SstIdentity::of_path(path)?;
+    Ok((identity.size_bytes, identity.crc32c))
+}
+
+/// Compute an SST identity through the same filesystem that published it.
+pub(crate) fn file_identity_with_fs(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult<(u64, u32)> {
+    let path = fs_relative_sst_path(fs, path)?;
+    let size = fs.metadata(&path)?.len;
+    let file = fs.open(
+        &path,
+        crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    )?;
+    let identity = crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)?;
     Ok((identity.size_bytes, identity.crc32c))
 }
 

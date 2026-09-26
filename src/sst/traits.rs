@@ -347,6 +347,9 @@ pub trait DynSstWriter: Send {
 
 /// Factory trait for creating SST writers and readers
 pub trait SstFactory: Send + Sync {
+    /// Filesystem that owns SST outputs and their metadata, identity and cleanup.
+    fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs>;
+
     /// Whether every temporary file created by compaction writers has been
     /// explicitly removed. Unknown cleanup retains ephemeral disk admission.
     fn compaction_scratch_cleanup_verified(&self) -> bool;

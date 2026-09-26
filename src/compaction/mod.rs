@@ -1317,6 +1317,10 @@ mod tests {
         }
 
         impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
             fn compaction_scratch_cleanup_verified(&self) -> bool {
                 self.inner.compaction_scratch_cleanup_verified()
             }
@@ -1758,6 +1762,10 @@ mod tests {
         }
 
         impl crate::sst::traits::SstFactory for CountingFactory {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
             fn compaction_scratch_cleanup_verified(&self) -> bool {
                 self.inner.compaction_scratch_cleanup_verified()
             }
@@ -1970,6 +1978,10 @@ mod tests {
         }
 
         impl crate::sst::SstFactory for TransitionFactory<'_> {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
             fn compaction_scratch_cleanup_verified(&self) -> bool {
                 self.inner.compaction_scratch_cleanup_verified()
             }

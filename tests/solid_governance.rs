@@ -121,3 +121,22 @@ fn should_keep_dead_sst_and_skiplist_interfaces_out_of_production() {
         assert!(skiplist[..position].ends_with("#[cfg(test)]\n    "));
     }
 }
+
+#[test]
+fn should_route_compaction_output_checks_through_injected_fs() {
+    // Arrange
+    let executor = include_str!("../src/compaction/executor.rs");
+    let actor = include_str!("../src/runtime/actors/compaction.rs");
+    let flush = include_str!("../src/runtime/actors/flush/build.rs");
+    let reader = include_str!("../src/sst/fs/reader_io/mod.rs");
+
+    // Act / Assert
+    let output_code = executor.split("#[cfg(test)]\nmod tests").next().unwrap();
+    assert!(!output_code.contains("std::fs::metadata("));
+    assert!(!output_code.contains("std::fs::remove_file("));
+    assert!(!actor.contains("std::fs::remove_file("));
+    assert!(!actor.contains("std::fs::read_dir("));
+    assert!(!flush.contains("std::fs::create_dir_all("));
+    assert!(!flush.contains("file_identity(&task.staging_path)"));
+    assert!(!reader.contains("summarize_with_real_fs_for_compaction"));
+}

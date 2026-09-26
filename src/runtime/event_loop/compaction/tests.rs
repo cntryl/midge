@@ -8,6 +8,10 @@ const STAGING_BYTES: u64 = 500;
 struct UnknownScratchFactory;
 
 impl crate::sst::SstFactory for UnknownScratchFactory {
+    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+        Arc::new(crate::io::MockFs::new())
+    }
+
     fn compaction_scratch_cleanup_verified(&self) -> bool {
         false
     }

@@ -41,8 +41,10 @@ pub(super) fn write(
                 .into(),
         ));
     }
-    if let Some(parent) = task.staging_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let fs = factory.output_fs();
+    let staging_path = crate::sst::fs::fs_relative_sst_path(&fs, &task.staging_path)?;
+    if let Some(parent) = std::path::Path::new(&staging_path.0).parent() {
+        fs.create_dir_all(&crate::io::FsPath::new(parent.to_string_lossy()))?;
     }
     // Streaming scratch and final output can coexist. Admission must precede
     // creation of the writer, which can write scratch on its first full block.
@@ -78,7 +80,7 @@ pub(super) fn write(
     };
     let (largest_key, _last_charge) = bounds.last.expect("first key implies last key");
     crate::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
-    let (size_bytes, checksum) = crate::sst::fs::file_identity(&task.staging_path)?;
+    let (size_bytes, checksum) = crate::sst::fs::file_identity_with_fs(&fs, &task.staging_path)?;
     Ok(crate::runtime::FileMeta {
         name: String::new(),
         level: 0,

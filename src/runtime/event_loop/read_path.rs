@@ -336,6 +336,10 @@ mod tests {
     struct TestFactory;
 
     impl crate::sst::traits::SstFactory for TestFactory {
+        fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+            std::sync::Arc::new(crate::io::MockFs::new())
+        }
+
         fn compaction_scratch_cleanup_verified(&self) -> bool {
             false
         }

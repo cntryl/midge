@@ -496,13 +496,15 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
 }
 
 struct OutputSetCleanup {
+    fs: std::sync::Arc<dyn crate::io::Fs>,
     paths: Vec<std::path::PathBuf>,
     armed: bool,
 }
 
 impl OutputSetCleanup {
-    fn new() -> Self {
+    fn new(fs: std::sync::Arc<dyn crate::io::Fs>) -> Self {
         Self {
+            fs,
             paths: Vec::new(),
             armed: true,
         }
@@ -523,9 +525,11 @@ impl Drop for OutputSetCleanup {
             return;
         }
         for path in &self.paths {
-            match std::fs::remove_file(path) {
+            let result = crate::sst::fs::fs_relative_sst_path(&self.fs, path)
+                .and_then(|fs_path| self.fs.remove_file(&fs_path).map_err(Into::into));
+            match result {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(crate::common::MidgeError::NotFound) => {}
                 Err(error) => tracing::warn!(
                     file = %path.display(),
                     %error,
@@ -582,6 +586,7 @@ fn finish_partition(
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
     output_size_limit: Option<usize>,
+    output_fs: &std::sync::Arc<dyn crate::io::Fs>,
 ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
     ensure_compaction_not_aborted(abort_check)?;
     let tombstone_count = add_partition_range_tombstones(
@@ -604,10 +609,18 @@ fn finish_partition(
     );
     let path = output_dir.join(&name);
     writer.finish_to_path(&path)?;
-    if output_size_limit.is_some_and(|limit| {
-        std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > limit as u64)
-    }) {
-        std::fs::remove_file(&path)?;
+    let fs_path = crate::sst::fs::fs_relative_sst_path(output_fs, &path)?;
+    let size = match output_fs.metadata(&fs_path) {
+        Ok(metadata) => metadata.len,
+        Err(error) => {
+            if let Err(cleanup_error) = output_fs.remove_file(&fs_path) {
+                tracing::warn!(file = %path.display(), %cleanup_error, "retaining unverified compaction output");
+            }
+            return Err(error.into());
+        }
+    };
+    if output_size_limit.is_some_and(|limit| size > limit as u64) {
+        output_fs.remove_file(&fs_path)?;
         return Err(crate::common::MidgeError::ResourceLimit(
             "encoded compaction partition exceeds its local staging limit".into(),
         ));
@@ -1267,6 +1280,7 @@ impl<'a> PartitionRoller<'a> {
             .take()
             .expect("partition roller always owns a writer before finalization");
         let retained = tombstones.partition_tombstones().collect::<Vec<_>>();
+        let output_fs = self.sst_factory.output_fs();
         finish_partition(
             writer,
             self.partition_point_count,
@@ -1277,6 +1291,7 @@ impl<'a> PartitionRoller<'a> {
             self.output_dir,
             abort_check,
             self.output_size_limit,
+            &output_fs,
         )
     }
 
@@ -1369,7 +1384,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
         output_size_limit,
     )?;
     let mut output_names = Vec::new();
-    let mut cleanup = OutputSetCleanup::new();
+    let mut cleanup = OutputSetCleanup::new(sst_factory.output_fs());
     let mut tombstones = RangeTombstoneTracker::new();
 
     let mut merged = EventMergeIterator::new(cursors, budget.clone())?;
@@ -1508,6 +1523,149 @@ fn normalize_range_tombstones(mut tombstones: Vec<RangeTombstone>) -> Vec<RangeT
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MetadataFailFs {
+        inner: crate::io::MockFs,
+    }
+
+    impl crate::io::Fs for MetadataFailFs {
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            opts: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            self.inner.open(path, opts)
+        }
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+        fn metadata(
+            &self,
+            _path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            Err(crate::io::FsError::Io(
+                "injected output metadata failure".into(),
+            ))
+        }
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
+        }
+        fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(
+            &self,
+            path: &crate::io::FsPath,
+            durability: crate::io::Durability,
+        ) -> crate::io::FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+        fn rename_atomic(
+            &self,
+            from: &crate::io::FsPath,
+            to: &crate::io::FsPath,
+        ) -> crate::io::FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_fail_partition_when_output_metadata_cannot_be_read() -> MidgeResult<()> {
+        // Arrange
+        let mock = crate::io::MockFs::new();
+        let factory = crate::sst::FsSstFactoryIo::new(
+            std::sync::Arc::new(MetadataFailFs {
+                inner: mock.clone(),
+            }),
+            4096,
+        );
+        let mut writer = factory.create()?;
+        writer.add_with_meta(
+            b"key",
+            Some(b"value"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        let fs = factory.output_fs();
+
+        // Act
+        let result = finish_partition(
+            writer,
+            1,
+            &[],
+            None,
+            None,
+            PartitionIdentity {
+                cf_id: 0,
+                target_level: 1,
+                generation: 1,
+                ordinal: 0,
+            },
+            std::path::Path::new("output"),
+            None,
+            Some(usize::MAX),
+            &fs,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Io(_))));
+        let name = crate::cloud_layout::compaction_file_name(0, 1, 1, 0);
+        assert!(mock.get_file(&format!("output/{name}")).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> MidgeResult<()>
+    {
+        // Arrange
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let factory = crate::sst::FsSstFactoryIo::new(mock.clone(), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(
+            b"key",
+            Some(b"value"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        writer.finish_to_path(std::path::Path::new("input.sst"))?;
+        let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(2);
+        plan.add_test_source("input.sst");
+        let sink = |_name: &str,
+                    _path: &std::path::Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget| {
+            Err(crate::common::MidgeError::Aborted(
+                "injected after first output".into(),
+            ))
+        };
+
+        // Act
+        let result = crate::compaction::execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            std::path::Path::new("output"),
+            None,
+            Some(&sink),
+            None,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Aborted(_))));
+        assert!(mock.get_file("input.sst").is_some());
+        let output = crate::cloud_layout::compaction_file_name(0, 1, 2, 0);
+        assert!(mock.get_file(&format!("output/{output}")).is_none());
+        Ok(())
+    }
 
     #[test]
     fn should_initialize_merge_with_one_raw_version_per_input() {

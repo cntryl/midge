@@ -6,6 +6,38 @@ use crate::sst::SstStateReader;
 use crate::types::EntryType;
 
 #[test]
+fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<()> {
+    // Arrange
+    let mock = Arc::new(crate::io::MockFs::new());
+    let factory = crate::sst::FsSstFactoryIo::new(mock.clone(), 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
+    let name = "mock-summary.sst";
+    let path = std::path::Path::new(name);
+    writer.finish_to_path(path)?;
+
+    // Act
+    let prepared = stage_local_output_partition(
+        &factory.output_fs(),
+        0,
+        1,
+        name,
+        path,
+        &ResourceBudget::new(1024 * 1024),
+    )?;
+
+    // Assert
+    assert_eq!(prepared.metadata.name, name);
+    assert_eq!(prepared.metadata.largest_seq, Some(7));
+    assert_eq!(
+        prepared.metadata.size_bytes as usize,
+        mock.get_file(name).unwrap().len()
+    );
+    assert!(prepared.metadata.content_crc32c.is_some());
+    Ok(())
+}
+
+#[test]
 fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted() -> MidgeResult<()>
 {
     // Arrange
@@ -44,8 +76,16 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let name = "000000_01_00000000000000000002.sst";
 
     // Act
-    let result =
-        record_staged_output_partition(Some(&hybrid), &prepared, 0, 1, name, &path, &budget);
+    let result = record_staged_output_partition(
+        Some(&hybrid),
+        &factory.output_fs(),
+        &prepared,
+        0,
+        1,
+        name,
+        &path,
+        &budget,
+    );
 
     // Assert
     assert!(
@@ -133,6 +173,7 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
     // Act
     let result = record_staged_output_partition(
         Some(&hybrid),
+        &factory.output_fs(),
         &prepared,
         0,
         1,
@@ -337,7 +378,16 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
     let name = "000000_01_00000000000000000002.sst";
 
     // Act
-    record_staged_output_partition(None, &prepared, 0, 1, name, &path, &budget)?;
+    record_staged_output_partition(
+        None,
+        &factory.output_fs(),
+        &prepared,
+        0,
+        1,
+        name,
+        &path,
+        &budget,
+    )?;
 
     // Assert: the worker, not the event loop, paid for the re-read and CRC.
     let output = prepared
