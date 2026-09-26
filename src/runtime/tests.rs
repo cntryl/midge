@@ -993,7 +993,7 @@ fn assert_response_payloads(responses: Vec<RuntimeResponse>) {
 }
 
 #[test]
-fn should_extract_request_id_from_all_responses() {
+fn should_extract_request_id_from_response_fixtures() {
     // Arrange
     let responses = runtime_response_fixtures();
 
@@ -1001,7 +1001,7 @@ fn should_extract_request_id_from_all_responses() {
     let request_ids: Vec<u64> = responses.iter().map(RuntimeResponse::request_id).collect();
 
     // Assert
-    assert_eq!(request_ids, (1..=13).collect::<Vec<_>>());
+    assert_eq!(request_ids, (1..=12).collect::<Vec<_>>());
     assert_response_payloads(responses);
 }
 

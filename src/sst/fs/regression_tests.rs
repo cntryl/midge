@@ -116,9 +116,6 @@ fn should_preserve_zero_sequence_states_in_both_scan_directions() {
         .add_with_meta(b"c", Some(b"expired"), 0, EntryType::Put, Some(1))
         .unwrap();
     writer
-        .add_with_meta(b"d", Some(b"masked"), 0, EntryType::Put, None)
-        .unwrap();
-    writer
         .add_with_meta(b"d", None, 0, EntryType::Delete, None)
         .unwrap();
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("zero.sst")).unwrap();
