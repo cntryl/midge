@@ -278,33 +278,6 @@ mod tests {
 
     struct FakeReader;
 
-    impl crate::sst::traits::SstReader for FakeReader {
-        fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
-            if key == b"a" {
-                Ok(Some(bytes::Bytes::copy_from_slice(b"va")))
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn scan_range(
-            &self,
-            start: Option<&[u8]>,
-            end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-            let s = start.unwrap_or(&[]);
-            let e = end.unwrap_or(&[255u8]);
-            if s <= &b"a"[..] && &b"a"[..] < e {
-                Ok(vec![(
-                    bytes::Bytes::copy_from_slice(b"a"),
-                    bytes::Bytes::copy_from_slice(b"va"),
-                )])
-            } else {
-                Ok(Vec::new())
-            }
-        }
-    }
-
     impl crate::sst::traits::SstStateReader for FakeReader {
         crate::sst::traits::test_reader_required_methods!();
 
@@ -494,12 +467,12 @@ mod tests {
         // Arrange
         let (_tmp, el, sst_path) = create_event_loop_with_test_sst()?;
         let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
-        let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
+        let sst_pairs = reader.scan_range_state(Some(b"a"), Some(b"b"))?;
         // Act
         // Assert
         assert!(sst_pairs
             .iter()
-            .any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
+            .any(|(k, state)| k.as_ref() == b"a" && matches!(state, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"va")));
 
         let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
 

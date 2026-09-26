@@ -330,6 +330,11 @@ impl DynSstWriter for FsSstWriter {
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         Self::writable_entry_type(op_type)?;
+        if value.is_none() && op_type != EntryType::Delete {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "SST value writes require a value, including an empty value".into(),
+            ));
+        }
         if !self.preserve_legacy_entries {
             crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         }
@@ -358,6 +363,11 @@ impl DynSstWriter for FsSstWriter {
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         Self::writable_entry_type(op_type)?;
+        if value.is_none() && op_type != EntryType::Delete {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "SST value writes require a value, including an empty value".into(),
+            ));
+        }
         if !self.preserve_legacy_entries {
             crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         }

@@ -9,10 +9,9 @@ use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
-use crate::sst::bloom::{BlockBloomFilter, BloomMetrics};
+use crate::sst::bloom::BlockBloomFilter;
 use crate::sst::cache::BlockCache;
 use crate::sst::index::tuner::IndexKind;
-use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::trie::TrieReader;
 use crate::sst::types::{BlockHandle, Footer, SstEntry, SST_FORMAT_V4};
 use crate::types::{EntryType, KeyState, RangeTombstone};
@@ -53,8 +52,6 @@ pub struct SstFileIo {
     block_region_end: u64,
     sst_id: u64,
     block_bloom_filter: Option<BlockBloomFilter>,
-    bloom_metrics: BloomMetrics,
-    read_amp_metrics: ReadAmpMetrics,
     trie_reader: Option<Arc<TrieReader>>,
     block_cache: Option<Arc<BlockCache>>,
     /// Where read-path activity is reported. Standalone readers count into a
@@ -669,8 +666,6 @@ impl SstFileIo {
             // attachment requires a generation-scoped identity explicitly.
             sst_id: 0,
             block_bloom_filter: None,
-            bloom_metrics: BloomMetrics::new(),
-            read_amp_metrics: ReadAmpMetrics::new(),
             trie_reader: None,
             block_cache: None,
             diagnostics: Arc::new(
@@ -849,42 +844,6 @@ impl SstFileIo {
         )
     }
 
-    /// Get reference to bloom metrics for this reader
-    pub fn bloom_metrics(&self) -> &BloomMetrics {
-        &self.bloom_metrics
-    }
-
-    /// Get reference to read amplification metrics for this reader
-    pub fn read_amp_metrics(&self) -> &ReadAmpMetrics {
-        &self.read_amp_metrics
-    }
-
-    /// Derive key-range and sequence metadata from the actual SST contents.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be scanned or has no publishable entries.
-    pub fn summary(&self) -> MidgeResult<SstFileSummary> {
-        use crate::sst::traits::SstStateReader;
-
-        let size_bytes = self.fs.metadata(&self.path)?.len;
-        let mut accumulator = SstSummaryProgress::default();
-        for (key, state) in self.scan_range_state(None, None)? {
-            let sequence = match state {
-                KeyState::Value(_, sequence, _, _) | KeyState::Tombstone(sequence) => sequence,
-                KeyState::Absent => continue,
-            };
-            accumulator.observe(size_bytes, &key, sequence, None)?;
-        }
-        for range in &self.range_tombstones {
-            accumulator.observe(size_bytes, &range.start, range.seq, None)?;
-            accumulator.observe(size_bytes, &range.end, range.seq, None)?;
-        }
-        accumulator
-            .summary
-            .ok_or_else(|| MidgeError::Corruption("SST contains no publishable entries".into()))
-    }
-
     fn into_streaming_summary(self) -> MidgeResult<SstFileSummary> {
         use crate::sst::traits::SstStateReader;
 
@@ -905,10 +864,6 @@ impl SstFileIo {
             .summary
             .ok_or_else(|| MidgeError::Corruption("SST contains no publishable entries".into()))
     }
-
-    /// Readahead window size: read up to this many blocks in a single IO operation
-    /// for cold-cache range scans. Tuned for typical SSD latency/throughput tradeoffs.
-    pub(super) const READAHEAD_WINDOW_BLOCKS: usize = 32;
 }
 
 #[cfg(test)]

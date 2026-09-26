@@ -39,28 +39,6 @@ impl Iterator for MaterializedRawVersionCursor {
     }
 }
 
-/// Reader contract for SST implementations
-pub trait SstReader: Send + Sync {
-    /// Get the value for a specific key, if present
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be read or decoded.
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>>;
-
-    /// Scan a key range [start, end) where either bound may be None
-    /// Returns list of (key, value) pairs
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be scanned or decoded.
-    fn scan_range(
-        &self,
-        start: Option<&[u8]>,
-        end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, Bytes)>>;
-}
-
 /// Stateful reader contract exposing tombstones and metadata
 pub trait SstStateReader: Send + Sync {
     /// Get presence state (value/tombstone/absent) for a specific key
@@ -276,9 +254,9 @@ pub(crate) fn test_state_at_time(state: KeyState, now_millis: u64) -> KeyState {
 }
 
 /// Combined reader contract used by the SST factory.
-pub trait SstReaderExt: SstReader + SstStateReader {}
+pub trait SstReaderExt: SstStateReader {}
 
-impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
+impl<T> SstReaderExt for T where T: SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
@@ -434,7 +412,7 @@ mod tests {
         }
     }
 
-    impl SstReader for MockSstReader {
+    impl MockSstReader {
         fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
             Ok(self.data.get(key).map(|v| Bytes::copy_from_slice(v)))
         }
@@ -627,11 +605,11 @@ mod tests {
         let reader_ref: &dyn SstReaderExt = &reader;
 
         // Act
-        let result = reader_ref.get(b"any_key");
+        let result = reader_ref.get_state(b"any_key");
 
         // Assert
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(matches!(result.unwrap(), KeyState::Absent));
     }
 
     #[test]
@@ -642,15 +620,16 @@ mod tests {
         let reader_ref: &dyn SstReaderExt = &reader;
 
         // Act
-        let result = reader_ref.get(b"key1");
+        let result = reader_ref.get_state(b"key1");
 
         // Assert
         assert!(result.is_ok());
-        let value = result.expect("get failed").expect("key not found");
-        assert_eq!(value, Bytes::from("value1"));
+        assert!(
+            matches!(result.expect("get failed"), KeyState::Value(value, _, _, _) if value == Bytes::from("value1"))
+        );
     }
 
-    // =========== SstReader Trait Behavior Tests ===========
+    // =========== Mock reader behavior tests ===========
 
     #[test]
     fn should_get_return_present_key() {

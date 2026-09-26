@@ -124,6 +124,7 @@ impl SkipListMemtable {
     ///
     /// Returns every version in sorted key order and newest-first sequence
     /// order per key so flush/compaction paths can preserve metadata exactly.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn iter_all_with_meta(&self) -> Vec<MemtableEntryWithMeta> {
         self.skiplist
             .drain_with_meta_with_exp()
@@ -143,6 +144,7 @@ impl SkipListMemtable {
     /// Iterate over all entries in the memtable.
     /// Returns (key, value, sequence) tuples in sorted order.
     #[must_use]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn iter_all(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>, u64)> {
         self.iter_all_with_meta()
             .into_iter()

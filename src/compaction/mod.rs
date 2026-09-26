@@ -177,12 +177,9 @@ mod tests {
         ] {
             let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096)
                 .with_compression_policy(CompressionPolicy::Fixed(algo));
-            assert_eq!(
-                factory
-                    .open(Path::new("legacy.sst"))?
-                    .get(b"legacy")?
-                    .as_deref(),
-                Some(value.as_slice())
+            assert!(
+                matches!(factory.open(Path::new("legacy.sst"))?.get_state(b"legacy")?,
+                crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
             );
             let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
             plan.compaction_memory_limit = 1024 * 1024 * 1024;
@@ -193,7 +190,8 @@ mod tests {
 
             // Assert
             let reader = factory.open(Path::new(&outputs[0]))?;
-            assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
+            assert!(matches!(reader.get_state(b"legacy")?,
+                crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice()));
             assert!(matches!(
                 reader.get_state(b"legacy")?,
                 crate::types::KeyState::Value(_, 7, Some(u64::MAX), _)
@@ -1369,7 +1367,9 @@ mod tests {
         // Assert
         assert_eq!(outputs.len(), 1);
         let reader = factory.open(Path::new(&outputs[0]))?;
-        assert_eq!(reader.get(b"key")?.as_deref(), Some(b"value".as_slice()));
+        assert!(
+            matches!(reader.get_state(b"key")?, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"value")
+        );
         Ok(())
     }
 

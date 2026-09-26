@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
-use crate::sst::SstReader;
+use crate::sst::SstStateReader;
 use crate::types::EntryType;
 
 #[test]
@@ -226,7 +226,12 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             let reader = crate::sst::fs::SstFileIo::open_with_real_fs(
                 &cloud_path.join(crate::cloud_layout::object_key(&name)),
             )?;
-            actual.extend(reader.scan_range(None, None)?);
+            actual.extend(reader.scan_range_state(None, None)?.into_iter().filter_map(
+                |(key, state)| match state {
+                    crate::types::KeyState::Value(value, _, _, _) => Some((key, value)),
+                    crate::types::KeyState::Absent | crate::types::KeyState::Tombstone(_) => None,
+                },
+            ));
             let proof = prepared
                 .lock()
                 .get(&name)

@@ -2,7 +2,7 @@ use super::*;
 use crate::codec::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
-use crate::sst::traits::{SstFactory, SstReader, SstStateReader};
+use crate::sst::traits::{SstFactory, SstStateReader};
 use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -272,16 +272,18 @@ fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeRe
     write_single_value_sst(&temp_dir, "replaced.sst", b"old")?;
     let first = SstFileIo::open("replaced.sst", Arc::clone(&shared_fs))?
         .with_block_cache(Arc::clone(&cache), 100);
-    assert_eq!(first.get(b"key")?.as_deref(), Some(b"old".as_slice()));
+    assert!(
+        matches!(first.get_state(b"key")?, KeyState::Value(value, _, _, _) if value.as_ref() == b"old")
+    );
 
     write_single_value_sst(&temp_dir, "replaced.sst", b"new")?;
     let replacement = SstFileIo::open("replaced.sst", shared_fs)?.with_block_cache(cache, 101);
 
     // Act
-    let value = replacement.get(b"key")?;
+    let value = replacement.get_state(b"key")?;
 
     // Assert
-    assert_eq!(value.as_deref(), Some(b"new".as_slice()));
+    assert!(matches!(value, KeyState::Value(value, _, _, _) if value.as_ref() == b"new"));
     Ok(())
 }
 
@@ -342,9 +344,8 @@ fn should_finish_scan_from_original_handle_when_sst_path_is_replaced_mid_scan() 
     assert!(remaining.iter().all(|(_, state)| {
         matches!(state, KeyState::Value(value, ..) if value.as_ref() == old_value.as_slice())
     }));
-    assert_eq!(
-        replacement.get(b"key_0001")?.as_deref(),
-        Some(new_value.as_slice())
+    assert!(
+        matches!(replacement.get_state(b"key_0001")?, KeyState::Value(value, _, _, _) if value.as_ref() == new_value.as_slice())
     );
     Ok(())
 }
@@ -762,7 +763,7 @@ fn should_skip_range_scan_when_requested_keys_are_outside_persisted_bounds() -> 
     counting_fs.clear_reads();
 
     // Act
-    let rows = reader.scan_range(Some(b"zzz"), Some(b"zzzz"))?;
+    let rows = reader.scan_range_state(Some(b"zzz"), Some(b"zzzz"))?;
 
     // Assert
     assert!(rows.is_empty());
@@ -1025,17 +1026,27 @@ fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeRes
     let deleted_dead = reader.get_state_at(b"dead", u64::MAX)?;
     let expired = reader.get_state_at(b"ttl", u64::MAX)?;
     let current_expired = reader.get_state(b"ttl")?;
-    let direct_expired = reader.get(b"ttl")?;
-    let direct_rows = reader.scan_range(None, None)?;
+    let direct_expired = reader.get_state(b"ttl")?;
+    let direct_rows = Arc::new(reader)
+        .state_scan(
+            None,
+            None,
+            false,
+            u64::MAX,
+            crate::common::time::unix_time_millis(),
+        )
+        .collect::<MidgeResult<Vec<_>>>()?;
 
     // Assert
     assert!(matches!(old_dead, KeyState::Value(_, 4, _, _)));
     assert_eq!(deleted_dead, KeyState::Tombstone(9));
     assert_eq!(expired, KeyState::Tombstone(11));
     assert_eq!(current_expired, KeyState::Tombstone(11));
-    assert_eq!(direct_expired, None);
+    assert_eq!(direct_expired, KeyState::Tombstone(11));
     assert!(
-        direct_rows.is_empty(),
+        direct_rows
+            .iter()
+            .all(|(_, state)| matches!(state, KeyState::Tombstone(_))),
         "expired and deleted states must mask scans"
     );
     Ok(())
@@ -1137,10 +1148,10 @@ fn should_report_corruption_given_shipping_codec_payload_when_reading_through_fu
 
         // Act
         let point_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
-            .get(b"codec-key")
+            .get_state(b"codec-key")
             .expect_err("point read must surface compressed payload corruption");
         let scan_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
-            .scan_range(None, None)
+            .scan_range_state(None, None)
             .expect_err("range read must surface compressed payload corruption");
         let verify_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
             .verify_all_blocks()
@@ -1175,24 +1186,6 @@ fn should_reject_oversized_block_handle_before_issuing_filesystem_read() -> Midg
         counting_fs.reads().is_empty(),
         "corrupt handles must be rejected before a pre-read allocation is requested"
     );
-    Ok(())
-}
-
-#[test]
-fn should_reject_out_of_order_readahead_handles_without_panicking() -> MidgeResult<()> {
-    // Arrange
-    let temp_dir = tempfile::tempdir()?;
-    write_unique_key_sst(&temp_dir, "reversed-handles.sst")?;
-    let (_counting_fs, reader) = open_counting_reader(&temp_dir, "reversed-handles.sst")?;
-    let index = reader.index_entries()?;
-    assert!(index.len() >= 2);
-    let handles = [index[1].1, index[0].1];
-
-    // Act
-    let result = reader.read_blocks_contiguous(&handles);
-
-    // Assert
-    assert!(matches!(result, Err(MidgeError::Corruption(_))));
     Ok(())
 }
 
@@ -1248,8 +1241,7 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
 }
 
 #[test]
-fn should_match_summary_bounds_across_materialized_streaming_and_resumable_reads() -> MidgeResult<()>
-{
+fn should_match_summary_bounds_across_streaming_and_resumable_reads() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path())?);
@@ -1263,7 +1255,6 @@ fn should_match_summary_bounds_across_materialized_streaming_and_resumable_reads
     let mut progress = super::SstSummaryProgress::default();
 
     // Act
-    let materialized = SstFileIo::open("summary-parity.sst", Arc::clone(&fs))?.summary()?;
     let streaming = SstFileIo::summarize_with_fs("summary-parity.sst", Arc::clone(&fs))?;
     let resumable = SstFileIo::summarize_with_fs_progress(
         "summary-parity.sst",
@@ -1274,7 +1265,6 @@ fn should_match_summary_bounds_across_materialized_streaming_and_resumable_reads
     )?;
 
     // Assert
-    assert_eq!(materialized, streaming);
     assert_eq!(&streaming, resumable);
     assert_eq!(streaming.smallest_key, b"alpha");
     assert_eq!(streaming.largest_key, b"zulu");

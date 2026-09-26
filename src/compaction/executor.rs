@@ -1639,24 +1639,10 @@ mod tests {
 
     #[test]
     fn should_collect_tombstones_given_stateful_reader_input() {
-        use crate::sst::traits::{SstReader, SstStateReader};
+        use crate::sst::traits::SstStateReader;
 
         // Arrange
         struct FakeReader;
-
-        impl SstReader for FakeReader {
-            fn get(&self, _key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
-                Ok(None)
-            }
-
-            fn scan_range(
-                &self,
-                _start: Option<&[u8]>,
-                _end: Option<&[u8]>,
-            ) -> MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-                Ok(Vec::new())
-            }
-        }
 
         impl SstStateReader for FakeReader {
             crate::sst::traits::test_reader_required_methods!();

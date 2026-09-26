@@ -127,13 +127,10 @@ impl SstFileIo {
     /// Check block bloom filter with proper metrics and failure-safe semantics
     pub(super) fn check_block_bloom(&self, block_idx: usize, key: &[u8]) -> bool {
         if let Some(ref block_bloom) = self.block_bloom_filter {
-            self.bloom_metrics.record_check();
             self.diagnostics.sst_metrics().record_bloom_check();
 
             match block_bloom.might_contain_in_block(block_idx, key) {
                 BloomTestResult::DefinitelyNotPresent => {
-                    self.bloom_metrics.record_negative();
-                    self.bloom_metrics.record_block_skipped();
                     self.diagnostics.sst_metrics().record_bloom_reject();
                     false
                 }

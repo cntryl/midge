@@ -18,9 +18,11 @@ fn should_read_default_sequence_after_writer_add() {
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("probe.sst")).unwrap();
     // Act
     let reader = factory.open(Path::new("probe.sst")).unwrap();
-    let result = reader.get(b"key").unwrap();
+    let result = reader.get_state(b"key").unwrap();
     // Assert
-    assert_eq!(result.as_deref(), Some(b"value".as_slice()));
+    assert!(
+        matches!(result, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"value")
+    );
 }
 
 #[test]
@@ -42,11 +44,13 @@ fn should_read_empty_key_when_trie_has_deep_leftmost_branch() {
     }
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("probe.sst")).unwrap();
     let reader = factory.open(Path::new("probe.sst")).unwrap();
-    assert_eq!(reader.scan_range(None, None).unwrap().len(), 301);
+    assert_eq!(reader.scan_range_state(None, None).unwrap().len(), 301);
     // Act
-    let result = reader.get(b"").unwrap();
+    let result = reader.get_state(b"").unwrap();
     // Assert
-    assert_eq!(result.as_deref().map(<[u8]>::len), Some(value.len()));
+    assert!(
+        matches!(result, crate::types::KeyState::Value(actual, _, _, _) if actual.len() == value.len())
+    );
 }
 
 #[test]
@@ -189,9 +193,8 @@ fn should_roundtrip_maximum_decoded_entry_when_writing_sorted_or_unsorted() {
         crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("max.sst")).unwrap();
         let reader = factory.open(Path::new("max.sst")).unwrap();
         // Assert
-        assert_eq!(
-            reader.get(b"key").unwrap().as_deref(),
-            Some(value.as_slice())
+        assert!(
+            matches!(reader.get_state(b"key").unwrap(), crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
         );
     }
 }
@@ -225,7 +228,9 @@ fn should_read_back_sst_when_keys_share_prefix_longer_than_trie_can_encode() {
     written.expect("an SST of accepted keys must always be writable");
     let reader = factory.open(Path::new("long.sst")).unwrap();
     for key in [&keys[0], &keys[99], &keys[199]] {
-        assert_eq!(reader.get(key).unwrap().as_deref(), Some(b"v".as_slice()));
+        assert!(
+            matches!(reader.get_state(key).unwrap(), crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"v")
+        );
     }
 }
 

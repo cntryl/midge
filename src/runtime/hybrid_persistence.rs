@@ -459,10 +459,7 @@ fn validate_sst_object_bytes(
     temp.flush()
         .map_err(|error| format!("flush temp SST verifier for '{sst_name}': {error}"))?;
 
-    let reader = crate::sst::fs::SstFileIo::open_with_real_fs(temp.path())
-        .map_err(|error| format!("cloud SST '{sst_name}' failed validation: {error}"))?;
-    let summary = reader
-        .summary()
+    let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs(temp.path())
         .map_err(|error| format!("cloud SST '{sst_name}' summary validation: {error}"))?;
     if let Some(expected_file) = expected_file {
         verify_sst_summary_matches_manifest(sst_name, &summary, expected_file)?;

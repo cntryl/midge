@@ -96,5 +96,28 @@ fn should_decode_sst_frames_and_prefix_keys_in_one_reader_path() {
     assert!(io.contains("fn read_framed_block"));
     assert!(reader.contains("struct BlockEntryDecoder"));
     assert!(!state.contains("encoding::decode_with_format("));
-    assert!(scan.matches("self.block_span(").count() >= 3);
+    assert!(scan.matches("self.block_span(").count() >= 2);
+}
+
+#[test]
+fn should_keep_dead_sst_and_skiplist_interfaces_out_of_production() {
+    // Arrange
+    let types = include_str!("../src/sst/types.rs");
+    let traits = include_str!("../src/sst/traits.rs");
+    let reader = include_str!("../src/sst/fs/reader_io/mod.rs");
+    let skiplist = include_str!("../src/memtable/skiplist.rs");
+
+    // Act / Assert
+    assert!(!types.contains("enum SstBlockType"));
+    assert!(!traits.contains("pub trait SstReader: "));
+    assert!(!reader.contains("    bloom_metrics: BloomMetrics"));
+    assert!(!reader.contains("    read_amp_metrics: ReadAmpMetrics"));
+    for signature in [
+        "pub fn get(&self, key: &[u8], snapshot_seq: u64)",
+        "pub fn get_all_keys(&self)",
+        "pub fn tombstones_range_visible(",
+    ] {
+        let position = skiplist.find(signature).expect("test reader remains gated");
+        assert!(skiplist[..position].ends_with("#[cfg(test)]\n    "));
+    }
 }
