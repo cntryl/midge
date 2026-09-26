@@ -473,8 +473,7 @@ fn validate_backup(artifact: &Path) -> MidgeResult<BackupManifest> {
     collect_inventory_objects(&objects_root, &objects_root, &mut actual)?;
     let mut declared = BTreeSet::new();
     for object in &manifest.objects {
-        let relative = Path::new(&object.path);
-        validate_relative_path(relative)?;
+        let relative = validate_inventory_path(&object.path)?;
         if !declared.insert(object.path.clone()) {
             return Err(MidgeError::Corruption(format!(
                 "duplicate backup object '{}'",
@@ -519,8 +518,7 @@ fn copy_verified_objects(
     manifest: &BackupManifest,
 ) -> MidgeResult<()> {
     for object in &manifest.objects {
-        let relative = Path::new(&object.path);
-        validate_relative_path(relative)?;
+        let relative = validate_inventory_path(&object.path)?;
         let source = artifact.join("objects").join(relative);
         let destination = staging.join(relative);
         if let Some(parent) = destination.parent() {
@@ -599,9 +597,10 @@ fn collect_inventory_objects(
 }
 
 fn validate_relative_path(path: &Path) -> MidgeResult<()> {
+    let path_text = path.to_string_lossy();
     if path.as_os_str().is_empty()
-        || path.to_string_lossy().contains('\\')
-        || path.to_string_lossy().contains(':')
+        || path_text.contains(':')
+        || (std::path::MAIN_SEPARATOR != '\\' && path_text.contains('\\'))
         || path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
@@ -612,6 +611,17 @@ fn validate_relative_path(path: &Path) -> MidgeResult<()> {
         )));
     }
     Ok(())
+}
+
+fn validate_inventory_path(path: &str) -> MidgeResult<&Path> {
+    if path.contains('\\') {
+        return Err(MidgeError::Corruption(format!(
+            "unsafe backup object path '{path}'"
+        )));
+    }
+    let relative = Path::new(path);
+    validate_relative_path(relative)?;
+    Ok(relative)
 }
 
 fn path_to_inventory(path: &Path) -> MidgeResult<String> {
@@ -651,6 +661,47 @@ fn sync_directory(path: &Path) -> MidgeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_encode_native_nested_backup_path_with_portable_separators() {
+        // Arrange
+        let native_path = Path::new("wal").join("segment.wal");
+
+        // Act
+        let inventory_path = path_to_inventory(&native_path).expect("native backup path");
+
+        // Assert
+        assert_eq!(inventory_path, "wal/segment.wal");
+    }
+
+    #[test]
+    fn should_pin_nested_wal_file_using_native_path_separators() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let wal = source.join("wal").join("segment.wal");
+        fs::create_dir_all(wal.parent().expect("WAL directory")).expect("create WAL directory");
+        fs::write(&wal, b"sealed WAL").expect("seed WAL");
+
+        // Act
+        let pinned = pin_durable_files(&source, false, directory.path()).expect("pin WAL");
+
+        // Assert
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].relative, Path::new("wal").join("segment.wal"));
+    }
+
+    #[test]
+    fn should_reject_backslash_in_serialized_backup_inventory_path() {
+        // Arrange
+        let path = "wal\\segment.wal";
+
+        // Act
+        let result = validate_inventory_path(path);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    }
 
     #[test]
     fn should_preserve_captured_journal_when_live_journal_is_truncated() {
