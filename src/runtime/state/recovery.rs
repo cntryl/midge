@@ -119,6 +119,7 @@ impl RuntimeState {
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
                 .max(wal_recovery.recovered_sequence);
+        let diagnostics = Self::diagnostics_for_recovered_wal(&wal_recovery);
 
         let mut state = Self {
             db_path,
@@ -150,7 +151,7 @@ impl RuntimeState {
                 max_snapshot_lifetime: std::time::Duration::from_hours(1), // 1 hour default
             },
             snapshot_pins: Arc::new(SnapshotPinRegistry::default()),
-            diagnostics: Arc::new(RuntimeDiagnostics::default()),
+            diagnostics,
             recent_delete_ranges: Vec::new(),
             memtable_size_limit: 64 * 1024 * 1024, // 64MB
             mode: RuntimeMode {
@@ -192,6 +193,14 @@ impl RuntimeState {
         };
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)
+    }
+
+    fn diagnostics_for_recovered_wal(wal_recovery: &WalRecoveryState) -> Arc<RuntimeDiagnostics> {
+        let diagnostics = Arc::new(RuntimeDiagnostics::default());
+        diagnostics.record(|metrics| {
+            metrics.record_wal_recovery(wal_recovery.records_replayed, wal_recovery.bytes_replayed);
+        });
+        diagnostics
     }
 
     fn recovered_memtable_bytes(wal_recovery: &WalRecoveryState) -> usize {
@@ -646,9 +655,6 @@ impl RuntimeState {
         replay_dir: &std::path::Path,
         stats: &crate::wal::recovery::RecoveryStats,
     ) {
-        crate::telemetry::CounterSink::default().record(|m| {
-            m.record_wal_recovery(stats.record_count, stats.bytes);
-        });
         tracing::info!(
             records_recovered = stats.record_count,
             bytes_recovered = stats.bytes,

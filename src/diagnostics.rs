@@ -62,13 +62,16 @@ impl crate::sst::read_path_metrics::SstReadObserver for RuntimeDiagnostics {
     }
 
     fn record_block_cache_lookup(&self, hit: bool) {
-        self.record(|metrics| {
+        // The per-engine read-path counters already counted this lookup. Only
+        // the optional process-wide exporter needs a second observation.
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            let metrics = telemetry.metrics();
             if hit {
                 metrics.record_cache_hit();
             } else {
                 metrics.record_cache_miss();
             }
-        });
+        }
     }
 }
 

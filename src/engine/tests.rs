@@ -2,6 +2,31 @@ use super::*;
 use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
+#[test]
+fn should_report_wal_recovery_counters_in_engine_diagnostics_after_replay() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
+    {
+        let mut engine = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+        let cf = engine
+            .get_column_family("default")
+            .expect("default column family");
+        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        tx.put(b"replayed-key".to_vec(), b"replayed-value".to_vec(), None)?;
+        tx.commit(WriteOptions::buffered())?;
+        engine.shutdown(Duration::from_secs(5))?;
+    }
+
+    // Act
+    let mut reopened = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+    let counters = reopened.runtime_handle.diagnostics.counters();
+
+    // Assert
+    assert!(counters.wal_recovery_records_replayed > 0);
+    assert!(counters.wal_recovery_bytes_replayed > 0);
+    reopened.shutdown(Duration::from_secs(5))
+}
+
 #[derive(Default)]
 struct BlockingReleaseState {
     started: bool,
