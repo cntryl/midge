@@ -259,12 +259,13 @@ impl StorageBackend for CloudStorage {
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        self.submit_write_with_headers_and_timeout(
+        self.write_admitted(
             key,
             data,
             Vec::new(),
             self.callback_timeout,
-            callback,
+            None,
+            &callback,
         );
     }
 
@@ -275,24 +276,7 @@ impl StorageBackend for CloudStorage {
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
-        self.submit_write_with_headers_and_timeout(
-            key,
-            data,
-            headers,
-            self.callback_timeout,
-            callback,
-        );
-    }
-
-    fn submit_write_with_headers_and_timeout(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.write_admitted(key, data, headers, timeout, None, &callback);
+        self.write_admitted(key, data, headers, self.callback_timeout, None, &callback);
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {

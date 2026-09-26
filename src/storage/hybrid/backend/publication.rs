@@ -132,7 +132,6 @@ impl HybridStorage {
             deadline,
         )?;
         let upload = data.to_vec();
-        let headers = vec![("If-None-Match".into(), "*".into())];
         let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(
             key,
@@ -140,9 +139,12 @@ impl HybridStorage {
             self.callback_timeout,
             deadline,
         )?;
-        self.stores
-            .sst
-            .submit_write_with_headers_and_timeout(key, upload, headers, timeout, tx);
+        self.stores.sst.submit_write_request(
+            crate::storage::StorageRequest::new(key, *deadline, timeout)
+                .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
+            upload,
+            tx,
+        );
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
                 MidgeError::Timeout("cloud immutable upload callback timed out".to_string())
@@ -217,7 +219,6 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        let headers = vec![("If-None-Match".into(), "*".into())];
         let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(
             key,
@@ -227,7 +228,12 @@ impl HybridStorage {
         )?;
         self.local_store_if_active()
             .expect("local fixture backend active")
-            .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
+            .submit_write_request(
+                crate::storage::StorageRequest::new(key, *deadline, timeout)
+                    .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
+                data,
+                tx,
+            );
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
                 MidgeError::Timeout("local immutable cache write callback timed out".to_string())

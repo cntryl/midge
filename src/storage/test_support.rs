@@ -31,13 +31,9 @@ pub(crate) fn forward_typed_write_to_legacy<B: super::StorageBackend + ?Sized>(
     };
     if let Some(reservation) = request.reservation {
         match super::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => backend.submit_write_with_headers_and_timeout(
-                &request.key,
-                data,
-                headers,
-                timeout,
-                retained,
-            ),
+            Ok(retained) => {
+                backend.submit_write_with_headers(&request.key, data, headers, retained);
+            }
             Err(error) => {
                 let _ = callback.send(super::StorageEvent::WriteComplete {
                     key: request.key,
@@ -49,13 +45,7 @@ pub(crate) fn forward_typed_write_to_legacy<B: super::StorageBackend + ?Sized>(
             }
         }
     } else {
-        backend.submit_write_with_headers_and_timeout(
-            &request.key,
-            data,
-            headers,
-            timeout,
-            callback,
-        );
+        backend.submit_write_with_headers(&request.key, data, headers, callback);
     }
 }
 
@@ -246,13 +236,6 @@ macro_rules! forward_storage_backend {
         fn submit_write_with_headers(&self, key: &str, data: Vec<u8>,
             headers: Vec<(String, String)>, callback: $crate::storage::StorageCallback) {
             self.$inner.submit_write_with_headers(key, data, headers, callback);
-        }
-    };
-    (@method $inner:ident, submit_write_with_headers_and_timeout) => {
-        fn submit_write_with_headers_and_timeout(&self, key: &str, data: Vec<u8>,
-            headers: Vec<(String, String)>, timeout: std::time::Duration,
-            callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_write_with_headers_and_timeout(key, data, headers, timeout, callback);
         }
     };
     (@method $inner:ident, submit_delete) => {

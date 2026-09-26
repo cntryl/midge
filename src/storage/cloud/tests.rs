@@ -390,12 +390,15 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
     let (head_sender, head_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_write_with_headers_and_timeout(
+    StorageBackend::submit_write_request(
         &storage,
-        "metadata/manifest.json",
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
         b"manifest".to_vec(),
-        vec![("If-None-Match".to_string(), "*".to_string())],
-        std::time::Duration::ZERO,
         write_sender,
     );
     StorageBackend::submit_head_request(
@@ -790,12 +793,15 @@ fn should_apply_operation_timeout_to_cloud_cas_adapter_when_shorter_than_configu
 
     // Act
     let started = std::time::Instant::now();
-    StorageBackend::submit_write_with_headers_and_timeout(
+    StorageBackend::submit_write_request(
         &storage,
-        "metadata/manifest.json",
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(5),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
         b"manifest".to_vec(),
-        vec![("If-None-Match".to_string(), "*".to_string())],
-        std::time::Duration::from_millis(5),
         sender,
     );
     let event = receiver.recv().expect("receive bounded adapter result");
@@ -1567,12 +1573,21 @@ fn should_bound_provider_put_by_caller_timeout_when_write_is_unreserved() {
     let (sender, receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_write_with_headers_and_timeout(
+    StorageBackend::submit_write_request(
         &storage,
-        "metadata/registry.json",
+        crate::storage::StorageRequest::new(
+            "metadata/registry.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(200),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+            crate::storage::StorageObjectMetadata {
+                size: 0,
+                etag: "\"e1\"".to_string(),
+                generation: None,
+            },
+        )),
         b"payload".to_vec(),
-        vec![("If-Match".to_string(), "\"e1\"".to_string())],
-        std::time::Duration::from_millis(200),
         sender,
     );
 

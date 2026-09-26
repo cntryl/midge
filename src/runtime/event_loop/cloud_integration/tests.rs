@@ -1197,30 +1197,6 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         );
     }
 
-    fn submit_write_with_headers_and_timeout(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
-            self.registry_cas_timeouts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(timeout);
-            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "remote request timed out before mutation",
-                )),
-            });
-            return;
-        }
-        self.submit_write_with_headers(key, data, headers, callback);
-    }
-
     crate::storage::forward_storage_backend!(
     inner;
     submit_delete,
@@ -1332,57 +1308,6 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
             return;
         }
         self.inner.submit_write_request(request, data, callback);
-    }
-
-    fn submit_write_with_headers_and_timeout(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
-            && self.delay_first_registry_cas.swap(false, Ordering::SeqCst)
-        {
-            let inner = Arc::clone(&self.inner);
-            let key_for_worker = key.to_string();
-            let commit_complete = Arc::clone(&self.commit_complete);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                let (tx, rx) = std::sync::mpsc::channel();
-                crate::storage::StorageBackend::submit_write_with_headers(
-                    inner.as_ref(),
-                    &key_for_worker,
-                    data,
-                    headers,
-                    tx,
-                );
-                let committed = matches!(
-                    rx.recv_timeout(Duration::from_secs(1)),
-                    Ok(crate::storage::StorageEvent::WriteComplete {
-                        result: crate::storage::StorageOutcome::Ok(()),
-                        ..
-                    })
-                );
-                commit_complete.store(committed, Ordering::SeqCst);
-            });
-            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    format!("remote request timed out after submission (budget {timeout:?})"),
-                )),
-            });
-            return;
-        }
-        crate::storage::StorageBackend::submit_write_with_headers_and_timeout(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            timeout,
-            callback,
-        );
     }
 
     crate::storage::forward_storage_backend!(

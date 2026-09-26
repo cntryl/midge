@@ -748,18 +748,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         panic!("test backend received undeclared conditional-write capability");
     }
 
-    /// Submit a conditional write with a bounded callback-adapter wait.
-    fn submit_write_with_headers_and_timeout(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        _timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.submit_write_with_headers(key, data, headers, callback);
-    }
-
     /// Submit a delete operation. Returns immediately.
     fn submit_delete(&self, key: &str, callback: StorageCallback);
 
