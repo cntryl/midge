@@ -1084,27 +1084,22 @@ impl CloudBackend for S3Backend {
         if conditional_mutation {
             request = request.with_conditional_conflict_retries();
         }
-        // Apply provided headers (e.g. conditional headers like If-None-Match)
-        for (name, value) in headers {
-            if name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER) {
-                match value.parse::<u64>() {
-                    Ok(milliseconds) => {
-                        request =
-                            request.with_timeout(std::time::Duration::from_millis(milliseconds));
-                    }
-                    Err(error) => {
-                        let _ = callback.send(CloudEvent::Put {
-                            key,
-                            result: CloudOutcome::Err(CloudError::Protocol(format!(
-                                "invalid internal request timeout: {error}"
-                            ))),
-                        });
-                        return;
-                    }
-                }
-            } else {
-                request = request.with_header(name, value);
+        let (headers, timeout) = match crate::storage::cloud::split_request_timeout_header(headers)
+        {
+            Ok(parts) => parts,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::Put {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol(error)),
+                });
+                return;
             }
+        };
+        if let Some(timeout) = timeout {
+            request = request.with_timeout(timeout);
+        }
+        for (name, value) in headers {
+            request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::Put {
