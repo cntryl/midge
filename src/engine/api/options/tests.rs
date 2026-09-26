@@ -21,6 +21,22 @@ fn should_reserve_read_capacity_when_automatic_memtables_reach_small_memory_budg
 }
 
 #[test]
+fn should_apply_storage_io_timeout_to_local_open_options() {
+    // Arrange
+    let timeout = std::time::Duration::from_secs(7);
+
+    // Act
+    let options = OpenOptions::local("unused-local-timeout-path")
+        .storage_io_timeout(timeout)
+        .build()
+        .expect("local options");
+
+    // Assert
+    assert_eq!(options.storage_io_timeout(), timeout);
+    assert!(options.runtime_response_timeout() > timeout);
+}
+
+#[test]
 fn should_preserve_automatic_memtable_capacity_when_storage_is_in_memory() {
     // Arrange
     let budget = 8 * 1024 * 1024;

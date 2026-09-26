@@ -6,6 +6,22 @@
 pub(crate) mod size_bound;
 pub(crate) mod skiplist;
 
+/// Validated memory allocations used by the memtable and transaction writer.
+#[derive(Debug, Clone)]
+pub(crate) struct MemtableConfig {
+    pub(crate) size_limit: usize,
+    pub(crate) flush_threshold: usize,
+    pub(crate) transaction_pool_size: usize,
+}
+
+/// Caller overrides are kept separate from derived allocations until build.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MemtableConfigInput {
+    pub(crate) size_limit: Option<usize>,
+    pub(crate) flush_threshold: Option<usize>,
+    pub(crate) transaction_pool_size: Option<usize>,
+}
+
 /// Raw skiplist access for this crate's benchmark harnesses only.
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]

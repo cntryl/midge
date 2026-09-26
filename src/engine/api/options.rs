@@ -29,15 +29,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Clone)]
-pub(crate) struct LeaseLossHook(pub(crate) std::sync::Arc<dyn Fn() + Send + Sync>);
-
-impl std::fmt::Debug for LeaseLossHook {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("LeaseLossHook(..)")
-    }
-}
-
 use crate::codec::{CompressionAlgo, CompressionPolicy};
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
@@ -46,6 +37,8 @@ use crate::config::{
     S3CredentialSource,
 };
 pub use crate::config::{RecoveryPolicy, Storage};
+use crate::lease::{LeaseConfig, LeaseLossHook, LeaseStorageKind};
+use crate::memtable::{MemtableConfig, MemtableConfigInput};
 pub use crate::sst::cache::BlockCachePolicy;
 use crate::sst::cache::{CachePolicyConfig, CachePolicyType};
 pub use crate::storage::cloud::CloudWritePolicy;
@@ -132,6 +125,12 @@ pub enum WorkloadProfile {
     TtlHeavy,
 }
 
+#[derive(Debug, Clone)]
+struct IoTimeouts<T> {
+    storage: Duration,
+    runtime_response: T,
+}
+
 /// Immutable, validated database open options.
 ///
 /// Values of this type can only be produced by [`OpenOptionsBuilder::build`].
@@ -151,17 +150,13 @@ pub struct OpenOptions {
     workload: WorkloadProfile,
     recovery_policy: RecoveryPolicy,
     derived_memory_budget: usize,
-    memtable_size_limit: usize,
-    memtable_flush_threshold: usize,
-    transaction_memory_pool_size: usize,
+    memtable: MemtableConfig,
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
-    runtime_response_timeout: Duration,
+    io_timeouts: IoTimeouts<Duration>,
     wal: crate::wal::WalBatchingConfig,
-    lease_loss_hook: Option<LeaseLossHook>,
-    lease_ttl: Duration,
-    lease_clock_skew_tolerance: Duration,
+    lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
 }
 
@@ -176,18 +171,13 @@ pub struct OpenOptionsBuilder {
     memory_budget: MemoryBudget,
     workload: WorkloadProfile,
     recovery_policy: RecoveryPolicy,
-    explicit_memtable_size_limit: Option<usize>,
-    explicit_memtable_flush_threshold: Option<usize>,
-    transaction_memory_pool_size: Option<usize>,
+    memtable: MemtableConfigInput,
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
-    runtime_response_timeout: Option<Duration>,
+    io_timeouts: IoTimeouts<Option<Duration>>,
     wal: crate::wal::WalBatchingConfig,
-    lease_loss_hook: Option<LeaseLossHook>,
-    lease_ttl: Duration,
-    /// `None` derives half the lease TTL at build time.
-    lease_clock_skew_tolerance: Option<Duration>,
+    lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
 }
 
@@ -287,7 +277,8 @@ impl OpenOptions {
     // replay memory ceiling as well, so a legal standalone replay generation
     // can still be constructed when the configured flush target is small.
     pub(crate) fn flush_memory_limit(&self) -> usize {
-        self.memtable_size_limit
+        self.memtable
+            .size_limit
             .max(self.derived_memory_budget / 8)
             .saturating_mul(4)
             .saturating_add(1024 * 1024)
@@ -314,13 +305,13 @@ impl OpenOptions {
     /// Return the derived memtable size limit.
     #[must_use]
     pub fn memtable_size_limit(&self) -> usize {
-        self.memtable_size_limit
+        self.memtable.size_limit
     }
 
     /// Return the memtable flush threshold.
     #[must_use]
     pub fn memtable_flush_threshold(&self) -> usize {
-        self.memtable_flush_threshold
+        self.memtable.flush_threshold
     }
 
     /// Return the target SST size.
@@ -347,7 +338,7 @@ impl OpenOptions {
     /// Return the shared transaction-memory-pool allocation.
     #[must_use]
     pub fn transaction_memory_pool_size(&self) -> usize {
-        self.transaction_memory_pool_size
+        self.memtable.transaction_pool_size
     }
 
     /// Return the configured block-cache eviction policy.
@@ -365,13 +356,13 @@ impl OpenOptions {
     /// Return the maximum wait for a storage I/O acknowledgement.
     #[must_use]
     pub fn storage_io_timeout(&self) -> Duration {
-        self.cloud.storage_io_timeout
+        self.io_timeouts.storage
     }
 
     /// Return the maximum wait for an enclosing runtime response.
     #[must_use]
     pub fn runtime_response_timeout(&self) -> Duration {
-        self.runtime_response_timeout
+        self.io_timeouts.runtime_response
     }
 
     /// Return the derived WAL buffer size.
@@ -393,11 +384,11 @@ impl OpenOptions {
     }
 
     pub(crate) fn runtime_memtable_size_limit(&self) -> usize {
-        self.memtable_size_limit
+        self.memtable.size_limit
     }
 
     pub(crate) fn runtime_memtable_flush_threshold(&self) -> usize {
-        self.memtable_flush_threshold
+        self.memtable.flush_threshold
     }
 
     pub(crate) fn block_cache_policy_type(&self) -> CachePolicyType {
@@ -440,17 +431,18 @@ impl OpenOptions {
     }
 
     pub(crate) fn lease_loss_hook(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
-        self.lease_loss_hook
+        self.lease
+            .loss_hook
             .as_ref()
             .map(|hook| std::sync::Arc::clone(&hook.0))
     }
 
     pub(crate) fn lease_clock_skew_tolerance(&self) -> Duration {
-        self.lease_clock_skew_tolerance
+        self.lease.resolved_clock_skew_tolerance()
     }
 
     pub(crate) fn lease_ttl(&self) -> Duration {
-        self.lease_ttl
+        self.lease.ttl
     }
 
     pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
@@ -466,9 +458,7 @@ impl OpenOptionsBuilder {
             memory_budget: MemoryBudget::default(),
             workload: WorkloadProfile::default(),
             recovery_policy: RecoveryPolicy::default(),
-            explicit_memtable_size_limit: None,
-            explicit_memtable_flush_threshold: None,
-            transaction_memory_pool_size: None,
+            memtable: MemtableConfigInput::default(),
             cache: CachePolicyConfig::new(0, 0, BlockCachePolicy::default()),
             compaction: crate::compaction::OpenCompactionConfig::new(
                 0,
@@ -478,13 +468,12 @@ impl OpenOptionsBuilder {
                 Self::derive_compression_policy(Goal::default()),
             ),
             cloud: CloudWritePolicyConfig::default(),
-            runtime_response_timeout: None,
+            io_timeouts: IoTimeouts {
+                storage: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+                runtime_response: None,
+            },
             wal: crate::wal::WalBatchingConfig::new(0, None),
-            lease_loss_hook: None,
-            lease_ttl: Duration::from_secs(30),
-            // Half a lease TTL tolerates ordinary NTP/VM clock correction while
-            // bounding additional failover latency.
-            lease_clock_skew_tolerance: None,
+            lease: LeaseConfig::new(Duration::from_secs(30), None, None),
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
                 crate::common::time::ObservedClock::default(),
             )),
@@ -508,21 +497,21 @@ impl OpenOptionsBuilder {
     /// Override the derived memtable size limit in bytes.
     #[must_use]
     pub fn with_memtable_size_limit(mut self, bytes: usize) -> Self {
-        self.explicit_memtable_size_limit = Some(bytes);
+        self.memtable.size_limit = Some(bytes);
         self
     }
 
     /// Override the runtime memtable flush threshold in bytes.
     #[must_use]
     pub fn with_memtable_flush_threshold(mut self, bytes: usize) -> Self {
-        self.explicit_memtable_flush_threshold = Some(bytes);
+        self.memtable.flush_threshold = Some(bytes);
         self
     }
 
     /// Override the shared transaction-memory-pool allocation.
     #[must_use]
     pub fn transaction_memory_pool_size(mut self, bytes: usize) -> Self {
-        self.transaction_memory_pool_size = Some(bytes);
+        self.memtable.transaction_pool_size = Some(bytes);
         self
     }
 
@@ -579,7 +568,7 @@ impl OpenOptionsBuilder {
     /// Set the maximum wait for append, flush, and sync acknowledgements.
     #[must_use]
     pub fn storage_io_timeout(mut self, timeout: Duration) -> Self {
-        self.cloud.storage_io_timeout = timeout;
+        self.io_timeouts.storage = timeout;
         self
     }
 
@@ -590,7 +579,7 @@ impl OpenOptionsBuilder {
     /// response wait expires.
     #[must_use]
     pub fn runtime_response_timeout(mut self, timeout: Duration) -> Self {
-        self.runtime_response_timeout = Some(timeout);
+        self.io_timeouts.runtime_response = Some(timeout);
         self
     }
 
@@ -610,7 +599,7 @@ impl OpenOptionsBuilder {
     /// notification without blocking the callback.
     #[must_use]
     pub fn on_lease_loss(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
-        self.lease_loss_hook = Some(LeaseLossHook(std::sync::Arc::new(hook)));
+        self.lease.loss_hook = Some(LeaseLossHook(std::sync::Arc::new(hook)));
         self
     }
 
@@ -620,19 +609,14 @@ impl OpenOptionsBuilder {
     /// correction.
     #[must_use]
     pub fn lease_clock_skew_tolerance(mut self, tolerance: Duration) -> Self {
-        self.lease_clock_skew_tolerance = Some(tolerance);
+        self.lease.clock_skew_tolerance = Some(tolerance);
         self
-    }
-
-    fn resolved_lease_clock_skew_tolerance(&self) -> Duration {
-        self.lease_clock_skew_tolerance
-            .unwrap_or(self.lease_ttl / 2)
     }
 
     /// Set the primary lease TTL used by local and cloud coordination.
     #[must_use]
     pub fn lease_ttl(mut self, ttl: Duration) -> Self {
-        self.lease_ttl = ttl;
+        self.lease.ttl = ttl;
         self
     }
 
@@ -661,33 +645,6 @@ impl OpenOptionsBuilder {
     #[must_use]
     pub fn with_simulated_cloud_local_storage_budget(self, bytes: u64) -> Self {
         self.local_storage_budget(bytes)
-    }
-
-    fn validate_lease_settings(&self) -> MidgeResult<()> {
-        if self.lease_ttl.is_zero() {
-            return Err(MidgeError::InvalidArgument(
-                "lease TTL must be greater than zero".to_string(),
-            ));
-        }
-        if self.resolved_lease_clock_skew_tolerance() > self.lease_ttl {
-            return Err(MidgeError::InvalidArgument(
-                "lease clock-skew tolerance must not exceed the lease TTL".to_string(),
-            ));
-        }
-        // A cloud lease renews with two thirds of its TTL left and reserves a
-        // fixed margin for the conditional provider write. A shorter TTL can
-        // never renew, so the engine would fence itself shortly after open.
-        if matches!(self.storage, Storage::Cloud { .. })
-            && self.lease_ttl.saturating_mul(2) / 3
-                <= crate::lease::cloud::RENEWAL_WRITE_DEADLINE_MARGIN
-        {
-            return Err(MidgeError::InvalidArgument(format!(
-            "cloud lease TTL {:?} is too short to renew; two thirds of it must exceed the {:?} provider write margin",
-            self.lease_ttl,
-            crate::lease::cloud::RENEWAL_WRITE_DEADLINE_MARGIN
-        )));
-        }
-        Ok(())
     }
 
     /// Build immutable options and derive every dependent value once.
@@ -720,16 +677,15 @@ impl OpenOptionsBuilder {
                 )));
             }
         }
-        if self.cloud.storage_io_timeout < Duration::from_millis(1) {
+        if self.io_timeouts.storage < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be at least 1 millisecond".to_string(),
             ));
         }
-        let lease_clock_skew_tolerance = self.resolved_lease_clock_skew_tolerance();
-        let runtime_response_timeout = self.runtime_response_timeout.unwrap_or_else(|| {
-            crate::config::default_runtime_response_timeout(self.cloud.storage_io_timeout)
+        let runtime_response_timeout = self.io_timeouts.runtime_response.unwrap_or_else(|| {
+            crate::config::default_runtime_response_timeout(self.io_timeouts.storage)
         });
-        if runtime_response_timeout <= self.cloud.storage_io_timeout {
+        if runtime_response_timeout <= self.io_timeouts.storage {
             return Err(MidgeError::InvalidArgument(
                 "runtime response timeout must be greater than storage I/O timeout".to_string(),
             ));
@@ -739,7 +695,7 @@ impl OpenOptionsBuilder {
                 "cloud shutdown drain timeout must be greater than zero".to_string(),
             ));
         }
-        self.validate_lease_settings()?;
+        self.lease.validate(LeaseStorageKind::from(&self.storage))?;
         self.cloud.policy.validate()?;
 
         let total_memory = self.resolve_total_memory()?;
@@ -774,9 +730,11 @@ impl OpenOptionsBuilder {
             workload: self.workload,
             recovery_policy: self.recovery_policy,
             derived_memory_budget: total_memory,
-            memtable_size_limit: pools.memtable_size_limit,
-            memtable_flush_threshold: pools.memtable_flush_threshold,
-            transaction_memory_pool_size: pools.transaction_memory_pool_size,
+            memtable: MemtableConfig {
+                size_limit: pools.memtable_size_limit,
+                flush_threshold: pools.memtable_flush_threshold,
+                transaction_pool_size: pools.transaction_memory_pool_size,
+            },
             cache: CachePolicyConfig::new(block_size, pools.block_cache_size, self.cache.policy),
             compaction: crate::compaction::OpenCompactionConfig::new(
                 target_sst_size,
@@ -786,11 +744,12 @@ impl OpenOptionsBuilder {
                 compression_policy,
             ),
             cloud: self.cloud,
-            runtime_response_timeout,
+            io_timeouts: IoTimeouts {
+                storage: self.io_timeouts.storage,
+                runtime_response: runtime_response_timeout,
+            },
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
-            lease_loss_hook: self.lease_loss_hook,
-            lease_ttl: self.lease_ttl,
-            lease_clock_skew_tolerance,
+            lease: self.lease,
             ttl_clock: self.ttl_clock,
         })
     }
@@ -811,7 +770,8 @@ impl OpenOptionsBuilder {
 
     fn derive_memory_pools(&self, total_memory: usize) -> MidgeResult<DerivedMemoryPools> {
         let transaction_memory_pool_size = self
-            .transaction_memory_pool_size
+            .memtable
+            .transaction_pool_size
             .unwrap_or_else(|| (total_memory / 10).max(1));
         if transaction_memory_pool_size == 0 {
             return Err(MidgeError::InvalidArgument(
@@ -846,13 +806,12 @@ impl OpenOptionsBuilder {
         // Persistent automatic memtables leave working memory for SST metadata and
         // cached blocks, even when the total is smaller than the desired table
         // size. Explicit table sizes retain their full available allowance.
-        let automatic_read_share = if self.explicit_memtable_size_limit.is_none()
-            && !matches!(self.storage, Storage::InMemory)
-        {
-            read_and_memtable_bytes / 4
-        } else {
-            0
-        };
+        let automatic_read_share =
+            if self.memtable.size_limit.is_none() && !matches!(self.storage, Storage::InMemory) {
+                read_and_memtable_bytes / 4
+            } else {
+                0
+            };
         let max_memtable_size = read_and_memtable_bytes.saturating_sub(automatic_read_share) / 2;
         if max_memtable_size == 0 {
             return Err(MidgeError::ResourceLimit(
@@ -901,7 +860,7 @@ impl OpenOptionsBuilder {
             WorkloadProfile::ReadMostly => base_memtable / 2,
             _ => base_memtable,
         };
-        match self.explicit_memtable_size_limit {
+        match self.memtable.size_limit {
             Some(0) => Err(MidgeError::InvalidArgument(
                 "memtable size limit must be greater than zero".to_string(),
             )),
@@ -925,7 +884,7 @@ impl OpenOptionsBuilder {
     }
 
     fn derive_flush_threshold(&self, memtable_size_limit: usize) -> MidgeResult<usize> {
-        match self.explicit_memtable_flush_threshold {
+        match self.memtable.flush_threshold {
             Some(0) => Err(MidgeError::InvalidArgument(
                 "memtable flush threshold must be greater than zero".to_string(),
             )),
