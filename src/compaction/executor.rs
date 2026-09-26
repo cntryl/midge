@@ -983,7 +983,8 @@ fn soft_roll_due(
         || range_only_roll
 }
 
-/// Newest version in one key group, ignoring range events.
+/// Newest version in one key group, ignoring range events. Merge inputs order
+/// versions by descending sequence within a key.
 ///
 /// Two versions at the same sequence must be identical. If they differ, the
 /// inputs disagree about what was written at that sequence, and compaction must
@@ -992,11 +993,12 @@ fn select_newest_version<'a>(
     events: impl Iterator<Item = &'a CompactionEvent>,
 ) -> MidgeResult<Option<&'a CompactionVersion>> {
     let mut selected: Option<&CompactionVersion> = None;
+    let mut previous: Option<&CompactionVersion> = None;
     for event in events {
         let CompactionEvent::Version(version) = event else {
             continue;
         };
-        match selected {
+        match previous {
             None => selected = Some(version),
             Some(current) if current.seq == version.seq => {
                 crate::types::resolve_same_sequence(
@@ -1019,9 +1021,15 @@ fn select_newest_version<'a>(
                     ))
                 })?;
             }
-            Some(current) if version.seq > current.seq => selected = Some(version),
+            Some(current) if version.seq > current.seq => {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "compaction versions for key {:?} are out of sequence order",
+                    String::from_utf8_lossy(&version.key)
+                )));
+            }
             Some(_) => {}
         }
+        previous = Some(version);
     }
     Ok(selected)
 }
@@ -2253,9 +2261,9 @@ mod tests {
         fn should_select_highest_sequence_when_key_group_has_several_versions() {
             // Arrange
             let events = [
-                version_event("k", 3, false, "old"),
                 version_event("k", 9, false, "new"),
                 version_event("k", 5, false, "mid"),
+                version_event("k", 3, false, "old"),
             ];
 
             // Act
@@ -2296,6 +2304,59 @@ mod tests {
                 selected,
                 Err(crate::common::MidgeError::Corruption(message))
                     if message.contains("conflicting compaction versions")
+            ));
+        }
+
+        #[test]
+        fn should_reject_shadowed_equal_sequence_conflict_during_compaction() {
+            // Arrange
+            let events = [
+                version_event("k", 10, false, "newest"),
+                version_event("k", 5, false, "left"),
+                version_event("k", 5, false, "right"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert!(matches!(
+                selected,
+                Err(crate::common::MidgeError::Corruption(_))
+            ));
+        }
+
+        #[test]
+        fn should_keep_newest_version_when_shadowed_equal_sequence_copies_are_identical() {
+            // Arrange
+            let events = [
+                version_event("k", 10, false, "newest"),
+                version_event("k", 5, false, "same"),
+                version_event("k", 5, false, "same"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), Some(10));
+        }
+
+        #[test]
+        fn should_reject_out_of_order_versions_before_compaction_selects_a_winner() {
+            // Arrange
+            let events = [
+                version_event("k", 5, false, "older"),
+                version_event("k", 10, false, "newer"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert!(matches!(
+                selected,
+                Err(crate::common::MidgeError::Corruption(_))
             ));
         }
 
