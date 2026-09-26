@@ -7,9 +7,7 @@ pub(crate) use config::{
 };
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
-#[cfg(test)]
-use crate::common::MidgeError;
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
 use crate::types::EntryType;
 use std::path::Path;
@@ -81,6 +79,12 @@ pub(crate) fn execute_compaction_at_target(
     output_sink: Option<&CompactionOutputSink<'_>>,
     output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
+    if plan.input_files != strategy::combined_input_files(&plan.source_files, &plan.target_files) {
+        return Err(MidgeError::Corruption(
+            "compaction replacement set differs from source and target inputs".into(),
+        ));
+    }
+
     // An empty plan is a planner no-op and must not create an unreferenced
     // output. The executor separately rejects non-empty plans whose selected
     // inputs decode to no versions or range tombstones.
@@ -91,23 +95,11 @@ pub(crate) fn execute_compaction_at_target(
     // --- 1. Open bounded source streams and chained level spans ------------
     let budget = resources.budget;
     let target_sst_size = resources.target_sst_size;
-    let (source_files, target_files, source_level) =
-        if plan.source_files.is_empty() && plan.target_files.is_empty() {
-            // Compatibility for focused executor tests and explicitly constructed
-            // internal plans: treat the legacy combined vector as source streams.
-            (plan.input_files.as_slice(), &[][..], 0)
-        } else {
-            (
-                plan.source_files.as_slice(),
-                plan.target_files.as_slice(),
-                plan.source_level,
-            )
-        };
     let inputs = executor::collect_compaction_stream_inputs(
         sst_factory,
-        source_files,
-        target_files,
-        source_level,
+        &plan.source_files,
+        &plan.target_files,
+        plan.source_level,
         &budget,
         abort_check,
     )?;
@@ -194,7 +186,7 @@ mod tests {
             );
             let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
             plan.compaction_memory_limit = 1024 * 1024 * 1024;
-            plan.input_files.push("legacy.sst".to_string());
+            plan.add_test_source("legacy.sst".to_string());
 
             // Act
             let outputs = execute_compaction(&plan, &factory, dir.path(), None)?;
@@ -228,7 +220,7 @@ mod tests {
         }
         writer.finish_to_path(&dir.path().join("ranges.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
-        plan.input_files.push("ranges.sst".into());
+        plan.add_test_source("ranges.sst");
         plan.target_sst_size = 128 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
         let sink =
@@ -276,7 +268,7 @@ mod tests {
         }
         writer.finish_to_path(&dir.path().join("ranges.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
-        plan.input_files.push("ranges.sst".into());
+        plan.add_test_source("ranges.sst");
         plan.target_sst_size = 16 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
         let sink =
@@ -330,7 +322,7 @@ mod tests {
                 None,
             )?;
             writer.finish_to_path(&dir.path().join(&name))?;
-            plan.input_files.push(name);
+            plan.add_test_source(name);
         }
         let observed = std::cell::RefCell::new(Vec::new());
         let sink =
@@ -383,7 +375,7 @@ mod tests {
         )?;
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
-        plan.input_files.push("input.sst".into());
+        plan.add_test_source("input.sst");
 
         // Act
         let result = execute_compaction_with_output_sink(
@@ -425,7 +417,7 @@ mod tests {
         }
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
-        plan.input_files.push("input.sst".into());
+        plan.add_test_source("input.sst");
         plan.target_sst_size = 32 * 1024;
         plan.compaction_memory_limit = 128 * 1024;
         let drained = std::cell::RefCell::new(Vec::new());
@@ -646,7 +638,7 @@ mod tests {
         let input = factory.create()?;
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("empty-input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
-        plan.input_files.push("empty-input.sst".to_string());
+        plan.add_test_source("empty-input.sst".to_string());
 
         // Act
         let result = execute_compaction(&plan, &factory, temp_dir.path(), None);
@@ -654,6 +646,38 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(MidgeError::Internal(_))));
         assert!(temp_dir.path().join("empty-input.sst").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_plan_when_replacement_set_differs_from_merge_inputs() -> MidgeResult<()> {
+        // Arrange: the omitted SST must never be removed from a manifest edit
+        // without contributing its contents to the replacement output.
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        for (name, key) in [
+            ("source.sst", &b"source"[..]),
+            ("omitted.sst", &b"omitted"[..]),
+        ] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(key, Some(b"value"), 1, EntryType::Put, None)?;
+            writer.finish_to_path(&dir.path().join(name))?;
+        }
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
+        plan.source_files = vec!["source.sst".into()];
+        plan.input_files = vec!["omitted.sst".into(), "source.sst".into()];
+        let output = output_filename(&plan, 0, dir.path());
+
+        // Act
+        let result = execute_compaction(&plan, &factory, dir.path(), None);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+        assert!(
+            !output.exists(),
+            "invalid plan must not write an output SST"
+        );
         Ok(())
     }
 
@@ -669,7 +693,7 @@ mod tests {
         input_writer.add_with_meta(b"live", Some(b"value"), 7, EntryType::Put, Some(expiration))?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(41);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -704,7 +728,7 @@ mod tests {
         )?;
         crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("expired.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(49);
-        plan.input_files.push("expired.sst".to_string());
+        plan.add_test_source("expired.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -738,8 +762,8 @@ mod tests {
         newer.add_with_meta(b"same", None, 4, EntryType::Delete, None)?;
         crate::sst::fs::finish_writer_to_path(newer, &temp_dir.path().join("newer.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(50);
-        plan.input_files
-            .extend(["older.sst".to_string(), "newer.sst".to_string()]);
+        plan.add_test_source("older.sst");
+        plan.add_test_source("newer.sst");
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -768,8 +792,8 @@ mod tests {
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(51);
-        plan.input_files
-            .extend(["first.sst".to_string(), "second.sst".to_string()]);
+        plan.add_test_source("first.sst");
+        plan.add_test_source("second.sst");
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -799,7 +823,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -840,7 +864,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 0, 1)
             .with_output_seq(43)
             .with_snapshot_horizon(Some(10));
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -872,7 +896,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(45)
             .with_tombstone_gc_eligibility(true, false);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1023,7 +1047,7 @@ mod tests {
             .with_output_seq(49)
             .with_snapshot_horizon(Some(10))
             .with_tombstone_gc_eligibility(true, true);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1058,8 +1082,9 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(46)
             .with_tombstone_gc_eligibility(true, true);
-        plan.input_files
-            .extend(["values.sst".to_string(), "range-delete.sst".to_string()]);
+        plan.add_test_source("values.sst");
+        plan.target_files.push("range-delete.sst".into());
+        plan.input_files = strategy::combined_input_files(&plan.source_files, &plan.target_files);
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1091,7 +1116,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(47)
             .with_tombstone_gc_eligibility(true, false);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1121,8 +1146,8 @@ mod tests {
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(48);
-        plan.input_files
-            .extend(["first.sst".to_string(), "second.sst".to_string()]);
+        plan.add_test_source("first.sst");
+        plan.add_test_source("second.sst");
 
         // Act
         let error = execute_compaction(&plan, &factory, temp_dir.path(), None)
@@ -1151,7 +1176,7 @@ mod tests {
         let input_bytes = std::fs::read(&input_path)?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(44);
-        plan.input_files.push(input_name.to_string());
+        plan.add_test_source(input_name.to_string());
         let cancelled = || true;
 
         // Act
@@ -1185,7 +1210,7 @@ mod tests {
         let input_bytes = std::fs::read(&input_path)?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(45);
-        plan.input_files.push(input_name.to_string());
+        plan.add_test_source(input_name.to_string());
         let checks = AtomicUsize::new(0);
         let cancelled_after_finalize = || checks.fetch_add(1, Ordering::SeqCst) >= 3;
 
@@ -1311,7 +1336,7 @@ mod tests {
             inner: base_factory,
         };
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(46);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1344,7 +1369,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("large-input.sst"))?;
         let mut plan = CompactionPlan::new(7, 0, 1).with_output_seq(52);
         plan.target_sst_size = 4096;
-        plan.input_files.push("large-input.sst".to_string());
+        plan.add_test_source("large-input.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1399,7 +1424,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("small-keys.sst"))?;
         let mut plan = CompactionPlan::new(8, 0, 1).with_output_seq(53);
         plan.target_sst_size = 64 * 1024;
-        plan.input_files.push("small-keys.sst".to_string());
+        plan.add_test_source("small-keys.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1439,7 +1464,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("range-input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(53);
         plan.target_sst_size = 4096;
-        plan.input_files.push("range-input.sst".to_string());
+        plan.add_test_source("range-input.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1505,8 +1530,7 @@ mod tests {
         )?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(54);
         plan.target_sst_size = 64 * 1024;
-        plan.input_files
-            .push("metadata-heavy-input.sst".to_string());
+        plan.add_test_source("metadata-heavy-input.sst");
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1538,8 +1562,7 @@ mod tests {
             &temp_dir.path().join("tombstone-only-input.sst"),
         )?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(54);
-        plan.input_files
-            .push("tombstone-only-input.sst".to_string());
+        plan.add_test_source("tombstone-only-input.sst");
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1577,7 +1600,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("same-key.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(55);
         plan.target_sst_size = 4096;
-        plan.input_files.push("same-key.sst".to_string());
+        plan.add_test_source("same-key.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1756,7 +1779,7 @@ mod tests {
         };
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(56);
         plan.target_sst_size = 4096;
-        plan.input_files.push("cancel-input.sst".to_string());
+        plan.add_test_source("cancel-input.sst".to_string());
         let abort = || finalized.load(std::sync::atomic::Ordering::SeqCst) > 0;
 
         // Act
@@ -1806,8 +1829,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(57);
         plan.source_files.push(source_name);
         plan.target_files.clone_from(&target_names);
-        plan.input_files.extend(plan.source_files.clone());
-        plan.input_files.extend(target_names);
+        plan.input_files = strategy::combined_input_files(&plan.source_files, &target_names);
         let budget =
             crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
         let streams = executor::collect_compaction_stream_inputs(
@@ -1884,8 +1906,7 @@ mod tests {
             "target-left.sst".to_string(),
             "target-right.sst".to_string(),
         ]);
-        plan.input_files.extend(plan.source_files.clone());
-        plan.input_files.extend(plan.target_files.clone());
+        plan.input_files = strategy::combined_input_files(&plan.source_files, &plan.target_files);
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1978,8 +1999,8 @@ mod tests {
                 .with_output_seq(100 + u64::try_from(completed_targets).expect("small index"));
             plan.source_files.push(source_name.clone());
             plan.target_files.clone_from(&target_names);
-            plan.input_files.extend(plan.source_files.clone());
-            plan.input_files.extend(plan.target_files.clone());
+            plan.input_files =
+                strategy::combined_input_files(&plan.source_files, &plan.target_files);
             let abort = || cancelled.load(Ordering::SeqCst);
             let error = execute_compaction(&plan, &factory, temp_dir.path(), Some(&abort))
                 .expect_err("transition cancellation must abort compaction");

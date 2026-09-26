@@ -87,6 +87,12 @@ impl CompactionPlan {
         self.range_tombstone_gc_eligible = range_tombstone_gc_eligible;
         self
     }
+
+    #[cfg(test)]
+    pub fn add_test_source(&mut self, name: impl Into<String>) {
+        self.source_files.push(name.into());
+        self.input_files = combined_input_files(&self.source_files, &self.target_files);
+    }
 }
 
 /// Configuration for leveled compaction.
@@ -544,7 +550,10 @@ impl Compactor {
     }
 }
 
-fn combined_input_files(source_files: &[String], target_files: &[String]) -> Vec<String> {
+pub(super) fn combined_input_files(
+    source_files: &[String],
+    target_files: &[String],
+) -> Vec<String> {
     let mut inputs = Vec::with_capacity(source_files.len().saturating_add(target_files.len()));
     inputs.extend_from_slice(source_files);
     inputs.extend_from_slice(target_files);
