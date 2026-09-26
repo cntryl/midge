@@ -255,7 +255,7 @@ fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<By
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
+    use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
     use std::time::Duration;
 
     struct RecordingBackend {
@@ -270,9 +270,9 @@ mod tests {
             range: std::ops::Range<u64>,
             callback: crate::storage::RangeReadCallback,
         ) {
-            crate::storage::test_support::forward_typed_range_read_to_legacy(
-                self, request, range, callback,
-            );
+            self.ranges.lock().push((range.start, range.end));
+            self.inner
+                .submit_range_read_request(request, range, callback);
         }
 
         crate::storage::forward_storage_backend!(
@@ -293,19 +293,6 @@ mod tests {
         }
         fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
             panic!("replay cannot delete cloud objects");
-        }
-        fn submit_read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-            expected: StorageObjectMetadata,
-            timeout: Duration,
-            callback: crate::storage::RangeReadCallback,
-        ) {
-            self.ranges.lock().push((start, end));
-            self.inner
-                .submit_read_range(key, start, end, expected, timeout, callback);
         }
     }
 

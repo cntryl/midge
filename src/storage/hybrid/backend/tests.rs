@@ -595,9 +595,8 @@ impl StorageBackend for BudgetConsumingProofBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
     }
 
     fn submit_range_head_request(
@@ -700,9 +699,8 @@ impl StorageBackend for NeverCompletesBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
     }
 
     fn submit_range_head_request(

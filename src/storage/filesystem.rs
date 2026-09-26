@@ -525,6 +525,56 @@ impl FileSystem {
         });
     }
 
+    fn read_range_within(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: &StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: &crate::storage::RangeReadCallback,
+    ) {
+        use std::io::{Read, Seek, SeekFrom};
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error(
+                    "range read timed out",
+                ));
+            }
+            if start >= end || end > expected.size {
+                return Err("invalid remote SST byte range".into());
+            }
+            let path = self.full_path(key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let mut file = fs::File::open(&path).map_err(|error| range_io_error(&error))?;
+            let metadata = range_file_metadata(&file)?;
+            if !metadata.same_version(expected) {
+                return Err(crate::storage::StorageError::precondition_failed(
+                    "remote SST version changed",
+                ));
+            }
+            let len = usize::try_from(end - start).map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|error| error.to_string())?;
+            bytes.resize(len, 0);
+            file.seek(SeekFrom::Start(start))
+                .map_err(|error| range_io_error(&error))?;
+            file.read_exact(&mut bytes)
+                .map_err(|error| range_io_error(&error))?;
+            let after = range_file_metadata(&file)?;
+            if !after.same_version(expected) {
+                return Err(crate::storage::StorageError::precondition_failed(
+                    "remote SST changed during range read",
+                ));
+            }
+            Ok(bytes)
+        })();
+        let _ = callback.send(result);
+    }
+
     fn metadata_read_within(
         &self,
         key: &str,
@@ -578,13 +628,13 @@ impl StorageBackend for FileSystem {
             return;
         };
         let _reservation = request.reservation;
-        self.submit_read_range(
+        self.read_range_within(
             &request.key,
             range.start,
             range.end,
-            expected,
+            &expected,
             timeout,
-            callback,
+            &callback,
         );
     }
 
@@ -748,56 +798,6 @@ impl StorageBackend for FileSystem {
             Err(error) => StorageOutcome::Err(error),
         };
         let _ = callback.send(StorageEvent::WriteComplete { key, result });
-    }
-
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        use std::io::{Read, Seek, SeekFrom};
-        let result = (|| {
-            if timeout.is_zero() {
-                return Err(crate::storage::storage_timeout_error(
-                    "range read timed out",
-                ));
-            }
-            if start >= end || end > expected.size {
-                return Err("invalid remote SST byte range".into());
-            }
-            let path = self.full_path(key)?;
-            let _lock = mutation_lock(&path);
-            let _process_lock = self.acquire_process_lock(&path)?;
-            let mut file = fs::File::open(&path).map_err(|error| range_io_error(&error))?;
-            let metadata = range_file_metadata(&file)?;
-            if !metadata.same_version(&expected) {
-                return Err(crate::storage::StorageError::precondition_failed(
-                    "remote SST version changed",
-                ));
-            }
-            let len = usize::try_from(end - start).map_err(|error| error.to_string())?;
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(len)
-                .map_err(|error| error.to_string())?;
-            bytes.resize(len, 0);
-            file.seek(SeekFrom::Start(start))
-                .map_err(|error| range_io_error(&error))?;
-            file.read_exact(&mut bytes)
-                .map_err(|error| range_io_error(&error))?;
-            let after = range_file_metadata(&file)?;
-            if !after.same_version(&expected) {
-                return Err(crate::storage::StorageError::precondition_failed(
-                    "remote SST changed during range read",
-                ));
-            }
-            Ok(bytes)
-        })();
-        let _ = callback.send(result);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {

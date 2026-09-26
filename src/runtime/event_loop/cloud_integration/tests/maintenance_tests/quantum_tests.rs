@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::{RangeReadCallback, StorageBackend, StorageCallback, StorageObjectMetadata};
+use crate::storage::{StorageBackend, StorageCallback};
 
 struct SlowWalRanges {
     inner: Arc<crate::storage::filesystem::FileSystem>,
@@ -13,9 +13,20 @@ impl StorageBackend for SlowWalRanges {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        if request.key.starts_with("wal/") {
+            let inner = self.inner.clone();
+            let calls = self.calls.clone();
+            std::thread::spawn(move || {
+                // One successful provider request exceeds the cooperative
+                // quantum but fits its unchanged three-second hard deadline.
+                std::thread::sleep(Duration::from_millis(250));
+                calls.fetch_add(1, Ordering::AcqRel);
+                inner.submit_range_read_request(request, range, callback);
+            });
+        } else {
+            self.inner
+                .submit_range_read_request(request, range, callback);
+        }
     }
 
     fn submit_range_head_request(
@@ -57,32 +68,6 @@ impl StorageBackend for SlowWalRanges {
         callback: crate::storage::StorageCallback,
     ) {
         crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: Duration,
-        callback: RangeReadCallback,
-    ) {
-        if key.starts_with("wal/") {
-            let inner = self.inner.clone();
-            let key = key.to_string();
-            let calls = self.calls.clone();
-            std::thread::spawn(move || {
-                // One successful provider request exceeds the cooperative
-                // quantum but fits its unchanged three-second hard deadline.
-                std::thread::sleep(Duration::from_millis(250));
-                calls.fetch_add(1, Ordering::AcqRel);
-                inner.submit_read_range(&key, start, end, expected, timeout, callback);
-            });
-        } else {
-            self.inner
-                .submit_read_range(key, start, end, expected, timeout, callback);
-        }
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {

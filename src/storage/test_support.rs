@@ -109,45 +109,6 @@ pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
 }
 
 #[cfg(test)]
-pub(crate) fn forward_typed_range_read_to_legacy<B: super::StorageBackend + ?Sized>(
-    backend: &B,
-    request: super::StorageRequest,
-    range: std::ops::Range<u64>,
-    callback: super::RangeReadCallback,
-) {
-    let timeout = request.remaining_timeout();
-    if timeout.is_zero() {
-        let _ = callback.send(Err(super::storage_timeout_error("range read timed out")));
-        return;
-    }
-    let super::StoragePrecondition::IfMatch(expected) = request.precondition else {
-        let _ = callback.send(Err(super::StorageError::protocol(
-            "range read requires an object identity",
-        )));
-        return;
-    };
-    let callback = if let Some(reservation) = request.reservation {
-        match super::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => retained,
-            Err(error) => {
-                let _ = callback.send(Err(super::StorageError::from(error)));
-                return;
-            }
-        }
-    } else {
-        callback
-    };
-    backend.submit_read_range(
-        &request.key,
-        range.start,
-        range.end,
-        expected,
-        timeout,
-        callback,
-    );
-}
-
-#[cfg(test)]
 macro_rules! forward_storage_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::storage::forward_storage_backend!(@method $inner, $method);)+
@@ -186,13 +147,6 @@ macro_rules! forward_storage_backend {
         fn submit_metadata_read_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::MetadataReadCallback) {
             self.$inner.submit_metadata_read_request(request, callback);
-        }
-    };
-    (@method $inner:ident, submit_read_range) => {
-        fn submit_read_range(&self, key: &str, start: u64, end: u64,
-            expected: $crate::storage::StorageObjectMetadata, timeout: std::time::Duration,
-            callback: $crate::storage::RangeReadCallback) {
-            self.$inner.submit_read_range(key, start, end, expected, timeout, callback);
         }
     };
     (@method $inner:ident, submit_write) => {

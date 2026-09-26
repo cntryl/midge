@@ -488,38 +488,10 @@ mod tests {
             range: std::ops::Range<u64>,
             callback: super::super::RangeReadCallback,
         ) {
-            crate::storage::test_support::forward_typed_range_read_to_legacy(
-                self, request, range, callback,
-            );
-        }
-
-        crate::storage::forward_storage_backend!(
-            inner;
-            submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
-            submit_write_with_headers,
-            submit_delete_with_headers,
-            submit_head,
-        );
-
-        fn submit_write(&self, key: &str, bytes: Vec<u8>, callback: super::super::StorageCallback) {
-            self.inner.submit_write(key, bytes, callback);
-        }
-        fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
-            self.inner.submit_delete(key, callback);
-        }
-        fn submit_read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-            expected: StorageObjectMetadata,
-            timeout: Duration,
-            callback: super::super::RangeReadCallback,
-        ) {
             self.ranges
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((start, end));
+                .push((range.start, range.end));
             match self
                 .next_range_failure
                 .swap(0, std::sync::atomic::Ordering::SeqCst)
@@ -536,7 +508,22 @@ mod tests {
                 _ => {}
             }
             self.inner
-                .submit_read_range(key, start, end, expected, timeout, callback);
+                .submit_range_read_request(request, range, callback);
+        }
+
+        crate::storage::forward_storage_backend!(
+            inner;
+            submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
+            submit_write_with_headers,
+            submit_delete_with_headers,
+            submit_head,
+        );
+
+        fn submit_write(&self, key: &str, bytes: Vec<u8>, callback: super::super::StorageCallback) {
+            self.inner.submit_write(key, bytes, callback);
+        }
+        fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
+            self.inner.submit_delete(key, callback);
         }
     }
 

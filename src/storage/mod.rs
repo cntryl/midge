@@ -666,31 +666,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         callback: StorageCallback,
     );
 
-    /// Read precisely [start, end) from the expected immutable object version.
-    /// Implementations must reject unsupported conditions and short responses.
-    #[cfg(not(test))]
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        callback: RangeReadCallback,
-    );
-    #[cfg(test)]
-    fn submit_read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-        _expected: StorageObjectMetadata,
-        _timeout: std::time::Duration,
-        _callback: RangeReadCallback,
-    ) {
-        panic!("test backend received undeclared range-read capability");
-    }
-
     /// Submit a write operation. Returns immediately.
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
 

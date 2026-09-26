@@ -682,9 +682,8 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -722,7 +721,7 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
     crate::storage::forward_storage_backend!(
         inner;
 
-        submit_read_range,
+
 
         submit_write,
     );
@@ -878,9 +877,8 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -910,7 +908,7 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
 
     crate::storage::forward_storage_backend!(
     inner;
-    submit_write_request, submit_delete_request, submit_metadata_read_request, submit_read_range,
+    submit_write_request, submit_delete_request, submit_metadata_read_request,
 
     submit_write,
     submit_write_with_headers,
@@ -940,9 +938,8 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -980,7 +977,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
     crate::storage::forward_storage_backend!(
         inner;
 
-        submit_read_range,
+
 
         submit_write,
     );
@@ -1080,9 +1077,8 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -1120,7 +1116,7 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
     crate::storage::forward_storage_backend!(
         inner;
 
-        submit_read_range,
+
 
         submit_write,
     );
@@ -1208,9 +1204,8 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -1248,7 +1243,7 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
     crate::storage::forward_storage_backend!(
         inner;
 
-        submit_read_range,
+
 
         submit_write,
         submit_write_with_headers,
@@ -1336,9 +1331,8 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -1368,7 +1362,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
     crate::storage::forward_storage_backend!(
         inner;
         submit_write_request,
-        submit_read_range,
+
 
         submit_write,
         submit_write_with_headers,
@@ -1443,9 +1437,8 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -1475,7 +1468,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
     crate::storage::forward_storage_backend!(
         inner;
         submit_write_request,
-        submit_read_range,
+
 
         submit_write,
         submit_write_with_headers,
@@ -9108,9 +9101,8 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_range_read_to_legacy(
-            self, request, range, callback,
-        );
+        self.inner
+            .submit_range_read_request(request, range, callback);
     }
 
     fn submit_range_head_request(
@@ -9126,7 +9118,7 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_write_request, submit_delete_request, submit_head_request, submit_metadata_read_request, submit_read_range,
+        submit_write_request, submit_delete_request, submit_head_request, submit_metadata_read_request,
 
         submit_write,
         submit_write_with_headers,

@@ -248,18 +248,6 @@ impl StorageBackend for CloudStorage {
         self.write_admitted(&key, data, headers, timeout, request.reservation, &callback);
     }
 
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.read_range_admitted(key, start..end, expected, timeout, None, &callback);
-    }
-
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         self.write_admitted(
             key,
