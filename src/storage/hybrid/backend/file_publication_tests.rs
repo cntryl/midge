@@ -10,6 +10,16 @@ use std::time::Duration;
 struct PanicLocalBackend;
 
 impl StorageBackend for PanicLocalBackend {
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
+            self, request, callback,
+        );
+    }
+
     fn submit_head_request(
         &self,
         request: crate::storage::StorageRequest,

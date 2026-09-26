@@ -149,6 +149,17 @@ pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
 }
 
 #[cfg(test)]
+pub(crate) fn forward_typed_metadata_read_to_legacy<B: super::StorageBackend + ?Sized>(
+    backend: &B,
+    request: super::StorageRequest,
+    callback: super::MetadataReadCallback,
+) {
+    super::dispatch_metadata_read_request(request, callback, |key, timeout, callback| {
+        backend.submit_read_with_metadata(key, timeout, callback);
+    });
+}
+
+#[cfg(test)]
 macro_rules! forward_storage_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::storage::forward_storage_backend!(@method $inner, $method);)+
@@ -169,6 +180,12 @@ macro_rules! forward_storage_backend {
         fn submit_head_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::StorageCallback) {
             self.$inner.submit_head_request(request, callback);
+        }
+    };
+    (@method $inner:ident, submit_metadata_read_request) => {
+        fn submit_metadata_read_request(&self, request: $crate::storage::StorageRequest,
+            callback: $crate::storage::MetadataReadCallback) {
+            self.$inner.submit_metadata_read_request(request, callback);
         }
     };
     (@method $inner:ident, submit_read_with_metadata) => {

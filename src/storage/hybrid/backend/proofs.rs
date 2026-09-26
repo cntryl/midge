@@ -264,7 +264,10 @@ impl HybridStorage {
         let read_timeout =
             Self::deadline_timeout(key, "GET during object proof", callback_timeout, deadline)?;
         let (tx, rx) = mpsc::channel();
-        backend.submit_read_with_metadata(key, read_timeout, tx);
+        backend.submit_metadata_read_request(
+            crate::storage::StorageRequest::new(key, *deadline, read_timeout),
+            tx,
+        );
         let (bytes, metadata) = rx
             .recv_timeout(read_timeout)
             .map_err(|error| match error {

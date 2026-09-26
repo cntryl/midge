@@ -498,6 +498,20 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl StorageBackend for FileSystem {
+    fn submit_metadata_read_request(
+        &self,
+        request: StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        crate::storage::dispatch_metadata_read_request(
+            request,
+            callback,
+            |key, timeout, callback| {
+                self.submit_read_with_metadata(key, timeout, callback);
+            },
+        );
+    }
+
     fn submit_head_request(&self, request: StorageRequest, callback: StorageCallback) {
         let timeout = request.remaining_timeout();
         let key = request.key;

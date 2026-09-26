@@ -86,6 +86,20 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        crate::storage::dispatch_metadata_read_request(
+            request,
+            callback,
+            |key, timeout, callback| {
+                self.submit_read_with_metadata(key, timeout, callback);
+            },
+        );
+    }
+
     fn submit_head_request(
         &self,
         request: crate::storage::StorageRequest,

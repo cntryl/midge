@@ -373,6 +373,46 @@ fn should_reject_expired_or_conditional_typed_head_for_every_storage_backend() {
     }
 }
 
+#[test]
+fn should_reject_expired_or_conditional_typed_metadata_read_for_every_storage_backend() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        for (case, request, expected_kind) in [
+            (
+                "expired",
+                super::StorageRequest::new(
+                    "missing/read",
+                    crate::common::OperationDeadline::unbounded(),
+                    std::time::Duration::ZERO,
+                ),
+                super::StorageErrorKind::Timeout,
+            ),
+            (
+                "conditional",
+                super::StorageRequest::new(
+                    "missing/read",
+                    crate::common::OperationDeadline::unbounded(),
+                    std::time::Duration::from_secs(1),
+                )
+                .with_precondition(super::StoragePrecondition::IfAbsent),
+                super::StorageErrorKind::Protocol,
+            ),
+        ] {
+            // Act
+            let (tx, rx) = mpsc::channel();
+            backend.submit_metadata_read_request(request, tx);
+
+            // Assert
+            let error = rx
+                .recv()
+                .expect("metadata read callback")
+                .expect_err("invalid typed read must fail");
+            assert_eq!(error.kind(), expected_kind, "{name}/{case}");
+        }
+    }
+}
+
 fn delete_outcome(
     backend: &dyn StorageBackend,
     key: &str,

@@ -23,7 +23,14 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<Vec<u8>, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_read_with_metadata(key, callback_timeout, tx);
+        backend.submit_metadata_read_request(
+            crate::storage::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(callback_timeout),
+                callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(callback_timeout) {
             Ok(Ok((data, _metadata))) => Ok(data),
             Ok(Err(error)) => Err(crate::storage::StorageError::new(

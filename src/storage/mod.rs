@@ -538,6 +538,39 @@ pub type MetadataReadCallback =
 /// Completion of an exact, conditionally versioned object range.
 pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageError>>;
 
+/// Preserve the typed request's deadline and reservation around a versioned read.
+pub(crate) fn dispatch_metadata_read_request(
+    request: StorageRequest,
+    callback: MetadataReadCallback,
+    submit: impl FnOnce(&str, std::time::Duration, MetadataReadCallback),
+) {
+    let timeout = request.remaining_timeout();
+    if timeout.is_zero() {
+        let _ = callback.send(Err(storage_timeout_error(
+            "metadata read has no remaining budget",
+        )));
+        return;
+    }
+    if !matches!(request.precondition, StoragePrecondition::None) {
+        let _ = callback.send(Err(StorageError::protocol(
+            "metadata read does not accept a mutation precondition",
+        )));
+        return;
+    }
+    let callback = if let Some(reservation) = request.reservation {
+        match retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => retained,
+            Err(error) => {
+                let _ = callback.send(Err(StorageError::from(error)));
+                return;
+            }
+        }
+    } else {
+        callback
+    };
+    submit(&request.key, timeout, callback);
+}
+
 /// Version-aware object I/O required by engine persistence paths.
 ///
 /// CRITICAL DESIGN:
@@ -565,6 +598,9 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Read the body and identity from one version under one typed request.
+    fn submit_metadata_read_request(&self, request: StorageRequest, callback: MetadataReadCallback);
+
     /// Submit one typed metadata lookup with the caller's remaining budget.
     fn submit_head_request(&self, request: StorageRequest, callback: StorageCallback);
 
