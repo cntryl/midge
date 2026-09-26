@@ -14,6 +14,7 @@
 use crate::common::MidgeResult;
 use crate::storage::{
     StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
+    StoragePrecondition, StorageRequest,
 };
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -497,6 +498,69 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl StorageBackend for FileSystem {
+    fn submit_write_request(
+        &self,
+        request: StorageRequest,
+        data: Vec<u8>,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error("write timed out"));
+            }
+            let path = self.full_path(&key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let outcome = match request.precondition {
+                StoragePrecondition::None => {
+                    publish_object_atomically(&self.base_path, &path, &data, Publish::Replace)
+                }
+                StoragePrecondition::IfAbsent => {
+                    publish_object_atomically(&self.base_path, &path, &data, Publish::CreateNew)
+                }
+                StoragePrecondition::IfMatch(expected) => {
+                    if expected.generation.is_some() {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "filesystem cannot enforce generation precondition",
+                        ));
+                    }
+                    let etag = expected.etag.trim().trim_matches('"');
+                    if etag.is_empty() {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "object identity is missing",
+                        ));
+                    }
+                    let current = if etag.starts_with("fs:") {
+                        range_path_metadata(&path).map(|metadata| metadata.etag)
+                    } else {
+                        fs::read(&path)
+                            .map_err(crate::storage::StorageError::from)
+                            .map(|bytes| {
+                                StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes).etag
+                            })
+                    }?;
+                    if current != etag {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "etag mismatch",
+                        ));
+                    }
+                    publish_object_atomically(&self.base_path, &path, &data, Publish::Replace)
+                }
+            };
+            Ok(outcome)
+        })();
+        // Local I/O and its callback complete inline; holding the reservation
+        // through the send is sufficient.
+        let _reservation = request.reservation;
+        let result = match result {
+            Ok(outcome) => outcome,
+            Err(error) => StorageOutcome::Err(error),
+        };
+        let _ = callback.send(StorageEvent::WriteComplete { key, result });
+    }
+
     /// Every filesystem call completes before it returns, so the reservation
     /// only has to outlive the call: no completion thread is needed (#518).
     fn submit_write_with_reservation(

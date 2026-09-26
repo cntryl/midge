@@ -9,6 +9,36 @@ use super::{StorageBackend, StorageEvent, StorageOutcome};
 use std::sync::mpsc;
 
 #[test]
+fn should_reject_typed_write_when_callback_budget_is_zero() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/expired-write");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        );
+
+        // Act
+        let (tx, rx) = mpsc::channel();
+        backend.submit_write_request(request, b"value".to_vec(), tx);
+
+        // Assert
+        assert!(matches!(
+            rx.recv().expect("write callback"),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(_),
+                ..
+            }
+        ));
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+        assert!(read_rx.recv().expect("read callback").is_err(), "{name}");
+    }
+}
+
+#[test]
 fn should_keep_existing_bytes_when_generation_precondition_is_unsupported_or_stale() {
     // Arrange
     let root = tempfile::tempdir().expect("temp dir");
