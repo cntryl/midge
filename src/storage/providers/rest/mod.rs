@@ -413,6 +413,46 @@ mod tests {
     }
 
     #[test]
+    fn should_preserve_request_fields_when_applying_caller_headers() {
+        // Arrange
+        let request = CloudRequest::new(reqwest::Method::PUT, "https://example.test/object".into())
+            .with_body(vec![1, 2])
+            .with_header("Content-Length", "2");
+        let headers = vec![
+            (
+                crate::storage::cloud::REQUEST_TIMEOUT_HEADER.into(),
+                "750".into(),
+            ),
+            ("If-Match".into(), "\"v1\"".into()),
+            ("x-test".into(), "value".into()),
+        ];
+
+        // Act
+        let (request, conditional) = apply_caller_headers(
+            request,
+            headers,
+            |name, _| name.eq_ignore_ascii_case("if-match"),
+            |request, name, value| Ok(request.with_header(name, value)),
+        )
+        .expect("caller headers accepted");
+
+        // Assert
+        assert!(conditional);
+        assert_eq!(request.method, reqwest::Method::PUT);
+        assert_eq!(request.url, "https://example.test/object");
+        assert_eq!(request.body.as_deref(), Some(&[1, 2][..]));
+        assert_eq!(request.timeout, Some(std::time::Duration::from_millis(750)));
+        assert_eq!(
+            request.headers,
+            [
+                ("Content-Length".into(), "2".into()),
+                ("If-Match".into(), "\"v1\"".into()),
+                ("x-test".into(), "value".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn should_return_identity_headers_when_the_range_lies_within_the_object() {
         // Arrange
         let object = expected(100, "\"v1\"");
