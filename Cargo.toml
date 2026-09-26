@@ -162,11 +162,12 @@ cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
 cloud_integration = ["cloud-all"]
 
 
-# Deterministic injection suites are compiled only when the non-production
-# `failpoints` feature is selected explicitly.
+# Fault injection is run explicitly and serially because failpoints are
+# process-global. Broad test selections must not run this target.
 [[test]]
 name = "fault_injection"
 path = "tests/fault_injection.rs"
+test = false
 required-features = ["failpoints"]
 
 # =============================================================================

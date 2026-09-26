@@ -1357,6 +1357,7 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let mode = self.mode;
