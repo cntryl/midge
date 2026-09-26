@@ -4,6 +4,7 @@ use crate::runtime::actors::compaction::publication::{
     CompactionPublishTask,
 };
 use crate::runtime::actors::compaction::PreparedCompactionOutput;
+use crate::runtime::state::CompactionWait;
 #[cfg(test)]
 use crate::runtime::CompactionPlan;
 use crate::runtime::RuntimeResponse;
@@ -54,35 +55,6 @@ impl CompactionCoordinator {
         request_id: u64,
         plan: CompactionPlan,
     ) -> HandleOutcome {
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            let epoch = event_loop
-                .state
-                .ingest_epoch
-                .load(std::sync::atomic::Ordering::SeqCst);
-            tracing::error!(
-                component = "compaction",
-                invariant = "no_compaction_during_ingest",
-                ingest_epoch = epoch,
-                input_files = ?plan.input_files,
-                "BUG: RunCompaction called while ingest mode is active."
-            );
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(
-                        "BUG: compaction execution attempted during ingest mode - violated invariant"
-                            .to_string(),
-                    ),
-                },
-            );
-            return HandleOutcome::Continue;
-        }
-
         let cplan = crate::compaction::CompactionPlan {
             source_files: plan.input_files.clone(),
             target_files: Vec::new(),
@@ -118,8 +90,7 @@ impl CompactionCoordinator {
             event_loop
                 .state
                 .pending_compaction_waits
-                .lock()
-                .insert(request_id, "CompactAll".to_string());
+                .insert(request_id, CompactionWait::CompactAll);
             event_loop.schedule_cloud_maintenance();
             return HandleOutcome::Continue;
         }
@@ -133,8 +104,7 @@ impl CompactionCoordinator {
             event_loop
                 .state
                 .pending_compaction_waits
-                .lock()
-                .insert(request_id, "CompactAll".to_string());
+                .insert(request_id, CompactionWait::CompactAll);
             return HandleOutcome::Continue;
         }
 
@@ -166,8 +136,10 @@ impl CompactionCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let mut pending = event_loop.state.pending_compaction_waits.lock();
-        pending.insert(request_id, "CompactAll".to_string());
+        event_loop
+            .state
+            .pending_compaction_waits
+            .insert(request_id, CompactionWait::CompactAll);
         HandleOutcome::Continue
     }
 
@@ -183,25 +155,6 @@ impl CompactionCoordinator {
         if event_loop.fencing.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
-            ));
-        }
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            let epoch = event_loop
-                .state
-                .ingest_epoch
-                .load(std::sync::atomic::Ordering::SeqCst);
-            tracing::error!(
-                component = "compaction",
-                invariant = "no_compaction_during_ingest",
-                ingest_epoch = epoch,
-                "BUG: CompactAll called while ingest mode is active."
-            );
-            return Err(crate::common::MidgeError::Internal(
-                "BUG: compact_all attempted during ingest mode - violated invariant".to_string(),
             ));
         }
         Ok(())
@@ -1050,24 +1003,9 @@ impl CompactionCoordinator {
             return;
         }
 
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            Self::fail_pending_compaction_waits(
-                event_loop,
-                &crate::common::MidgeError::Aborted(
-                    "manual compaction interrupted by ingestion barrier".into(),
-                ),
-            );
-            return;
-        }
-
         if event_loop.cloud_maintenance_enabled() {
-            // BeginIngest waits for the active worker only. CompactAll keeps
-            // its obligation until a later fair compaction turn proves that
-            // no eligible manual plan remains.
+            // CompactAll keeps its obligation until a later fair compaction
+            // turn proves that no eligible manual plan remains.
             Self::complete_idle_compaction_waits(event_loop, false);
             return;
         }
@@ -1113,7 +1051,7 @@ impl CompactionCoordinator {
         if active_now == 0 {
             Self::complete_idle_compaction_waits(event_loop, true);
         } else if emergent_scheduled {
-            let pending = event_loop.state.pending_compaction_waits.lock();
+            let pending = &event_loop.state.pending_compaction_waits;
             tracing::debug!(
                 "emergent compactions scheduled; {} requests still waiting",
                 pending.len()
@@ -1122,48 +1060,33 @@ impl CompactionCoordinator {
     }
 
     pub(super) fn has_manual_compaction_waiters(event_loop: &EventLoop) -> bool {
-        event_loop
-            .state
-            .pending_compaction_waits
-            .lock()
-            .values()
-            .any(|condition| condition == "CompactAll")
+        !event_loop.state.pending_compaction_waits.is_empty()
     }
 
-    pub(super) fn complete_idle_compaction_waits(event_loop: &EventLoop, include_manual: bool) {
-        let mut pending = event_loop.state.pending_compaction_waits.lock();
-        pending.retain(|request_id, condition| {
-            if condition == "CompactAll" && !include_manual {
-                return true;
-            }
-            event_loop.respond(
-                *request_id,
-                RuntimeResponse::Ok {
-                    request_id: *request_id,
-                },
-            );
-            false
-        });
+    pub(super) fn complete_idle_compaction_waits(event_loop: &mut EventLoop, include_manual: bool) {
+        if !include_manual {
+            return;
+        }
+        for (request_id, CompactionWait::CompactAll) in
+            event_loop.state.pending_compaction_waits.drain()
+        {
+            event_loop
+                .router
+                .complete(RuntimeResponse::Ok { request_id });
+        }
     }
 
     pub(super) fn fail_pending_compaction_waits(
-        event_loop: &EventLoop,
+        event_loop: &mut EventLoop,
         error: &crate::common::MidgeError,
     ) {
-        let mut pending = event_loop.state.pending_compaction_waits.lock();
-        for (request_id, condition) in pending.drain() {
-            let response = if condition.starts_with("BeginIngest(") {
-                // BeginIngest deliberately cancels the active worker. Once it
-                // has drained, the barrier is established even though that
-                // compaction itself terminated with `Aborted`.
-                RuntimeResponse::Ok { request_id }
-            } else {
-                RuntimeResponse::Error {
-                    request_id,
-                    error: error.replay(),
-                }
-            };
-            event_loop.router.complete(response);
+        for (request_id, CompactionWait::CompactAll) in
+            event_loop.state.pending_compaction_waits.drain()
+        {
+            event_loop.router.complete(RuntimeResponse::Error {
+                request_id,
+                error: error.replay(),
+            });
         }
     }
 

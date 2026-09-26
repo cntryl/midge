@@ -783,9 +783,6 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
             removed: vec!["old.sst".to_string()],
             added: vec![file_meta],
         }),
-        RuntimeMsg::Test(TestRuntimeMsg::BeginIngest { request_id: 16 }),
-        RuntimeMsg::Test(TestRuntimeMsg::EndIngest { request_id: 17 }),
-        RuntimeMsg::Test(TestRuntimeMsg::GetIngestState { request_id: 18 }),
         RuntimeMsg::Test(TestRuntimeMsg::GetRuntimeConfig { request_id: 19 }),
     ]
 }
@@ -955,10 +952,6 @@ fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: crate::wal::policy::BatchConfig::default(),
         },
-        RuntimeResponse::IngestState {
-            request_id: 13,
-            ingest_active: true,
-        },
     ]
 }
 
@@ -994,7 +987,6 @@ fn assert_response_payloads(responses: Vec<RuntimeResponse>) {
                 assert_eq!(wal_batch_config.max_delay_ms, default_batch.max_delay_ms);
                 assert_eq!(wal_batch_config.max_bytes, default_batch.max_bytes);
             }
-            RuntimeResponse::IngestState { ingest_active, .. } => assert!(ingest_active),
             _ => {}
         }
     }

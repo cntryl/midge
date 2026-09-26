@@ -458,16 +458,6 @@ pub enum TestRuntimeMsg {
         added: Vec<FileMeta>,
     },
 
-    // === Ingest Barrier ===
-    /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,
-    /// and wait until in-flight compactions drain.
-    BeginIngest { request_id: u64 },
-    /// End an ingest barrier: flush outstanding memtables, bump epoch and
-    /// re-enable scheduling.
-    EndIngest { request_id: u64 },
-    /// Query whether an ingest barrier is currently active.
-    GetIngestState { request_id: u64 },
-
     /// Get runtime configuration snapshot.
     GetRuntimeConfig { request_id: u64 },
 
@@ -708,11 +698,11 @@ impl TestRuntimeMsg {
             | TestRuntimeMsg::WalAppendDeleteRange { request_id, .. }
             | TestRuntimeMsg::WalRotate { request_id }
             | TestRuntimeMsg::CheckGc { request_id }
-            | TestRuntimeMsg::RunCompaction { request_id, .. }
-            | TestRuntimeMsg::BeginIngest { request_id }
-            | TestRuntimeMsg::EndIngest { request_id } => VerificationBarrierAction::Reject {
-                request_id: *request_id,
-            },
+            | TestRuntimeMsg::RunCompaction { request_id, .. } => {
+                VerificationBarrierAction::Reject {
+                    request_id: *request_id,
+                }
+            }
             _ => VerificationBarrierAction::Allow,
         }
     }
@@ -735,9 +725,6 @@ impl TestRuntimeMsg {
             | TestRuntimeMsg::CaptureReadSnapshot { request_id, .. }
             | TestRuntimeMsg::RegisterSnapshot { request_id, .. }
             | TestRuntimeMsg::GetRuntimeConfig { request_id }
-            | TestRuntimeMsg::GetIngestState { request_id }
-            | TestRuntimeMsg::BeginIngest { request_id }
-            | TestRuntimeMsg::EndIngest { request_id }
             | TestRuntimeMsg::Noop { request_id }
             | TestRuntimeMsg::StartupPing { request_id } => Some(*request_id),
 
@@ -764,9 +751,6 @@ impl TestRuntimeMsg {
             TestRuntimeMsg::RegisterSnapshot { .. } => "RegisterSnapshot",
             TestRuntimeMsg::UnregisterSnapshot { .. } => "UnregisterSnapshot",
             TestRuntimeMsg::GetRuntimeConfig { .. } => "GetRuntimeConfig",
-            TestRuntimeMsg::GetIngestState { .. } => "GetIngestState",
-            TestRuntimeMsg::BeginIngest { .. } => "BeginIngest",
-            TestRuntimeMsg::EndIngest { .. } => "EndIngest",
             TestRuntimeMsg::Noop { .. } => "Noop",
             TestRuntimeMsg::StartupPing { .. } => "StartupPing",
         }
@@ -893,13 +877,6 @@ pub enum RuntimeResponse {
         wal_durability_policy: DurabilityPolicy,
         wal_batch_config: crate::wal::policy::BatchConfig,
     },
-    /// Simple ingest state response
-    #[cfg(test)]
-    IngestState {
-        request_id: u64,
-        ingest_active: bool,
-    },
-
     /// Write stall status response
     WriteStallStatus {
         request_id: u64,
@@ -929,8 +906,7 @@ impl RuntimeResponse {
             | RuntimeResponse::CompactionComplete { request_id, .. }
             | RuntimeResponse::CurrentSequence { request_id, .. }
             | RuntimeResponse::ReadSnapshot { request_id, .. }
-            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. }
-            | RuntimeResponse::IngestState { request_id, .. } => *request_id,
+            | RuntimeResponse::RuntimeConfigSnapshot { request_id, .. } => *request_id,
         }
     }
 
@@ -963,8 +939,6 @@ impl RuntimeResponse {
             RuntimeResponse::ReadSnapshot { .. } => "ReadSnapshot",
             #[cfg(test)]
             RuntimeResponse::RuntimeConfigSnapshot { .. } => "RuntimeConfigSnapshot",
-            #[cfg(test)]
-            RuntimeResponse::IngestState { .. } => "IngestState",
         }
     }
 }

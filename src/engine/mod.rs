@@ -242,17 +242,6 @@ impl Engine {
         false
     }
 
-    /// Check if ingest batching should be used based on durability policy.
-    ///
-    /// Return whether an ingest barrier is currently active.
-    ///
-    /// Ingest batching is orthogonal to cloud durability. Cloud-backed async mode
-    /// still makes writes visible after the local WAL append barrier; it simply
-    /// advances cloud durability later in the background.
-    pub(crate) fn is_ingesting(&self) -> bool {
-        self.runtime_handle.ingest_active()
-    }
-
     /// Force a flush of a specific column family
     ///
     /// # Errors
@@ -286,9 +275,6 @@ impl Engine {
     /// Returns an error when snapshot registration fails or the column family does
     /// not exist.
     ///
-    /// # Errors
-    ///
-    /// Returns `MidgeError::InvalidArgument` when called while ingest mode is active.
     pub fn begin_tx(
         &self,
         cf_id: ColumnFamilyId,
@@ -297,13 +283,6 @@ impl Engine {
         let is_read_only = mode == api::TransactionMode::ReadOnly;
         if is_read_only {
             self.runtime_handle.diagnostics.record_read_only_begin_tx();
-        }
-
-        if self.is_ingesting() {
-            return Err(MidgeError::InvalidArgument(
-                "cannot begin a transaction while ingest mode is active; end the ingest barrier first"
-                    .to_string(),
-            ));
         }
 
         let runtime_transaction_guard = self.runtime_handle.acquire_transaction_guard()?;
@@ -571,7 +550,7 @@ impl Engine {
     /// contain NUL, and must not be the reserved name `default`.
     ///
     /// Returns [`MidgeError::InvalidArgument`] when a name violates those
-    /// restrictions or DDL is attempted during ingest mode. Returns
+    /// restrictions. Returns
     /// [`MidgeError::ResourceLimit`] when the column-family ID space is
     /// exhausted. Other errors report persistence or runtime failures.
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
@@ -614,8 +593,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns [`MidgeError::InvalidArgument`] for the default, missing, or
-    /// already-dropped column family and when DDL is attempted during ingest
-    /// mode.
+    /// already-dropped column family.
     ///
     /// Returns [`MidgeError::UnflushedDataPresent`] -- and only that error --
     /// when committed data remains in the active memtable. That is the sole
@@ -643,8 +621,8 @@ impl Engine {
     /// # Errors
     ///
     /// Returns [`MidgeError::InvalidArgument`] for the default, missing, or
-    /// already-dropped column family and when DDL is attempted during ingest
-    /// mode. Other errors report persistence or runtime failures.
+    /// already-dropped column family. Other errors report persistence or
+    /// runtime failures.
     pub fn drop_column_family_discarding_unflushed(
         &self,
         cf_id: ColumnFamilyId,

@@ -72,24 +72,6 @@ impl ManifestCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            tracing::error!("ingest: attempted DDL (create CF) during ingest mode");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::InvalidArgument(
-                        "ingest: DDL forbidden during ingest mode".to_string(),
-                    ),
-                },
-            );
-            return HandleOutcome::Continue;
-        }
-
         if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
@@ -182,24 +164,6 @@ impl ManifestCoordinator {
         discard_unflushed: bool,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            tracing::error!("ingest: attempted DDL (drop CF) during ingest mode");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::InvalidArgument(
-                        "ingest: DDL forbidden during ingest mode".to_string(),
-                    ),
-                },
-            );
-            return HandleOutcome::Continue;
-        }
-
         if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,

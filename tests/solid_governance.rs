@@ -22,3 +22,33 @@ fn should_keep_metric_verification_delegates_off_engine() {
         );
     }
 }
+
+#[test]
+fn should_keep_test_only_ingest_and_idempotency_protocols_out_of_runtime() {
+    // Arrange
+    let state = include_str!("../src/runtime/state.rs");
+    let protocol = include_str!("../src/runtime/protocol.rs");
+    let durability = include_str!("../src/runtime/durability.rs");
+    let engine = include_str!("../src/engine/mod.rs");
+
+    // Act / Assert
+    for (name, source) in [
+        ("state", state),
+        ("protocol", protocol),
+        ("durability", durability),
+        ("engine", engine),
+    ] {
+        for forbidden in [
+            "ingest_active",
+            "ingest_epoch",
+            "BeginIngest",
+            "EndIngest",
+            "idempotency_cache",
+            "ConfirmWalAppend",
+        ] {
+            assert!(!source.contains(forbidden), "{name} retains {forbidden}");
+        }
+    }
+    assert!(state.contains("HashMap<u64, CompactionWait>"));
+    assert!(!state.contains("HashMap<u64, String>"));
+}

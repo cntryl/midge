@@ -4,7 +4,6 @@ use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
 use crate::types::EntryType;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -93,10 +92,9 @@ fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::com
         event_loop
             .state
             .pending_compaction_waits
-            .lock()
             .get(&request_id)
-            .map(String::as_str),
-        Some("CompactAll")
+            .copied(),
+        Some(crate::runtime::state::CompactionWait::CompactAll)
     );
     Ok(())
 }
@@ -352,8 +350,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     event_loop
         .state
         .pending_compaction_waits
-        .lock()
-        .insert(8105, "CompactAll".to_string());
+        .insert(8105, crate::runtime::state::CompactionWait::CompactAll);
     event_loop.write_stall_waiters.register(8106, 0);
     event_loop.durability.queue_waiter_for_key(
         0,
@@ -389,7 +386,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     assert!(event_loop.publication_gate.deferred_messages_is_empty());
     assert!(event_loop.verification_barrier.deferred_messages.is_empty());
     assert!(event_loop.flush_barrier_waiters.is_empty());
-    assert!(event_loop.state.pending_compaction_waits.lock().is_empty());
+    assert!(event_loop.state.pending_compaction_waits.is_empty());
     assert!(event_loop.write_stall_waiters.is_empty());
     assert!(!event_loop.durability.has_pending_waiters());
 }
@@ -423,73 +420,6 @@ fn should_retain_writer_epochs_in_recovered_cloud_wal_runtime_config() {
             writer_epoch: 8,
         })
     );
-}
-
-#[test]
-fn should_return_invalid_argument_given_column_family_create_during_ingest() {
-    // Arrange
-    let mut event_loop = create_test_event_loop().expect("create event loop");
-    event_loop
-        .state
-        .ingest_active
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let request_id = 901;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
-
-    // Act
-    super::manifest::ManifestCoordinator::create_column_family(
-        &mut event_loop,
-        &msg_rx,
-        request_id,
-        "during-ingest",
-    );
-    let response = response_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("receive create response");
-
-    // Assert
-    assert!(matches!(
-        response,
-        RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(message),
-            ..
-        } if message.contains("ingest mode")
-    ));
-}
-
-#[test]
-fn should_return_invalid_argument_given_column_family_drop_during_ingest() {
-    // Arrange
-    let mut event_loop = create_test_event_loop().expect("create event loop");
-    event_loop
-        .state
-        .ingest_active
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let request_id = 902;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
-
-    // Act
-    super::manifest::ManifestCoordinator::drop_column_family(
-        &mut event_loop,
-        &msg_rx,
-        request_id,
-        42,
-        false,
-    );
-    let response = response_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("receive drop response");
-
-    // Assert
-    assert!(matches!(
-        response,
-        RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(message),
-            ..
-        } if message.contains("ingest mode")
-    ));
 }
 
 #[test]
@@ -1056,7 +986,7 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
 #[test]
 fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
     // Arrange
-    for gate in ["ingest", "ddl", "publication", "unsettled"] {
+    for gate in ["ddl", "publication", "unsettled"] {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         event_loop.state.set_compaction_enabled(false);
         event_loop.state.l0_compaction_trigger = 2;
@@ -1070,7 +1000,6 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
                 test_manifest_l0_file_meta(&format!("gated-{sequence}.sst"), sequence)
             }));
         match gate {
-            "ingest" => event_loop.state.ingest_active.store(true, Ordering::SeqCst),
             "ddl" => event_loop.fencing.ddl_authority_ambiguous = true,
             "publication" => {
                 event_loop.publication_gate.try_acquire(
@@ -1084,9 +1013,6 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
             event_loop.schedule_one_background_compaction_if_needed("pressure gate regression");
         // Assert
         let guarded = match (&result, gate) {
-            (Err(crate::MidgeError::Internal(message)), "ingest") => {
-                message.contains("during ingest mode")
-            }
             (Err(crate::MidgeError::Fenced(message)), "ddl") => {
                 message.contains("DDL authority is ambiguous")
             }
@@ -1140,85 +1066,6 @@ fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::comm
     );
 
     Ok(())
-}
-
-#[test]
-fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled() {
-    // Arrange
-    #[derive(Clone)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-        type Writer = CapturedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            CapturedLogWriter(Arc::clone(&self.0))
-        }
-    }
-
-    impl std::io::Write for CapturedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.state.set_compaction_enabled(false);
-    event_loop
-        .state
-        .ingest_active
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    event_loop.state.manifest.files.extend(
-        (1..=4).map(|seq| test_manifest_l0_file_meta(&format!("ingest-disabled-{seq}.sst"), seq)),
-    );
-
-    let captured_logs = CapturedLogs(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_writer(captured_logs.clone())
-        .finish();
-
-    tracing::subscriber::with_default(subscriber, || {
-        event_loop.schedule_compaction_after_flush_publication("ingest-disabled-4.sst");
-    });
-
-    let logs = String::from_utf8(
-        captured_logs
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone(),
-    )
-    .expect("captured logs should be utf8");
-    // Act
-    // Assert
-    assert!(
-        !logs.contains("no_compaction_during_ingest"),
-        "disabled post-flush scheduling should not enter the ingest invariant path: {logs}"
-    );
-    assert!(
-        !logs.contains("BUG: compaction scheduling attempted while ingest mode is active"),
-        "disabled post-flush scheduling should stay quiet during ingest teardown: {logs}"
-    );
-    assert_eq!(
-        event_loop
-            .state
-            .active_compactions
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "disabled post-flush scheduling should not start compaction during ingest"
-    );
 }
 
 #[test]
@@ -1870,18 +1717,13 @@ mod compaction_scheduling {
     }
 
     #[test]
-    fn should_assign_output_sequence_when_compaction_runs_after_end_ingest() {
+    fn should_assign_output_sequence_when_background_compaction_runs() {
         // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
         event_loop.state.set_compaction_enabled(true);
         event_loop.state.sequence = 100;
-        event_loop
-            .state
-            .ingest_active
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-
         for seq in 1..=4 {
             let name = crate::cloud_layout::file_name(0, 0, seq);
             let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
@@ -1892,24 +1734,26 @@ mod compaction_scheduling {
                 .push(manifest_file_from_runtime(file));
         }
 
-        event_loop.handle_end_ingest(77);
+        event_loop
+            .schedule_one_background_compaction_if_needed("sequence test")
+            .expect("schedule background compaction");
 
         let msg = worker_rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("EndIngest-triggered compaction should complete");
+            .expect("background compaction should complete");
         match msg {
             RuntimeMsg::CompactionComplete { output_ssts, .. } => {
                 // Act
                 // Assert
                 assert!(
                     !output_ssts.is_empty(),
-                    "EndIngest-triggered compaction should produce an output SST"
+                    "background compaction should produce an output SST"
                 );
                 assert!(
                     output_ssts
                         .iter()
                         .all(|name| !name.ends_with("00000000000000000000.sst")),
-                    "EndIngest-triggered compaction must not use sequence zero: {output_ssts:?}"
+                    "background compaction must not use sequence zero: {output_ssts:?}"
                 );
             }
             other => panic!("unexpected worker message: {other:?}"),
@@ -2593,11 +2437,10 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
     let compact_all_rx = event_loop
         .router
         .register(compact_all_request_id, "CompactAll");
-    event_loop
-        .state
-        .pending_compaction_waits
-        .lock()
-        .insert(compact_all_request_id, "CompactAll".to_string());
+    event_loop.state.pending_compaction_waits.insert(
+        compact_all_request_id,
+        crate::runtime::state::CompactionWait::CompactAll,
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2666,11 +2509,10 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
     let response_rx = event_loop
         .router
         .register(compact_all_request_id, "CompactAll");
-    event_loop
-        .state
-        .pending_compaction_waits
-        .lock()
-        .insert(compact_all_request_id, "CompactAll".to_string());
+    event_loop.state.pending_compaction_waits.insert(
+        compact_all_request_id,
+        crate::runtime::state::CompactionWait::CompactAll,
+    );
     event_loop.compaction_actor.set_worker_error_for_test(
         crate::common::MidgeError::ResourceLimit("compaction pool exhausted".to_string()),
     );

@@ -872,7 +872,6 @@ impl CompactionActor {
         let sst_dir = state.sst_dir.clone();
         let input_files = plan.input_files.clone();
         let plan_clone = plan.clone();
-        let epoch = std::sync::Arc::clone(&state.ingest_epoch);
         self.worker_cancel.store(false, Ordering::Release);
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
@@ -884,11 +883,7 @@ impl CompactionActor {
             .name(format!("midge-compaction-{job_id}"))
             .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let my_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-                let abort_check = || {
-                    worker_cancel.load(Ordering::Acquire)
-                        || epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch
-                };
+                let abort_check = || worker_cancel.load(Ordering::Acquire);
                 let result = Self::execute_with_storage(
                     &plan_clone,
                     sst_factory.as_ref(),
@@ -901,27 +896,13 @@ impl CompactionActor {
                 let (output_ssts, error) = match result {
                     Ok(v) => (v, None),
                     Err(e) => {
-                        if matches!(e, MidgeError::Aborted(_)) {
-                            let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
-                            tracing::info!(
-                                component = "compaction",
-                                invariant = "cooperative_cancellation",
-                                job_id = job_id,
-                                old_epoch = my_epoch,
-                                new_epoch = new_epoch,
-                                input_files = ?input_files,
-                                "compaction: aborting due to ingest epoch change (job_id={}, old_epoch={}, new_epoch={})",
-                                job_id, my_epoch, new_epoch
-                            );
-                        } else {
-                            tracing::warn!(
-                                component = "compaction",
-                                job_id = job_id,
-                                error = %e,
-                                input_files = ?input_files,
-                                "compaction worker aborted or failed"
-                            );
-                        }
+                        tracing::warn!(
+                            component = "compaction",
+                            job_id = job_id,
+                            error = %e,
+                            input_files = ?input_files,
+                            "compaction worker aborted or failed"
+                        );
                         (Vec::new(), Some(e))
                     }
                 };
