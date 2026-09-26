@@ -11,7 +11,7 @@ use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudRespon
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
     classify_response_error, conditional_range_preconditions, current_unix_secs, finish_paged_list,
-    object_metadata_from_response, response_error_detail, PagedList,
+    object_metadata_from_response, response_error_detail, ListPageParser, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1027,18 +1027,37 @@ struct S3ListContext {
     base_url: String,
 }
 
-impl PagedList<S3ListContext> {
-    fn url(&self) -> String {
-        let mut url = format!(
-            "{}?list-type=2&prefix={}",
-            self.provider.base_url,
-            encode(&self.prefix)
-        );
-        if let Some(token) = self.token.as_deref() {
+impl ListPageParser for S3ListContext {
+    fn url(&self, prefix: &str, token: Option<&str>) -> String {
+        let mut url = format!("{}?list-type=2&prefix={}", self.base_url, encode(prefix));
+        if let Some(token) = token {
             url.push_str("&continuation-token=");
             url.push_str(&encode(token));
         }
         url
+    }
+
+    fn parse_page(&self, response: &CloudResponse) -> MidgeResult<(Vec<String>, Option<String>)> {
+        let body = String::from_utf8_lossy(&response.body);
+        super::validate_list_xml(&body, "ListBucketResult")?;
+        let items = extract_xml_tag_values(&body, "Key");
+        let truncated = extract_xml_tag_values(&body, "IsTruncated")
+            .first()
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        let token = extract_xml_tag_values(&body, "NextContinuationToken")
+            .into_iter()
+            .next()
+            .filter(|token| !token.is_empty());
+        if truncated && token.is_none() {
+            return Err(MidgeError::Internal(
+                "S3 list response was truncated without NextContinuationToken".to_string(),
+            ));
+        }
+        Ok((items, truncated.then_some(token).flatten()))
+    }
+
+    fn response_error(&self, response: &CloudResponse) -> CloudError {
+        s3_response_error(response, "S3 LIST", false)
     }
 }
 
@@ -1336,30 +1355,7 @@ impl CloudBackend for S3Backend {
                 }
                 Ok(request)
             },
-            |state, resp| {
-                if resp.status != 200 {
-                    state.error = Some(s3_response_error(&resp, "S3 LIST", false));
-                    return Ok(false);
-                }
-                let body = String::from_utf8_lossy(&resp.body);
-                super::validate_list_xml(&body, "ListBucketResult")?;
-                let page_items = extract_xml_tag_values(&body, "Key");
-                let truncated = extract_xml_tag_values(&body, "IsTruncated")
-                    .first()
-                    .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-                let continuation_token = extract_xml_tag_values(&body, "NextContinuationToken")
-                    .into_iter()
-                    .next()
-                    .filter(|token| !token.is_empty());
-                if truncated && continuation_token.is_none() {
-                    return Err(MidgeError::Internal(
-                        "S3 list response was truncated without NextContinuationToken".to_string(),
-                    ));
-                }
-                let continuation_token = truncated.then_some(continuation_token).flatten();
-                state.record_page(page_items, continuation_token)?;
-                Ok(truncated)
-            },
+            |state, resp| state.accept_page(&resp),
             finish_paged_list,
         );
     }

@@ -28,7 +28,7 @@ use crate::storage::cloud::{CloudOutcome, CloudResponse, ObjectMetadata};
     feature = "cloud-azure",
     feature = "cloud-gcp"
 ))]
-pub(super) struct PagedList<P> {
+pub(super) struct PagedList<P: ListPageParser> {
     pub(super) prefix: String,
     pub(super) provider: P,
     pub(super) token: Option<String>,
@@ -43,7 +43,22 @@ pub(super) struct PagedList<P> {
     feature = "cloud-azure",
     feature = "cloud-gcp"
 ))]
-impl<P> PagedList<P> {
+pub(super) trait ListPageParser {
+    fn url(&self, prefix: &str, token: Option<&str>) -> String;
+    fn parse_page(
+        &self,
+        response: &crate::storage::cloud::CloudResponse,
+    ) -> crate::common::MidgeResult<(Vec<String>, Option<String>)>;
+    fn response_error(&self, response: &crate::storage::cloud::CloudResponse) -> CloudError;
+}
+
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+impl<P: ListPageParser> PagedList<P> {
     pub(super) fn new(prefix: String, provider: P) -> Self {
         Self {
             prefix,
@@ -65,6 +80,22 @@ impl<P> PagedList<P> {
         self.token = token;
         Ok(self.token.is_some())
     }
+
+    pub(super) fn url(&self) -> String {
+        self.provider.url(&self.prefix, self.token.as_deref())
+    }
+
+    pub(super) fn accept_page(
+        &mut self,
+        response: &crate::storage::cloud::CloudResponse,
+    ) -> crate::common::MidgeResult<bool> {
+        if response.status != 200 {
+            self.error = Some(self.provider.response_error(response));
+            return Ok(false);
+        }
+        let (items, token) = self.provider.parse_page(response)?;
+        self.record_page(items, token)
+    }
 }
 
 #[cfg(any(
@@ -73,7 +104,7 @@ impl<P> PagedList<P> {
     feature = "cloud-azure",
     feature = "cloud-gcp"
 ))]
-pub(super) fn finish_paged_list<P>(
+pub(super) fn finish_paged_list<P: ListPageParser>(
     prefix: String,
     result: crate::common::MidgeResult<PagedList<P>>,
 ) -> CloudEvent {

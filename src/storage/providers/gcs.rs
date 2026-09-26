@@ -12,7 +12,7 @@ use super::super::cloud::{
 };
 use super::rest::{
     classify_response_error, conditional_range_preconditions, current_unix_secs, finish_paged_list,
-    response_error_detail, PagedList,
+    response_error_detail, ListPageParser, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1080,17 +1080,17 @@ struct GcsListContext {
     mode: GcsBackendMode,
 }
 
-impl PagedList<GcsListContext> {
-    fn url(&self) -> String {
-        match self.provider.mode {
+impl ListPageParser for GcsListContext {
+    fn url(&self, prefix: &str, token: Option<&str>) -> String {
+        match self.mode {
             GcsBackendMode::Json => {
                 let mut url = format!(
                     "{}/storage/v1/b/{}/o?prefix={}",
-                    self.provider.endpoint.trim_end_matches('/'),
-                    self.provider.bucket,
-                    urlencoding::encode(&self.prefix)
+                    self.endpoint.trim_end_matches('/'),
+                    self.bucket,
+                    urlencoding::encode(prefix)
                 );
-                if let Some(token) = self.token.as_deref() {
+                if let Some(token) = token {
                     url.push_str("&pageToken=");
                     url.push_str(&urlencoding::encode(token));
                 }
@@ -1099,17 +1099,46 @@ impl PagedList<GcsListContext> {
             GcsBackendMode::Xml => {
                 let mut url = format!(
                     "{}/{}?prefix={}",
-                    self.provider.endpoint.trim_end_matches('/'),
-                    self.provider.bucket,
-                    urlencoding::encode(&self.prefix)
+                    self.endpoint.trim_end_matches('/'),
+                    self.bucket,
+                    urlencoding::encode(prefix)
                 );
-                if let Some(token) = self.token.as_deref() {
+                if let Some(token) = token {
                     url.push_str("&marker=");
                     url.push_str(&urlencoding::encode(token));
                 }
                 url
             }
         }
+    }
+
+    fn parse_page(&self, response: &CloudResponse) -> MidgeResult<(Vec<String>, Option<String>)> {
+        let body = String::from_utf8_lossy(&response.body);
+        match self.mode {
+            GcsBackendMode::Json => extract_gcs_json_list(&body),
+            GcsBackendMode::Xml => {
+                super::validate_list_xml(&body, "ListBucketResult")?;
+                let items = extract_xml_tag_values(&body, "Key");
+                let truncated = extract_xml_tag_values(&body, "IsTruncated")
+                    .first()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+                let token = extract_xml_tag_values(&body, "NextMarker")
+                    .into_iter()
+                    .next()
+                    .or_else(|| truncated.then(|| items.last().cloned()).flatten())
+                    .filter(|marker| !marker.is_empty());
+                if truncated && token.is_none() {
+                    return Err(MidgeError::Internal(
+                        "GCS XML list response was truncated without NextMarker".to_string(),
+                    ));
+                }
+                Ok((items, truncated.then_some(token).flatten()))
+            }
+        }
+    }
+
+    fn response_error(&self, response: &CloudResponse) -> CloudError {
+        gcs_response_error(response, "GCS LIST", self.mode, false)
     }
 }
 
@@ -1495,50 +1524,7 @@ impl CloudBackend for GcsBackend {
                 }
                 Ok(request)
             },
-            |state, resp| {
-                if resp.status != 200 {
-                    state.error = Some(gcs_response_error(
-                        &resp,
-                        "GCS LIST",
-                        state.provider.mode,
-                        false,
-                    ));
-                    return Ok(false);
-                }
-                let body = String::from_utf8_lossy(&resp.body);
-                let (page_items, page_token) = match state.provider.mode {
-                    GcsBackendMode::Json => {
-                        let (items, next_page_token) = extract_gcs_json_list(&body)?;
-                        (items, next_page_token)
-                    }
-                    GcsBackendMode::Xml => {
-                        super::validate_list_xml(&body, "ListBucketResult")?;
-                        let items = extract_xml_tag_values(&body, "Key");
-                        let truncated = extract_xml_tag_values(&body, "IsTruncated")
-                            .first()
-                            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-                        let page_token = extract_xml_tag_values(&body, "NextMarker")
-                            .into_iter()
-                            .next()
-                            .or_else(|| {
-                                if truncated {
-                                    items.last().cloned()
-                                } else {
-                                    None
-                                }
-                            })
-                            .filter(|marker| !marker.is_empty());
-                        if truncated && page_token.is_none() {
-                            return Err(MidgeError::Internal(
-                                "GCS XML list response was truncated without NextMarker"
-                                    .to_string(),
-                            ));
-                        }
-                        (items, truncated.then_some(page_token).flatten())
-                    }
-                };
-                state.record_page(page_items, page_token)
-            },
+            |state, resp| state.accept_page(&resp),
             finish_paged_list,
         );
     }

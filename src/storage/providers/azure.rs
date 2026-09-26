@@ -13,7 +13,7 @@ use super::super::cloud::{
 };
 use super::rest::{
     classify_response_error, conditional_range_preconditions, finish_paged_list,
-    object_metadata_from_response, response_error_detail, PagedList,
+    object_metadata_from_response, response_error_detail, ListPageParser, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -818,22 +818,37 @@ struct AzureListContext {
     sas_token: Option<String>,
 }
 
-impl PagedList<AzureListContext> {
-    fn url(&self) -> String {
+impl ListPageParser for AzureListContext {
+    fn url(&self, prefix: &str, token: Option<&str>) -> String {
         let mut url = format!(
             "{}?restype=container&comp=list&prefix={}",
-            self.provider.base_url,
-            urlencoding::encode(&self.prefix)
+            self.base_url,
+            urlencoding::encode(prefix)
         );
-        if let Some(marker) = self.token.as_deref() {
+        if let Some(marker) = token {
             url.push_str("&marker=");
             url.push_str(&urlencoding::encode(marker));
         }
-        if let Some(token) = self.provider.sas_token.as_deref() {
+        if let Some(token) = self.sas_token.as_deref() {
             url.push('&');
             url.push_str(token);
         }
         url
+    }
+
+    fn parse_page(&self, response: &CloudResponse) -> MidgeResult<(Vec<String>, Option<String>)> {
+        let body = String::from_utf8_lossy(&response.body);
+        super::validate_list_xml(&body, "EnumerationResults")?;
+        let items = extract_xml_tag_values(&body, "Name");
+        let marker = extract_xml_tag_values(&body, "NextMarker")
+            .into_iter()
+            .next()
+            .filter(|marker| !marker.is_empty());
+        Ok((items, marker))
+    }
+
+    fn response_error(&self, response: &CloudResponse) -> CloudError {
+        azure_response_error(response, "Azure LIST", false)
     }
 }
 
@@ -1130,20 +1145,7 @@ impl CloudBackend for AzureBackend {
                 }
                 Ok(request)
             },
-            |state, resp| {
-                if resp.status != 200 {
-                    state.error = Some(azure_response_error(&resp, "Azure LIST", false));
-                    return Ok(false);
-                }
-                let body = String::from_utf8_lossy(&resp.body);
-                super::validate_list_xml(&body, "EnumerationResults")?;
-                let page_items = extract_xml_tag_values(&body, "Name");
-                let marker = extract_xml_tag_values(&body, "NextMarker")
-                    .into_iter()
-                    .next()
-                    .filter(|marker| !marker.is_empty());
-                state.record_page(page_items, marker)
-            },
+            |state, resp| state.accept_page(&resp),
             finish_paged_list,
         );
     }
