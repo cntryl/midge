@@ -10,8 +10,82 @@
     feature = "cloud-gcp"
 ))]
 use crate::storage::cloud::CloudError;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+use crate::storage::cloud::{CloudEvent, CloudListBudget};
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
 use crate::storage::cloud::{CloudOutcome, CloudResponse, ObjectMetadata};
+
+/// State shared by the paginated REST provider loops. Provider-specific URL
+/// construction and page parsing stay in the caller.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) struct PagedList<P> {
+    pub(super) prefix: String,
+    pub(super) provider: P,
+    pub(super) token: Option<String>,
+    pub(super) items: Vec<String>,
+    pub(super) budget: CloudListBudget,
+    pub(super) error: Option<CloudError>,
+}
+
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+impl<P> PagedList<P> {
+    pub(super) fn new(prefix: String, provider: P) -> Self {
+        Self {
+            prefix,
+            provider,
+            token: None,
+            items: Vec::new(),
+            budget: CloudListBudget::default(),
+            error: None,
+        }
+    }
+
+    pub(super) fn record_page(
+        &mut self,
+        items: Vec<String>,
+        token: Option<String>,
+    ) -> crate::common::MidgeResult<bool> {
+        self.budget.record_page(&items, token.as_deref())?;
+        self.items.extend(items);
+        self.token = token;
+        Ok(self.token.is_some())
+    }
+}
+
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn finish_paged_list<P>(
+    prefix: String,
+    result: crate::common::MidgeResult<PagedList<P>>,
+) -> CloudEvent {
+    let result = match result {
+        Ok(state) => match state.error {
+            Some(error) => Err(error),
+            None => Ok(state.items),
+        },
+        Err(error) => Err(CloudError::from_protocol_or_timeout_error(error)),
+    };
+    CloudEvent::List { prefix, result }
+}
 
 /// Current Unix time in whole seconds, or zero if the clock is before the epoch.
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-gcp"))]

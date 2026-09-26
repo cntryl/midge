@@ -8,10 +8,12 @@
 //! - All operations routed through the same `CloudBackend` trait as S3
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
-    CloudOutcome, CloudRequest, CloudResponse, CloudSigner,
+    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
+    CloudResponse, CloudSigner,
 };
-use super::rest::{conditional_range_preconditions, object_metadata_from_response};
+use super::rest::{
+    conditional_range_preconditions, finish_paged_list, object_metadata_from_response, PagedList,
+};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -810,28 +812,23 @@ impl AzureBackend {
     }
 }
 
-struct AzureListState {
-    prefix: String,
+struct AzureListContext {
     base_url: String,
     sas_token: Option<String>,
-    marker: Option<String>,
-    items: Vec<String>,
-    budget: CloudListBudget,
-    error: Option<CloudError>,
 }
 
-impl AzureListState {
+impl PagedList<AzureListContext> {
     fn url(&self) -> String {
         let mut url = format!(
             "{}?restype=container&comp=list&prefix={}",
-            self.base_url,
+            self.provider.base_url,
             urlencoding::encode(&self.prefix)
         );
-        if let Some(marker) = self.marker.as_deref() {
+        if let Some(marker) = self.token.as_deref() {
             url.push_str("&marker=");
             url.push_str(&urlencoding::encode(marker));
         }
-        if let Some(token) = self.sas_token.as_deref() {
+        if let Some(token) = self.provider.sas_token.as_deref() {
             url.push('&');
             url.push_str(token);
         }
@@ -1114,15 +1111,13 @@ impl CloudBackend for AzureBackend {
             return;
         };
         let prefix = prefix.to_string();
-        let state = AzureListState {
-            prefix: prefix.clone(),
-            base_url: self.base_url(),
-            sas_token: self.sas_token.clone(),
-            marker: None,
-            items: Vec::new(),
-            budget: CloudListBudget::default(),
-            error: None,
-        };
+        let state = PagedList::new(
+            prefix.clone(),
+            AzureListContext {
+                base_url: self.base_url(),
+                sas_token: self.sas_token.clone(),
+            },
+        );
         self.executor.spawn_request_loop(
             state,
             prefix,
@@ -1146,25 +1141,9 @@ impl CloudBackend for AzureBackend {
                     .into_iter()
                     .next()
                     .filter(|marker| !marker.is_empty());
-                state.budget.record_page(&page_items, marker.as_deref())?;
-                state.items.extend(page_items);
-                state.marker = marker;
-                Ok(state.marker.is_some())
+                state.record_page(page_items, marker)
             },
-            |ctx, result| match result {
-                Ok(state) if state.error.is_none() => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Ok(state.items),
-                },
-                Ok(mut state) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(state.error.take().expect("checked list error")),
-                },
-                Err(err) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(CloudError::from_protocol_or_timeout_error(err)),
-                },
-            },
+            finish_paged_list,
         );
     }
 

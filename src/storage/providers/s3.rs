@@ -7,12 +7,11 @@
 //! - Oracle Cloud Infrastructure (OCI S3 compatibility)
 //! - Any other S3-compatible service
 
-use super::super::cloud::{
-    CloudBackend, CloudExecutor, CloudListBudget, CloudRequest, CloudResponse, CloudSigner,
-};
+use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, object_metadata_from_response,
+    conditional_range_preconditions, current_unix_secs, finish_paged_list,
+    object_metadata_from_response, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1024,23 +1023,18 @@ impl S3Backend {
     }
 }
 
-struct S3ListState {
-    prefix: String,
+struct S3ListContext {
     base_url: String,
-    continuation_token: Option<String>,
-    items: Vec<String>,
-    budget: CloudListBudget,
-    error: Option<CloudError>,
 }
 
-impl S3ListState {
+impl PagedList<S3ListContext> {
     fn url(&self) -> String {
         let mut url = format!(
             "{}?list-type=2&prefix={}",
-            self.base_url,
+            self.provider.base_url,
             encode(&self.prefix)
         );
-        if let Some(token) = self.continuation_token.as_deref() {
+        if let Some(token) = self.token.as_deref() {
             url.push_str("&continuation-token=");
             url.push_str(&encode(token));
         }
@@ -1330,14 +1324,7 @@ impl CloudBackend for S3Backend {
         };
         let prefix = prefix.to_string();
         let base_url = self.base_url();
-        let state = S3ListState {
-            prefix: prefix.clone(),
-            base_url,
-            continuation_token: None,
-            items: Vec::new(),
-            budget: CloudListBudget::default(),
-            error: None,
-        };
+        let state = PagedList::new(prefix.clone(), S3ListContext { base_url });
         self.executor.spawn_request_loop(
             state,
             prefix,
@@ -1370,27 +1357,10 @@ impl CloudBackend for S3Backend {
                     ));
                 }
                 let continuation_token = truncated.then_some(continuation_token).flatten();
-                state
-                    .budget
-                    .record_page(&page_items, continuation_token.as_deref())?;
-                state.items.extend(page_items);
-                state.continuation_token = continuation_token;
+                state.record_page(page_items, continuation_token)?;
                 Ok(truncated)
             },
-            |ctx, result| match result {
-                Ok(state) if state.error.is_none() => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Ok(state.items),
-                },
-                Ok(mut state) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(state.error.take().expect("checked list error")),
-                },
-                Err(err) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(CloudError::from_protocol_or_timeout_error(err)),
-                },
-            },
+            finish_paged_list,
         );
     }
 

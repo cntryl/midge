@@ -7,10 +7,12 @@
 //! - All operations routed through the same `CloudBackend` trait as S3/Azure
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
-    CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
+    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
+    CloudResponse, CloudSigner, ObjectMetadata,
 };
-use super::rest::{conditional_range_preconditions, current_unix_secs};
+use super::rest::{
+    conditional_range_preconditions, current_unix_secs, finish_paged_list, PagedList,
+};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
@@ -1071,28 +1073,23 @@ impl GcsBackend {
     }
 }
 
-struct GcsListState {
-    prefix: String,
+struct GcsListContext {
     endpoint: String,
     bucket: String,
     mode: GcsBackendMode,
-    page_token: Option<String>,
-    items: Vec<String>,
-    budget: CloudListBudget,
-    error: Option<CloudError>,
 }
 
-impl GcsListState {
+impl PagedList<GcsListContext> {
     fn url(&self) -> String {
-        match self.mode {
+        match self.provider.mode {
             GcsBackendMode::Json => {
                 let mut url = format!(
                     "{}/storage/v1/b/{}/o?prefix={}",
-                    self.endpoint.trim_end_matches('/'),
-                    self.bucket,
+                    self.provider.endpoint.trim_end_matches('/'),
+                    self.provider.bucket,
                     urlencoding::encode(&self.prefix)
                 );
-                if let Some(token) = self.page_token.as_deref() {
+                if let Some(token) = self.token.as_deref() {
                     url.push_str("&pageToken=");
                     url.push_str(&urlencoding::encode(token));
                 }
@@ -1101,11 +1098,11 @@ impl GcsListState {
             GcsBackendMode::Xml => {
                 let mut url = format!(
                     "{}/{}?prefix={}",
-                    self.endpoint.trim_end_matches('/'),
-                    self.bucket,
+                    self.provider.endpoint.trim_end_matches('/'),
+                    self.provider.bucket,
                     urlencoding::encode(&self.prefix)
                 );
-                if let Some(token) = self.page_token.as_deref() {
+                if let Some(token) = self.token.as_deref() {
                     url.push_str("&marker=");
                     url.push_str(&urlencoding::encode(token));
                 }
@@ -1477,22 +1474,21 @@ impl CloudBackend for GcsBackend {
             return;
         };
         let prefix = prefix.to_string();
-        let state = GcsListState {
-            prefix: prefix.clone(),
-            endpoint: self.endpoint.clone(),
-            bucket: self.bucket.clone(),
-            mode: self.mode,
-            page_token: None,
-            items: Vec::new(),
-            budget: CloudListBudget::default(),
-            error: None,
-        };
+        let state = PagedList::new(
+            prefix.clone(),
+            GcsListContext {
+                endpoint: self.endpoint.clone(),
+                bucket: self.bucket.clone(),
+                mode: self.mode,
+            },
+        );
         self.executor.spawn_request_loop(
             state,
             prefix,
             callback,
             move |state| {
-                let mut request = Self::bodyless_request(state.mode, Method::GET, state.url());
+                let mut request =
+                    Self::bodyless_request(state.provider.mode, Method::GET, state.url());
                 if let Some(timeout) = request_timeout {
                     request = request.with_timeout(timeout);
                 }
@@ -1500,11 +1496,16 @@ impl CloudBackend for GcsBackend {
             },
             |state, resp| {
                 if resp.status != 200 {
-                    state.error = Some(gcs_response_error(&resp, "GCS LIST", state.mode, false));
+                    state.error = Some(gcs_response_error(
+                        &resp,
+                        "GCS LIST",
+                        state.provider.mode,
+                        false,
+                    ));
                     return Ok(false);
                 }
                 let body = String::from_utf8_lossy(&resp.body);
-                let (page_items, page_token) = match state.mode {
+                let (page_items, page_token) = match state.provider.mode {
                     GcsBackendMode::Json => {
                         let (items, next_page_token) = extract_gcs_json_list(&body)?;
                         (items, next_page_token)
@@ -1535,27 +1536,9 @@ impl CloudBackend for GcsBackend {
                         (items, truncated.then_some(page_token).flatten())
                     }
                 };
-                state
-                    .budget
-                    .record_page(&page_items, page_token.as_deref())?;
-                state.items.extend(page_items);
-                state.page_token = page_token;
-                Ok(state.page_token.is_some())
+                state.record_page(page_items, page_token)
             },
-            |ctx, result| match result {
-                Ok(state) if state.error.is_none() => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Ok(state.items),
-                },
-                Ok(mut state) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(state.error.take().expect("checked list error")),
-                },
-                Err(err) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(CloudError::from_protocol_or_timeout_error(err)),
-                },
-            },
+            finish_paged_list,
         );
     }
 
