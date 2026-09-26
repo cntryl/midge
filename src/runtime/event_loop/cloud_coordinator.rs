@@ -38,6 +38,22 @@ impl CloudCoordinator {
                 .is_some_and(|storage| storage.ephemeral_sst_cache_enabled())
     }
 
+    pub(super) fn attach_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+        self.hybrid_storage = Some(storage);
+    }
+
+    pub(super) fn disconnect_storage_events(&mut self) {
+        self.hybrid_storage_events = None;
+    }
+
+    pub(super) fn set_prune_worker(&mut self, worker: std::thread::JoinHandle<()>) {
+        self.cloud_wal_prune_worker = Some(worker);
+    }
+
+    pub(super) fn take_prune_worker(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        self.cloud_wal_prune_worker.take()
+    }
+
     pub(super) fn mirror_metadata_within(
         &self,
         fs: &dyn crate::io::Fs,

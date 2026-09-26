@@ -215,7 +215,7 @@ impl EventLoop {
             });
 
         match worker {
-            Ok(worker) => self.cloud_coordinator.cloud_wal_prune_worker = Some(worker),
+            Ok(worker) => self.cloud_coordinator.set_prune_worker(worker),
             Err(error) => {
                 for segment_id in candidate_ids {
                     self.cloud_coordinator
@@ -277,7 +277,7 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn join_cloud_wal_prune_worker(&mut self) {
-        if let Some(worker) = self.cloud_coordinator.cloud_wal_prune_worker.take() {
+        if let Some(worker) = self.cloud_coordinator.take_prune_worker() {
             if worker.join().is_err() {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!("cloud WAL prune preflight worker panicked during join");

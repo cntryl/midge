@@ -519,7 +519,7 @@ impl EventLoop {
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
         storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
         self.wal_actor.set_storage_budget(Arc::clone(&storage));
-        self.cloud_coordinator.hybrid_storage = Some(storage);
+        self.cloud_coordinator.attach_hybrid_storage(storage);
     }
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).

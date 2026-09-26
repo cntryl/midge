@@ -614,6 +614,25 @@ fn should_keep_cloud_fields_in_cloud_coordinator() {
 }
 
 #[test]
+fn should_mutate_cloud_lifecycle_state_through_coordinator_methods() {
+    // Arrange
+    let event_loop = include_str!("../src/runtime/event_loop/mod.rs");
+    let scheduler = include_str!("../src/runtime/event_loop/scheduler.rs");
+    let retention = include_str!("../src/runtime/event_loop/wal_retention/cloud.rs");
+
+    // Act
+    let direct_writes = [
+        event_loop.contains("cloud_coordinator.hybrid_storage ="),
+        scheduler.contains("cloud_coordinator.hybrid_storage_events ="),
+        retention.contains("cloud_coordinator.cloud_wal_prune_worker ="),
+        retention.contains("cloud_coordinator.cloud_wal_prune_worker.take()"),
+    ];
+
+    // Assert
+    assert!(!direct_writes.into_iter().any(|write| write));
+}
+
+#[test]
 fn should_register_background_maintenance_with_retry_deadlines() {
     // Arrange
     let event_loop = include_str!("../src/runtime/event_loop/mod.rs");

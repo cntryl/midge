@@ -367,7 +367,7 @@ impl EventLoop {
                                     self.handle_storage_event(ev);
                                 }
                                 Err(_) => {
-                                    self.cloud_coordinator.hybrid_storage_events = None;
+                                    self.cloud_coordinator.disconnect_storage_events();
                                 }
                             }
                             continue;
@@ -387,7 +387,7 @@ impl EventLoop {
                                     self.handle_storage_event(ev);
                                 }
                                 Err(_) => {
-                                    self.cloud_coordinator.hybrid_storage_events = None;
+                                    self.cloud_coordinator.disconnect_storage_events();
                                 }
                             }
                             continue;
