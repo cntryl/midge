@@ -353,10 +353,13 @@ fn should_not_classify_disconnected_cloud_callback_as_timeout() {
     let (sender, receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "metadata/manifest.json",
-        std::time::Duration::from_secs(1),
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        ),
         sender,
     );
     let event = receiver
@@ -395,10 +398,13 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
         std::time::Duration::ZERO,
         write_sender,
     );
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "metadata/manifest.json",
-        std::time::Duration::ZERO,
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        ),
         head_sender,
     );
     let write = write_receiver
@@ -750,10 +756,13 @@ fn should_apply_operation_timeout_to_cloud_head_adapter_when_shorter_than_config
 
     // Act
     let started = std::time::Instant::now();
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "metadata/manifest.json",
-        std::time::Duration::from_millis(5),
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(5),
+        ),
         sender,
     );
     let event = receiver.recv().expect("receive bounded adapter result");
@@ -1636,10 +1645,13 @@ fn should_bound_provider_read_requests_by_caller_timeout() {
     let (list_sender, list_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "sst/000001.sst",
-        std::time::Duration::from_millis(250),
+        crate::storage::StorageRequest::new(
+            "sst/000001.sst",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(250),
+        ),
         head_sender,
     );
     storage.submit_list("sst/", list_sender);

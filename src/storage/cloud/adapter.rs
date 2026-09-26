@@ -135,7 +135,7 @@ impl StorageBackend for CloudStorage {
         callback: StorageCallback,
     ) {
         crate::storage::dispatch_head_request(request, callback, |key, timeout, callback| {
-            self.submit_head_with_timeout(key, timeout, callback);
+            self.head_with_timeout(key, timeout, &callback);
         });
     }
 
@@ -210,7 +210,7 @@ impl StorageBackend for CloudStorage {
         callback: StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_head_with_timeout(key, timeout, tx);
+        self.head_with_timeout(key, timeout, &tx);
         let result = match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
@@ -333,14 +333,16 @@ impl StorageBackend for CloudStorage {
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {
-        self.submit_head_with_timeout(key, self.callback_timeout, callback);
+        self.head_with_timeout(key, self.callback_timeout, &callback);
     }
+}
 
-    fn submit_head_with_timeout(
+impl CloudStorage {
+    fn head_with_timeout(
         &self,
         key: &str,
         timeout: std::time::Duration,
-        callback: StorageCallback,
+        callback: &StorageCallback,
     ) {
         if timeout.is_zero() {
             let _ = callback.send(StorageEvent::HeadComplete {

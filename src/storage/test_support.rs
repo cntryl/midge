@@ -113,8 +113,8 @@ pub(crate) fn forward_typed_head_to_legacy<B: super::StorageBackend + ?Sized>(
     request: super::StorageRequest,
     callback: super::StorageCallback,
 ) {
-    super::dispatch_head_request(request, callback, |key, timeout, callback| {
-        backend.submit_head_with_timeout(key, timeout, callback);
+    super::dispatch_head_request(request, callback, |key, _, callback| {
+        backend.submit_head(key, callback);
     });
 }
 
@@ -269,11 +269,6 @@ macro_rules! forward_storage_backend {
     (@method $inner:ident, submit_head) => {
         fn submit_head(&self, key: &str, callback: $crate::storage::StorageCallback) {
             self.$inner.submit_head(key, callback);
-        }
-    };
-    (@method $inner:ident, submit_head_with_timeout) => {
-        fn submit_head_with_timeout(&self, key: &str, timeout: std::time::Duration, callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_head_with_timeout(key, timeout, callback);
         }
     };
 }

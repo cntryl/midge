@@ -398,8 +398,10 @@ impl HybridStorage {
         let timeout =
             Self::deadline_timeout(key, "optional object HEAD", self.callback_timeout, deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud_backend_for_key(key)
-            .submit_head_with_timeout(key, timeout, tx);
+        self.cloud_backend_for_key(key).submit_head_request(
+            crate::storage::StorageRequest::new(key, *deadline, timeout),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),

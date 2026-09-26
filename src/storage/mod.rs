@@ -789,16 +789,6 @@ pub trait StorageBackend: Send + Sync + 'static {
     fn submit_head(&self, _key: &str, _callback: StorageCallback) {
         panic!("test backend received undeclared HEAD capability");
     }
-
-    /// Submit an object metadata lookup with a bounded callback-adapter wait.
-    fn submit_head_with_timeout(
-        &self,
-        key: &str,
-        _timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.submit_head(key, callback);
-    }
 }
 
 #[cfg(test)]
