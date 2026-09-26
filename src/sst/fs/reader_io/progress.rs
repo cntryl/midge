@@ -55,12 +55,12 @@ impl SstFileIo {
             } else {
                 cursor.next_block.saturating_sub(1)
             };
-            if progress.block == Some(block) && cursor.block_offset <= progress.offset {
+            if progress.block == Some(block) && cursor.decoder.offset <= progress.offset {
                 continue;
             }
             visitor(version)?;
             progress.block = Some(block);
-            progress.offset = cursor.block_offset;
+            progress.offset = cursor.decoder.offset;
             checkpoint()?;
         }
         progress.complete = true;
@@ -79,8 +79,8 @@ impl SstFileIo {
             let size = reader.fs.metadata(&reader.path)?.len;
             if !progress.ranges_checked {
                 for tombstone in &reader.range_tombstones {
-                    progress.observe(size, &tombstone.start, tombstone.seq, budget)?;
-                    progress.observe(size, &tombstone.end, tombstone.seq, budget)?;
+                    progress.observe(size, &tombstone.start, tombstone.seq, Some(budget))?;
+                    progress.observe(size, &tombstone.end, tombstone.seq, Some(budget))?;
                 }
                 progress.ranges_checked = true;
                 if !reader.range_tombstones.is_empty() {
@@ -95,7 +95,7 @@ impl SstFileIo {
                 None,
                 None,
                 &mut cursor,
-                &mut |version| progress.observe(size, &version.key, version.seq, budget),
+                &mut |version| progress.observe(size, &version.key, version.seq, Some(budget)),
                 checkpoint,
             );
             progress.cursor = cursor;
@@ -109,23 +109,27 @@ impl SstFileIo {
 }
 
 impl SstSummaryProgress {
-    fn observe(
+    pub(super) fn observe(
         &mut self,
         size: u64,
         key: &[u8],
         seq: u64,
-        budget: &ResourceBudget,
+        budget: Option<&ResourceBudget>,
     ) -> MidgeResult<()> {
         if self
             .summary
             .as_ref()
             .is_none_or(|summary| key < summary.smallest_key.as_slice())
         {
-            let reservation = budget.reserve(key.len(), "SST resume minimum key")?;
+            let reservation = budget
+                .map(|budget| budget.reserve(key.len(), "SST resume minimum key"))
+                .transpose()?;
             if let Some(summary) = &mut self.summary {
                 summary.smallest_key = key.to_vec();
             } else {
-                let maximum = budget.reserve(key.len(), "SST resume maximum key")?;
+                let maximum = budget
+                    .map(|budget| budget.reserve(key.len(), "SST resume maximum key"))
+                    .transpose()?;
                 self.summary = Some(SstFileSummary {
                     size_bytes: size,
                     smallest_key: key.to_vec(),
@@ -133,15 +137,17 @@ impl SstSummaryProgress {
                     smallest_seq: seq,
                     largest_seq: seq,
                 });
-                self.maximum_reservation = Some(maximum);
+                self.maximum_reservation = maximum;
             }
-            self.minimum_reservation = Some(reservation);
+            self.minimum_reservation = reservation;
         }
         let summary = self.summary.as_mut().expect("observed summary entry");
         if key > summary.largest_key.as_slice() {
-            let reservation = budget.reserve(key.len(), "SST resume maximum key")?;
+            let reservation = budget
+                .map(|budget| budget.reserve(key.len(), "SST resume maximum key"))
+                .transpose()?;
             summary.largest_key = key.to_vec();
-            self.maximum_reservation = Some(reservation);
+            self.maximum_reservation = reservation;
         }
         summary.smallest_seq = summary.smallest_seq.min(seq);
         summary.largest_seq = summary.largest_seq.max(seq);

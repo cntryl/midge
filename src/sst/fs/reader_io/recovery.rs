@@ -68,11 +68,6 @@ impl SstFileIo {
         let budget = self.metadata_budget.as_ref().ok_or_else(|| {
             MidgeError::Internal("recovery reader requires a shared budget".into())
         })?;
-        let compressed_size = usize::try_from(handle.size).map_err(|_| {
-            MidgeError::ResourceLimit("recovery block exceeds addressable memory".into())
-        })?;
-        let compressed_reservation =
-            budget.reserve(compressed_size, "recovery compressed block")?;
         let file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {
@@ -82,18 +77,19 @@ impl SstFileIo {
                 truncate: false,
             },
         )?;
-        let buffer = file.read_at(handle.offset, handle.size)?;
-        let raw = SstFileIo::split_block_frame(&buffer)?;
-        let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
-        let reservation = budget.reserve(
-            decoded_size
-                .saturating_add(std::mem::size_of::<ReservedBytes>())
-                .saturating_add(std::mem::size_of::<usize>()),
-            "recovery decoded block",
+        let (decoded, reservation) = self.read_framed_block(
+            file.as_ref(),
+            handle,
+            Some((budget, "recovery compressed block")),
+            |decoded_size| {
+                budget.reserve(
+                    decoded_size
+                        .saturating_add(std::mem::size_of::<ReservedBytes>())
+                        .saturating_add(std::mem::size_of::<usize>()),
+                    "recovery decoded block",
+                )
+            },
         )?;
-        let decoded = SstFileIo::decode_block_payload(raw, decoded_size)?;
-        drop(buffer);
-        drop(compressed_reservation);
         // Slices returned as KeyState values retain this owner and its charge.
         let bytes = Bytes::from_owner(ReservedBytes {
             bytes: decoded,

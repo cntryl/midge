@@ -1248,6 +1248,41 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
 }
 
 #[test]
+fn should_match_summary_bounds_across_materialized_streaming_and_resumable_reads() -> MidgeResult<()>
+{
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path())?);
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"middle", Some(b"old"), 2, EntryType::Put, None)?;
+    writer.add_with_meta(b"middle", Some(b"new"), 9, EntryType::Put, None)?;
+    writer.add_range_tombstone(b"alpha", b"zulu", 5)?;
+    crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("summary-parity.sst"))?;
+    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+    let mut progress = super::SstSummaryProgress::default();
+
+    // Act
+    let materialized = SstFileIo::open("summary-parity.sst", Arc::clone(&fs))?.summary()?;
+    let streaming = SstFileIo::summarize_with_fs("summary-parity.sst", Arc::clone(&fs))?;
+    let resumable = SstFileIo::summarize_with_fs_progress(
+        "summary-parity.sst",
+        fs,
+        &budget,
+        &mut progress,
+        &mut || Ok(()),
+    )?;
+
+    // Assert
+    assert_eq!(materialized, streaming);
+    assert_eq!(&streaming, resumable);
+    assert_eq!(streaming.smallest_key, b"alpha");
+    assert_eq!(streaming.largest_key, b"zulu");
+    assert_eq!((streaming.smallest_seq, streaming.largest_seq), (2, 9));
+    Ok(())
+}
+
+#[test]
 fn should_reject_corrupt_block_trailer_identically_on_every_block_read_path() -> MidgeResult<()> {
     // Arrange: flip the stored CRC of the first data block. Every block
     // reader decodes frames through one helper, so each must report the

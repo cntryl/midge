@@ -1,4 +1,4 @@
-use super::{KeyState, SstEntry, SstFileIo};
+use super::{BlockEntryDecoder, KeyState, SstEntry, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::bloom::writer::BloomTestResult;
 use crate::sst::encoding;
@@ -11,20 +11,11 @@ impl SstFileIo {
         block_data: &bytes::Bytes,
     ) -> MidgeResult<Vec<SstEntry>> {
         let mut result = Vec::new();
-        let mut offset = 0;
-        let mut previous_key = Vec::new();
+        let mut decoder = BlockEntryDecoder::default();
 
-        while offset < block_data.len() {
-            let (entry, next_offset) =
-                encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
-
-            let shared_len =
-                SstFileIo::shared_prefix_len(usize::from(entry.shared_len), previous_key.len())?;
-
-            let mut full_key = Vec::with_capacity(shared_len + entry.key_delta.len());
-            full_key.extend_from_slice(&previous_key[..shared_len]);
-            full_key.extend_from_slice(entry.key_delta);
-
+        while let Some(entry) =
+            decoder.next(block_data, self.format_version, None, "range decoder key")?
+        {
             let value_bytes = if let Some(val_off) = entry.value_offset {
                 let val_len = match entry.value {
                     Some(v) => v.len(),
@@ -39,15 +30,13 @@ impl SstFileIo {
                 None
             };
 
-            previous_key = full_key.clone();
             result.push(SstEntry::new(
-                full_key,
+                decoder.key().to_vec(),
                 value_bytes,
                 entry.sequence,
                 entry.entry_type,
                 entry.expiration,
             ));
-            offset = next_offset;
         }
 
         Ok(result)
@@ -107,39 +96,20 @@ impl SstFileIo {
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<KeyState> {
-        let mut offset = 0usize;
-        let mut reconstructed_key = Vec::new();
-        let mut key_reservation = None;
+        let mut decoder = BlockEntryDecoder::default();
         let mut best_state = KeyState::Absent;
 
-        while offset < block_data.len() {
-            let (entry, next_offset) =
-                encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
-            let shared_len = SstFileIo::shared_prefix_len(
-                usize::from(entry.shared_len),
-                reconstructed_key.len(),
-            )?;
-
-            let key_len = shared_len
-                .checked_add(entry.key_delta.len())
-                .ok_or_else(|| {
-                    MidgeError::Corruption("SST reconstructed key length overflow".into())
-                })?;
-            if self.recovery_block.is_some() && key_len > reconstructed_key.capacity() {
-                let reservation = self
-                    .metadata_budget
-                    .as_ref()
-                    .map(|budget| budget.reserve(key_len, "recovery decoder key"))
-                    .transpose()?;
-                let mut replacement = Vec::with_capacity(key_len);
-                replacement.extend_from_slice(&reconstructed_key[..shared_len]);
-                reconstructed_key = replacement;
-                key_reservation = reservation;
-            }
-            reconstructed_key.truncate(shared_len);
-            reconstructed_key.extend_from_slice(entry.key_delta);
-
-            match reconstructed_key.as_slice().cmp(key) {
+        let budget = self
+            .recovery_block
+            .as_ref()
+            .and(self.metadata_budget.as_ref());
+        while let Some(entry) = decoder.next(
+            block_data,
+            self.format_version,
+            budget,
+            "recovery decoder key",
+        )? {
+            match decoder.key().cmp(key) {
                 std::cmp::Ordering::Less => {}
                 std::cmp::Ordering::Greater => break,
                 std::cmp::Ordering::Equal => {
@@ -149,12 +119,8 @@ impl SstFileIo {
                     }
                 }
             }
-
-            offset = next_offset;
         }
 
-        drop(reconstructed_key);
-        drop(key_reservation);
         Ok(best_state)
     }
 

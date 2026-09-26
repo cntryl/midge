@@ -293,11 +293,6 @@ impl SstFileIo {
             return self.read_block(handle);
         };
 
-        Self::validate_block_handle(*handle, self.block_region_end, resource)?;
-        let compressed_size = usize::try_from(handle.size).map_err(|_| {
-            MidgeError::ResourceLimit(format!("{resource} exceeds addressable memory"))
-        })?;
-        let compressed_reservation = budget.reserve(compressed_size, resource)?;
         let file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {
@@ -307,13 +302,14 @@ impl SstFileIo {
                 truncate: false,
             },
         )?;
-        let buffer = file.read_at(handle.offset, handle.size)?;
-        let raw = Self::split_block_frame(&buffer)?;
-        let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
-        let retained_size = decoded_size.saturating_mul(4).saturating_add(256);
-        let retained_reservation = budget.reserve(retained_size, resource)?;
-        let decoded = Self::decode_block_payload(raw, decoded_size)?;
-        drop(compressed_reservation);
+        let (decoded, retained_reservation) = self.read_framed_block(
+            file.as_ref(),
+            handle,
+            Some((&budget, resource)),
+            |decoded_size| {
+                budget.reserve(decoded_size.saturating_mul(4).saturating_add(256), resource)
+            },
+        )?;
         // The decoded bytes are transient, but their decoded reader structure
         // remains live (index, filter, trie, or range tombstones). Keep this
         // conservative reservation with the reader for that parsed structure.
@@ -326,9 +322,52 @@ impl SstFileIo {
         file: &dyn File,
         handle: &BlockHandle,
     ) -> MidgeResult<bytes::Bytes> {
+        self.read_framed_block(file, handle, None, |_| Ok(()))
+            .map(|(block, ())| block)
+    }
+
+    /// Read and decode one handle through the same checked framing as all
+    /// other SST readers. The caller reserves its retained decoded form before
+    /// decompression so metadata and recovery can keep different lifetimes.
+    pub(super) fn read_framed_block<R>(
+        &self,
+        file: &dyn File,
+        handle: &BlockHandle,
+        compressed_budget: Option<(
+            &crate::common::resource_budget::ResourceBudget,
+            &'static str,
+        )>,
+        reserve_decoded: impl FnOnce(usize) -> MidgeResult<R>,
+    ) -> MidgeResult<(bytes::Bytes, R)> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
+        let compressed_reservation = compressed_budget
+            .map(|(budget, resource)| {
+                let size = usize::try_from(handle.size).map_err(|_| {
+                    MidgeError::ResourceLimit(format!("{resource} exceeds addressable memory"))
+                })?;
+                budget.reserve(size, resource)
+            })
+            .transpose()?;
         let buffer = file.read_at(handle.offset, handle.size)?;
-        Self::decompress_raw_block(Self::split_block_frame(&buffer)?)
+        let result = Self::decode_framed_block(&buffer, reserve_decoded);
+        drop(compressed_reservation);
+        result
+    }
+
+    fn decode_framed_block<R>(
+        buffer: &[u8],
+        reserve_decoded: impl FnOnce(usize) -> MidgeResult<R>,
+    ) -> MidgeResult<(bytes::Bytes, R)> {
+        let raw = Self::split_block_frame(buffer)?;
+        let declared = crate::codec::decompressed_size_with_trailer(raw)?;
+        let reservation = reserve_decoded(declared)?;
+        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
+        if decoded.len() > declared {
+            return Err(MidgeError::Corruption(
+                "decoded SST block exceeded its declared size".into(),
+            ));
+        }
+        Ok((decoded, reservation))
     }
 
     /// Split a block frame read from its handle: a `u32` length prefix that
@@ -366,38 +405,6 @@ impl SstFileIo {
             ));
         }
         Ok(shared_len)
-    }
-
-    /// Decompress a block payload whose trailer declares `declared` decoded
-    /// bytes (from `crate::codec::decompressed_size_with_trailer`), rejecting
-    /// output that exceeds it.
-    pub(super) fn decode_block_payload(
-        payload: &[u8],
-        declared: usize,
-    ) -> MidgeResult<bytes::Bytes> {
-        let decoded = crate::codec::decompress_block_with_trailer(payload)?;
-        if decoded.len() > declared {
-            return Err(MidgeError::Corruption(
-                "decoded SST block exceeded its declared size".into(),
-            ));
-        }
-        Ok(decoded)
-    }
-
-    /// Decompress a raw block payload, stripping the block trailer if present.
-    ///
-    /// Every V4 block carries `[payload][algo:u8][crc32c:u32]` and is rejected
-    /// if that trailer cannot be verified and decoded.
-    fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
-        // Decode first: that verifies the trailer checksum, so the declared
-        // size is read only from bytes already proven intact.
-        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
-        if decoded.len() > crate::codec::decompressed_size_with_trailer(raw)? {
-            return Err(MidgeError::Corruption(
-                "decoded SST block exceeded its declared size".into(),
-            ));
-        }
-        Ok(decoded)
     }
 
     /// Read multiple contiguous blocks in a single IO operation for cold-cache scans.
@@ -490,9 +497,7 @@ impl SstFileIo {
             }
 
             let block_slice = &buffer[buf_offset..buf_end];
-            result.push(Self::decompress_raw_block(Self::split_block_frame(
-                block_slice,
-            )?)?);
+            result.push(Self::decode_framed_block(block_slice, |_| Ok(()))?.0);
         }
 
         Ok(result)

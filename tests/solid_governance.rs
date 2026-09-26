@@ -67,3 +67,34 @@ fn should_require_explicit_sst_tombstone_and_filesystem_behavior() {
     assert!(!traits.contains("persist_sst_bytes_with_host_fs"));
     assert!(traits.contains("fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()>;"));
 }
+
+#[test]
+fn should_decode_sst_frames_and_prefix_keys_in_one_reader_path() {
+    // Arrange
+    let reader = include_str!("../src/sst/fs/reader_io/mod.rs");
+    let io = include_str!("../src/sst/fs/reader_io/io.rs");
+    let recovery = include_str!("../src/sst/fs/reader_io/recovery.rs");
+    let state = include_str!("../src/sst/fs/reader_io/state.rs");
+    let scan = include_str!("../src/sst/fs/reader_io/scan.rs");
+
+    // Act / Assert
+    let sources = [reader, io, recovery, state, scan];
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.matches("u32::from_le_bytes").count())
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.matches("Invalid shared prefix length").count())
+            .sum::<usize>(),
+        1
+    );
+    assert!(io.contains("fn read_framed_block"));
+    assert!(reader.contains("struct BlockEntryDecoder"));
+    assert!(!state.contains("encoding::decode_with_format("));
+    assert!(scan.matches("self.block_span(").count() >= 3);
+}
