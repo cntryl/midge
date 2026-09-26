@@ -222,8 +222,8 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
             .expect("commit compaction seed");
         engine.flush_cf(&cf).expect("force SST upload");
     }
-    let pre_failure_layout = engine
-        .metrics()
+    let metrics = engine.metrics();
+    let pre_failure_layout = metrics
         .get_storage_layout()
         .expect("pre-failure storage layout");
     let scenario = fail::FailScenario::setup();
@@ -237,8 +237,7 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
 
     // Assert: surface the exact error and retain the old authority.
     assert_exact_sst_upload_failure(compaction_result);
-    let failed_layout = engine
-        .metrics()
+    let failed_layout = metrics
         .get_storage_layout()
         .expect("post-failure storage layout");
     assert!(
@@ -268,10 +267,8 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
             Some(Bytes::from(vec![batch; 512]))
         );
     }
-    let reopened_layout = reopened
-        .metrics()
-        .get_storage_layout()
-        .expect("reopened storage layout");
+    let view = reopened.metrics();
+    let reopened_layout = view.get_storage_layout().expect("reopened layout");
     assert_eq!(
         reopened_layout
             .levels

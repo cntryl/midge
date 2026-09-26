@@ -352,7 +352,6 @@ mod cloud_remote_sst {
         let cf = engine.get_column_family("data").expect("recovered CF");
         let before = engine
             .metrics()
-            .metrics()
             .get_runtime_metrics()
             .expect("before metrics");
         // Act
@@ -365,7 +364,6 @@ mod cloud_remote_sst {
         );
         let cold = engine
             .metrics()
-            .metrics()
             .get_runtime_metrics()
             .expect("cold metrics");
         assert_eq!(
@@ -374,11 +372,9 @@ mod cloud_remote_sst {
         );
         let warm = engine
             .metrics()
-            .metrics()
             .get_runtime_metrics()
             .expect("warm metrics");
         let other = unrelated
-            .metrics()
             .metrics()
             .get_runtime_metrics()
             .expect("other metrics");

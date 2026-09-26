@@ -1,5 +1,5 @@
 #[test]
-fn should_keep_metrics_and_verification_delegates_off_engine() {
+fn should_keep_metric_verification_delegates_off_engine() {
     // Arrange
     let source = include_str!("../src/engine/mod.rs");
 

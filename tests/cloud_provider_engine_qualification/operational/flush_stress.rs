@@ -82,8 +82,8 @@ pub(super) fn exercise(
     campaign: &Campaign,
     progress: &mut workload::WorkloadProgress,
 ) {
-    let before = engine
-        .metrics()
+    let metrics = engine.metrics();
+    let before = metrics
         .get_runtime_metrics()
         .expect("initial stress metrics");
     let families = seed(engine);
@@ -144,8 +144,7 @@ pub(super) fn exercise(
         maintenance.join().expect("concurrent stress compaction");
         workload::compact_all(engine, progress);
     });
-    let after = engine
-        .metrics()
+    let after = metrics
         .get_runtime_metrics()
         .expect("completed stress metrics");
     let flushes = after.flush_publish_count - before.flush_publish_count;
