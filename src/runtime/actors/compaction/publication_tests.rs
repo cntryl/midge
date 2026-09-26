@@ -199,7 +199,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             hybrid.enable_ephemeral_sst_cache(1024 * 1024);
         }
         let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(2);
-        plan.input_files.push("input.sst".into());
+        plan.add_test_source("input.sst");
         plan.compaction_memory_limit = 1024 * 1024;
         plan.target_sst_size = 1024 * 1024;
         let prepared = PreparedCompactionOutputs::default();

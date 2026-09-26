@@ -373,7 +373,7 @@ impl CompactionActor {
                     self.compactor
                         .pick_l0_compaction(&state.manifest.files, *cf_id, true)?
                 {
-                    return Ok(Some(self.decorate_plan(state, plan)));
+                    return Ok(Some(self.record_scheduled_plan(plan)));
                 }
             }
         }
@@ -394,7 +394,7 @@ impl CompactionActor {
             }
         }
         if let Some(plan) = deepest_plan {
-            return Ok(Some(self.decorate_plan(state, plan)));
+            return Ok(Some(self.record_scheduled_plan(plan)));
         }
 
         // Manual compaction drains every L0 generation. Background work keeps
@@ -406,7 +406,7 @@ impl CompactionActor {
                 self.compactor
                     .pick_l0_compaction(&state.manifest.files, *cf_id, force_l0)?
             {
-                return Ok(Some(self.decorate_plan(state, plan)));
+                return Ok(Some(self.record_scheduled_plan(plan)));
             }
         }
 
@@ -440,14 +440,10 @@ impl CompactionActor {
         cf_ids
     }
 
-    fn decorate_plan(
+    fn record_scheduled_plan(
         &mut self,
-        state: &RuntimeState,
-        mut plan: crate::compaction::CompactionPlan,
+        plan: crate::compaction::CompactionPlan,
     ) -> crate::compaction::CompactionPlan {
-        plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
-        plan.target_sst_size = self.target_sst_size;
-        plan.compaction_memory_limit = self.compaction_memory_limit;
         self.last_scheduled_cf = Some(plan.cf_id);
         plan
     }
@@ -1746,7 +1742,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(Arc::clone(&actor.worker_cancel));
         let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(2);
-        plan.input_files.push(input_name.clone());
+        plan.add_test_source(input_name.clone());
         let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
         actor
             .run_compaction(
