@@ -85,6 +85,30 @@ fn should_keep_request_timeout_parser_in_cloud_core() {
 }
 
 #[test]
+fn should_keep_sqrzl_signing_in_shared_test_support() {
+    // Arrange
+    let support = include_str!("support/sqrzl.rs");
+    let qualification = include_str!("../src/storage/providers/qualification.rs");
+    let engine = include_str!("cloud_provider_engine_qualification.rs");
+
+    // Act
+    // Assert
+    for helper in [
+        "fn signed_s3_request(",
+        "fn signed_gcs_request(",
+        "fn azure_string_to_sign(",
+        "fn signed_azure_request(",
+    ] {
+        assert!(support.contains(helper));
+        assert!(!qualification.contains(helper));
+        assert!(!engine.contains(helper));
+    }
+    assert!(support.contains("fn configured_real_s3_settings("));
+    assert!(!qualification.contains("REAL_S3_BUCKET_ENV"));
+    assert!(!engine.contains("REAL_S3_BUCKET_ENV"));
+}
+
+#[test]
 fn should_keep_test_only_protocols_out_of_runtime() {
     // Arrange
     let state = include_str!("../src/runtime/state.rs");
