@@ -32,21 +32,27 @@ Run the repository and packaging qualification gates:
 cargo test --workspace --all-features --doc
 cargo check --example documented_quick_start --all-features
 cargo machete
-cargo test --test governance -- repository_gates
 cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
 
-GitHub keeps the checks separated by cost and responsibility. Pull requests
-into `develop` run only `CI`, which covers the Ubuntu core suite and Windows
-compile and lint checks. Release promotion pull requests from `develop` into
-`main` also run `Repository Qualification` for docs, examples, benchmarks,
-packaging, and repository contracts; `Docker Qualification` for the test
-image; CodeQL for Actions and Rust; and the promotion-source check. `Platform`
-covers macOS and Windows, `Compatibility` covers Rust 1.97 and provider-only
-features, and `Cloud Qualification` runs the Sqrzl emulator. Those extended
-workflows run on schedules against `main` or manually against the selected ref.
-Platform and Compatibility also run on every `main` push.
+Pull requests into `develop` run only `ci.yml`. Its Ubuntu job checks formatting,
+strict Clippy, test conventions, the full workspace suite with mock-backed
+cloud behavior, and the serial fault-injection suite. The Sqrzl provider tests are
+ignored in this mock-backed suite and run in `cloud-integration.yml`.
+
+`os-matrix.yml` runs the workspace and fault-injection suites on Windows and
+macOS, plus Windows-specific recovery tests and Clippy. `cloud-integration.yml` runs the ignored provider and engine suites
+against Sqrzl. Both run on promotion pull requests into `main`, on a schedule,
+or by manual dispatch; the OS matrix also runs on `main` pushes. Scheduled runs
+test the default `develop` revision, and a manual dispatch can select `main`
+for release qualification.
+
+Promotion pull requests into `main` run CI, OS matrix, cloud integration,
+`Repository Qualification` for docs and packaging, `Docker Qualification` for
+the test image, `Compatibility` for Rust 1.97 and provider-only features,
+CodeQL, and the promotion-source check. `Compatibility` also runs on its
+schedule, manual dispatch, and `main` pushes.
 
 Provider features are checked independently so one provider cannot hide a
 dependency on another provider's implementation:
@@ -65,16 +71,8 @@ or provider error responses; see `docs/operations/cloud-setup.md`.
 The scheduled fuzz workflow builds every registered target and runs bounded
 smokes. Local smoke commands should use the same time and per-input bounds.
 
-The scheduled/manual `Testing Governance` workflow owns the expensive,
-informational checks. Its coverage-tier diff compares unit-only and
-integration-only coverage for storage-critical modules; its mutation pilot
-targets compaction, lease, WAL, metadata, and runtime code. Neither job is a
-required pull-request check. Review the reports weekly and triage every item as
-one of: wire the mechanism through production, remove it, strengthen a real
-entry-point test, or record why it is intentionally test-only/accepted.
-
 Sqrzl provider-engine tests are explicitly ignored in ordinary test runs. The
-scheduled/manual `Cloud Qualification` workflow starts Sqrzl and selects those
+`cloud-integration.yml` workflow starts Sqrzl and selects those
 ignored tests. Once selected, an unreachable emulator is a hard failure; there
 is no runtime skip that can be confused with a passing qualification.
 The provider contract includes a zero-byte object PUT/HEAD/GET/DELETE lifecycle
@@ -194,13 +192,6 @@ implementation solely to satisfy this convention: delete nonshipping variants
 instead. The PR8 compression work removes the fast-accept alternate, so no
 differential test should reintroduce it.
 
-The compile-enforced manifests in `tests/coverage_manifests.rs` exhaustively
-classify cloud credential sources, compression algorithms/policies, recovery
-policies, and durability policies. Adding an enum variant requires updating
-the corresponding manifest; an explicit intentionally-untested reason is
-acceptable for scheduled real-provider cases. The mappings are compile-time
-review contracts, while the named suites remain the behavioral proof.
-
 ## Shared Test Infrastructure Review
 
 Treat failpoint registries, shared statics, temporary-directory helpers, and
@@ -208,12 +199,7 @@ chaos/fault-injection adapters like production code. Reviews must confirm:
 
 - shared locks recover from poison instead of cascading one panic;
 - every test reusing a failpoint name uses the same mutex/gate as existing users;
-- governance checks discover production failpoint call sites mechanically,
-  rather than maintaining a drift-prone allowlist;
 - new fixture behavior has a regression through a real test entry point.
-
-The repository failpoint contract test scans production call sites and is the
-authoritative inventory; do not replace it with a hand-maintained path list.
 
 ## Crash-Trigger Evidence
 

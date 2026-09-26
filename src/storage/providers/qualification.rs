@@ -25,28 +25,28 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_s3_compatible_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3");
     run_provider_contract("s3", &provider);
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_azure_blob_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
     run_provider_contract("azure", &provider);
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_gcs_xml_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-gcs");
     run_provider_contract("gcs", &provider);
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_gcs_json_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-gcs-json");
     run_provider_contract("gcs-json", &provider);

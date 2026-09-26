@@ -31,7 +31,7 @@ const PHASE_ENV: &str = "MIDGE_OPERATIONAL_CHILD_PHASE";
 const CHILD_TEST: &str = "operational::should_execute_cloud_recovery_phase_in_child";
 
 #[test]
-#[ignore = "requires Sqrzl; Cloud Qualification runs this configurable recovery campaign"]
+#[ignore = "requires Sqrzl; cloud-integration.yml runs this configurable recovery campaign"]
 fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
     // Arrange
     super::require_sqrzl("operational-recovery");

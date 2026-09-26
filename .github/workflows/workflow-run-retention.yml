@@ -1,0 +1,33 @@
+name: Workflow Run Retention
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cleanup:
+    name: Prune expired runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Prune old workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cutoff="$(date -u -d '30 days ago' +%Y-%m-%d)"
+          while true; do
+            ids="$(gh run list --created "<${cutoff}" --status completed --limit 100 --json databaseId --jq '.[].databaseId')"
+            if [ -z "$ids" ]; then
+              break
+            fi
+            while IFS= read -r id; do
+              gh run delete "$id"
+            done <<< "$ids"
+          done

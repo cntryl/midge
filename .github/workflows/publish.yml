@@ -104,7 +104,7 @@ jobs:
         run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
 
       - name: Full test suite
-        run: cargo test --workspace --features telemetry,telemetry-otlp,cloud-common,cloud-aws,sqrzl-tests,cloud-azure,cloud-gcp,cloud-oci,cloud-all,cloud_integration
+        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
 
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1

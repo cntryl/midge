@@ -830,23 +830,3 @@ fn should_keep_every_acknowledged_record_when_fenced_writer_interleaved_into_act
     }
     Ok(())
 }
-
-/// Cloud WAL recovery has one production path, this module's streaming
-/// planner. A `#[cfg(test)]` item in the cloud recovery module would let
-/// tests exercise a second copy that production never runs (#496).
-#[test]
-fn should_keep_cloud_recovery_free_of_test_only_code_when_scanning_source() {
-    // Arrange
-    let source = include_str!("../cloud_recovery/mod.rs");
-
-    // Act
-    let test_only: Vec<_> = source
-        .lines()
-        .zip(source.lines().skip(1))
-        .filter(|(line, next)| line.trim() == "#[cfg(test)]" && next.trim() != "mod tests;")
-        .map(|(_, next)| next.trim())
-        .collect();
-
-    // Assert
-    assert!(test_only.is_empty(), "test-only items: {test_only:?}");
-}

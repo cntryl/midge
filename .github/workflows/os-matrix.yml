@@ -1,0 +1,75 @@
+name: OS Matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * 3"
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: OS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout event revision
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "platform-${{ matrix.os }}"
+
+      - name: Verify release build
+        run: cargo check --release
+
+      - name: Check all Windows targets
+        if: matrix.os == 'windows-latest'
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Test cloud WAL salvage on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib streaming_wal_plan::tests --all-features
+
+      - name: Test cloud SST loss classification on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib should_treat_missing_child --all-features
+
+      - name: Test cloud SST salvage on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib salvage_removes_definitively_lost_ssts --all-features
+
+      - name: Test consistent-cut backup and restore on Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo test --lib engine::backup::tests --all-features
+          cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
+
+      - name: Clippy on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+
+      - name: Test workspace
+        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
+
+      - name: Fault injection suite (serial; failpoints are process-global)
+        run: cargo test --test fault_injection --all-features -- --test-threads=1

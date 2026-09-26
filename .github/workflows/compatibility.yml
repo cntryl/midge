@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "17 2 * * 1"
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
 
@@ -21,14 +23,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout event revision
-        if: github.event_name != 'schedule'
         uses: actions/checkout@v7
-
-      - name: Checkout main for scheduled qualification
-        if: github.event_name == 'schedule'
-        uses: actions/checkout@v7
-        with:
-          ref: main
 
       - name: Install Rust 1.97 toolchain
         run: rustup toolchain install 1.97 --profile minimal --component clippy
@@ -54,14 +49,7 @@ jobs:
         feature: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci, telemetry]
     steps:
       - name: Checkout event revision
-        if: github.event_name != 'schedule'
         uses: actions/checkout@v7
-
-      - name: Checkout main for scheduled qualification
-        if: github.event_name == 'schedule'
-        uses: actions/checkout@v7
-        with:
-          ref: main
 
       - name: Update Rust toolchain
         run: rustup update stable

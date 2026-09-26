@@ -4,6 +4,55 @@
 
 mod common;
 
+mod crash_validation {
+    use crate::common::crash;
+
+    #[test]
+    fn should_report_specific_failpoint_marker_when_child_process_aborts_at_intended_boundary() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let marker = temp_dir.path().join("trigger.sentinel");
+
+        // Act
+        let missing = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
+        std::fs::write(&marker, "scenario=scenario\ntrigger=wrong-trigger\n")
+            .expect("write wrong trigger sentinel");
+        let wrong = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
+        std::fs::write(&marker, "scenario=scenario\ntrigger=expected-trigger\n")
+            .expect("write expected trigger sentinel");
+        let exact = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
+
+        // Assert
+        assert!(missing.is_err());
+        assert!(wrong.is_err());
+        assert_eq!(exact, Ok(()));
+    }
+
+    #[test]
+    fn should_reject_non_abort_child_failure_even_when_trigger_marker_matches() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let marker = temp_dir.path().join("trigger.sentinel");
+        std::fs::write(&marker, "scenario=scenario\ntrigger=expected-trigger\n")
+            .expect("write exact trigger sentinel");
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("locate failpoint contract test executable"),
+        )
+        .arg("--definitely-not-a-valid-test-harness-option")
+        .output()
+        .expect("run ordinary failing child");
+
+        // Act
+        let validation =
+            crash::validate_child_crash(&output, &marker, "scenario", "expected-trigger");
+
+        // Assert
+        assert!(validation
+            .expect_err("ordinary failure must not count as an abort")
+            .contains("failed without process abort"));
+    }
+}
+
 mod failure_injection {
     use bytes::Bytes;
     use cntryl_midge::{

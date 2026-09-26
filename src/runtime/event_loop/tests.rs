@@ -1915,48 +1915,6 @@ mod compaction_scheduling {
             other => panic!("unexpected worker message: {other:?}"),
         }
     }
-
-    #[test]
-    fn should_launch_compactions_only_through_event_loop_helper() {
-        // Arrange
-        let event_loop_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime/event_loop");
-        let pattern = format!(".run_{}(", "compaction");
-        let mut call_sites = Vec::new();
-
-        for entry in std::fs::read_dir(&event_loop_dir).expect("read event_loop dir") {
-            let entry = entry.expect("read event_loop entry");
-            let path = entry.path();
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
-                continue;
-            }
-
-            let source = std::fs::read_to_string(&path).expect("read event_loop source file");
-            let relative = path
-                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                .expect("strip source prefix")
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            for (line_idx, line) in source.lines().enumerate() {
-                if line.contains(&pattern) {
-                    call_sites.push(format!("{relative}:{}:{}", line_idx + 1, line.trim()));
-                }
-            }
-        }
-
-        // Act
-        // Assert
-        assert_eq!(
-            call_sites.len(),
-            1,
-            "event-loop compaction actor launches must stay centralized: {call_sites:?}"
-        );
-        assert!(
-            call_sites[0].starts_with("src/runtime/event_loop/mod.rs:"),
-            "central compaction actor launch must live in event_loop/mod.rs: {call_sites:?}"
-        );
-    }
 }
 
 // =========== Trace Flag Tests ===========

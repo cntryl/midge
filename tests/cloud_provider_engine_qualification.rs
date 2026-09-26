@@ -46,7 +46,7 @@ fn should_join_azure_canonical_headers_directly_to_resource() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3");
@@ -59,7 +59,7 @@ fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-engine-azure");
@@ -77,7 +77,7 @@ fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-engine-gcs-json");
@@ -95,7 +95,7 @@ fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_gcs_xml_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-engine-gcs-xml");
@@ -113,7 +113,7 @@ fn should_recover_engine_from_sqrzl_gcs_xml_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_route_two_location_topology_through_sqrzl() {
     // Arrange
     require_sqrzl("sqrzl-two-location");
@@ -135,7 +135,7 @@ fn should_route_two_location_topology_through_sqrzl() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_route_three_location_topology_through_sqrzl() {
     // Arrange
     require_sqrzl("sqrzl-three-location");
@@ -160,7 +160,7 @@ fn should_route_three_location_topology_through_sqrzl() {
 
 #[test]
 #[cfg(feature = "failpoints")]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_partitioned_compaction_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
     let _failpoint_guard = sqrzl_compaction_failpoint_test_lock();
@@ -179,7 +179,7 @@ fn should_recover_partitioned_compaction_from_sqrzl_s3_after_local_cache_loss() 
 
 #[test]
 #[cfg(feature = "failpoints")]
-#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
     // Arrange
     let _failpoint_guard = sqrzl_compaction_failpoint_test_lock();
@@ -383,7 +383,10 @@ fn partitioned_compaction_round_trip_over_sqrzl(
                 cache_path.clone(),
                 CloudStorageLocation::new(provider.clone(), database_prefix.clone()),
             )
-            .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+            // Four live input cursors and an immutable output upload must fit
+            // together; a smaller fixture budget rejects the upload before
+            // this test can exercise cache-loss recovery.
+            .memory_budget(MemoryBudget::Bytes(16 * 1024 * 1024))
             .background_compaction(false)
             .target_sst_size_for_testing(SQRZL_PARTITIONED_TARGET_SST_SIZE)
             .build()

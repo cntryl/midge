@@ -22,8 +22,6 @@
 //!   - `runtime`     - event loop, actors and durability coordination
 //!   - `engine`      - the public `Engine` API
 //!
-//! `tests/governance.rs` (`architecture_ladder`) enforces the forbidden edges.
-//!
 //! # Public API Surface
 //!
 //! Only the types re-exported at the bottom of this file and the [`prelude`]

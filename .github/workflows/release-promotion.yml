@@ -1,4 +1,4 @@
-name: Release promotion
+name: Release Promotion
 
 on:
   pull_request:

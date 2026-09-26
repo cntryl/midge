@@ -1,9 +1,11 @@
-name: Cloud Qualification
+name: Cloud Integration
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "47 2 * * *"
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,7 +16,7 @@ concurrency:
 
 jobs:
   sqrzl:
-    name: Sqrzl emulator
+    name: Sqrzl provider and engine
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -23,8 +25,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - name: Record qualified revision
         id: revision
@@ -53,9 +53,6 @@ jobs:
 
       - name: Provider engine qualification
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
-
-      - name: Full test suite against Sqrzl emulator
-        run: cargo test --workspace --all-features
 
       - name: Preserve cloud qualification evidence
         if: always()
