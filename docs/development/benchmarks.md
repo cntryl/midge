@@ -45,27 +45,12 @@ cargo bench --bench tier4_ycsb_workload_c -- --json
 Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 `latest.md`, and `latest.txt` plus timestamped copies.
 
-## Automation Contract
+## Comparing Changes
 
-The `Bench` GitHub Actions workflow runs the complete registered benchmark
-inventory weekly and on manual dispatch. Pull requests that change production
-or benchmark code run a bounded Ubuntu A/B guard instead: the exact base and
-candidate revisions each run the memory-mode Tier 4 workload three times on
-the same runner, and the median-of-medians comparison rejects a throughput
-regression greater than 15%. Reports are retained as workflow artifacts. The
-required check exits quickly without timed execution for documentation-only
-and other performance-neutral changes.
-
-The A/B design deliberately avoids a fixed operations-per-second threshold,
-which would encode one machine's performance and be unreliable on hosted
-runners. The complete matrix remains informational because its duration and
-cross-platform variance are unsuitable for every pull request.
-
-Benchmark commands in this document and the performance-target document are
-validated against Cargo metadata by `tests/repository_gates.rs`. The same
-required repository check verifies that the workflow's tier patterns cover
-every registered benchmark and that the bounded PR guard remains wired. Add a
-target to `Cargo.toml` before advertising it here.
+Build registered benchmarks with `cargo bench --no-run`, then run the relevant
+tiers on the same runner for both base and candidate revisions. For a performance
+pull request, attach the commands, measurements, and summary. Add a target to
+`Cargo.toml` before advertising it in this guide.
 
 ## Tier Model
 

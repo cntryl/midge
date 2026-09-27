@@ -11,7 +11,7 @@ impl ManifestCoordinator {
     pub(super) fn add_sst(
         event_loop: &mut EventLoop,
         request_id: u64,
-        file_meta: FileMeta,
+        file_meta: &FileMeta,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
         let result = event_loop
@@ -72,28 +72,10 @@ impl ManifestCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            tracing::error!("ingest: attempted DDL (create CF) during ingest mode");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::InvalidArgument(
-                        "ingest: DDL forbidden during ingest mode".to_string(),
-                    ),
-                },
-            );
-            return HandleOutcome::Continue;
-        }
-
         if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
-                event_loop.hybrid_storage.as_ref(),
+                event_loop.cloud_coordinator.hybrid_storage.as_ref(),
                 &deadline,
             ) {
                 Ok(()) => event_loop.fencing.ddl_authority_ambiguous = false,
@@ -127,7 +109,7 @@ impl ManifestCoordinator {
                 };
                 crate::runtime::ddl::execute_within(
                     &mut event_loop.state,
-                    event_loop.hybrid_storage.as_ref(),
+                    event_loop.cloud_coordinator.hybrid_storage.as_ref(),
                     &edit,
                     &deadline,
                 )?;
@@ -154,7 +136,6 @@ impl ManifestCoordinator {
             |cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id },
         );
         if should_publish {
-            event_loop.invalidate_sst_read_views();
             event_loop.publish_snapshot();
         }
         event_loop.respond(request_id, resp);
@@ -182,28 +163,10 @@ impl ManifestCoordinator {
         discard_unflushed: bool,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            tracing::error!("ingest: attempted DDL (drop CF) during ingest mode");
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::InvalidArgument(
-                        "ingest: DDL forbidden during ingest mode".to_string(),
-                    ),
-                },
-            );
-            return HandleOutcome::Continue;
-        }
-
         if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
-                event_loop.hybrid_storage.as_ref(),
+                event_loop.cloud_coordinator.hybrid_storage.as_ref(),
                 &deadline,
             ) {
                 Ok(()) => {
@@ -242,7 +205,7 @@ impl ManifestCoordinator {
                 event_loop.sync_current_wal()?;
                 crate::runtime::ddl::execute_within(
                     &mut event_loop.state,
-                    event_loop.hybrid_storage.as_ref(),
+                    event_loop.cloud_coordinator.hybrid_storage.as_ref(),
                     &edit,
                     &deadline,
                 )?;
@@ -265,7 +228,6 @@ impl ManifestCoordinator {
         deadline: &crate::common::OperationDeadline,
     ) {
         Self::cancel_column_family_pending_work(event_loop, cf_id);
-        event_loop.invalidate_sst_read_views();
         event_loop.publish_snapshot();
         let _ = event_loop.retry_gc_within(deadline);
 

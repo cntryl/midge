@@ -16,6 +16,59 @@ mod frame_reader;
 #[cfg(test)]
 mod tests;
 
+/// Find verified record sequences after a corrupt boundary without replaying
+/// any of them. Candidate headers are found in bounded chunks; a candidate
+/// counts only after its complete payload passes CRC and record decoding.
+pub(crate) fn max_verified_suffix_sequence(
+    file: &dyn crate::io::File,
+    path: &FsPath,
+    start: u64,
+    limits: StreamingReplayLimits,
+) -> MidgeResult<Option<u64>> {
+    use crate::wal::frame::FrameBytes;
+
+    let source = crate::wal::frame::FileFrames::new(file, path);
+    let file_len = source.len()?;
+    let overlap = crate::wal::frame::WAL_FRAME_HEADER_LEN + 2;
+    let chunk_size = limits.max_frame_bytes.min(1024 * 1024).max(overlap + 1);
+    let mut pos = start;
+    let mut max_sequence = None;
+    while file_len.saturating_sub(pos) > overlap as u64 {
+        let len = usize::try_from((file_len - pos).min(chunk_size as u64)).map_err(|_| {
+            MidgeError::ResourceLimit("WAL suffix read length exceeds usize".into())
+        })?;
+        let bytes = source.read(pos, len as u64)?;
+        for payload_offset in crate::wal::frame::WAL_FRAME_HEADER_LEN..=len.saturating_sub(3) {
+            if !crate::wal::encoding::has_current_record_prefix(&bytes[payload_offset..]) {
+                continue;
+            }
+            let header_start = payload_offset - crate::wal::frame::WAL_FRAME_HEADER_LEN;
+            let Ok((payload_len, crc)) =
+                crate::wal::frame::decode_frame_header(&bytes[header_start..payload_offset])
+            else {
+                continue;
+            };
+            let payload_start = pos + payload_offset as u64;
+            if payload_len as u64 > file_len - payload_start {
+                continue;
+            }
+            if payload_len > limits.max_frame_bytes {
+                return Err(MidgeError::ResourceLimit(
+                    "WAL suffix candidate exceeds replay frame limit".into(),
+                ));
+            }
+            let payload = source.read(payload_start, payload_len as u64)?;
+            if crate::wal::frame::verify_frame_crc(&payload, crc).is_ok() {
+                if let Ok(record) = crate::wal::encoding::decode_view(&payload) {
+                    max_sequence = max_sequence.max(Some(record.seq));
+                }
+            }
+        }
+        pos += (len - overlap) as u64;
+    }
+    Ok(max_sequence)
+}
+
 // Explicit byte units distinguish allocation bounds from sequence/record limits.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy)]
@@ -250,19 +303,21 @@ fn ensure_deadline(deadline: Option<&crate::common::OperationDeadline>) -> Midge
     Ok(())
 }
 
-/// Highest sequence among the leading verified frames of `path`. Used only to
+/// Highest sequence among verified frames beginning at `offset`. Used only to
 /// keep new writes above sequences that salvage set aside unreplayed.
-fn max_verified_prefix_sequence(
+fn max_verified_sequence_from_offset(
     storage: &dyn Fs,
     path: &FsPath,
     limits: StreamingReplayLimits,
+    offset: u64,
 ) -> Option<u64> {
     let mut read_ns = 0;
     let file = open_wal_replay_file(storage, path, &mut read_ns).ok()??;
-    let mut pos = 0;
+    let source = frame_reader::source(&*file, path, limits);
+    let mut pos = offset;
     let mut max_sequence = None;
     while let Ok(NextWalFrame::Frame(frame)) =
-        frame_reader::next_frame(&*file, path, pos, limits, &mut read_ns)
+        frame_reader::next_frame(&source, path, pos, limits, &mut read_ns)
     {
         max_sequence = max_sequence.max(Some(frame.record.seq));
         pos = frame.next_pos;
@@ -278,6 +333,21 @@ pub(crate) fn inspect_wal_file(
     limits: StreamingReplayLimits,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
     inspect_file(file, path, limits, EpochPolicy::SkipStale, &mut |_| Ok(()))
+}
+
+/// A local sealed file has the same epoch rule as a local active file: it may
+/// span a restart or contain a late append from a fenced writer.
+pub(crate) fn inspect_local_sealed_wal_file(
+    file: &dyn crate::io::File,
+    path: &FsPath,
+    limits: StreamingReplayLimits,
+) -> MidgeResult<super::VerifiedWalPrefix> {
+    let prefix =
+        inspect_wal_file(file, path, limits).map_err(|failure| failure.failure.into_error())?;
+    if prefix.record_count == 0 {
+        return Err(MidgeError::Corruption("sealed WAL segment is empty".into()));
+    }
+    Ok(prefix)
 }
 
 /// Sealed cloud segments must contain complete frames from exactly one epoch.
@@ -367,10 +437,16 @@ fn inspect_file_from(
         super::wal_prefix_failure(super::VerifiedWalPrefix::default(), error.into())
     })?;
     let mut read_ns = 0;
+    let source = frame_reader::source(file, path, limits);
     loop {
-        let next =
-            frame_reader::next_frame(file, path, prefix.valid_bytes as u64, limits, &mut read_ns)
-                .map_err(|failure| super::wal_prefix_failure(prefix, failure))?;
+        let next = frame_reader::next_frame(
+            &source,
+            path,
+            prefix.valid_bytes as u64,
+            limits,
+            &mut read_ns,
+        )
+        .map_err(|failure| super::wal_prefix_failure(prefix, failure))?;
         let NextWalFrame::Frame(frame) = next else {
             return Ok(prefix);
         };
@@ -442,10 +518,11 @@ pub(super) fn discover_frontiers(
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut read_ns)? else {
             continue;
         };
+        let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
         loop {
             ensure_deadline(deadline)?;
-            match frame_reader::next_frame(&*file, &path.path, pos, limits, &mut read_ns) {
+            match frame_reader::next_frame(&source, &path.path, pos, limits, &mut read_ns) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
                     frontiers.record(&frame.record, ordinal);
@@ -479,12 +556,13 @@ fn replay_paths(
         else {
             continue;
         };
+        let source = frame_reader::source(&*file, &path.path, state.limits);
         // End of the last frame this file replayed: the verified prefix.
         let mut pos = 0;
         loop {
             ensure_deadline(state.options.deadline)?;
             let frame = match frame_reader::next_frame(
-                &*file,
+                &source,
                 &path.path,
                 pos,
                 state.limits,
@@ -540,7 +618,7 @@ fn replay_paths(
                         index,
                         pos,
                         policy,
-                        ReplayFailure::Error(error),
+                        ReplayFailure::Record(error),
                     );
                 }
                 return Err(error);
@@ -590,10 +668,24 @@ impl ReplayState<'_> {
                     .iter()
                     .map(|file| file.path.clone())
                     .collect();
-                let max_unreplayed_sequence = unreplayed_paths
+                let mut max_unreplayed_sequence = unreplayed_paths
                     .iter()
-                    .filter_map(|path| max_verified_prefix_sequence(storage, path, self.limits))
+                    .filter_map(|path| {
+                        max_verified_sequence_from_offset(storage, path, self.limits, 0)
+                    })
                     .max();
+                if failure.is_record_failure() {
+                    // The failing record was decoded, so later frames in this
+                    // file can still be read. Keep their sequence range above
+                    // the next writer even though the file is quarantined.
+                    max_unreplayed_sequence =
+                        max_unreplayed_sequence.max(max_verified_sequence_from_offset(
+                            storage,
+                            &path.path,
+                            self.limits,
+                            valid_bytes,
+                        ));
+                }
                 self.stats.salvage_stop = Some(WalSalvageStop {
                     path: path.path.clone(),
                     valid_bytes,
@@ -630,10 +722,11 @@ fn duplicate_before(
         let Some(file) = open_wal_replay_file(storage, &path.path, read_ns)? else {
             continue;
         };
+        let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
         while !current_file || pos < current_pos {
             ensure_deadline(deadline)?;
-            let frame = match frame_reader::next_frame(&*file, &path.path, pos, limits, read_ns)
+            let frame = match frame_reader::next_frame(&source, &path.path, pos, limits, read_ns)
                 .map_err(super::ReplayFailure::into_error)?
             {
                 NextWalFrame::Eof => break,

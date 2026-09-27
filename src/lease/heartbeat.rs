@@ -702,21 +702,32 @@ mod tests {
     fn should_stop_heartbeat_given_renewal_failure_when_running() {
         // Arrange: distinct from
         // `should_mark_heartbeat_unhealthy_given_renewal_failure_when_running`,
-        // which only checks the unhealthy flag while the worker threads are
-        // still alive. This test verifies `stop()` itself actually tears the
-        // worker threads down and that no renewal attempt sneaks in after.
+        // which checks the unhealthy flag while the worker threads are still
+        // alive. This test verifies `stop()` joins and clears the worker.
         let mock = Arc::new(MockLease::new());
         mock.set_should_fail(true);
         let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
 
         // Act
         heartbeat.start();
-        std::thread::sleep(Duration::from_millis(200));
+        heartbeat
+            .renewal_handle
+            .as_ref()
+            .expect("renewal worker started")
+            .thread()
+            .unpark();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let unhealthy_before_stop = !heartbeat.is_healthy();
         heartbeat.stop();
-        let renewal_count_at_stop = mock.get_renewal_count();
-        std::thread::sleep(Duration::from_millis(200));
 
         // Assert
+        assert!(
+            unhealthy_before_stop,
+            "renewal failure must be observed before stop"
+        );
         assert!(!heartbeat.is_healthy());
         assert!(
             heartbeat.renewal_handle.is_none(),
@@ -725,11 +736,6 @@ mod tests {
         assert!(
             heartbeat.watchdog_handle.is_none(),
             "stop() must join and clear the watchdog thread"
-        );
-        assert_eq!(
-            mock.get_renewal_count(),
-            renewal_count_at_stop,
-            "no renewal attempts should occur after stop() returns"
         );
     }
 

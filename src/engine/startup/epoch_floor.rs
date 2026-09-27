@@ -14,6 +14,7 @@ use super::super::OpenOptions;
 use super::StartupStoragePath;
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
+use crate::io::FsError;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -69,7 +70,7 @@ impl StartupEpochFloor {
             RecoveryPolicy::Salvage => crate::wal::recovery::ReplayPolicy::SalvageValidPrefix,
         };
         crate::io::RealFs::new(&wal_dir)
-            .map_err(MidgeError::from)
+            .map_err(FsError::into_midge)
             .and_then(|storage| {
                 crate::wal::recovery::max_writer_epoch(
                     &storage,

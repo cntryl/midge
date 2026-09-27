@@ -40,6 +40,7 @@ pub trait CachePolicy: Send + Sync {
     fn on_stale(&self, key: CacheKey);
 
     /// Clear all tracked keys
+    #[cfg(any(test, feature = "internal-testing"))]
     fn clear(&self);
 }
 

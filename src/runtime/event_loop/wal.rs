@@ -307,10 +307,7 @@ impl WalCoordinator {
     pub(super) fn sync(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         let result = event_loop.sync_wal_generation(CompletionSource::SealedGeneration);
         let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
+            |error| RuntimeResponse::Error { request_id, error },
             |()| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);
@@ -338,7 +335,7 @@ impl WalCoordinator {
         wait_for_ack: bool,
     ) -> HandleOutcome {
         if !event_loop.wal_actor.is_cloud_async() {
-            let resp = if event_loop.state.wal.local_durable_seq >= sequence {
+            let resp = if event_loop.state.wal.frontiers.local_durable() >= sequence {
                 RuntimeResponse::Ok { request_id }
             } else {
                 RuntimeResponse::Error {
@@ -357,7 +354,7 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        if event_loop.state.wal.cloud_durable_seq >= sequence {
+        if event_loop.state.wal.frontiers.cloud_durable() >= sequence {
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
             return HandleOutcome::Continue;
         }
@@ -374,7 +371,7 @@ impl WalCoordinator {
             .inflight_segment_for_sequence(sequence);
         if inflight_segment.is_none()
             && (event_loop.state.wal.pending_writes > 0
-                || event_loop.state.wal.local_durable_seq < sequence)
+                || event_loop.state.wal.frontiers.local_durable() < sequence)
         {
             // A missing route means the caller abandoned the request, which
             // is a zero budget, not an unbounded one. This used to be a second
@@ -404,7 +401,7 @@ impl WalCoordinator {
             }
         }
 
-        if !wait_for_ack || event_loop.state.wal.cloud_durable_seq >= sequence {
+        if !wait_for_ack || event_loop.state.wal.frontiers.cloud_durable() >= sequence {
             event_loop.drain_auto_flush_memtables();
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         } else if let Some(segment_id) = inflight_segment {
@@ -432,7 +429,9 @@ impl WalCoordinator {
             return false;
         }
 
-        if event_loop.wal_actor.is_cloud_async() && event_loop.hybrid_storage.is_none() {
+        if event_loop.wal_actor.is_cloud_async()
+            && event_loop.cloud_coordinator.hybrid_storage.is_none()
+        {
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -446,7 +445,12 @@ impl WalCoordinator {
         }
 
         if event_loop.wal_actor.is_cloud_async() {
-            if !event_loop.cloud_wal.upload_backlog.is_empty() {
+            if !event_loop
+                .cloud_coordinator
+                .cloud_wal
+                .upload_backlog
+                .is_empty()
+            {
                 event_loop.respond(
                     request_id,
                     RuntimeResponse::Error {
@@ -458,7 +462,7 @@ impl WalCoordinator {
                 );
                 return false;
             }
-            if let Some(storage) = &event_loop.hybrid_storage {
+            if let Some(storage) = &event_loop.cloud_coordinator.hybrid_storage {
                 if let Err(error) = storage.ensure_wal_write_admission() {
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                     return false;

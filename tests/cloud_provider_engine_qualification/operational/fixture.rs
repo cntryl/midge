@@ -150,11 +150,13 @@ impl Campaign {
             .expect("seed cloud acknowledgment");
         engine.flush_cf(&cf).expect("publish seed SST");
         let next_sequence = engine
+            .metrics()
             .get_storage_layout()
             .expect("seed layout")
             .manifest_last_persisted_sequence
             + 1;
         let next_segment = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("seed WAL position")
             .wal_current_segment_id

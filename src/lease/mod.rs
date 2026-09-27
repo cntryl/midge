@@ -42,6 +42,86 @@ pub use traits::{LeaderStore, LeaseGuard, PrimaryLease};
 use crate::config::Storage;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+#[derive(Clone)]
+pub(crate) struct LeaseLossHook(pub(crate) Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for LeaseLossHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LeaseLossHook(..)")
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LeaseStorageKind {
+    Cloud,
+    Local,
+}
+
+impl From<&Storage> for LeaseStorageKind {
+    fn from(storage: &Storage) -> Self {
+        if matches!(storage, Storage::Cloud { .. }) {
+            Self::Cloud
+        } else {
+            Self::Local
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LeaseConfig {
+    pub(crate) ttl: Duration,
+    pub(crate) clock_skew_tolerance: Option<Duration>,
+    pub(crate) loss_hook: Option<LeaseLossHook>,
+}
+
+impl LeaseConfig {
+    pub(crate) fn new(
+        ttl: Duration,
+        clock_skew_tolerance: Option<Duration>,
+        loss_hook: Option<LeaseLossHook>,
+    ) -> Self {
+        Self {
+            ttl,
+            clock_skew_tolerance,
+            loss_hook,
+        }
+    }
+
+    pub(crate) fn resolved_clock_skew_tolerance(&self) -> Duration {
+        self.clock_skew_tolerance.unwrap_or(self.ttl / 2)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        storage_kind: LeaseStorageKind,
+    ) -> crate::common::MidgeResult<()> {
+        use crate::common::MidgeError;
+        if self.ttl.is_zero() {
+            return Err(MidgeError::InvalidArgument(
+                "lease TTL must be greater than zero".to_string(),
+            ));
+        }
+        if self.resolved_clock_skew_tolerance() > self.ttl {
+            return Err(MidgeError::InvalidArgument(
+                "lease clock-skew tolerance must not exceed the lease TTL".to_string(),
+            ));
+        }
+        // A cloud lease renews with two thirds of its TTL left and needs
+        // enough time for its conditional provider write.
+        if matches!(storage_kind, LeaseStorageKind::Cloud)
+            && self.ttl.saturating_mul(2) / 3 <= cloud::RENEWAL_WRITE_DEADLINE_MARGIN
+        {
+            return Err(MidgeError::InvalidArgument(format!(
+                "cloud lease TTL {:?} is too short to renew; two thirds of it must exceed the {:?} provider write margin",
+                self.ttl,
+                cloud::RENEWAL_WRITE_DEADLINE_MARGIN
+            )));
+        }
+        Ok(())
+    }
+}
 
 static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -213,6 +293,43 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 lease,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn should_reject_short_cloud_lease_ttl_when_lease_config_validates() {
+        // Arrange
+        let config = LeaseConfig::new(Duration::from_secs(15), None, None);
+
+        // Act
+        let result = config.validate(LeaseStorageKind::Cloud);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn should_allow_short_local_lease_ttl_when_lease_config_validates() {
+        // Arrange
+        let config = LeaseConfig::new(Duration::from_secs(15), None, None);
+
+        // Act
+        let result = config.validate(LeaseStorageKind::Local);
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(
+            config.resolved_clock_skew_tolerance(),
+            Duration::from_millis(7500)
+        );
     }
 }
 

@@ -217,6 +217,7 @@ mod transaction_basic {
                 .unwrap();
             assert_eq!(
                 engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("metrics before read-only commit")
                     .active_snapshots,
@@ -229,6 +230,7 @@ mod transaction_basic {
             assert!(result.is_ok());
             assert_eq!(
                 engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("metrics after read-only commit")
                     .active_snapshots,
@@ -750,6 +752,7 @@ mod transaction_basic {
                 .unwrap();
             assert_eq!(
                 engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("metrics before failed commit")
                     .active_snapshots,
@@ -768,6 +771,7 @@ mod transaction_basic {
             assert!(matches!(failed_commit, Err(MidgeError::InvalidArgument(_))));
             assert_eq!(
                 engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("metrics after failed commit")
                     .active_snapshots,
@@ -1777,6 +1781,7 @@ mod transaction_conflicts {
 
     fn sequence_metric(engine: &cntryl_midge::Engine) -> u64 {
         engine
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics")
             .current_sequence
@@ -4983,7 +4988,7 @@ mod transaction_snapshot_tracking {
         let deadline = Instant::now() + timeout;
 
         loop {
-            let metrics = engine.get_runtime_metrics()?;
+            let metrics = engine.metrics().get_runtime_metrics()?;
             if metrics.active_snapshots == expected {
                 return Ok(());
             }
@@ -5031,7 +5036,10 @@ mod transaction_snapshot_tracking {
                 .expect("commit seed generation");
             engine.flush_cf(cf).expect("flush seed generation");
         }
-        let layout = engine.get_storage_layout().expect("layout before scan");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("layout before scan");
         let input_names: Vec<_> = layout
             .levels
             .iter()
@@ -5098,6 +5106,7 @@ mod transaction_snapshot_tracking {
 
             // Assert
             let metrics = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("get runtime metrics immediately after begin_tx");
             assert_eq!(metrics.active_snapshots, 1, "mode: {mode}");
@@ -5134,6 +5143,7 @@ mod transaction_snapshot_tracking {
 
             // Assert
             let metrics = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("get runtime metrics with active snapshot");
             assert_eq!(metrics.active_snapshots, 1, "mode: {mode}");
@@ -5182,6 +5192,7 @@ mod transaction_snapshot_tracking {
                 }
 
                 let metrics = engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("get metrics after failed begin_tx");
                 assert_eq!(
@@ -5305,6 +5316,7 @@ mod transaction_snapshot_tracking {
                 engine.flush_cf(&cf).expect("flush filler");
             }
             let layout_before = engine
+                .metrics()
                 .get_storage_layout()
                 .expect("layout before compaction");
             let l0_before = layout_before
@@ -5319,6 +5331,7 @@ mod transaction_snapshot_tracking {
 
             // Assert
             let layout_after = engine
+                .metrics()
                 .get_storage_layout()
                 .expect("layout after compaction");
             let l0_after = layout_after
@@ -5581,6 +5594,7 @@ mod transaction_snapshot_tracking {
             "the already-open iterator must retain its frozen values"
         );
         let after = engine
+            .metrics()
             .get_storage_layout()
             .expect("layout after compaction");
         assert!(
@@ -5666,6 +5680,7 @@ mod transaction_snapshot_tracking {
         filler.commit(WriteOptions::sync()).expect("commit filler");
         engine.flush_cf(&cf).expect("flush filler");
         let before = engine
+            .metrics()
             .get_storage_layout()
             .expect("layout before generation compaction");
         assert_eq!(
@@ -5697,6 +5712,7 @@ mod transaction_snapshot_tracking {
 
         // Assert
         let after = engine
+            .metrics()
             .get_storage_layout()
             .expect("layout after generation compaction");
         assert!(
@@ -6523,7 +6539,10 @@ mod runtime_transaction_coalescing {
 
         // Assert: caller submissions stay distinct, while the runtime coalesces
         // their WAL frames and preserves every logical write.
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         let read = engine
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read transaction");

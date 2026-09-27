@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Failed deletion must remain retryable, but immediately resubmitting a
 // permanently failing provider request would turn the event loop into a busy
@@ -43,13 +43,13 @@ pub struct GcActor {
     /// Earliest time at which a failed authoritative-manifest publication may
     /// be retried. Reclamation is a database obligation after it is queued;
     /// it must not depend on another caller submitting unrelated work.
-    manifest_reclamation_retry_at: Option<Instant>,
+    manifest_reclamation_retry: crate::runtime::retry_schedule::RetrySchedule,
     /// Failed asynchronous cloud deletes. The worker owns this queue until the
     /// event loop imports it for a delayed retry, so a failed provider request
     /// cannot be lost when the worker exits.
     failed_cloud_deletes: Arc<parking_lot::Mutex<VecDeque<String>>>,
     /// Earliest time at which the failed cloud-delete queue may be retried.
-    failed_delete_retry_at: Option<Instant>,
+    failed_delete_retry: crate::runtime::retry_schedule::RetrySchedule,
     /// Wakes the event loop when an asynchronous worker adds a failed delete.
     /// The event loop then owns retry scheduling and never lets a detached
     /// worker mutate runtime state directly.
@@ -65,9 +65,13 @@ impl GcActor {
             last_gc_run: None,
             pending_obsolete: VecDeque::new(),
             pending_manifest_reclamation: VecDeque::new(),
-            manifest_reclamation_retry_at: None,
+            manifest_reclamation_retry: crate::runtime::retry_schedule::RetrySchedule::new(
+                MANIFEST_RECLAMATION_RETRY_DELAY,
+            ),
             failed_cloud_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
-            failed_delete_retry_at: None,
+            failed_delete_retry: crate::runtime::retry_schedule::RetrySchedule::new(
+                CLOUD_DELETE_RETRY_DELAY,
+            ),
             retry_notifier: None,
             cloud_delete_workers: Vec::new(),
         }
@@ -323,42 +327,38 @@ impl GcActor {
     }
 
     pub fn take_manifest_reclamation(&mut self) -> Vec<String> {
-        self.manifest_reclamation_retry_at = None;
+        self.manifest_reclamation_retry.clear();
         self.pending_manifest_reclamation.drain(..).collect()
     }
 
     /// Start an explicit or scheduled publication attempt. A failure must arm
     /// a new retry before returning; success drains the queue.
     pub fn begin_manifest_reclamation_attempt(&mut self) {
-        self.manifest_reclamation_retry_at = None;
+        self.manifest_reclamation_retry.clear();
     }
 
     /// Retain the queued reclamation and arrange another callerless attempt.
     pub fn defer_manifest_reclamation_retry(&mut self) {
         // This also owns discovery failures that occur before any names can be
         // queued (for example, a failed reclamation journal append).
-        self.manifest_reclamation_retry_at =
-            Some(Instant::now() + MANIFEST_RECLAMATION_RETRY_DELAY);
+        self.manifest_reclamation_retry.defer();
     }
 
     #[must_use]
     pub fn manifest_reclamation_retry_due(&self) -> bool {
-        self.manifest_reclamation_retry_at
-            .is_some_and(|retry_at| Instant::now() >= retry_at)
+        self.manifest_reclamation_retry.is_scheduled() && self.manifest_reclamation_retry.is_ready()
     }
 
     /// Return the duration until the next failed cloud-delete retry, if one is
     /// scheduled. The event loop folds this into its idle wakeup deadline.
     #[must_use]
     pub fn retry_deadline_timeout(&self) -> Option<Duration> {
-        let now = Instant::now();
         [
-            self.failed_delete_retry_at,
-            self.manifest_reclamation_retry_at,
+            self.failed_delete_retry.remaining(),
+            self.manifest_reclamation_retry.remaining(),
         ]
         .into_iter()
         .flatten()
-        .map(|retry_at| retry_at.saturating_duration_since(now))
         .min()
     }
 
@@ -373,10 +373,10 @@ impl GcActor {
     ) {
         self.schedule_failed_cloud_delete_retry();
 
-        let Some(retry_at) = self.failed_delete_retry_at else {
+        if !self.failed_delete_retry.is_scheduled() {
             return;
-        };
-        if Instant::now() < retry_at {
+        }
+        if !self.failed_delete_retry.is_ready() {
             return;
         }
 
@@ -385,7 +385,7 @@ impl GcActor {
             .lock()
             .drain(..)
             .collect::<Vec<_>>();
-        self.failed_delete_retry_at = None;
+        self.failed_delete_retry.clear();
         if !failed.is_empty() {
             self.delete_ssts(state, &failed, hybrid_storage);
         }
@@ -428,8 +428,9 @@ impl GcActor {
             return;
         }
 
-        self.failed_delete_retry_at
-            .get_or_insert_with(|| Instant::now() + CLOUD_DELETE_RETRY_DELAY);
+        if !self.failed_delete_retry.is_scheduled() {
+            self.failed_delete_retry.defer();
+        }
     }
 
     /// Queue a failed deletion without mutating manifest state. The next event
@@ -446,9 +447,8 @@ impl GcActor {
         }
         drop(failed);
 
-        if inserted {
-            self.failed_delete_retry_at
-                .get_or_insert_with(|| Instant::now() + CLOUD_DELETE_RETRY_DELAY);
+        if inserted && !self.failed_delete_retry.is_scheduled() {
+            self.failed_delete_retry.defer();
         }
     }
 
@@ -543,6 +543,7 @@ impl Drop for GcActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn should_not_block_worker_when_retry_notification_queue_is_full() {

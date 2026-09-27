@@ -204,7 +204,7 @@ When investigating a crash or restart, answer these questions in order:
 4. Was there an outstanding flush or compaction publication intent?
 5. Did recovery open in strict or salvage mode?
 
-The recovery counters exposed by `Engine::get_recovery_metrics()` should confirm which replay paths ran.
+The recovery counters exposed by `engine.metrics().get_recovery_metrics()` should confirm which replay paths ran.
 
 ## Related References
 

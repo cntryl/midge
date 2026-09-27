@@ -38,7 +38,7 @@ impl WalActor {
         last_sequence: u64,
     ) -> MidgeResult<()> {
         match effective_durability {
-            DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
+            DurabilityPolicy::Strict => {
                 self.apply_strict_transaction_group_durability(state, last_sequence)?;
             }
             DurabilityPolicy::Batched => {
@@ -70,7 +70,7 @@ impl WalActor {
             }
             return Err(error);
         }
-        state.wal.local_durable_seq = last_sequence;
+        state.wal.frontiers.advance_local_to(last_sequence);
         crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
         Ok(())
     }
@@ -258,8 +258,10 @@ impl WalActor {
             state.mark_persistence_anomaly();
             tracing::error!(%error, "WAL sync could not return to open state");
         })?;
-        state.wal.last_synced_seq = receipt.durable_sequence;
-        state.wal.local_durable_seq = receipt.durable_sequence;
+        state
+            .wal
+            .frontiers
+            .advance_synced_to(receipt.durable_sequence);
         state.wal.pending_writes = 0;
         self.pending_sync_count = 0;
         self.bytes_since_sync = 0;
@@ -380,8 +382,7 @@ impl WalActor {
         receipt: super::WalRotationReceipt,
     ) {
         let max_sequence = receipt.max_sequence();
-        state.wal.last_synced_seq = max_sequence;
-        state.wal.local_durable_seq = max_sequence;
+        state.wal.frontiers.advance_synced_to(max_sequence);
         state.wal.pending_writes = 0;
         self.pending_sync_count = 0;
         self.bytes_since_sync = 0;

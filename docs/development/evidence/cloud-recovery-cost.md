@@ -35,6 +35,7 @@ The baseline commit includes the deliberately failing repeated-probe regression:
 Reproduce on each revision using the same environment and profile:
 
 ```sh
+export SQRZL_SECRET_ACCESS_KEY=easy-peasy
 docker compose up -d sqrzl
 MIDGE_QUALIFICATION_LOCAL_BYTES=33554432 \
 MIDGE_QUALIFICATION_WAL_BYTES=134217728 \

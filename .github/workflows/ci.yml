@@ -1,11 +1,13 @@
 name: CI
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * 3"
   push:
-    branches: [develop]
+    branches: [develop, main]
   pull_request:
-    branches: [develop]
-    types: [opened, synchronize, reopened, edited]
+    branches: [develop, main]
 
 permissions:
   contents: read
@@ -18,7 +20,7 @@ jobs:
   core:
     name: Core (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
 
@@ -34,14 +36,36 @@ jobs:
         with:
           shared-key: "ci-core"
 
-      - name: Rustfmt
+      - name: Install test validator
+        run: cargo install --git https://github.com/cntryl/tools
+
+      - name: Validate test contracts
+        run: cntryl-tools validate-tests
+
+      - name: Format
         run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
-      - name: Test
-        run: cargo test --workspace --features telemetry,telemetry-otlp,cloud-common,cloud-aws,sqrzl-tests,cloud-azure,cloud-gcp,cloud-oci,cloud-all,cloud_integration
+      - name: Build
+        run: cargo build --all-targets --all-features
+
+      - name: Unit and binary tests
+        run: cargo test --lib --bins --all-features -- --test-threads=1
+
+      - name: Integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for source in tests/*.rs; do
+            target="${source#tests/}"
+            target="${target%.rs}"
+            if [[ "$target" == "fault_injection" ]]; then
+              continue
+            fi
+            cargo test --test "$target" --all-features -- --test-threads=1
+          done
 
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
@@ -60,10 +84,17 @@ jobs:
           cargo rustc --lib -- -D unnameable_types
           cargo rustc --lib --no-default-features -- -D unnameable_types
 
-  windows-check:
-    name: Windows check (windows-latest)
-    runs-on: windows-latest
-    timeout-minutes: 20
+      - name: Production build has no dead code
+        run: cargo rustc --lib --no-default-features --features cloud-all -- -D dead_code
+
+  platform:
+    name: OS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
     env:
       CARGO_INCREMENTAL: 0
 
@@ -77,10 +108,39 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ci-windows"
+          shared-key: "platform-${{ matrix.os }}"
 
-      - name: Check all targets
-        run: cargo check --workspace --all-targets --all-features
+      - name: Verify release build
+        if: matrix.os == 'macos-latest'
+        run: cargo check --release
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+      - name: Test Windows filesystem operations
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib io::real::tests --all-features
+
+      - name: Test cloud WAL salvage on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib streaming_wal_plan::tests --all-features
+
+      - name: Test cloud SST loss classification on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib should_treat_missing_child --all-features
+
+      - name: Test cloud SST salvage on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --lib salvage_removes_definitively_lost_ssts --all-features
+
+      - name: Test consistent-cut backup and restore on Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo test --lib engine::backup::tests --all-features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
+
+      - name: Test workspace
+        if: matrix.os == 'macos-latest'
+        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
+
+      - name: Fault injection suite (serial; failpoints are process-global)
+        if: matrix.os == 'macos-latest'
+        run: cargo test --test fault_injection --all-features -- --test-threads=1

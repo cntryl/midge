@@ -45,6 +45,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::FsError;
 use crate::io::{Fs, RealFs};
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::wal::policy::BatchConfig;
@@ -600,7 +601,7 @@ impl WalActor {
         let io = if memory_mode {
             WalIoState::Memory
         } else {
-            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir)?);
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir).map_err(FsError::into_midge)?);
             let factory = FsWalFactoryIo::new(Arc::clone(&fs))
                 .with_io_timeout(storage_io_timeout)
                 .with_counters(counters.clone());

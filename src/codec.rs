@@ -37,6 +37,9 @@ impl CompressionAlgo {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompressionPolicy {
     /// Never compress
+    // No production configuration selects this yet; tests and benches do,
+    // and the codec must still handle it.
+    #[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
     None,
 
     /// Use the specified algorithm for inputs at or above

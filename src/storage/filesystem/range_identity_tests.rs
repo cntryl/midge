@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::test_support::StorageBackendTestExt;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -6,7 +7,14 @@ const KEY: &str = "immutable.sst";
 
 fn head(backend: &FileSystem) -> StorageObjectMetadata {
     let (tx, rx) = mpsc::channel();
-    backend.submit_range_head(KEY, Duration::from_secs(2), tx);
+    backend.submit_range_head_request(
+        crate::storage::StorageRequest::new(
+            KEY,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        ),
+        tx,
+    );
     match rx.recv().expect("range HEAD response") {
         StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(metadata),
@@ -21,13 +29,32 @@ fn read(
     metadata: StorageObjectMetadata,
 ) -> Result<Vec<u8>, crate::storage::StorageError> {
     let (tx, rx) = mpsc::channel();
-    backend.submit_read_range(KEY, 1, 4, metadata, Duration::from_secs(2), tx);
+    backend.submit_range_read_request(
+        crate::storage::StorageRequest::new(
+            KEY,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(metadata)),
+        1..4,
+        tx,
+    );
     rx.recv().expect("range read response")
 }
 
 fn delete(backend: &FileSystem, metadata: &StorageObjectMetadata) -> StorageOutcome<()> {
     let (tx, rx) = mpsc::channel();
-    backend.submit_delete_with_headers(KEY, vec![("If-Match".into(), metadata.etag.clone())], tx);
+    backend.submit_delete_request(
+        crate::storage::StorageRequest::new(
+            KEY,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+            metadata.clone(),
+        )),
+        tx,
+    );
     match rx.recv().expect("conditional delete response") {
         StorageEvent::DeleteComplete { result, .. } => result,
         other => panic!("unexpected delete: {other:?}"),
@@ -101,7 +128,7 @@ fn should_reject_stale_range_authority_when_in_place_write_preserves_size_and_mo
     let before = head(&backend);
     let (tx, rx) = mpsc::channel();
     // Act
-    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    backend.write_for_test(KEY, b"newer".to_vec(), tx);
     let write = rx.recv().expect("in-place write response");
     fs::File::options()
         .write(true)
@@ -167,7 +194,7 @@ fn should_advance_modified_time_when_replacing_object_stamped_ahead_of_the_clock
     let backend = FileSystem::new(directory.path())?;
     let path = directory.path().join(KEY);
     let (tx, rx) = mpsc::channel();
-    backend.submit_write(KEY, b"older".to_vec(), tx);
+    backend.write_for_test(KEY, b"older".to_vec(), tx);
     rx.recv().expect("first write response");
     let ahead = std::time::SystemTime::now() + Duration::from_hours(1);
     fs::File::options()
@@ -177,7 +204,7 @@ fn should_advance_modified_time_when_replacing_object_stamped_ahead_of_the_clock
     let (tx, rx) = mpsc::channel();
 
     // Act
-    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    backend.write_for_test(KEY, b"newer".to_vec(), tx);
     rx.recv().expect("replacement write response");
 
     // Assert
@@ -193,7 +220,7 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
     let backend = FileSystem::new(directory.path())?;
     let path = directory.path().join(KEY);
     let (tx, rx) = mpsc::channel();
-    backend.submit_write(KEY, b"older".to_vec(), tx);
+    backend.write_for_test(KEY, b"older".to_vec(), tx);
     rx.recv().expect("first write response");
     let ahead = std::time::SystemTime::now() + Duration::from_hours(2);
     fs::File::options()
@@ -201,16 +228,16 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
         .open(&path)?
         .set_modified(ahead)?;
     let (tx, rx) = mpsc::channel();
-    backend.submit_write(KEY, b"middle".to_vec(), tx);
+    backend.write_for_test(KEY, b"middle".to_vec(), tx);
     rx.recv().expect("second write response");
     let middle = fs::metadata(&path)?.modified()?;
     let (tx, rx) = mpsc::channel();
-    backend.submit_delete(KEY, tx);
+    backend.delete_for_test(KEY, tx);
     rx.recv().expect("delete response");
     let (tx, rx) = mpsc::channel();
 
     // Act
-    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    backend.write_for_test(KEY, b"newer".to_vec(), tx);
     rx.recv().expect("recreate write response");
 
     // Assert

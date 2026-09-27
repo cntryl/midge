@@ -44,6 +44,32 @@ fn isolated_test_db_path() -> PathBuf {
 }
 
 #[test]
+fn should_rebuild_manifest_read_view_when_files_change_through_owner() {
+    // Arrange
+    let mut owner = ManifestRuntimeState::new(Manifest::default());
+    let initial = owner.read_view_for(0);
+    assert!(initial.pinned_sst_names().is_empty());
+    assert!(owner.take_rebuilt_live_names().is_some());
+
+    // Act
+    owner.add_file(crate::metadata::FileMeta {
+        name: "new.sst".to_owned(),
+        cf_id: 0,
+        ..crate::metadata::FileMeta::default()
+    });
+    let updated = owner.read_view_for(0);
+    let rebuilt_live_names = owner.take_rebuilt_live_names();
+
+    // Assert
+    assert!(!Arc::ptr_eq(&initial, &updated));
+    assert!(updated.pinned_sst_names().contains("new.sst"));
+    assert!(rebuilt_live_names
+        .expect("changed manifest must rebuild")
+        .contains("new.sst"));
+    assert!(owner.take_rebuilt_live_names().is_none());
+}
+
+#[test]
 #[cfg(feature = "failpoints")]
 fn should_count_retained_recovery_files_when_startup_cleanup_fails() -> MidgeResult<()> {
     // Arrange
@@ -375,7 +401,7 @@ fn should_create_column_family_state_with_empty_memtables() {
 fn should_select_due_pending_immutable_before_active_memtable() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_flush_threshold = 1;
+    state.limits.memtable_flush_threshold = 1;
     let immutable = Arc::new(SkipListMemtable::new());
     immutable
         .put_with_seq(b"older".to_vec(), b"value".to_vec(), 1, None)
@@ -440,9 +466,9 @@ fn should_cap_immutable_flush_retry_backoff_at_one_second() {
 fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_flush_threshold = 4 * 1024;
-    state.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.eventual_flush_segment_gap + 50;
+    state.limits.memtable_flush_threshold = 4 * 1024;
+    state.limits.memtable_size_limit = 1024 * 1024;
+    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 50;
 
     grow_active_memtable(&mut state, 0, 5 * 1024);
 
@@ -474,9 +500,9 @@ fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
 fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_flush_threshold = 1024 * 1024;
-    state.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.eventual_flush_segment_gap + 1;
+    state.limits.memtable_flush_threshold = 1024 * 1024;
+    state.limits.memtable_size_limit = 1024 * 1024;
+    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 1;
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -503,9 +529,9 @@ fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
 fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_flush_threshold = 1024 * 1024;
-    state.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.eventual_flush_segment_gap + 10;
+    state.limits.memtable_flush_threshold = 1024 * 1024;
+    state.limits.memtable_size_limit = 1024 * 1024;
+    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 10;
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -530,7 +556,7 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
 fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = state.eventual_flush_segment_gap + 20;
+    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 20;
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -569,8 +595,8 @@ fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
 fn should_flush_but_not_hard_stall_when_active_memtable_exceeds_flush_threshold() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_size_limit = 1024 * 1024;
-    state.memtable_flush_threshold = 4 * 1024;
+    state.limits.memtable_size_limit = 1024 * 1024;
+    state.limits.memtable_flush_threshold = 4 * 1024;
     state.total_memtable_bytes = 0;
 
     grow_active_memtable(&mut state, 0, 5 * 1024);
@@ -587,7 +613,7 @@ fn should_flush_but_not_hard_stall_when_active_memtable_exceeds_flush_threshold(
 fn should_hard_stall_when_immutable_memtable_queue_is_full() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.max_immutable_memtables = 1;
+    state.limits.max_immutable_memtables = 1;
     state
         .get_cf_mut(0)
         .expect("default cf")
@@ -605,8 +631,8 @@ fn should_hard_stall_when_immutable_memtable_queue_is_full() {
 fn should_derive_hard_l0_ceiling_from_capacity() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.l0_compaction_trigger = 3;
-    state.max_immutable_memtables = 2;
+    state.limits.l0_compaction_trigger = 3;
+    state.limits.max_immutable_memtables = 2;
     state
         .manifest
         .files
@@ -637,9 +663,9 @@ fn should_derive_hard_l0_ceiling_from_capacity() {
 fn should_stall_next_write_after_active_generation_reserves_last_l0_slot() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.l0_compaction_trigger = 1;
-    state.max_immutable_memtables = 1;
-    state.memtable_flush_threshold = 1;
+    state.limits.l0_compaction_trigger = 1;
+    state.limits.max_immutable_memtables = 1;
+    state.limits.memtable_flush_threshold = 1;
     state
         .manifest
         .files
@@ -672,7 +698,7 @@ fn should_stall_next_write_after_active_generation_reserves_last_l0_slot() {
 fn should_hard_stall_when_total_memtable_memory_exceeds_limit() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_flush_threshold = 1024;
+    state.limits.memtable_flush_threshold = 1024;
     state.total_memtable_bytes = 2 * 1024;
 
     // Act
@@ -781,10 +807,10 @@ fn should_initialize_wal_state_with_defaults() {
 
     // Assert
     assert_eq!(wal.current_segment_id, 1);
-    assert_eq!(wal.last_synced_seq, 0);
+    assert_eq!(wal.frontiers.last_synced(), 0);
     assert_eq!(wal.pending_writes, 0);
-    assert_eq!(wal.local_durable_seq, 0);
-    assert_eq!(wal.cloud_durable_seq, 0);
+    assert_eq!(wal.frontiers.local_durable(), 0);
+    assert_eq!(wal.frontiers.cloud_durable(), 0);
 }
 
 #[test]
@@ -1896,8 +1922,8 @@ fn should_maintain_memtable_size_limit() {
     // (none)
 
     // Assert
-    assert!(state.memtable_size_limit > 0);
-    assert_eq!(state.memtable_size_limit, 64 * 1024 * 1024); // 64MB
+    assert!(state.limits.memtable_size_limit > 0);
+    assert_eq!(state.limits.memtable_size_limit, 64 * 1024 * 1024); // 64MB
 }
 
 #[test]
@@ -1968,7 +1994,7 @@ fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
         .immutable_flush_by_id_mut(generation.flush_id)
         .unwrap();
     queued.phase = ImmutableFlushPhase::RetryPending;
-    queued.retry_at = Instant::now() + Duration::from_mins(1);
+    queued.retry.defer_for(Duration::from_mins(1));
     let retrying = state.wal_recovery_floor_segment();
     state.complete_immutable_flush(0, &frozen).unwrap();
     let after_publication = state.wal_recovery_floor_segment();
@@ -2246,8 +2272,8 @@ fn should_keep_in_memory_manifest_when_intent_reload_fails() {
 
 fn state_with_unflushed_default_family(appended_since_start: u64) -> RuntimeState {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.memtable_flush_threshold = 1024;
-    state.memtable_size_limit = 1024;
+    state.limits.memtable_flush_threshold = 1024;
+    state.limits.memtable_size_limit = 1024;
     state
         .get_cf(0)
         .expect("default cf")
@@ -2282,7 +2308,7 @@ fn should_not_select_wal_bytes_flush_candidate_when_only_segments_advance() {
     // far behind in segments but not in bytes must not be flushed. This is
     // what keeps local eventual flushes from feeding each other (#552).
     let mut state = state_with_unflushed_default_family(100);
-    state.wal.current_segment_id = state.eventual_flush_segment_gap + 100;
+    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 100;
 
     // Act
     let by_bytes = state.next_flush_candidate(EventualFlush::WalBytes);

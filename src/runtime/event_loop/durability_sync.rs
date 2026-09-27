@@ -515,10 +515,6 @@ mod tests {
             Ok(0)
         }
 
-        fn flush(&self) -> crate::common::MidgeResult<()> {
-            Ok(())
-        }
-
         fn sync(&self) -> crate::common::MidgeResult<()> {
             assert!(
                 !self.0.swap(false, std::sync::atomic::Ordering::SeqCst),
@@ -529,10 +525,6 @@ mod tests {
 
         fn current_pos(&self) -> u64 {
             0
-        }
-
-        fn close(&self) -> crate::common::MidgeResult<()> {
-            Ok(())
         }
     }
 
@@ -845,11 +837,13 @@ mod tests {
                 "{boundary:?}"
             );
             assert_eq!(
-                event_loop.state.wal.local_durable_seq, expected_frontier,
+                event_loop.state.wal.frontiers.local_durable(),
+                expected_frontier,
                 "{boundary:?}"
             );
             assert_eq!(
-                event_loop.state.wal.last_synced_seq, expected_frontier,
+                event_loop.state.wal.frontiers.last_synced(),
+                expected_frontier,
                 "{boundary:?}"
             );
             assert_eq!(event_loop.wal_actor.is_fenced(), fenced, "{boundary:?}");
@@ -930,7 +924,7 @@ mod tests {
                 if message.contains("generation space exhausted")
         ));
         assert_eq!(event_loop.durability.current_key(), u64::MAX);
-        assert_eq!(event_loop.state.wal.local_durable_seq, 0);
+        assert_eq!(event_loop.state.wal.frontiers.local_durable(), 0);
         assert_eq!(event_loop.state.wal.pending_writes, 1);
         assert!(!event_loop.wal_actor.is_fenced());
         assert!(!event_loop.wal_transition.is_fenced());
@@ -1076,7 +1070,11 @@ mod tests {
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
         let response = event_loop.router.register(51, "ApplyTransaction");
-        event_loop.state.wal.local_durable_seq = 40;
+        event_loop
+            .state
+            .wal
+            .frontiers
+            .set_local_durable_for_test(40);
         event_loop.state.begin_pending_transaction();
 
         // Act
@@ -1119,7 +1117,11 @@ mod tests {
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
         let response = event_loop.router.register(52, "ApplyTransaction");
-        event_loop.state.wal.local_durable_seq = 40;
+        event_loop
+            .state
+            .wal
+            .frontiers
+            .set_local_durable_for_test(40);
         event_loop.state.begin_pending_transaction();
 
         // Act

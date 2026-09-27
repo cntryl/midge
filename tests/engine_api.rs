@@ -511,6 +511,7 @@ mod engine_wal {
             batch_count += 1;
             segment_ids.push(
                 engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("runtime metrics")
                     .wal_current_segment_id,
@@ -3728,7 +3729,10 @@ mod engine_compaction {
         engine.compact_all().expect("compact all seeded L0 files");
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let compacted_names: Vec<String> = layout
             .levels
             .iter()
@@ -4631,6 +4635,7 @@ mod edge_cases {
             let total_puts: usize = threads * puts_per_thread;
 
             let before_uploads = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics before puts")
                 .cloud_async_wal_uploads_completed;
@@ -4674,12 +4679,14 @@ mod edge_cases {
             let mut after_uploads;
             loop {
                 after_uploads = engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("runtime metrics after puts")
                     .cloud_async_wal_uploads_completed;
                 if after_uploads > before_uploads {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     let settled = engine
+                        .metrics()
                         .get_runtime_metrics()
                         .expect("runtime metrics after settling")
                         .cloud_async_wal_uploads_completed;
@@ -4736,6 +4743,7 @@ mod consistent_cut_backup {
             .expect("flush checkpoint baseline");
         let running = std::sync::Arc::new(AtomicBool::new(true));
         let writer_running = std::sync::Arc::clone(&running);
+        let (writer_started_tx, writer_started_rx) = std::sync::mpsc::sync_channel(1);
         let writer_engine = &engine;
         let writer = std::thread::scope(|scope| {
             let handle = scope.spawn(move || {
@@ -4748,21 +4756,24 @@ mod consistent_cut_backup {
                         b"frontier",
                         &next.to_be_bytes(),
                     );
+                    if next == 1 {
+                        let _ = writer_started_tx.send(());
+                    }
                     next += 1;
                 }
             });
 
             // Act
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            let backup = engine
-                .backup_to(&artifact, std::time::Duration::from_secs(10))
-                .expect("capture backup");
+            let writer_started = writer_started_rx.recv_timeout(std::time::Duration::from_secs(30));
+            let backup = engine.backup_to(&artifact, std::time::Duration::from_secs(10));
+            running.store(false, Ordering::Release);
+            handle.join().expect("writer thread");
+            writer_started.expect("writer committed first event and checkpoint");
+            let backup = backup.expect("capture backup");
             assert!(backup
                 .objects
                 .iter()
                 .any(|object| object.path.starts_with("sst/")));
-            running.store(false, Ordering::Release);
-            handle.join().expect("writer thread");
             backup
         });
         assert!(writer.durability_frontier > 0);

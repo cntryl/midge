@@ -61,7 +61,10 @@ mod cloud_eventual_flush {
     {
         let deadline = Instant::now() + timeout;
         loop {
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             if predicate(&metrics) {
                 return metrics;
             }
@@ -98,7 +101,10 @@ mod cloud_eventual_flush {
             );
         }
 
-        let pre_flush_metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let pre_flush_metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         // Act
         // Assert
         assert!(
@@ -121,7 +127,10 @@ mod cloud_eventual_flush {
             metrics.max_memtable_wal_segment_gap
         );
 
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         assert!(
             layout
                 .levels
@@ -152,7 +161,10 @@ mod cloud_eventual_flush {
             );
         }
 
-        let pre_flush_metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let pre_flush_metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         // Act
         // Assert
         assert_eq!(
@@ -223,7 +235,10 @@ mod cloud_eventual_flush {
 
         let deadline = Instant::now() + Duration::from_secs(3);
         let layout = loop {
-            let layout = engine.get_storage_layout().expect("storage layout");
+            let layout = engine
+                .metrics()
+                .get_storage_layout()
+                .expect("storage layout");
             let light_has_sst = layout
                 .levels
                 .iter()
@@ -233,7 +248,10 @@ mod cloud_eventual_flush {
                 break layout;
             }
 
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             // Act
             // Assert
             assert!(
@@ -281,6 +299,7 @@ mod cloud_eventual_flush {
             }
 
             let metrics = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics before reopen");
             // Act
@@ -302,6 +321,7 @@ mod cloud_eventual_flush {
 
         let reopened = open_large_cloud_engine(&opts);
         let reopened_metrics = reopened
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics after reopen");
         assert_eq!(
@@ -699,7 +719,10 @@ mod cloud_small_memory {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("read transaction");
         let value = transaction.get(b"key").expect("bounded cold SST read");
-        let metrics = reopened.get_runtime_metrics().expect("read metrics");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read metrics");
 
         // Assert
         assert_eq!(value.as_deref(), Some(b"value".as_slice()));

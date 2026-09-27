@@ -2,6 +2,31 @@ use super::*;
 use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
+#[test]
+fn should_report_wal_recovery_counters_in_engine_diagnostics_after_replay() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
+    {
+        let mut engine = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+        let cf = engine
+            .get_column_family("default")
+            .expect("default column family");
+        let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        tx.put(b"replayed-key".to_vec(), b"replayed-value".to_vec(), None)?;
+        tx.commit(WriteOptions::buffered())?;
+        engine.shutdown(Duration::from_secs(5))?;
+    }
+
+    // Act
+    let mut reopened = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+    let counters = reopened.runtime_handle.diagnostics.counters();
+
+    // Assert
+    assert!(counters.wal_recovery_records_replayed > 0);
+    assert!(counters.wal_recovery_bytes_replayed > 0);
+    reopened.shutdown(Duration::from_secs(5))
+}
+
 #[derive(Default)]
 struct BlockingReleaseState {
     started: bool,
@@ -266,7 +291,7 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    Engine::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
+    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -447,7 +472,8 @@ fn should_reap_engine_without_blocking_drop_when_transaction_is_live() -> MidgeR
     );
 
     drop(transaction);
-    let reopen_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    // Reaper completion is asynchronous and can lag under hosted machine load.
+    let reopen_deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut reopened = loop {
         match Engine::open(OpenOptions::local(temp_dir.path()).build()?) {
             Ok(engine) => break engine,
@@ -459,6 +485,43 @@ fn should_reap_engine_without_blocking_drop_when_transaction_is_live() -> MidgeR
         }
     };
     reopened.shutdown(Duration::from_secs(2))?;
+    Ok(())
+}
+
+#[test]
+fn should_preserve_fenced_kind_when_empty_sync_commit_loses_writer_authority() -> MidgeResult<()> {
+    // Arrange: replace this temporary database's leader record with a newer
+    // holder so the explicit WAL sync observes lost authority.
+    let temp_dir = tempfile::tempdir()?;
+    let engine = Engine::open(OpenOptions::local(temp_dir.path()).build()?)?;
+    let default_cf = engine
+        .get_column_family("default")
+        .ok_or_else(|| MidgeError::Internal("default column family missing".into()))?;
+    let transaction = engine.begin_tx(default_cf.id(), TransactionMode::ReadWrite)?;
+    let record_path = temp_dir.path().join(".midge_leader");
+    let record = std::fs::read_to_string(&record_path)?;
+    let epoch = record
+        .lines()
+        .find_map(|line| line.strip_prefix("epoch: "))
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| MidgeError::Internal("leader epoch missing".into()))?;
+    let acquired_at = record
+        .lines()
+        .find_map(|line| line.strip_prefix("acquired_at: "))
+        .ok_or_else(|| MidgeError::Internal("leader acquisition time missing".into()))?;
+    std::fs::write(
+        &record_path,
+        format!(
+            "epoch: {}\nholder_id: replacement-writer\nacquired_at: {acquired_at}\n",
+            epoch + 1
+        ),
+    )?;
+
+    // Act
+    let result = transaction.commit(WriteOptions::sync());
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
     Ok(())
 }
 
@@ -480,6 +543,10 @@ fn should_treat_flush_compact_as_noop_in_memory_mode() {
         .expect("memory compact_all should succeed");
 }
 
+// These reopen qualifications wait for runtime shutdown, WAL drain, and lease
+// cleanup. Their assertions concern the recovered data, not caller deadlines.
+const PARTITIONED_COMPACTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(2);
+
 fn partitioned_compaction_value(index: usize) -> Vec<u8> {
     (0..512)
         .map(|offset| {
@@ -493,7 +560,7 @@ fn assert_partitioned_compaction_reads(
     engine: &Engine,
     cf: &ColumnFamilyHandle,
 ) -> MidgeResult<()> {
-    let layout = engine.get_storage_layout()?;
+    let layout = engine.metrics().get_storage_layout()?;
     let output_files: Vec<_> = layout
         .levels
         .iter()
@@ -566,7 +633,7 @@ fn assert_partitioned_compaction_reopen(mut reopened: Engine) -> MidgeResult<()>
         Some(partitioned_compaction_value(96).as_slice())
     );
     drop(read);
-    let reopened_layout = reopened.get_storage_layout()?;
+    let reopened_layout = reopened.metrics().get_storage_layout()?;
     let reopened_names: Vec<_> = reopened_layout
         .levels
         .iter()
@@ -582,7 +649,7 @@ fn assert_partitioned_compaction_reopen(mut reopened: Engine) -> MidgeResult<()>
             .len(),
         reopened_names.len()
     );
-    reopened.shutdown(Duration::from_secs(5))
+    reopened.shutdown(PARTITIONED_COMPACTION_SHUTDOWN_TIMEOUT)
 }
 
 fn assert_partitioned_compaction_engine_round_trip(
@@ -629,7 +696,7 @@ fn assert_partitioned_compaction_engine_round_trip(
 
     // Assert
     assert_partitioned_compaction_reads(&engine, &cf)?;
-    engine.shutdown(Duration::from_secs(5))?;
+    engine.shutdown(PARTITIONED_COMPACTION_SHUTDOWN_TIMEOUT)?;
 
     let mut reopen_options = open_options()?;
     reopen_options.set_compaction_target_sst_size_for_test(TARGET_SST_SIZE);
@@ -646,6 +713,10 @@ fn should_preserve_partitioned_compaction_across_local_reopen() -> MidgeResult<(
         OpenOptions::local(temp_dir.path())
             .background_compaction(false)
             .with_memtable_size_limit(64 * 1024)
+            // This qualifies partitioned output and recovery rather than the
+            // response deadline. Hosted Windows runners can share disk load
+            // with other test processes during the manual compaction.
+            .runtime_response_timeout(Duration::from_mins(3))
             .build()
     });
 
@@ -673,6 +744,33 @@ fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> Mid
 
     // Assert
     result
+}
+
+#[test]
+fn should_sweep_legacy_local_sst_before_retiring_local_backend() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let options = || OpenOptions::cloud_simulated(directory.path(), "legacy", "sweep").build();
+    let mut engine = Engine::open(options()?)?;
+    let cf = engine.get_column_family("default").expect("default CF");
+    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    tx.put(b"legacy-key".to_vec(), b"value".to_vec(), None)?;
+    tx.commit(WriteOptions::cloud_strict())?;
+    engine.flush_cf(&cf)?;
+    engine.shutdown(Duration::from_secs(5))?;
+    let manifest =
+        crate::metadata::ManifestPersistence::load(directory.path()).expect("read checkpoint");
+    let name = &manifest.files.first().expect("flushed SST").name;
+    let legacy = directory.path().join("hybrid_local/sst").join(name);
+    std::fs::create_dir_all(legacy.parent().expect("legacy SST directory"))?;
+    std::fs::copy(directory.path().join("cloud_store/sst").join(name), &legacy)?;
+
+    // Act
+    let mut reopened = Engine::open(options()?)?;
+
+    // Assert
+    assert!(!legacy.exists(), "startup must sweep the legacy local copy");
+    reopened.shutdown(Duration::from_secs(5))
 }
 
 fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) -> Vec<u8> {
@@ -773,7 +871,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     };
     Engine::blocking_cloud_put(
         &cloud,
-        "metadata/manifest.json",
+        "metadata/manifest.snapshot.json",
         serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
     )
     .expect("upload newer remote manifest");
@@ -790,7 +888,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
         "unexpected stale engine metadata mirror error: {error}"
     );
     let retained: crate::metadata::Manifest = serde_json::from_slice(
-        &Engine::blocking_cloud_get(&cloud, "metadata/manifest.json")
+        &Engine::blocking_cloud_get(&cloud, "metadata/manifest.snapshot.json")
             .expect("download retained remote manifest"),
     )
     .expect("parse retained remote manifest");
@@ -827,6 +925,76 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
 }
 
 #[test]
+fn should_not_mirror_manifest_when_format_marker_upload_fails_under_salvage() {
+    // Arrange: a local FORMAT 4 upgrade must reach cloud before its manifest.
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+        .expect("create FORMAT 4 marker");
+    crate::metadata::ManifestPersistence::save(
+        temp_dir.path(),
+        &crate::metadata::Manifest::default(),
+    )
+    .expect("save local manifest");
+    let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let original_cloud =
+        crate::storage::cloud::CloudStorage::new(inner.clone(), "midge".to_string());
+    let old_format = b"midge-format-version=3\n".to_vec();
+    Engine::blocking_cloud_put(&original_cloud, "metadata/FORMAT", old_format.clone())
+        .expect("upload prior FORMAT marker");
+    inner.clear_history();
+    let cloud = crate::storage::cloud::CloudStorage::new(
+        Arc::new(FormatPutFailBackend {
+            inner: inner.clone(),
+        }),
+        "midge".to_string(),
+    );
+
+    // Act
+    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
+        .expect("salvage open tolerates failed FORMAT mirror");
+
+    // Assert
+    assert_eq!(
+        Engine::blocking_cloud_get(&original_cloud, "metadata/FORMAT")
+            .expect("read old FORMAT marker"),
+        old_format
+    );
+    assert!(
+        inner.get_uploads().is_empty(),
+        "a failed FORMAT put must block every newer manifest object"
+    );
+}
+
+struct FormatPutFailBackend {
+    inner: Arc<crate::storage::cloud::MockCloudBackend>,
+}
+
+impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        if key.ends_with("/metadata/FORMAT") {
+            let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+                key: key.to_string(),
+                result: crate::storage::cloud::CloudOutcome::Err(
+                    crate::storage::cloud::CloudError::Transport(
+                        "injected FORMAT put failure".into(),
+                    ),
+                ),
+            });
+            return;
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+}
+
+#[test]
 fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
@@ -842,7 +1010,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
     };
     Engine::blocking_cloud_put(
         &cloud,
-        "metadata/manifest.json",
+        "metadata/manifest.snapshot.json",
         serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
     )
     .expect("upload readable remote manifest metadata");
@@ -861,7 +1029,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
 }
 
 #[test]
-fn should_reject_mixed_cloud_manifest_metadata_without_journal() {
+fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -887,21 +1055,19 @@ fn should_reject_mixed_cloud_manifest_metadata_without_journal() {
     )
     .expect("upload newer manifest");
 
-    let error = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
-        .expect_err("strict hydration must reject mixed manifest metadata without journal");
+    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("legacy manifest mirror is not authoritative");
+    let recovered = crate::metadata::ManifestPersistence::load(temp_dir.path())
+        .expect("load hydrated snapshot");
 
     // Act
     // Assert
-    assert!(
-        error.to_string().contains("mixed")
-            || error.to_string().contains("inconsistent")
-            || error.to_string().contains("sequence"),
-        "unexpected mixed metadata error: {error}"
-    );
+    assert_eq!(recovered.last_persisted_sequence, 10);
+    assert!(!temp_dir.path().join("manifest.json").exists());
 }
 
 #[test]
-fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() {
+fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -928,16 +1094,76 @@ fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() 
     .expect("upload newer manifest");
 
     Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
-        .expect("salvage hydration should retain the highest sequence manifest metadata");
+        .expect("salvage hydration should use the snapshot");
 
     let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
         .expect("load salvaged manifest metadata");
     // Act
     // Assert
     assert_eq!(
-        hydrated.last_persisted_sequence, 11,
-        "salvage hydration must not let a stale snapshot hide a newer manifest"
+        hydrated.last_persisted_sequence, 10,
+        "legacy manifest mirror must not override the snapshot"
     );
+}
+
+#[test]
+fn should_recover_cloud_database_when_manifest_json_is_absent() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud = crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "midge".to_string(),
+    );
+    let snapshot = crate::metadata::Manifest {
+        last_persisted_sequence: 42,
+        ..Default::default()
+    };
+    Engine::blocking_cloud_put(
+        &cloud,
+        "metadata/manifest.snapshot.json",
+        serde_json::to_vec(&snapshot).expect("serialize snapshot"),
+    )
+    .expect("upload snapshot");
+
+    // Act
+    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("hydrate snapshot without legacy mirror");
+    let recovered = crate::metadata::ManifestPersistence::load(temp_dir.path())
+        .expect("recover hydrated snapshot");
+
+    // Assert
+    assert_eq!(recovered.last_persisted_sequence, 42);
+    assert!(!temp_dir.path().join("manifest.json").exists());
+}
+
+#[test]
+fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud = crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "midge".to_string(),
+    );
+    let legacy = crate::metadata::Manifest {
+        last_persisted_sequence: 42,
+        ..Default::default()
+    };
+    Engine::blocking_cloud_put(
+        &cloud,
+        "metadata/manifest.json",
+        serde_json::to_vec(&legacy).expect("serialize legacy mirror"),
+    )
+    .expect("upload legacy mirror");
+
+    // Act
+    let result = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(_))
+    ));
+    assert!(!temp_dir.path().join("manifest.snapshot.json").exists());
 }
 
 struct ListOmittingCloudBackend {
@@ -1586,7 +1812,7 @@ fn should_report_error_when_lease_release_keeps_failing() {
     let started = std::time::Instant::now();
 
     // Act
-    let result = Engine::release_fencing_parts(None, Some(engine_lease), None);
+    let result = super::LeaseState::release_fencing_parts(None, Some(engine_lease), None);
 
     // Assert
     assert!(

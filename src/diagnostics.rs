@@ -62,13 +62,16 @@ impl crate::sst::read_path_metrics::SstReadObserver for RuntimeDiagnostics {
     }
 
     fn record_block_cache_lookup(&self, hit: bool) {
-        self.record(|metrics| {
+        // The per-engine read-path counters already counted this lookup. Only
+        // the optional process-wide exporter needs a second observation.
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            let metrics = telemetry.metrics();
             if hit {
                 metrics.record_cache_hit();
             } else {
                 metrics.record_cache_miss();
             }
-        });
+        }
     }
 }
 
@@ -214,6 +217,7 @@ pub(crate) fn record_transaction_commit_timing(sample: TransactionCommitTimingSa
 ///
 /// This is not part of the stable user API; benchmarks use it to keep latency
 /// breakdown rows tied to real commit phase timings instead of synthetic totals.
+#[cfg(any(test, feature = "internal-testing"))]
 #[doc(hidden)]
 pub fn enable_transaction_commit_timing_for_benchmarks() {
     let _ = drain_transaction_commit_timings_for_benchmarks();
@@ -222,6 +226,7 @@ pub fn enable_transaction_commit_timing_for_benchmarks() {
 }
 
 /// Disable internal transaction commit timing collection for benchmark crates.
+#[cfg(any(test, feature = "internal-testing"))]
 #[doc(hidden)]
 pub fn disable_transaction_commit_timing_for_benchmarks() {
     TRANSACTION_COMMIT_TIMING_ENABLED.store(false, Ordering::Release);
@@ -229,6 +234,7 @@ pub fn disable_transaction_commit_timing_for_benchmarks() {
 }
 
 /// Drain collected transaction commit timing samples for benchmark crates.
+#[cfg(any(test, feature = "internal-testing"))]
 #[must_use]
 #[doc(hidden)]
 pub fn drain_transaction_commit_timings_for_benchmarks() -> Vec<TransactionCommitTimingSample> {

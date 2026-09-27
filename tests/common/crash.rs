@@ -55,7 +55,7 @@ pub fn clear_crashed_process_acquisition_lock(db_path: &Path) {
     }
 }
 
-/// Validate a child result separately from process execution so governance
+/// Validate a child result separately from process execution so tests
 /// tests can prove a missing or wrong marker is rejected.
 pub fn validate_child_crash(
     output: &Output,

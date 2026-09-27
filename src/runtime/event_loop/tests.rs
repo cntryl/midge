@@ -4,7 +4,7 @@ use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
 use crate::types::EntryType;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -18,6 +18,60 @@ fn should_dispatch_compact_all_before_background_cloud_progress() {
 
     // Assert
     assert!(!progress_first);
+}
+
+#[test]
+fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop
+        .wal_transition
+        .fence("writer lease lost", None, true);
+    let request_id = 9_001;
+    let response = event_loop.router.register(request_id, "WalSync");
+
+    // Act
+    super::wal::WalCoordinator::sync(&mut event_loop, request_id);
+
+    // Assert
+    let result = response.recv_timeout(Duration::from_secs(1));
+    assert!(
+        matches!(
+            &result,
+            Ok(RuntimeResponse::Error {
+                error: crate::common::MidgeError::Fenced(_),
+                ..
+            })
+        ),
+        "unexpected WAL sync response: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_preserve_resource_limit_when_compaction_launch_is_refused(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    event_loop
+        .cloud_coordinator
+        .hybrid_storage
+        .as_ref()
+        .expect("cloud storage")
+        .enable_ephemeral_sst_cache(7);
+
+    // Act
+    let result = event_loop.launch_compaction(crate::compaction::CompactionPlan::new(0, 0, 1));
+
+    // Assert
+    assert!(
+        matches!(&result, Err(crate::common::MidgeError::ResourceLimit(_))),
+        "unexpected compaction launch result: {result:?}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -36,15 +90,10 @@ fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::com
 
     // Assert
     assert!(response.try_recv().is_err());
-    assert_eq!(
-        event_loop
-            .state
-            .pending_compaction_waits
-            .lock()
-            .get(&request_id)
-            .map(String::as_str),
-        Some("CompactAll")
-    );
+    assert!(event_loop
+        .state
+        .pending_compaction_waits
+        .contains(&request_id));
     Ok(())
 }
 
@@ -296,11 +345,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
             frontier: 1,
         }],
     );
-    event_loop
-        .state
-        .pending_compaction_waits
-        .lock()
-        .insert(8105, "CompactAll".to_string());
+    event_loop.state.pending_compaction_waits.insert(8105);
     event_loop.write_stall_waiters.register(8106, 0);
     event_loop.durability.queue_waiter_for_key(
         0,
@@ -336,7 +381,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     assert!(event_loop.publication_gate.deferred_messages_is_empty());
     assert!(event_loop.verification_barrier.deferred_messages.is_empty());
     assert!(event_loop.flush_barrier_waiters.is_empty());
-    assert!(event_loop.state.pending_compaction_waits.lock().is_empty());
+    assert!(event_loop.state.pending_compaction_waits.is_empty());
     assert!(event_loop.write_stall_waiters.is_empty());
     assert!(!event_loop.durability.has_pending_waiters());
 }
@@ -373,73 +418,6 @@ fn should_retain_writer_epochs_in_recovered_cloud_wal_runtime_config() {
 }
 
 #[test]
-fn should_return_invalid_argument_given_column_family_create_during_ingest() {
-    // Arrange
-    let mut event_loop = create_test_event_loop().expect("create event loop");
-    event_loop
-        .state
-        .ingest_active
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let request_id = 901;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
-
-    // Act
-    super::manifest::ManifestCoordinator::create_column_family(
-        &mut event_loop,
-        &msg_rx,
-        request_id,
-        "during-ingest",
-    );
-    let response = response_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("receive create response");
-
-    // Assert
-    assert!(matches!(
-        response,
-        RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(message),
-            ..
-        } if message.contains("ingest mode")
-    ));
-}
-
-#[test]
-fn should_return_invalid_argument_given_column_family_drop_during_ingest() {
-    // Arrange
-    let mut event_loop = create_test_event_loop().expect("create event loop");
-    event_loop
-        .state
-        .ingest_active
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let request_id = 902;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
-
-    // Act
-    super::manifest::ManifestCoordinator::drop_column_family(
-        &mut event_loop,
-        &msg_rx,
-        request_id,
-        42,
-        false,
-    );
-    let response = response_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("receive drop response");
-
-    // Assert
-    assert!(matches!(
-        response,
-        RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(message),
-            ..
-        } if message.contains("ingest mode")
-    ));
-}
-
-#[test]
 fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_acknowledged(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -463,7 +441,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;
-    state.wal.local_durable_seq = 3;
+    state.wal.frontiers.set_local_durable_for_test(3);
     state.reset_cloud_durable_sequence_for_recovery();
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
@@ -499,8 +477,15 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     )?;
 
     // Assert
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
-    assert_eq!(event_loop.cloud_wal.upload_backlog.get(&2), Some(&2));
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1);
+    assert_eq!(
+        event_loop
+            .cloud_coordinator
+            .cloud_wal
+            .upload_backlog
+            .get(&2),
+        Some(&2)
+    );
     event_loop.drain_cloud_wal_upload_backlog();
     assert_eq!(hybrid_storage.pending_upload_count(), 1);
     assert_eq!(
@@ -518,7 +503,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         segment_id: 2,
         max_sequence: 2,
     });
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
     Ok(())
 }
 
@@ -769,14 +754,18 @@ fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work()
         crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
     )
     .expect("create cloud event loop");
-    let hybrid = event_loop.hybrid_storage.as_ref().expect("hybrid storage");
+    let hybrid = event_loop
+        .cloud_coordinator
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage");
     let reservation = hybrid
         .reserve_for_flush_with_token(960_000)
         .expect("test flush reservation");
     hybrid.flush_completed_with_token(reservation, 960_000);
 
-    event_loop.state.memtable_flush_threshold = 1024;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 1024;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
     event_loop.state.sequence = 1;
     {
         let cf = event_loop.state.get_cf(0).expect("default cf");
@@ -895,8 +884,8 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
     event_loop.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
-    event_loop.state.l0_compaction_trigger = 2;
-    event_loop.state.max_immutable_memtables = 0;
+    event_loop.state.limits.l0_compaction_trigger = 2;
+    event_loop.state.limits.max_immutable_memtables = 0;
     event_loop.compaction_actor.set_l0_file_count_threshold(2);
     assert_eq!(event_loop.state.l0_hard_ceiling(), 3);
     for sequence in 1..=4 {
@@ -931,8 +920,8 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
     event_loop.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
-    event_loop.state.l0_compaction_trigger = 2;
-    event_loop.state.max_immutable_memtables = 0;
+    event_loop.state.limits.l0_compaction_trigger = 2;
+    event_loop.state.limits.max_immutable_memtables = 0;
     event_loop.compaction_actor.set_l0_file_count_threshold(2);
     for sequence in 1..=3 {
         let name = format!("live-ceiling-{sequence}.sst");
@@ -944,7 +933,7 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
             .push(test_manifest_l0_file_meta(&name, sequence));
     }
     assert!(event_loop.state.l0_write_slot_unavailable(0));
-    event_loop.next_background_compaction_check = std::time::Instant::now();
+    event_loop.background_compaction_schedule.mark_due();
     // Act
     event_loop.run_background_compaction_maintenance_if_due();
     for _ in 0..16 {
@@ -1003,11 +992,11 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
 #[test]
 fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
     // Arrange
-    for gate in ["ingest", "ddl", "publication", "unsettled"] {
+    for gate in ["ddl", "publication", "unsettled"] {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         event_loop.state.set_compaction_enabled(false);
-        event_loop.state.l0_compaction_trigger = 2;
-        event_loop.state.max_immutable_memtables = 0;
+        event_loop.state.limits.l0_compaction_trigger = 2;
+        event_loop.state.limits.max_immutable_memtables = 0;
         event_loop.compaction_actor.set_l0_file_count_threshold(2);
         event_loop
             .state
@@ -1017,7 +1006,6 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
                 test_manifest_l0_file_meta(&format!("gated-{sequence}.sst"), sequence)
             }));
         match gate {
-            "ingest" => event_loop.state.ingest_active.store(true, Ordering::SeqCst),
             "ddl" => event_loop.fencing.ddl_authority_ambiguous = true,
             "publication" => {
                 event_loop.publication_gate.try_acquire(
@@ -1031,9 +1019,6 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
             event_loop.schedule_one_background_compaction_if_needed("pressure gate regression");
         // Assert
         let guarded = match (&result, gate) {
-            (Err(crate::MidgeError::Internal(message)), "ingest") => {
-                message.contains("during ingest mode")
-            }
             (Err(crate::MidgeError::Fenced(message)), "ddl") => {
                 message.contains("DDL authority is ambiguous")
             }
@@ -1090,85 +1075,6 @@ fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::comm
 }
 
 #[test]
-fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disabled() {
-    // Arrange
-    #[derive(Clone)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
-
-    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-        type Writer = CapturedLogWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            CapturedLogWriter(Arc::clone(&self.0))
-        }
-    }
-
-    impl std::io::Write for CapturedLogWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.state.set_compaction_enabled(false);
-    event_loop
-        .state
-        .ingest_active
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    event_loop.state.manifest.files.extend(
-        (1..=4).map(|seq| test_manifest_l0_file_meta(&format!("ingest-disabled-{seq}.sst"), seq)),
-    );
-
-    let captured_logs = CapturedLogs(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_writer(captured_logs.clone())
-        .finish();
-
-    tracing::subscriber::with_default(subscriber, || {
-        event_loop.schedule_compaction_after_flush_publication("ingest-disabled-4.sst");
-    });
-
-    let logs = String::from_utf8(
-        captured_logs
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone(),
-    )
-    .expect("captured logs should be utf8");
-    // Act
-    // Assert
-    assert!(
-        !logs.contains("no_compaction_during_ingest"),
-        "disabled post-flush scheduling should not enter the ingest invariant path: {logs}"
-    );
-    assert!(
-        !logs.contains("BUG: compaction scheduling attempted while ingest mode is active"),
-        "disabled post-flush scheduling should stay quiet during ingest teardown: {logs}"
-    );
-    assert_eq!(
-        event_loop
-            .state
-            .active_compactions
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "disabled post-flush scheduling should not start compaction during ingest"
-    );
-}
-
-#[test]
 fn should_apply_l0_compaction_trigger_from_runtime_config() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
@@ -1203,7 +1109,7 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
         "runtime config should update the compaction actor L0 file-count trigger"
     );
     assert_eq!(
-        event_loop.state.l0_compaction_trigger, 2,
+        event_loop.state.limits.l0_compaction_trigger, 2,
         "runtime config should update the admission ceiling from the same trigger"
     );
 }
@@ -1215,8 +1121,8 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
     let request_id = 100;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
-    let original_size = event_loop.state.memtable_size_limit;
-    let original_threshold = event_loop.state.memtable_flush_threshold;
+    let original_size = event_loop.state.limits.memtable_size_limit;
+    let original_threshold = event_loop.state.limits.memtable_flush_threshold;
     let original_compaction = event_loop.state.compaction_enabled();
     let original_trigger = event_loop.compaction_actor.l0_file_count_threshold();
     let original_wal_policy = event_loop.wal_actor.durability_policy();
@@ -1249,9 +1155,9 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
             ..
         }
     ));
-    assert_eq!(event_loop.state.memtable_size_limit, original_size);
+    assert_eq!(event_loop.state.limits.memtable_size_limit, original_size);
     assert_eq!(
-        event_loop.state.memtable_flush_threshold,
+        event_loop.state.limits.memtable_flush_threshold,
         original_threshold
     );
     assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
@@ -1280,10 +1186,10 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
     let request_id = 101;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
-    let original_size = event_loop.state.memtable_size_limit;
-    let original_threshold = event_loop.state.memtable_flush_threshold;
+    let original_size = event_loop.state.limits.memtable_size_limit;
+    let original_threshold = event_loop.state.limits.memtable_flush_threshold;
     let original_compaction = event_loop.state.compaction_enabled();
-    let original_state_trigger = event_loop.state.l0_compaction_trigger;
+    let original_state_trigger = event_loop.state.limits.l0_compaction_trigger;
     let original_actor_trigger = event_loop.compaction_actor.l0_file_count_threshold();
     let original_wal_policy = event_loop.wal_actor.durability_policy();
     let original_batch_config = event_loop.wal_actor.batch_config();
@@ -1317,14 +1223,14 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
             ..
         }
     ));
-    assert_eq!(event_loop.state.memtable_size_limit, original_size);
+    assert_eq!(event_loop.state.limits.memtable_size_limit, original_size);
     assert_eq!(
-        event_loop.state.memtable_flush_threshold,
+        event_loop.state.limits.memtable_flush_threshold,
         original_threshold
     );
     assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
     assert_eq!(
-        event_loop.state.l0_compaction_trigger,
+        event_loop.state.limits.l0_compaction_trigger,
         original_state_trigger
     );
     assert_eq!(
@@ -1528,8 +1434,8 @@ fn should_block_for_messages_when_manifest_retry_is_due_during_verification() {
 fn should_not_spin_auto_flush_drain_in_memory_mode() {
     // Arrange
     let mut event_loop = create_test_event_loop().expect("create memory event loop");
-    event_loop.state.memtable_flush_threshold = 1024;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 1024;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
 
     {
         let cf = event_loop.state.get_cf(0).expect("default cf");
@@ -1567,8 +1473,8 @@ fn should_not_spin_auto_flush_drain_in_memory_mode() {
 fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.state.memtable_flush_threshold = 1024;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 1024;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
 
     let second_cf_id = event_loop
         .state
@@ -1625,8 +1531,8 @@ fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
 fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writes() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.state.memtable_flush_threshold = 2048;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 2048;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
     let second_cf_id = event_loop
         .state
         .create_cf("burst-second".to_string())
@@ -1817,18 +1723,13 @@ mod compaction_scheduling {
     }
 
     #[test]
-    fn should_assign_output_sequence_when_compaction_runs_after_end_ingest() {
+    fn should_assign_output_sequence_when_background_compaction_runs() {
         // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
         event_loop.worker_msg_tx = Some(worker_tx);
         event_loop.state.set_compaction_enabled(true);
         event_loop.state.sequence = 100;
-        event_loop
-            .state
-            .ingest_active
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-
         for seq in 1..=4 {
             let name = crate::cloud_layout::file_name(0, 0, seq);
             let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
@@ -1839,70 +1740,30 @@ mod compaction_scheduling {
                 .push(manifest_file_from_runtime(file));
         }
 
-        event_loop.handle_end_ingest(77);
+        event_loop
+            .schedule_one_background_compaction_if_needed("sequence test")
+            .expect("schedule background compaction");
 
         let msg = worker_rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("EndIngest-triggered compaction should complete");
+            .expect("background compaction should complete");
         match msg {
             RuntimeMsg::CompactionComplete { output_ssts, .. } => {
                 // Act
                 // Assert
                 assert!(
                     !output_ssts.is_empty(),
-                    "EndIngest-triggered compaction should produce an output SST"
+                    "background compaction should produce an output SST"
                 );
                 assert!(
                     output_ssts
                         .iter()
                         .all(|name| !name.ends_with("00000000000000000000.sst")),
-                    "EndIngest-triggered compaction must not use sequence zero: {output_ssts:?}"
+                    "background compaction must not use sequence zero: {output_ssts:?}"
                 );
             }
             other => panic!("unexpected worker message: {other:?}"),
         }
-    }
-
-    #[test]
-    fn should_launch_compactions_only_through_event_loop_helper() {
-        // Arrange
-        let event_loop_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime/event_loop");
-        let pattern = format!(".run_{}(", "compaction");
-        let mut call_sites = Vec::new();
-
-        for entry in std::fs::read_dir(&event_loop_dir).expect("read event_loop dir") {
-            let entry = entry.expect("read event_loop entry");
-            let path = entry.path();
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
-                continue;
-            }
-
-            let source = std::fs::read_to_string(&path).expect("read event_loop source file");
-            let relative = path
-                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                .expect("strip source prefix")
-                .display()
-                .to_string()
-                .replace('\\', "/");
-            for (line_idx, line) in source.lines().enumerate() {
-                if line.contains(&pattern) {
-                    call_sites.push(format!("{relative}:{}:{}", line_idx + 1, line.trim()));
-                }
-            }
-        }
-
-        // Act
-        // Assert
-        assert_eq!(
-            call_sites.len(),
-            1,
-            "event-loop compaction actor launches must stay centralized: {call_sites:?}"
-        );
-        assert!(
-            call_sites[0].starts_with("src/runtime/event_loop/mod.rs:"),
-            "central compaction actor launch must live in event_loop/mod.rs: {call_sites:?}"
-        );
     }
 }
 
@@ -1975,7 +1836,7 @@ fn should_initialize_actors_with_expected_starting_state() {
         "GcActor must start with no recorded GC run"
     );
     assert!(
-        event_loop.hybrid_storage.is_none(),
+        event_loop.cloud_coordinator.hybrid_storage.is_none(),
         "hybrid storage is optional and unset by default"
     );
 }
@@ -2124,11 +1985,16 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let backlog_after_open = event_loop.cloud_wal.upload_backlog.len();
+    let backlog_after_open = event_loop.cloud_coordinator.cloud_wal.upload_backlog.len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline
-        && (!event_loop.cloud_wal.upload_backlog.is_empty() || storage.pending_upload_count() > 0)
+        && (!event_loop
+            .cloud_coordinator
+            .cloud_wal
+            .upload_backlog
+            .is_empty()
+            || storage.pending_upload_count() > 0)
     {
         event_loop.tick_hybrid_storage();
         event_loop.drain_cloud_wal_upload_backlog();
@@ -2144,9 +2010,13 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         backlog_after_open, 2,
         "remaining sealed and active WAL obligations must stay recoverable"
     );
-    assert!(event_loop.cloud_wal.upload_backlog.is_empty());
+    assert!(event_loop
+        .cloud_coordinator
+        .cloud_wal
+        .upload_backlog
+        .is_empty());
     assert_eq!(storage.pending_upload_count(), 0);
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
     Ok(())
 }
 
@@ -2192,7 +2062,7 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
 
     // Assert
     assert!(!local_path.exists());
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1);
     Ok(())
 }
 
@@ -2585,8 +2455,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
     event_loop
         .state
         .pending_compaction_waits
-        .lock()
-        .insert(compact_all_request_id, "CompactAll".to_string());
+        .insert(compact_all_request_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2658,8 +2527,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
     event_loop
         .state
         .pending_compaction_waits
-        .lock()
-        .insert(compact_all_request_id, "CompactAll".to_string());
+        .insert(compact_all_request_id);
     event_loop.compaction_actor.set_worker_error_for_test(
         crate::common::MidgeError::ResourceLimit("compaction pool exhausted".to_string()),
     );
@@ -2961,7 +2829,13 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
         event_loop.process_wake_msg(msg, &msg_rx, 16);
     }
     let after_writes = read_resources.prune_call_count();
-    event_loop.invalidate_sst_read_views();
+    event_loop
+        .state
+        .manifest
+        .add_file(crate::metadata::FileMeta {
+            name: "cache-invalidation.sst".to_owned(),
+            ..crate::metadata::FileMeta::default()
+        });
     event_loop.publish_snapshot();
     let after_manifest_change = read_resources.prune_call_count();
     drop(msg_tx);

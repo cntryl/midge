@@ -21,6 +21,9 @@ pub enum EntryType {
     Put = 0,
     Insert = 1,
     Delete = 2,
+    // Reserved on-disk discriminant. Writers and readers reject it (#404), so
+    // only tests construct it.
+    #[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
     Merge = 3,
 }
 
@@ -96,6 +99,45 @@ pub enum KeyState {
     Value(Bytes, u64, Option<u64>, EntryType),
 }
 
+/// Persisted content at one sequence, independent of its source. Put and
+/// Insert have the same logical value identity; TTL metadata is part of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VersionContent<'a> {
+    pub(crate) is_tombstone: bool,
+    pub(crate) value: Option<&'a [u8]>,
+    pub(crate) expiration: Option<u64>,
+}
+
+impl<'a> VersionContent<'a> {
+    pub(crate) fn from_state(state: &'a KeyState) -> Option<Self> {
+        match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(_) => Some(Self {
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }),
+            KeyState::Value(value, _, expiration, _) => Some(Self {
+                is_tombstone: false,
+                value: Some(value.as_ref()),
+                expiration: *expiration,
+            }),
+        }
+    }
+}
+
+/// Identical copies are valid; differing content at one sequence is corrupt.
+pub(crate) fn resolve_same_sequence(
+    existing: VersionContent<'_>,
+    candidate: VersionContent<'_>,
+) -> Result<(), ()> {
+    if existing == candidate {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 impl fmt::Display for KeyState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -123,14 +165,6 @@ pub(crate) struct ExpectedSst<'a> {
     pub(crate) largest_seq: Option<u64>,
 }
 
-/// Key-value pair produced by internal ordered read sources.
-#[derive(Clone, Debug)]
-pub struct KvPair {
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub sequence: u64,
-}
-
 /// Conflict handling policy for read-write transaction commits.
 ///
 /// This type is shared by the public API and the runtime so the engine does not
@@ -147,14 +181,11 @@ pub enum ConflictPolicy {
 ///
 /// This enum is for internal runtime durability tracking. Write-time
 /// durability decisions use `WriteOptions::DurabilityPolicy` instead.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadDurability {
     /// Strict - fsync on every write.
     Strict,
-    /// Steady - fsync every N ms.
-    Steady,
-    /// `CloudPersisted` - wait for cloud backup.
-    CloudPersisted,
 }
 
 /// Snapshot of read amplification metrics.

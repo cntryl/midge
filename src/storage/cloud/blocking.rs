@@ -123,4 +123,16 @@ impl<'a> BlockingCloud<'a> {
             ))),
         }
     }
+
+    pub(crate) fn put_with_precondition(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        precondition: &crate::storage::StoragePrecondition,
+    ) -> MidgeResult<()> {
+        let headers = precondition
+            .headers()
+            .map_err(|error| MidgeError::Internal(error.to_string()))?;
+        self.put_with_headers(key, data, headers)
+    }
 }

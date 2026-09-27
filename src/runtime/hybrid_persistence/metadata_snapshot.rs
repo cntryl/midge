@@ -4,6 +4,7 @@ use super::{
     Arc, CloudMetadataPruneGuard, CloudStorage, CloudWalPruneProgress, GuardedObjectProof,
     HybridStorage, Manifest, MidgeError, MidgeResult, StorageBackend,
 };
+use crate::io::FsError;
 use std::io::Read as _;
 
 #[derive(Clone)]
@@ -228,9 +229,9 @@ pub(crate) fn conditional_metadata_mirror_put(
 ) -> MidgeResult<()> {
     let io = crate::storage::cloud::BlockingCloud::new(cloud, deadline);
     let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-    let headers = match io.head_optional(&key)? {
+    let precondition = match io.head_optional(&key)? {
         Some(metadata) => {
-            let headers = crate::storage::cloud::object_match_precondition_headers(
+            crate::storage::conditional_object_identity(
                 &metadata.etag,
                 metadata.generation.as_deref(),
             )
@@ -252,11 +253,11 @@ pub(crate) fn conditional_metadata_mirror_put(
             if current == data {
                 return Ok(());
             }
-            headers
+            crate::storage::StoragePrecondition::IfMatch(metadata)
         }
-        None => vec![("If-None-Match".to_string(), "*".to_string())],
+        None => crate::storage::StoragePrecondition::IfAbsent,
     };
-    io.put_with_headers(&key, data, headers)
+    io.put_with_precondition(&key, data, &precondition)
 }
 
 /// Mirror the local control files under one shared, bounded publication turn.
@@ -303,19 +304,24 @@ pub(crate) fn mirror_control_metadata_within(
             )));
         }
         let path = crate::io::FsPath::new(*file_name);
-        if !fs.exists(&path)? {
+        if !fs.exists(&path).map_err(FsError::into_midge)? {
             continue;
         }
-        let file = fs.open(
-            &path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        let data = file.read_at(0, file.len()?)?.to_vec();
+        let file = fs
+            .open(
+                &path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
+        let data = file
+            .read_at(0, file.len().map_err(FsError::into_midge)?)
+            .map_err(FsError::into_midge)?
+            .to_vec();
         validate_lease(deadline)?;
         conditional_metadata_mirror_put(cloud, file_name, data, local_manifest_sequence, deadline)?;
     }
@@ -410,7 +416,9 @@ mod tests {
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(
-            &crate::cloud_layout::CloudObjectLayout::metadata_key(crate::metadata::files::MANIFEST),
+            &crate::cloud_layout::CloudObjectLayout::metadata_key(
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ),
             body,
             Vec::new(),
             tx,
@@ -438,7 +446,7 @@ mod tests {
         // Act
         let error = conditional_metadata_mirror_put(
             &cloud,
-            crate::metadata::files::MANIFEST,
+            crate::metadata::files::MANIFEST_SNAPSHOT,
             local,
             5,
             &crate::common::OperationDeadline::unbounded(),
@@ -470,7 +478,9 @@ mod tests {
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(
-            &crate::cloud_layout::CloudObjectLayout::metadata_key(crate::metadata::files::MANIFEST),
+            &crate::cloud_layout::CloudObjectLayout::metadata_key(
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ),
             remote,
             Vec::new(),
             tx,

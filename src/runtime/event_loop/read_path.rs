@@ -11,7 +11,8 @@ use super::super::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use super::super::RuntimeResponse;
 
 impl EventLoop {
-    /// Verify and durably publish complete bounds for at most one legacy SST.
+    /// Summarize a bounded batch of legacy SSTs away from the event loop, then
+    /// durably publish their bounds in one journal batch.
     ///
     /// The file remains authoritative and in the conservative fallback bucket
     /// until its full contents have been summarized and the additive manifest
@@ -20,52 +21,111 @@ impl EventLoop {
         if self.state.is_memory_mode() {
             return Ok(false);
         }
+        if let Some(worker) = self.legacy_bound_backfill.worker.as_ref() {
+            if !worker.is_finished() {
+                return Ok(false);
+            }
+            let worker = self
+                .legacy_bound_backfill
+                .worker
+                .take()
+                .expect("finished backfill worker");
+            let results = worker.join().map_err(|_| {
+                crate::common::MidgeError::Internal(
+                    "legacy SST bound summary worker panicked".into(),
+                )
+            })?;
+            return self.publish_backfilled_bounds(results);
+        }
         let now = std::time::Instant::now();
-        let Some(mut updated) = self
+        let candidates: Vec<_> = self
             .state
             .manifest
             .files
             .iter()
-            .find(|file| {
+            .filter(|file| {
                 !file.key_bounds_complete && self.legacy_bound_backfill.is_eligible(&file.name, now)
             })
+            .take(LegacyBoundBackfill::BATCH_SIZE)
             .cloned()
-        else {
+            .collect();
+        let Some(_) = candidates.first() else {
+            self.checkpoint_backfilled_bounds()?;
             return Ok(false);
         };
-
         let path_prefix = self
             .state
             .sst_dir
             .strip_prefix(&self.state.db_path)
-            .unwrap_or_else(|_| std::path::Path::new("sst"));
-        let path = path_prefix.join(&updated.name);
-        let summary = match crate::sst::fs::SstFileIo::summarize_with_fs(
-            &path.to_string_lossy(),
-            self.read_resources.as_ref().map_or_else(
-                || std::sync::Arc::clone(&self.state.fs),
-                |resources| resources.sst_fs(),
-            ),
-        ) {
-            Ok(summary) => summary,
-            Err(error) => {
-                // Back this file off so the remaining legacy files still get
-                // migrated; surface a file that keeps failing.
-                let attempts = self
-                    .legacy_bound_backfill
-                    .record_failure(&updated.name, now);
-                if attempts >= LegacyBoundBackfill::ANOMALY_AFTER_FAILURES {
-                    self.state.mark_persistence_anomaly();
-                }
-                return Err(error);
-            }
-        };
-        updated.smallest_key = Some(summary.smallest_key);
-        updated.largest_key = Some(summary.largest_key);
-        updated.smallest_seq = Some(summary.smallest_seq);
-        updated.largest_seq = Some(summary.largest_seq);
-        updated.key_bounds_complete = true;
+            .unwrap_or_else(|_| std::path::Path::new("sst"))
+            .to_path_buf();
+        let fs = self.read_resources.as_ref().map_or_else(
+            || std::sync::Arc::clone(&self.state.fs),
+            |resources| resources.sst_fs(),
+        );
+        self.legacy_bound_backfill.worker = Some(
+            std::thread::Builder::new()
+                .name("midge-legacy-sst-bound-backfill".into())
+                .spawn(move || {
+                    candidates
+                        .into_iter()
+                        .map(|file| {
+                            let path = path_prefix.join(&file.name);
+                            let summary = crate::sst::fs::SstFileIo::summarize_with_fs(
+                                &path.to_string_lossy(),
+                                std::sync::Arc::clone(&fs),
+                            );
+                            (file, summary)
+                        })
+                        .collect()
+                })
+                .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?,
+        );
+        Ok(false)
+    }
 
+    fn publish_backfilled_bounds(
+        &mut self,
+        results: Vec<BoundSummaryResult>,
+    ) -> crate::common::MidgeResult<bool> {
+        let now = std::time::Instant::now();
+        let mut updated_files = Vec::new();
+        let mut first_error = None;
+        for (mut updated, summary) in results {
+            if !self.state.manifest.files.iter().any(|file| {
+                file.name == updated.name
+                    && file.size_bytes == updated.size_bytes
+                    && file.content_crc32c == updated.content_crc32c
+                    && !file.key_bounds_complete
+            }) {
+                continue;
+            }
+            match summary {
+                Ok(summary) => {
+                    updated.smallest_key = Some(summary.smallest_key);
+                    updated.largest_key = Some(summary.largest_key);
+                    updated.smallest_seq = Some(summary.smallest_seq);
+                    updated.largest_seq = Some(summary.largest_seq);
+                    updated.key_bounds_complete = true;
+                    updated_files.push(updated);
+                }
+                Err(error) => {
+                    let attempts = self
+                        .legacy_bound_backfill
+                        .record_failure(&updated.name, now);
+                    tracing::warn!(file = %updated.name, %error, attempts, "legacy SST bound summary failed; retaining conservative read fallback");
+                    if attempts >= LegacyBoundBackfill::ANOMALY_AFTER_FAILURES {
+                        self.state.mark_persistence_anomaly();
+                    }
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if updated_files.is_empty() {
+            return first_error.map_or(Ok(false), Err);
+        }
         crate::failpoints::fail_point!(
             "midge::manifest::after_sst_bounds_verified_before_persist",
             |_| Err(crate::common::MidgeError::Internal(
@@ -73,20 +133,33 @@ impl EventLoop {
                     .to_string()
             ))
         );
-        let edit_id = self
-            .state
-            .manifest_store
-            .append(&crate::metadata::ManifestEdit::AddSst(updated.clone()))?;
-        let name = updated.name.clone();
-        self.state.manifest.add_file(updated);
+        let edits: Vec<_> = updated_files
+            .iter()
+            .cloned()
+            .map(crate::metadata::ManifestEdit::AddSst)
+            .collect();
+        let edit_id = self.state.manifest_store.append_batch(&edits)?;
+        for updated in updated_files {
+            self.legacy_bound_backfill.record_success(&updated.name);
+            self.state.manifest.add_file(updated);
+        }
         self.state.manifest.note_applied_journal_edit(edit_id);
-        self.invalidate_sst_read_views();
         self.publish_snapshot();
+        Ok(true)
+    }
 
+    /// Checkpoint and mirror the manifest once no legacy file is left to
+    /// backfill, rather than once per file (#548). Each bound edit is already
+    /// durable in the journal; until the checkpoint lands, recovery replays
+    /// it, and a stale mirror only keeps a file on the conservative read path.
+    fn checkpoint_backfilled_bounds(&mut self) -> crate::common::MidgeResult<()> {
+        if !self.legacy_bound_backfill.uncheckpointed {
+            return Ok(());
+        }
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
-        self.legacy_bound_backfill.record_success(&name);
-        Ok(true)
+        self.legacy_bound_backfill.uncheckpointed = false;
+        Ok(())
     }
 
     /// Create an immutable read snapshot for a column family
@@ -96,10 +169,7 @@ impl EventLoop {
     ) -> Option<super::super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
-        let sst_view = self
-            .sst_read_views
-            .borrow_mut()
-            .view_for(&self.state.manifest, cf_id);
+        let sst_view = self.state.manifest.read_view_for(cf_id);
 
         let sst_path_prefix = self
             .state
@@ -133,8 +203,7 @@ impl EventLoop {
         crate::runtime::durability::DurabilityCoordinator::is_durable(
             sequence,
             requested_durability,
-            self.state.wal.local_durable_seq,
-            self.state.wal.cloud_durable_seq,
+            self.state.wal.frontiers.local_durable(),
         )
     }
 
@@ -235,35 +304,55 @@ impl EventLoop {
 
 /// Per-file backoff for legacy SST key-bound backfill, so one file whose
 /// summary keeps failing does not block every other legacy file.
+type BoundSummaryResult = (
+    crate::metadata::FileMeta,
+    crate::common::MidgeResult<crate::sst::fs::SstFileSummary>,
+);
+
 #[derive(Default)]
 pub(super) struct LegacyBoundBackfill {
-    failures: std::collections::HashMap<String, (u32, std::time::Instant)>,
+    failures:
+        std::collections::HashMap<String, (u32, crate::runtime::retry_schedule::RetrySchedule)>,
+    /// Bound edits have been journaled since the last manifest checkpoint.
+    uncheckpointed: bool,
+    worker: Option<std::thread::JoinHandle<Vec<BoundSummaryResult>>>,
 }
 
 impl LegacyBoundBackfill {
+    const BATCH_SIZE: usize = 8;
     const BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
     const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_mins(10);
     pub(super) const ANOMALY_AFTER_FAILURES: u32 = 3;
 
+    pub(super) fn is_inflight(&self) -> bool {
+        self.worker.is_some()
+    }
+
     fn is_eligible(&self, name: &str, now: std::time::Instant) -> bool {
         self.failures
             .get(name)
-            .is_none_or(|(_, retry_at)| *retry_at <= now)
+            .is_none_or(|(_, retry)| retry.is_ready_at(now))
     }
 
     /// Record a failed summary and return the file's failure count.
     fn record_failure(&mut self, name: &str, now: std::time::Instant) -> u32 {
-        let entry = self.failures.entry(name.to_string()).or_insert((0, now));
+        let entry = self.failures.entry(name.to_string()).or_insert_with(|| {
+            (
+                0,
+                crate::runtime::retry_schedule::RetrySchedule::new(Self::BASE_BACKOFF),
+            )
+        });
         entry.0 = entry.0.saturating_add(1);
         let backoff = Self::BASE_BACKOFF
             .saturating_mul(1_u32 << entry.0.saturating_sub(1).min(16))
             .min(Self::MAX_BACKOFF);
-        entry.1 = now + backoff;
+        entry.1.defer_from(now, backoff);
         entry.0
     }
 
     fn record_success(&mut self, name: &str) {
         self.failures.remove(name);
+        self.uncheckpointed = true;
     }
 }
 
@@ -276,36 +365,34 @@ mod tests {
     use crate::types::EntryType;
     use std::sync::Arc;
 
-    struct FakeReader;
-
-    impl crate::sst::traits::SstReader for FakeReader {
-        fn get(&self, key: &[u8]) -> crate::common::MidgeResult<Option<bytes::Bytes>> {
-            if key == b"a" {
-                Ok(Some(bytes::Bytes::copy_from_slice(b"va")))
-            } else {
-                Ok(None)
+    fn finish_backfill(event_loop: &mut EventLoop) -> crate::common::MidgeResult<bool> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let result = event_loop.backfill_one_legacy_sst_bounds();
+            if !event_loop.legacy_bound_backfill.is_inflight() {
+                return result;
             }
-        }
-
-        fn scan_range(
-            &self,
-            start: Option<&[u8]>,
-            end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, bytes::Bytes)>> {
-            let s = start.unwrap_or(&[]);
-            let e = end.unwrap_or(&[255u8]);
-            if s <= &b"a"[..] && &b"a"[..] < e {
-                Ok(vec![(
-                    bytes::Bytes::copy_from_slice(b"a"),
-                    bytes::Bytes::copy_from_slice(b"va"),
-                )])
-            } else {
-                Ok(Vec::new())
-            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "backfill worker stalled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 
+    struct FakeReader;
+
     impl crate::sst::traits::SstStateReader for FakeReader {
+        crate::sst::traits::test_reader_required_methods!();
+
+        fn range_tombstones(&self) -> Vec<crate::types::RangeTombstone> {
+            Vec::new()
+        }
+
+        fn range_tombstone_memory_usage(&self) -> usize {
+            0
+        }
+
         fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::types::KeyState> {
             Ok(if key == b"a" {
                 crate::types::KeyState::Value(
@@ -319,6 +406,7 @@ mod tests {
             })
         }
 
+        #[cfg(test)]
         fn scan_range_state(
             &self,
             start: Option<&[u8]>,
@@ -341,6 +429,7 @@ mod tests {
             }
         }
 
+        #[cfg(test)]
         fn scan_range_raw_state(
             &self,
             start: Option<&[u8]>,
@@ -353,6 +442,32 @@ mod tests {
     struct TestFactory;
 
     impl crate::sst::traits::SstFactory for TestFactory {
+        fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+            std::sync::Arc::new(crate::io::MockFs::new())
+        }
+
+        fn compaction_scratch_cleanup_verified(&self) -> bool {
+            false
+        }
+
+        fn create_for_compaction(
+            &self,
+            _budget: crate::common::resource_budget::ResourceBudget,
+        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Err(crate::common::MidgeError::NotSupported(
+                "create not supported in test".into(),
+            ))
+        }
+
+        fn open_for_compaction(
+            &self,
+            path: &std::path::Path,
+            _budget: crate::common::resource_budget::ResourceBudget,
+        ) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.open(path)
+        }
+
+        #[cfg(test)]
         fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Err(crate::common::MidgeError::NotSupported(
                 "create not supported in test".into(),
@@ -384,7 +499,9 @@ mod tests {
 
         let sst_name = "00000001.sst".to_string();
         let sst_path = el.state.sst_dir.join(&sst_name);
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(&el.state.sst_dir).map_err(crate::io::FsError::into_midge)?,
+        );
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, EntryType::Put, None)?;
@@ -463,12 +580,12 @@ mod tests {
         // Arrange
         let (_tmp, el, sst_path) = create_event_loop_with_test_sst()?;
         let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
-        let sst_pairs = reader.scan_range(Some(b"a"), Some(b"b"))?;
+        let sst_pairs = reader.scan_range_state(Some(b"a"), Some(b"b"))?;
         // Act
         // Assert
         assert!(sst_pairs
             .iter()
-            .any(|(k, v)| k.as_ref() == b"a" && v.as_ref() == b"va"));
+            .any(|(k, state)| k.as_ref() == b"a" && matches!(state, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"va")));
 
         let results = el.handle_range_scan(0, b"a", b"b", u64::MAX);
 
@@ -476,6 +593,29 @@ mod tests {
             .iter()
             .any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_leave_event_loop_free_while_legacy_sst_bounds_are_summarized(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let (_tmp, mut event_loop, _sst_path) = create_event_loop_with_test_sst()?;
+        event_loop.state.manifest.files[0].key_bounds_complete = false;
+
+        // Act
+        let started = event_loop.backfill_one_legacy_sst_bounds()?;
+        let inflight = event_loop.legacy_bound_backfill.is_inflight();
+        let published = finish_backfill(&mut event_loop)?;
+
+        // Assert
+        assert!(
+            !started,
+            "summarization must return before worker completion"
+        );
+        assert!(inflight);
+        assert!(published);
+        assert!(event_loop.state.manifest.files[0].key_bounds_complete);
         Ok(())
     }
 
@@ -496,8 +636,8 @@ mod tests {
         crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
 
         // Act
-        let changed = event_loop.backfill_one_legacy_sst_bounds()?;
-        let second = event_loop.backfill_one_legacy_sst_bounds()?;
+        let changed = finish_backfill(&mut event_loop)?;
+        let second = finish_backfill(&mut event_loop)?;
         let reopened = crate::metadata::ManifestPersistence::load(tmp.path())
             .map_err(crate::common::MidgeError::Internal)?;
 
@@ -514,6 +654,52 @@ mod tests {
         );
         assert_eq!(file.smallest_seq, Some(9));
         assert_eq!(file.largest_seq, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn should_backfill_many_legacy_files_with_bounded_manifest_checkpoints(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: four legacy files without complete key bounds.
+        let (tmp, mut event_loop, sst_path) = create_event_loop_with_test_sst()?;
+        let template = event_loop.state.manifest.files[0].clone();
+        event_loop.state.manifest.files.clear();
+        for index in 1..=4 {
+            let name = format!("{index:08}.sst");
+            if index > 1 {
+                std::fs::copy(&sst_path, event_loop.state.sst_dir.join(&name))?;
+            }
+            let mut file = template.clone();
+            file.name = name;
+            file.key_bounds_complete = false;
+            event_loop.state.manifest.files.push(file);
+        }
+        crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
+
+        // Act: run maintenance passes until no legacy file remains.
+        let snapshot = tmp.path().join(crate::metadata::files::MANIFEST_SNAPSHOT);
+        let mut checkpoints = 0;
+        let mut passes = 0;
+        loop {
+            let before = std::fs::read(&snapshot)?;
+            let changed = finish_backfill(&mut event_loop)?;
+            if std::fs::read(&snapshot)? != before {
+                checkpoints += 1;
+            }
+            passes += 1;
+            if !changed || passes > 10 {
+                break;
+            }
+        }
+        let reopened = crate::metadata::ManifestPersistence::load(tmp.path())
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        // Assert: every file is migrated durably with one checkpoint, not
+        // one full manifest rewrite per file.
+        assert_eq!(passes, 2);
+        assert_eq!(checkpoints, 1);
+        assert!(reopened.files.iter().all(|file| file.key_bounds_complete));
+        assert_eq!(reopened.files.len(), 4);
         Ok(())
     }
 
@@ -536,12 +722,12 @@ mod tests {
         event_loop.state.manifest.files.insert(0, unreadable);
 
         // Act
-        let first = event_loop.backfill_one_legacy_sst_bounds();
-        let second = event_loop.backfill_one_legacy_sst_bounds();
+        let first = finish_backfill(&mut event_loop);
+        let second = finish_backfill(&mut event_loop);
 
         // Assert
-        assert!(first.is_err(), "the unreadable file fails its summary");
-        assert!(matches!(second, Ok(true)), "{second:?}");
+        assert!(matches!(first, Ok(true)), "{first:?}");
+        assert!(matches!(second, Ok(false)), "{second:?}");
         let readable = event_loop
             .state
             .manifest
@@ -568,8 +754,7 @@ mod tests {
         .map_err(crate::common::MidgeError::Internal)?;
 
         // Act
-        let error = event_loop
-            .backfill_one_legacy_sst_bounds()
+        let error = finish_backfill(&mut event_loop)
             .expect_err("backfill must stop before manifest persistence");
         drop(guard);
         let reopened = crate::metadata::ManifestPersistence::load(tmp.path())

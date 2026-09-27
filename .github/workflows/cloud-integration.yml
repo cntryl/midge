@@ -1,9 +1,11 @@
-name: Cloud Qualification
+name: Cloud Integration
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "47 2 * * *"
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,17 +16,16 @@ concurrency:
 
 jobs:
   sqrzl:
-    name: Sqrzl emulator
+    name: Sqrzl provider and engine
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
       MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
+      
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - name: Record qualified revision
         id: revision
@@ -49,13 +50,14 @@ jobs:
         run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
 
       - name: Sqrzl qualification
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
         run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
 
       - name: Provider engine qualification
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
-
-      - name: Full test suite against Sqrzl emulator
-        run: cargo test --workspace --all-features
 
       - name: Preserve cloud qualification evidence
         if: always()

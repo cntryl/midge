@@ -2,7 +2,7 @@ use super::*;
 use crate::codec::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
-use crate::sst::traits::{SstFactory, SstReader, SstStateReader};
+use crate::sst::traits::{SstFactory, SstStateReader};
 use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -78,10 +78,6 @@ impl File for CountingFile<'_> {
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
         self.inner.sync(dur)
     }
-
-    fn close(self: Box<Self>) -> FsResult<()> {
-        self.inner.close()
-    }
 }
 
 impl Fs for CountingFs {
@@ -143,7 +139,7 @@ fn write_unique_key_sst(temp_dir: &tempfile::TempDir, name: &str) -> MidgeResult
 }
 
 fn write_marked_key_sst(temp_dir: &tempfile::TempDir, name: &str, marker: u8) -> MidgeResult<()> {
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     let value = vec![marker; 256];
@@ -161,7 +157,7 @@ fn write_single_value_sst(
     name: &str,
     value: &[u8],
 ) -> MidgeResult<()> {
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", Some(value), 1, EntryType::Put, None)?;
@@ -174,7 +170,7 @@ fn write_keyed_sst(
     block_size: usize,
     keys: &[Vec<u8>],
 ) -> MidgeResult<()> {
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, block_size);
     let mut writer = factory.create()?;
     let value = vec![b'v'; 256];
@@ -202,7 +198,7 @@ fn open_counting_reader(
     temp_dir: &tempfile::TempDir,
     name: &str,
 ) -> MidgeResult<(Arc<CountingFs>, SstFileIo)> {
-    let counting_fs = Arc::new(CountingFs::new(temp_dir.path())?);
+    let counting_fs = Arc::new(CountingFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let fs: Arc<dyn Fs> = counting_fs.clone();
     let reader = SstFileIo::open(name, fs)?;
     Ok((counting_fs, reader))
@@ -268,20 +264,23 @@ fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeRe
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let cache = Arc::new(crate::sst::cache::BlockCache::new_default(1024 * 1024));
-    let shared_fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let shared_fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     write_single_value_sst(&temp_dir, "replaced.sst", b"old")?;
     let first = SstFileIo::open("replaced.sst", Arc::clone(&shared_fs))?
         .with_block_cache(Arc::clone(&cache), 100);
-    assert_eq!(first.get(b"key")?.as_deref(), Some(b"old".as_slice()));
+    assert!(
+        matches!(first.get_state(b"key")?, KeyState::Value(value, _, _, _) if value.as_ref() == b"old")
+    );
 
     write_single_value_sst(&temp_dir, "replaced.sst", b"new")?;
     let replacement = SstFileIo::open("replaced.sst", shared_fs)?.with_block_cache(cache, 101);
 
     // Act
-    let value = replacement.get(b"key")?;
+    let value = replacement.get_state(b"key")?;
 
     // Assert
-    assert_eq!(value.as_deref(), Some(b"new".as_slice()));
+    assert!(matches!(value, KeyState::Value(value, _, _, _) if value.as_ref() == b"new"));
     Ok(())
 }
 
@@ -293,7 +292,7 @@ fn should_finish_scan_from_open_handle_when_backing_sst_is_unlinked_mid_scan() -
     write_unique_key_sst(&temp_dir, "unlinked-scan.sst")?;
     let reader = Arc::new(SstFileIo::open(
         "unlinked-scan.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
     let mut scan = reader.state_scan(None, None, false, u64::MAX, 0);
     let first = scan.next().expect("first scan item")?;
@@ -319,7 +318,8 @@ fn should_finish_scan_from_original_handle_when_sst_path_is_replaced_mid_scan() 
     let temp_dir = tempfile::tempdir()?;
     write_marked_key_sst(&temp_dir, "active.sst", b'o')?;
     write_marked_key_sst(&temp_dir, "replacement.sst", b'n')?;
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let reader = Arc::new(SstFileIo::open("active.sst", Arc::clone(&fs))?);
     let mut scan = reader.state_scan(None, None, false, u64::MAX, 0);
     let first = scan.next().expect("first scan item")?;
@@ -342,9 +342,8 @@ fn should_finish_scan_from_original_handle_when_sst_path_is_replaced_mid_scan() 
     assert!(remaining.iter().all(|(_, state)| {
         matches!(state, KeyState::Value(value, ..) if value.as_ref() == old_value.as_slice())
     }));
-    assert_eq!(
-        replacement.get(b"key_0001")?.as_deref(),
-        Some(new_value.as_slice())
+    assert!(
+        matches!(replacement.get_state(b"key_0001")?, KeyState::Value(value, _, _, _) if value.as_ref() == new_value.as_slice())
     );
     Ok(())
 }
@@ -355,7 +354,9 @@ fn should_finish_scan_with_visible_error_when_backing_sst_is_deleted_mid_range_s
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     write_unique_key_sst(&temp_dir, "deleted-scan.sst")?;
-    let fs = Arc::new(CountingFs::without_persistent_handles(temp_dir.path())?);
+    let fs = Arc::new(
+        CountingFs::without_persistent_handles(temp_dir.path()).map_err(FsError::into_midge)?,
+    );
     let reader = Arc::new(SstFileIo::open("deleted-scan.sst", fs)?);
     let mut scan = reader.state_scan(None, None, false, u64::MAX, 0);
     let first = scan.next().expect("first scan item")?;
@@ -382,7 +383,8 @@ fn should_classify_truncated_nonlegacy_sst_as_corruption() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     std::fs::write(temp_dir.path().join("truncated.sst"), [0_u8; 32])?;
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
 
     // Act
     let Err(error) = SstFileIo::open("truncated.sst", fs) else {
@@ -400,7 +402,8 @@ fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() ->
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/compatibility/v2_compressed_sst_db/sst");
     let file_name = "000001_00_00000000000000000001.sst";
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&fixture_dir)?);
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(&fixture_dir).map_err(FsError::into_midge)?);
 
     // Act
     let Err(error) = SstFileIo::open(file_name, fs) else {
@@ -509,7 +512,7 @@ fn should_select_trie_metadata_for_structured_keys() -> MidgeResult<()> {
     // Act
     let reader = SstFileIo::open(
         "structured.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
 
     // Assert
@@ -535,7 +538,7 @@ fn should_keep_binary_index_metadata_for_small_ssts() -> MidgeResult<()> {
     // Act
     let reader = SstFileIo::open(
         "small.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
 
     // Assert
@@ -554,7 +557,7 @@ fn should_seek_to_first_key_at_or_after_bound_given_sparse_index_when_reading() 
     write_keyed_sst(&temp_dir, "forward-seek.sst", 4096, &keys)?;
     let reader = Arc::new(SstFileIo::open(
         "forward-seek.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
     assert_eq!(reader.index_kind, IndexKind::Sparse);
     assert!(
@@ -584,7 +587,7 @@ fn should_return_empty_scan_given_start_bound_after_all_keys_when_reading() -> M
     write_keyed_sst(&temp_dir, "start-after-all.sst", 4096, &keys)?;
     let reader = Arc::new(SstFileIo::open(
         "start-after-all.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
 
     // Act
@@ -607,7 +610,7 @@ fn should_return_empty_scan_given_end_bound_before_all_keys_when_reading() -> Mi
     write_keyed_sst(&temp_dir, "end-before-all.sst", 4096, &keys)?;
     let reader = Arc::new(SstFileIo::open(
         "end-before-all.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
 
     // Act
@@ -630,7 +633,7 @@ fn should_seek_to_last_key_at_or_before_bound_given_reverse_scan_when_reading() 
     write_keyed_sst(&temp_dir, "reverse-seek.sst", 4096, &keys)?;
     let reader = Arc::new(SstFileIo::open(
         "reverse-seek.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
     assert_eq!(reader.index_kind, IndexKind::Sparse);
     assert!(
@@ -654,7 +657,7 @@ fn should_seek_to_last_key_at_or_before_bound_given_reverse_scan_when_reading() 
 fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() -> MidgeResult<()> {
     // Arrange: fixed no-compression keeps the index payload byte-addressable.
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
         .with_compression_policy(CompressionPolicy::Fixed(CompressionAlgo::None));
     let mut writer = factory.create()?;
@@ -673,7 +676,7 @@ fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() 
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let reader = SstFileIo::open(
         "nonmonotonic-index.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
     assert_eq!(reader.index_kind, IndexKind::Sparse);
     let index = reader.index_entries()?;
@@ -714,7 +717,7 @@ fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() 
     // Act
     let Err(error) = SstFileIo::open(
         "nonmonotonic-index.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     ) else {
         panic!("nonmonotonic data-block offsets must fail SST open");
     };
@@ -762,7 +765,7 @@ fn should_skip_range_scan_when_requested_keys_are_outside_persisted_bounds() -> 
     counting_fs.clear_reads();
 
     // Act
-    let rows = reader.scan_range(Some(b"zzz"), Some(b"zzzz"))?;
+    let rows = reader.scan_range_state(Some(b"zzz"), Some(b"zzzz"))?;
 
     // Assert
     assert!(rows.is_empty());
@@ -778,7 +781,7 @@ fn should_fail_open_when_trie_block_is_corrupted() -> MidgeResult<()> {
     write_keyed_sst(&temp_dir, "corrupt-trie.sst", 4096, &keys)?;
     let reader = SstFileIo::open(
         "corrupt-trie.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
     let trie_handle = reader
         .footer
@@ -794,7 +797,7 @@ fn should_fail_open_when_trie_block_is_corrupted() -> MidgeResult<()> {
     // Act
     let Err(error) = SstFileIo::open(
         "corrupt-trie.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     ) else {
         panic!("corrupted trie block should fail to open");
     };
@@ -808,7 +811,7 @@ fn should_fail_open_when_trie_block_is_corrupted() -> MidgeResult<()> {
 fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"aaa", Some(&vec![b'a'; 256]), 100, EntryType::Put, None)?;
@@ -821,7 +824,7 @@ fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -
 
     let reader = SstFileIo::open(
         "versions.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
     let index = reader.index_entries()?;
     let duplicate_blocks = index
@@ -859,7 +862,7 @@ fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -
 fn should_stream_raw_versions_in_compaction_order_across_blocks() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"aaa", Some(b"first"), 100, EntryType::Put, None)?;
@@ -871,7 +874,7 @@ fn should_stream_raw_versions_in_compaction_order_across_blocks() -> MidgeResult
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("raw-versions.sst"))?;
     let reader = Box::new(SstFileIo::open(
         "raw-versions.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
 
     // Act
@@ -906,7 +909,7 @@ fn should_fail_raw_cursor_before_decoded_block_exceeds_compaction_pool() -> Midg
     let path = temp_dir.path().join("budgeted-raw-cursor.sst");
     let reader = Box::new(SstFileIo::open(
         "budgeted-raw-cursor.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?);
     let budget = crate::common::resource_budget::ResourceBudget::new(1024);
     let mut cursor = reader.raw_version_cursor_with_budget(None, None, Some(budget))?;
@@ -929,8 +932,10 @@ fn should_fail_compaction_open_before_sst_metadata_exceeds_pool() -> MidgeResult
     let temp_dir = tempfile::tempdir()?;
     write_unique_key_sst(&temp_dir, "budgeted-metadata.sst")?;
     let path = temp_dir.path().join("budgeted-metadata.sst");
-    let factory =
-        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(temp_dir.path())?), 4096);
+    let factory = crate::sst::FsSstFactoryIo::new(
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+        4096,
+    );
     let budget = crate::common::resource_budget::ResourceBudget::new(64);
 
     // Act
@@ -949,7 +954,7 @@ fn should_fail_compaction_open_before_sst_metadata_exceeds_pool() -> MidgeResult
 fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     for index in 0..128u64 {
@@ -977,7 +982,7 @@ fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -
 
     let reader = SstFileIo::open(
         "trie-versions.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
     let index = reader.index_entries()?;
     let duplicate_blocks = index
@@ -1008,7 +1013,7 @@ fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -
 fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"dead", Some(b"old"), 4, EntryType::Put, None)?;
@@ -1017,7 +1022,7 @@ fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeRes
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("state.sst"))?;
     let reader = SstFileIo::open(
         "state.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
 
     // Act
@@ -1025,17 +1030,27 @@ fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeRes
     let deleted_dead = reader.get_state_at(b"dead", u64::MAX)?;
     let expired = reader.get_state_at(b"ttl", u64::MAX)?;
     let current_expired = reader.get_state(b"ttl")?;
-    let direct_expired = reader.get(b"ttl")?;
-    let direct_rows = reader.scan_range(None, None)?;
+    let direct_expired = reader.get_state(b"ttl")?;
+    let direct_rows = Arc::new(reader)
+        .state_scan(
+            None,
+            None,
+            false,
+            u64::MAX,
+            crate::common::time::unix_time_millis(),
+        )
+        .collect::<MidgeResult<Vec<_>>>()?;
 
     // Assert
     assert!(matches!(old_dead, KeyState::Value(_, 4, _, _)));
     assert_eq!(deleted_dead, KeyState::Tombstone(9));
     assert_eq!(expired, KeyState::Tombstone(11));
     assert_eq!(current_expired, KeyState::Tombstone(11));
-    assert_eq!(direct_expired, None);
+    assert_eq!(direct_expired, KeyState::Tombstone(11));
     assert!(
-        direct_rows.is_empty(),
+        direct_rows
+            .iter()
+            .all(|(_, state)| matches!(state, KeyState::Tombstone(_))),
         "expired and deleted states must mask scans"
     );
     Ok(())
@@ -1045,7 +1060,7 @@ fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeRes
 fn should_reject_current_format_block_with_crc_mismatch() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"crc-key", Some(b"crc-value"), 7, EntryType::Put, None)?;
@@ -1069,7 +1084,7 @@ fn should_reject_current_format_block_with_crc_mismatch() -> MidgeResult<()> {
 
     let reader = SstFileIo::open(
         "crc.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
 
     // Act
@@ -1102,7 +1117,8 @@ fn should_report_corruption_given_shipping_codec_payload_when_reading_through_fu
         CompressionAlgo::Zstd9,
     ] {
         let temp_dir = tempfile::tempdir()?;
-        let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096)
             .with_compression_policy(CompressionPolicy::Fixed(algorithm));
         let mut writer = factory.create()?;
@@ -1137,10 +1153,10 @@ fn should_report_corruption_given_shipping_codec_payload_when_reading_through_fu
 
         // Act
         let point_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
-            .get(b"codec-key")
+            .get_state(b"codec-key")
             .expect_err("point read must surface compressed payload corruption");
         let scan_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
-            .scan_range(None, None)
+            .scan_range_state(None, None)
             .expect_err("range read must surface compressed payload corruption");
         let verify_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
             .verify_all_blocks()
@@ -1179,24 +1195,6 @@ fn should_reject_oversized_block_handle_before_issuing_filesystem_read() -> Midg
 }
 
 #[test]
-fn should_reject_out_of_order_readahead_handles_without_panicking() -> MidgeResult<()> {
-    // Arrange
-    let temp_dir = tempfile::tempdir()?;
-    write_unique_key_sst(&temp_dir, "reversed-handles.sst")?;
-    let (_counting_fs, reader) = open_counting_reader(&temp_dir, "reversed-handles.sst")?;
-    let index = reader.index_entries()?;
-    assert!(index.len() >= 2);
-    let handles = [index[1].1, index[0].1];
-
-    // Act
-    let result = reader.read_blocks_contiguous(&handles);
-
-    // Assert
-    assert!(matches!(result, Err(MidgeError::Corruption(_))));
-    Ok(())
-}
-
-#[test]
 fn should_reject_unreferenced_gap_between_v4_sst_blocks() {
     // Arrange
     let mut reader = SstFileIo::new("gap.sst", Arc::new(crate::io::MockFs::new()));
@@ -1217,7 +1215,7 @@ fn should_reject_unreferenced_gap_between_v4_sst_blocks() {
 fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
     let mut writer = factory.create()?;
     for prefix in *b"amz" {
@@ -1248,13 +1246,47 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
 }
 
 #[test]
+fn should_match_summary_bounds_across_reader_modes() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"middle", Some(b"old"), 2, EntryType::Put, None)?;
+    writer.add_with_meta(b"middle", Some(b"new"), 9, EntryType::Put, None)?;
+    writer.add_range_tombstone(b"alpha", b"zulu", 5)?;
+    crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("summary-parity.sst"))?;
+    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+    let mut progress = super::SstSummaryProgress::default();
+
+    // Act
+    let streaming = SstFileIo::summarize_with_fs("summary-parity.sst", Arc::clone(&fs))?;
+    let resumable = SstFileIo::summarize_with_fs_progress(
+        "summary-parity.sst",
+        fs,
+        &budget,
+        &mut progress,
+        &mut || Ok(()),
+    )?;
+
+    // Assert
+    assert_eq!(&streaming, resumable);
+    assert_eq!(streaming.smallest_key, b"alpha");
+    assert_eq!(streaming.largest_key, b"zulu");
+    assert_eq!((streaming.smallest_seq, streaming.largest_seq), (2, 9));
+    Ok(())
+}
+
+#[test]
 fn should_reject_corrupt_block_trailer_identically_on_every_block_read_path() -> MidgeResult<()> {
     // Arrange: flip the stored CRC of the first data block. Every block
     // reader decodes frames through one helper, so each must report the
     // same class (#510).
     let temp_dir = tempfile::tempdir()?;
     write_unique_key_sst(&temp_dir, "corrupt-trailer.sst")?;
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let (first_key, handle) = {
         let reader = SstFileIo::open("corrupt-trailer.sst", Arc::clone(&fs))?;
         let index = reader.index_entries()?;
@@ -1285,47 +1317,13 @@ fn should_reject_corrupt_block_trailer_identically_on_every_block_read_path() ->
 }
 
 #[test]
-fn should_keep_block_frame_decoding_in_one_place() {
-    // Arrange: framing and key-prefix rules drifted across five and three
-    // copies before (#510).
-    let sources = [
-        include_str!("io.rs"),
-        include_str!("mod.rs"),
-        include_str!("recovery.rs"),
-        include_str!("scan.rs"),
-        include_str!("state.rs"),
-        include_str!("progress.rs"),
-    ];
-
-    // Act
-    let frame_decoders: usize = sources
-        .iter()
-        .map(|source| source.matches("u32::from_le_bytes").count())
-        .sum();
-    let prefix_checks: usize = sources
-        .iter()
-        .map(|source| source.matches("Invalid shared prefix length").count())
-        .sum();
-
-    // Assert
-    assert_eq!(
-        frame_decoders, 1,
-        "block length prefixes are decoded only in split_block_frame"
-    );
-    assert_eq!(
-        prefix_checks, 1,
-        "shared prefixes are checked only in shared_prefix_len"
-    );
-}
-
-#[test]
 fn should_select_clamped_block_span_when_range_bounds_vary() -> MidgeResult<()> {
     // Arrange (#510): every range reader selects blocks through `block_span`.
     let temp_dir = tempfile::tempdir()?;
     write_unique_key_sst(&temp_dir, "span.sst")?;
     let reader = SstFileIo::open(
         "span.sst",
-        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+        Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
     )?;
     let index = reader.index_entries()?;
     let last = index.len() - 1;

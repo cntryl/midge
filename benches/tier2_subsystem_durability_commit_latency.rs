@@ -122,6 +122,7 @@ fn execute_rotation_run() -> RotationRunSample {
     engine.flush_cf(&cf).expect("flush rotation warmup");
 
     let start_metrics = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("capture starting rotation metrics");
     let mut all = Histogram::<u64>::new(3).expect("create rotation commit histogram");
@@ -131,6 +132,7 @@ fn execute_rotation_run() -> RotationRunSample {
     let started_at = Instant::now();
     for ordinal in 0..ROTATION_TRANSACTIONS_PER_RUN {
         let before = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("capture pre-commit rotation metrics");
         let commit_started_at = Instant::now();
@@ -139,6 +141,7 @@ fn execute_rotation_run() -> RotationRunSample {
             .unwrap_or(u64::MAX)
             .max(1);
         let after = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("capture post-commit rotation metrics");
         all.record(latency_us).expect("record commit latency");
@@ -158,6 +161,7 @@ fn execute_rotation_run() -> RotationRunSample {
         .flush_cf(&cf)
         .expect("drain measured rotation flushes");
     let end_metrics = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("capture ending rotation metrics");
 
@@ -239,6 +243,7 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
         .expect("create durability latency column family");
     let cf_id = cf.id();
     let start_metrics = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("capture starting durability metrics");
     let transactions_per_writer = transactions_per_sample / writers;
@@ -262,6 +267,7 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
     }
     let elapsed = started_at.elapsed();
     let end_metrics = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("capture ending durability metrics");
     let (wal_appends, physical_fsyncs) = metrics_delta(&start_metrics, &end_metrics);

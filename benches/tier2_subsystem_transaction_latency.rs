@@ -229,6 +229,7 @@ fn run_transaction_coalescing_signal(
     cf_id: ColumnFamilyId,
 ) -> TransactionCoalescingSignal {
     let start = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("get starting runtime metrics");
     // The signal measures WAL submission coalescing, not snapshot-acquisition
@@ -263,6 +264,7 @@ fn run_transaction_coalescing_signal(
     }
 
     let end = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("get ending runtime metrics");
     TransactionCoalescingSignal::from_snapshots(logical_coalescing_txn_records(), &start, &end)
@@ -311,6 +313,7 @@ fn run_buffered_transaction_latency_breakdown(
         })
         .expect("transaction count fits in u64");
     let start = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("get starting latency runtime metrics");
     cntryl_midge::__internal::diagnostics::enable_transaction_commit_timing_for_benchmarks();
@@ -340,6 +343,7 @@ fn run_buffered_transaction_latency_breakdown(
     }
 
     let end = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("get ending latency runtime metrics");
     let timing_samples =

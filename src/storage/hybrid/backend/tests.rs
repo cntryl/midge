@@ -6,6 +6,7 @@
 //! `hybrid_persistence` module and tested beside it.
 
 use super::*;
+use crate::storage::test_support::StorageBackendTestExt;
 
 use crate::storage::cloud::{CloudStorage, MockCloudBackend};
 use crate::storage::StorageCallback;
@@ -589,55 +590,103 @@ impl BudgetConsumingProofBackend {
 }
 
 impl StorageBackend for BudgetConsumingProofBackend {
-    fn submit_read_with_metadata(
+    fn submit_range_read_request(
         &self,
-        _key: &str,
-        _timeout: Duration,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        self.retained_metadata_callbacks.lock().push(callback);
-    }
-
-    fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "writes are not used by this proof fixture"
-                    .to_string()
-                    .into(),
-            ),
+        crate::storage::dispatch_metadata_read_request(request, callback, |_, _, callback| {
+            self.retained_metadata_callbacks.lock().push(callback);
         });
     }
 
-    fn submit_delete(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "deletes are not used by this proof fixture"
-                    .to_string()
-                    .into(),
-            ),
-        });
-    }
-
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            let delay = self.first_head_delay;
-            let key = key.to_string();
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                let _ = callback.send(StorageEvent::HeadComplete {
-                    key,
-                    result: StorageOutcome::Ok(StorageObjectMetadata {
-                        size: 7,
-                        etag: "slow-first-head".to_string(),
-                        generation: None,
-                    }),
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
+            if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let delay = self.first_head_delay;
+                let key = key.to_string();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    let _ = callback.send(StorageEvent::HeadComplete {
+                        key,
+                        result: StorageOutcome::Ok(StorageObjectMetadata {
+                            size: 7,
+                            etag: "slow-first-head".to_string(),
+                            generation: None,
+                        }),
+                    });
                 });
-            });
-        } else {
-            self.retain_callback(callback);
-        }
+            } else {
+                self.retain_callback(callback);
+            }
+        });
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |key, _precondition, callback| {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(
+                        "deletes are not used by this proof fixture"
+                            .to_string()
+                            .into(),
+                    ),
+                });
+            },
+        );
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |key, _precondition, _data, callback| {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(
+                        "writes are not used by this proof fixture"
+                            .to_string()
+                            .into(),
+                    ),
+                });
+            },
+        );
     }
 }
 
@@ -648,41 +697,78 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
-    fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_write_with_headers(
+    fn submit_range_read_request(
         &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
     ) {
-        self.retain_callback(callback);
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
     }
 
-    fn submit_delete(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_delete_with_headers(
+    fn submit_range_head_request(
         &self,
-        _key: &str,
-        _headers: Vec<(String, String)>,
-        callback: StorageCallback,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
     ) {
-        self.retain_callback(callback);
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
     }
 
-    fn submit_head(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::dispatch_head_request(request, callback, |_key, _, callback| {
+            self.retain_callback(callback);
+        });
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::dispatch_test_delete_request(
+            request,
+            callback,
+            |_key, _precondition, callback| {
+                self.retain_callback(callback);
+            },
+        );
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::dispatch_test_write_request(
+            request,
+            data,
+            callback,
+            |_key, _precondition, _data, callback| {
+                self.retain_callback(callback);
+            },
+        );
     }
 }
 
 fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.stores.sst.submit_write(key, data, tx);
+    storage.stores.sst.write_for_test(key, data, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::WriteComplete {
             result: StorageOutcome::Ok(()),

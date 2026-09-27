@@ -1,7 +1,32 @@
 use super::*;
 use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
 use crate::io::FsPath;
+use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
+use crate::MidgeError;
+
+#[test]
+fn should_reject_valueless_put_when_writing_sst() -> MidgeResult<()> {
+    // Arrange
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    let factory = FsSstFactoryIo::new(fs, 4096);
+    let mut unordered = factory.create()?;
+    let mut sorted = factory.create_for_compaction(
+        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+    )?;
+
+    // Act
+    let unordered_result = unordered.add_with_meta(b"key", None, 1, EntryType::Put, None);
+    let sorted_result = sorted.add_sorted_with_meta(b"key", None, 1, EntryType::Put, None);
+
+    // Assert
+    assert!(matches!(
+        unordered_result,
+        Err(MidgeError::InvalidArgument(_))
+    ));
+    assert!(matches!(sorted_result, Err(MidgeError::InvalidArgument(_))));
+    Ok(())
+}
 
 /// Records every staging operation an SST publication performs and can
 /// fail the parent-directory sync, so tests observe that persistence runs
@@ -36,10 +61,6 @@ impl File for RecordingFile<'_> {
         self.events.lock().push(format!("file sync {}", self.name));
         Ok(())
     }
-
-    fn close(self: Box<Self>) -> FsResult<()> {
-        self.inner.close()
-    }
 }
 
 struct RecordingFs {
@@ -51,7 +72,7 @@ struct RecordingFs {
 impl RecordingFs {
     fn new(root: &Path, fail_directory_sync: bool) -> MidgeResult<Self> {
         Ok(Self {
-            inner: crate::io::RealFs::new(root).map_err(crate::common::MidgeError::from)?,
+            inner: crate::io::RealFs::new(root).map_err(FsError::into_midge)?,
             events: Arc::new(parking_lot::Mutex::new(Vec::new())),
             fail_directory_sync,
         })
@@ -248,38 +269,14 @@ fn should_produce_identical_bytes_when_same_entries_written_via_create_and_creat
 }
 
 #[test]
-fn should_keep_sst_encoding_policy_in_the_shared_block_pipeline() {
-    // Arrange
-    let writer = include_str!("../factory_io.rs");
-    let pipeline = include_str!("pipeline.rs");
-    let sink = include_str!("sink.rs");
-
-    // Act
-    let legacy_streaming_helpers = [
-        "append_block_to_stream",
-        "flush_streaming_current_block",
-        "append_range_tombstone_block_to_stream",
-        "append_trie_block_to_stream",
-        "append_metadata_index_and_footer_to_stream",
-    ];
-
-    // Assert
-    assert!(pipeline.contains("fn append_block<S: BlockSink>"));
-    assert!(pipeline.contains("fn append_metadata_index_and_footer<S: BlockSink>"));
-    assert!(!pipeline.contains("fn finalize_data_blocks"));
-    assert!(legacy_streaming_helpers
-        .iter()
-        .all(|helper| !writer.contains(helper) && !pipeline.contains(helper)));
-    assert!(!sink.contains("CompressionPolicy"));
-    assert!(!sink.contains("encode_readable_block"));
-}
-
-#[test]
 fn should_reject_sst_target_when_path_escapes_injected_filesystem_root() -> MidgeResult<()> {
     // Arrange
     let root = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
-    let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root.path())?), 4096);
+    let factory = FsSstFactoryIo::new(
+        Arc::new(crate::io::RealFs::new(root.path()).map_err(FsError::into_midge)?),
+        4096,
+    );
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
 
@@ -318,14 +315,13 @@ fn should_publish_sst_into_injected_mock_filesystem_when_finishing_writer() -> M
     // Assert
     assert!(fs
         .exists(&FsPath::new("mocked.sst"))
-        .map_err(crate::common::MidgeError::from)?);
+        .map_err(FsError::into_midge)?);
     assert!(!fs
         .exists(&FsPath::new("mocked.sst.tmp"))
-        .map_err(crate::common::MidgeError::from)?);
+        .map_err(FsError::into_midge)?);
     let reader = super::super::SstFileIo::open("mocked.sst", Arc::clone(&fs) as Arc<dyn Fs>)?;
-    assert_eq!(
-        crate::sst::SstReader::get(&reader, b"key")?.as_deref(),
-        Some(b"value".as_slice())
+    assert!(
+        matches!(reader.get_state(b"key")?, KeyState::Value(value, _, _, _) if value.as_ref() == b"value")
     );
     Ok(())
 }
@@ -335,7 +331,7 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
     // Arrange
     let directory = tempfile::tempdir()?;
     let factory = FsSstFactoryIo::new(
-        Arc::new(crate::io::RealFs::new(directory.path())?),
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
         64 * 1024,
     )
     .with_compaction_scratch_directory(directory.path().to_path_buf())
@@ -366,9 +362,8 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
     assert!(factory.compaction_scratch_cleanup_verified());
     let reader = super::super::SstFileIo::open_with_real_fs(&output)?;
     for sequence in 0_u64..1024 {
-        assert_eq!(
-            crate::sst::SstReader::get(&reader, &sequence.to_be_bytes())?.as_deref(),
-            Some(value.as_slice())
+        assert!(
+            matches!(reader.get_state(&sequence.to_be_bytes())?, KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
         );
     }
     Ok(())
@@ -637,7 +632,7 @@ fn should_create_factory_with_mock_fs() {
 fn should_create_factory_with_real_fs() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
 
     // Act
     let factory = FsSstFactoryIo::new(fs, 4096);
@@ -663,7 +658,7 @@ fn should_support_method_chaining() {
 fn should_roundtrip_stateful_entries_when_sst_contains_range_tombstones() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = FsSstFactoryIo::new(fs, 4096);
     let path = temp_dir.path().join("stateful.sst");
 
@@ -716,7 +711,7 @@ fn should_roundtrip_stateful_entries_when_sst_contains_range_tombstones() -> Mid
 fn should_roundtrip_large_key_when_sst_entry_key_delta_exceeds_inline_limit() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = FsSstFactoryIo::new(fs, 4096);
     let path = temp_dir.path().join("large-key.sst");
     let oversized_key = vec![b'k'; 65_536];
@@ -747,7 +742,7 @@ fn should_roundtrip_large_key_when_sst_entry_key_delta_exceeds_inline_limit() ->
 fn should_roundtrip_empty_value_when_sst_entry_is_put() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = FsSstFactoryIo::new(fs, 4096);
     let path = temp_dir.path().join("empty-value.sst");
 
@@ -777,7 +772,7 @@ fn should_roundtrip_empty_value_when_sst_entry_is_put() -> MidgeResult<()> {
 fn should_roundtrip_multiple_blocks_when_sorted_compaction_spills() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = FsSstFactoryIo::new(fs, 4096);
     let path = temp_dir.path().join("streamed.sst");
     let mut writer = factory.create()?;
@@ -896,7 +891,7 @@ fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
 fn should_return_max_covering_tombstone_seq_when_key_is_in_range() -> MidgeResult<()> {
     // Arrange: three tombstones cover "cat"; one is above the snapshot.
     let temp_dir = tempfile::tempdir()?;
-    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = FsSstFactoryIo::new(fs, 4096);
     let path = temp_dir.path().join("tombstones.sst");
     let mut writer = factory.create()?;

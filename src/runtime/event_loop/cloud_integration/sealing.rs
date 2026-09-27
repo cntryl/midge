@@ -140,7 +140,7 @@ impl EventLoop {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
         }
-        let Some(storage) = self.hybrid_storage.clone() else {
+        let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
             return Err(crate::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
             ));
@@ -148,7 +148,7 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.state.wal.pending_writes == 0 {
             return Ok(None);
         }
-        if !recovered_active && !self.cloud_wal.upload_backlog.is_empty() {
+        if !recovered_active && !self.cloud_coordinator.cloud_wal.upload_backlog.is_empty() {
             return Err(crate::common::MidgeError::WriteStall(
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
@@ -236,7 +236,8 @@ impl EventLoop {
         WalTransitionBoundary::BeforeSegmentRegistration.check()?;
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.cloud_wal
+        self.cloud_coordinator
+            .cloud_wal
             .upload_backlog
             .insert(segment_id, max_sequence);
         self.wal_transition.note_queued(segment_id)?;
@@ -264,7 +265,8 @@ impl EventLoop {
         let max_sequence = receipt.max_sequence();
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.cloud_wal
+        self.cloud_coordinator
+            .cloud_wal
             .upload_backlog
             .insert(segment_id, max_sequence);
         if let Err(registration_error) = self.wal_transition.note_queued(segment_id) {
@@ -316,8 +318,8 @@ impl EventLoop {
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let Some(storage) = self.hybrid_storage.clone() else {
-            if self.cloud_wal.upload_backlog.is_empty() {
+        let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
+            if self.cloud_coordinator.cloud_wal.upload_backlog.is_empty() {
                 return Ok(());
             }
             return Err(crate::common::MidgeError::Internal(
@@ -326,13 +328,13 @@ impl EventLoop {
         };
         let storage = CloudPersistence::new(storage);
 
-        if self.cloud_wal.upload_backlog.is_empty() {
+        if self.cloud_coordinator.cloud_wal.upload_backlog.is_empty() {
             return Ok(());
         }
-        if !self.cloud_wal.uploads_ready() {
+        if !self.cloud_coordinator.cloud_wal.uploads_ready() {
             return Ok(());
         }
-        self.cloud_wal.begin_upload_attempt();
+        self.cloud_coordinator.cloud_wal.begin_upload_attempt();
         // Validate once per drain pass, not once per segment. Under a provider
         // leader store each validation is a cloud GET, and the durable guarantee
         // is not this poll: `WalPublicationCatalog::require_epoch` plus the
@@ -342,8 +344,11 @@ impl EventLoop {
         self.validate_runtime_writer_lease_within(deadline)?;
 
         loop {
-            let Some((&segment_id, &max_sequence)) =
-                self.cloud_wal.upload_backlog.first_key_value()
+            let Some((&segment_id, &max_sequence)) = self
+                .cloud_coordinator
+                .cloud_wal
+                .upload_backlog
+                .first_key_value()
             else {
                 return Ok(());
             };
@@ -359,12 +364,15 @@ impl EventLoop {
                     // this segment in the runtime backlog and avoid repeatedly
                     // paying lease validation and WAL readback while the queue
                     // is still full.
-                    self.cloud_wal.defer_upload_retry();
+                    self.cloud_coordinator.cloud_wal.defer_upload_retry();
                     return Ok(());
                 }
                 Err(error) => return Err(error),
             };
-            self.cloud_wal.upload_backlog.remove(&segment_id);
+            self.cloud_coordinator
+                .cloud_wal
+                .upload_backlog
+                .remove(&segment_id);
             if !self.state.cloud.pending_uploads.contains(&resource) {
                 self.state.cloud.pending_uploads.push(resource);
             }
@@ -381,7 +389,7 @@ impl EventLoop {
         deadline: &crate::common::OperationDeadline,
     ) {
         if let Err(error) = self.try_drain_cloud_wal_upload_backlog_within(deadline) {
-            self.cloud_wal.defer_upload_retry();
+            self.cloud_coordinator.cloud_wal.defer_upload_retry();
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "could not admit recovered CloudAsync WAL upload");
         }
@@ -393,7 +401,7 @@ impl EventLoop {
         if !self.wal_actor.is_cloud_async() {
             return;
         }
-        if self.hybrid_storage.is_none() {
+        if self.cloud_coordinator.hybrid_storage.is_none() {
             return;
         }
 

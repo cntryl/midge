@@ -24,7 +24,6 @@ const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
 pub struct RuntimeHandle {
     pub(super) msg_tx: Sender<RuntimeMsg>,
     pub(super) router: Arc<ResponseRouter>,
-    pub(super) ingest_active: Arc<std::sync::atomic::AtomicBool>,
     /// Lock-free snapshot cache for read-path bypass.
     ///
     /// Allows `begin_tx` to capture a read snapshot without event loop round-trip.
@@ -92,14 +91,6 @@ impl RuntimeHandle {
     pub(crate) fn acquire_transaction_guard(&self) -> MidgeResult<RuntimeTransactionGuard> {
         self.lifecycle.acquire()
     }
-    /// Return whether the runtime ingest barrier is currently active.
-    ///
-    /// This is intentionally a direct atomic read instead of an event-loop
-    /// message because transaction creation sits on the API hot path.
-    pub(crate) fn ingest_active(&self) -> bool {
-        self.ingest_active.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     pub(crate) fn begin_snapshot_acquisition(
         &self,
         sequence_floor: u64,

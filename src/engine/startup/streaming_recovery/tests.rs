@@ -678,13 +678,16 @@ fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
 #[test]
 fn should_flush_admitted_large_value_when_memtable_target_is_small() {
     // Arrange
+    // This qualifies flush and recovery, so leave room for shared-runner I/O
+    // and the cloud shutdown drain instead of testing caller deadlines.
+    const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
     let directory = tempfile::tempdir().expect("large-value database");
     let opts = OpenOptions::cloud_simulated(directory.path(), "bucket", "large-flush")
         .memory_budget(crate::MemoryBudget::Bytes(32 * 1024 * 1024))
         .local_storage_budget(16 * 1024 * 1024)
         .with_memtable_size_limit(8 * 1024)
-        .storage_io_timeout(std::time::Duration::from_secs(1))
-        .runtime_response_timeout(std::time::Duration::from_secs(5))
+        .storage_io_timeout(std::time::Duration::from_secs(10))
+        .runtime_response_timeout(std::time::Duration::from_mins(1))
         .background_compaction(false)
         .build()
         .expect("small target with larger engine resources");
@@ -701,7 +704,7 @@ fn should_flush_admitted_large_value_when_memtable_target_is_small() {
 
     // Act
     let result = engine.flush_cf(&cf);
-    let shutdown = engine.shutdown(std::time::Duration::from_secs(5));
+    let shutdown = engine.shutdown(SHUTDOWN_TIMEOUT);
     drop(engine);
 
     // Assert
@@ -717,7 +720,7 @@ fn should_flush_admitted_large_value_when_memtable_target_is_small() {
     );
     drop(tx);
     recovered
-        .shutdown(std::time::Duration::from_secs(5))
+        .shutdown(SHUTDOWN_TIMEOUT)
         .expect("close verifier");
 }
 

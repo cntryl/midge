@@ -78,7 +78,7 @@ and request ID. The timeout removes the caller's response route but does not
 cancel work already accepted by the runtime; a mutating operation can still
 complete later.
 
-`Engine::get_runtime_metrics` reports that ambiguity as a pair of counters:
+`engine.metrics().get_runtime_metrics()` reports that ambiguity as a pair of counters:
 
 - `abandoned_runtime_requests_total` — callers that stopped waiting for a
   response.
@@ -91,6 +91,17 @@ error, so counter deltas cannot identify the outcome of one timed-out mutation.
 Do not use them to decide whether that mutation should be retried. Use an
 application-level idempotency key or read the affected state through the normal
 API before retrying; otherwise the original and retry can both apply.
+
+### Metrics and verification API migration
+
+The `Engine::get_read_amp_metrics`, `Engine::get_recovery_metrics`,
+`Engine::get_runtime_metrics`, `Engine::get_runtime_metrics_with_timeout`,
+`Engine::verify_storage`, and `Engine::verify_path` convenience methods were
+removed. Use `engine.metrics().get_*` for metrics,
+`engine.storage_verifier().verify_storage(timeout)` for online integrity checks,
+and `StorageVerifier::verify_path(path)` for an offline check. Storage layout is
+now available at `engine.metrics().get_storage_layout()`. This is a source API
+break; metric snapshots and verification reports retain their existing shapes.
 
 Deadline-aware foreground paths—including strict WAL sealing and acknowledgement
 validation, remote DDL compare-exchange, and direct manifest mirroring—share the

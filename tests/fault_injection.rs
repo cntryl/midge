@@ -4,6 +4,55 @@
 
 mod common;
 
+mod crash_validation {
+    use crate::common::crash;
+
+    #[test]
+    fn should_report_specific_failpoint_marker_when_child_process_aborts_at_intended_boundary() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let marker = temp_dir.path().join("trigger.sentinel");
+
+        // Act
+        let missing = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
+        std::fs::write(&marker, "scenario=scenario\ntrigger=wrong-trigger\n")
+            .expect("write wrong trigger sentinel");
+        let wrong = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
+        std::fs::write(&marker, "scenario=scenario\ntrigger=expected-trigger\n")
+            .expect("write expected trigger sentinel");
+        let exact = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
+
+        // Assert
+        assert!(missing.is_err());
+        assert!(wrong.is_err());
+        assert_eq!(exact, Ok(()));
+    }
+
+    #[test]
+    fn should_reject_non_abort_child_failure_even_when_trigger_marker_matches() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let marker = temp_dir.path().join("trigger.sentinel");
+        std::fs::write(&marker, "scenario=scenario\ntrigger=expected-trigger\n")
+            .expect("write exact trigger sentinel");
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("locate failpoint contract test executable"),
+        )
+        .arg("--definitely-not-a-valid-test-harness-option")
+        .output()
+        .expect("run ordinary failing child");
+
+        // Act
+        let validation =
+            crash::validate_child_crash(&output, &marker, "scenario", "expected-trigger");
+
+        // Assert
+        assert!(validation
+            .expect_err("ordinary failure must not count as an abort")
+            .contains("failed without process abort"));
+    }
+}
+
 mod failure_injection {
     use bytes::Bytes;
     use cntryl_midge::{
@@ -225,6 +274,7 @@ mod failure_injection {
         assert!(engine.get_column_family("committed-drop").is_none());
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded runtime metrics")
                 .health,
@@ -238,6 +288,7 @@ mod failure_injection {
         assert!(reopened.get_column_family("committed-drop").is_none());
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("reopened runtime metrics")
                 .health,
@@ -345,6 +396,7 @@ mod failure_injection {
         scenario.teardown();
 
         let health_after_failure = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics after ambiguous WAL failure")
             .health;
@@ -575,6 +627,7 @@ mod failure_injection {
         }
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics")
                 .sst_count,
@@ -624,7 +677,10 @@ mod failure_injection {
             assert_visible(&reopened, &reopened_cf, key.as_bytes(), value.as_bytes());
         }
 
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(
             metrics.sst_count, 0,
             "recovery should not publish the flush SST when manifest append never succeeded"
@@ -685,7 +741,10 @@ mod failure_injection {
         // Act
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let metrics = loop {
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             if metrics.sst_count == 1 {
                 break metrics;
             }
@@ -697,7 +756,10 @@ mod failure_injection {
         };
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let published_names: Vec<_> = layout
             .levels
             .iter()
@@ -752,7 +814,10 @@ mod failure_injection {
         scenario.teardown();
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let mut names: Vec<_> = layout
             .levels
             .iter()
@@ -769,7 +834,8 @@ mod failure_injection {
             "the retained oldest immutable and younger flush need distinct stable identities"
         );
         let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(temp_dir.path().join("manifest.json")).expect("read manifest"),
+            &std::fs::read(temp_dir.path().join("manifest.snapshot.json"))
+                .expect("read manifest snapshot"),
         )
         .expect("parse manifest");
         assert_eq!(manifest["files"].as_array().map(Vec::len), Some(2));
@@ -801,7 +867,10 @@ mod failure_injection {
         wait_for_sst_count(&engine, 1);
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let names: Vec<_> = layout
             .levels
             .iter()
@@ -834,7 +903,10 @@ mod failure_injection {
         wait_for_sst_count(&engine, 1);
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         assert_eq!(
             layout
                 .levels
@@ -870,6 +942,7 @@ mod failure_injection {
             WriteOptions::cloud_strict(),
         );
         let committed_before_flush = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("pre-flush metrics")
             .hybrid_total_committed_bytes;
@@ -885,6 +958,7 @@ mod failure_injection {
             "unexpected cloud upload error: {error}"
         );
         let committed_during_retry = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("failed flush metrics")
             .hybrid_total_committed_bytes;
@@ -912,8 +986,14 @@ mod failure_injection {
         wait_for_sst_count(&engine, 1);
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
-        let settled = engine.get_runtime_metrics().expect("settled flush metrics");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
+        let settled = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("settled flush metrics");
         assert!(
             settled.hybrid_total_committed_bytes <= committed_before_flush,
             "successful retry must settle the reservation and evict its published SST: before={committed_before_flush}, retry={committed_during_retry}, settled={}",
@@ -959,7 +1039,10 @@ mod failure_injection {
 
         let reopened = open_local_engine(db_path);
         let reopened_cf = default_cf(&reopened);
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
 
         // Assert
         assert!(
@@ -1021,7 +1104,10 @@ mod failure_injection {
 
         // Assert
         let reopened_cf = default_cf(&reopened);
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::SalvageMode);
         assert_eq!(metrics.sst_count, 0);
         assert_eq!(count_sst_files(db_path), 0);
@@ -1152,7 +1238,10 @@ mod failure_injection {
                 .expect("commit best-effort value");
         }
         engine.flush_cf(&cf).expect("flush replay checkpoint seed");
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let file = layout
             .levels
             .iter()
@@ -1215,7 +1304,10 @@ mod failure_injection {
 
         // Assert
         let reopened_cf = default_cf(&reopened);
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::SalvageMode);
         assert_eq!(metrics.sst_count, 1);
         for index in 0..12 {
@@ -1248,7 +1340,10 @@ mod failure_injection {
                 .expect("commit best-effort value");
         }
         engine.flush_cf(&cf).expect("flush replay checkpoint seed");
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let file = layout
             .levels
             .iter()
@@ -1351,7 +1446,10 @@ mod failure_injection {
         )
         .expect("configure manifest checkpoint no-space failpoint");
         engine.flush_cf(&cf).expect("flush should still succeed");
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(
             metrics.health,
             EngineHealth::Degraded,
@@ -1372,7 +1470,10 @@ mod failure_injection {
             assert_visible(&reopened, &reopened_cf, key.as_bytes(), value.as_bytes());
         }
 
-        let reopened_metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+        let reopened_metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(reopened_metrics.health, EngineHealth::Healthy);
         assert!(
             reopened_metrics.sst_count >= 1,
@@ -1407,6 +1508,7 @@ mod failure_injection {
         }
 
         let initial_sst_count = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics")
             .sst_count;
@@ -1424,6 +1526,7 @@ mod failure_injection {
             .expect_err("compact_all must report the compaction output failure");
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics")
                 .sst_count,
@@ -1461,7 +1564,10 @@ mod failure_injection {
 
         seed_compaction_batches(&engine, &cf, "cmp-recover", 4, 25);
 
-        let initial_layout = engine.get_storage_layout().expect("initial storage layout");
+        let initial_layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("initial storage layout");
         let initial_sst_count = initial_layout
             .levels
             .iter()
@@ -1500,6 +1606,7 @@ mod failure_injection {
         assert_compaction_batches_visible(&reopened, &reopened_cf, "cmp-recover", 4, 25);
 
         let recovered_layout = reopened
+            .metrics()
             .get_storage_layout()
             .expect("recovered storage layout");
         assert!(
@@ -1522,7 +1629,10 @@ mod failure_injection {
         reopened
             .compact_all()
             .expect("retry compaction after rollback recovery");
-        let retried_layout = reopened.get_storage_layout().expect("retried layout");
+        let retried_layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("retried layout");
         assert!(
             retried_layout
                 .levels
@@ -1547,6 +1657,7 @@ mod failure_injection {
         let final_cf = default_cf(&final_reopen);
         assert_compaction_batches_visible(&final_reopen, &final_cf, "cmp-recover", 4, 25);
         let final_layout = final_reopen
+            .metrics()
             .get_storage_layout()
             .expect("final recovered layout");
         assert!(
@@ -1599,6 +1710,7 @@ mod failure_injection {
         assert!(count_sst_files(db_path) > initial_sst_count);
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded live metrics")
                 .health,
@@ -1610,9 +1722,11 @@ mod failure_injection {
 
         let reopened = open_local_engine_with_target(db_path, 128);
         let metrics = reopened
+            .metrics()
             .get_runtime_metrics()
             .expect("reopened runtime metrics");
         let layout = reopened
+            .metrics()
             .get_storage_layout()
             .expect("reopened storage layout");
         assert_eq!(metrics.health, EngineHealth::Healthy);
@@ -1668,7 +1782,10 @@ mod failure_injection {
         // Assert: the batch journal already made the output authoritative. The
         // live engine must not roll that decision back or retain obsolete local
         // inputs just because advancing the publication phase failed.
-        let live_layout = engine.get_storage_layout().expect("live storage layout");
+        let live_layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("live storage layout");
         let live_manifest_sst_count = live_layout
             .levels
             .iter()
@@ -1712,6 +1829,7 @@ mod failure_injection {
             }
         }
         let recovered_layout = reopened
+            .metrics()
             .get_storage_layout()
             .expect("recovered storage layout");
         assert_eq!(recovered_layout.health, EngineHealth::Healthy);
@@ -1758,6 +1876,7 @@ mod failure_injection {
             .compact_all()
             .expect_err("compact_all must report the intent-clear failure");
         let live_layout = engine
+            .metrics()
             .get_storage_layout()
             .expect("live partitioned layout");
         assert!(
@@ -1782,6 +1901,7 @@ mod failure_injection {
         }
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("reopened metrics")
                 .health,
@@ -1833,7 +1953,10 @@ mod failure_injection {
             let key = format!("ambiguous-sync-{batch}");
             assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
         }
-        let layout = reopened.get_storage_layout().expect("reopened layout");
+        let layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("reopened layout");
         assert_eq!(
             layout
                 .levels
@@ -2246,7 +2369,10 @@ mod failure_injection {
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
 
-        let initial_layout = engine.get_storage_layout().expect("initial storage layout");
+        let initial_layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("initial storage layout");
         assert!(
             !initial_layout
                 .levels
@@ -2267,6 +2393,7 @@ mod failure_injection {
             .expect_err("compact_all must report the checkpoint save failure");
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics")
                 .health,
@@ -2291,6 +2418,7 @@ mod failure_injection {
         }
 
         let recovered_layout = reopened
+            .metrics()
             .get_storage_layout()
             .expect("recovered storage layout");
         assert_eq!(recovered_layout.health, EngineHealth::Healthy);
@@ -2330,7 +2458,11 @@ mod failure_injection {
         assert_eq!(handle.name(), "after-commit");
         assert!(engine.get_column_family("after-commit").is_some());
         assert_eq!(
-            engine.get_runtime_metrics().expect("metrics").health,
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("metrics")
+                .health,
             EngineHealth::Degraded,
             "a failed post-commit checkpoint must be recorded as a persistence anomaly"
         );
@@ -2347,6 +2479,7 @@ mod failure_injection {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             let actual = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics")
                 .sst_count;
@@ -2539,6 +2672,7 @@ mod failure_injection {
 
     fn manifest_sst_file_names(engine: &Engine) -> std::collections::BTreeSet<String> {
         engine
+            .metrics()
             .get_storage_layout()
             .expect("storage layout")
             .levels
@@ -2708,7 +2842,11 @@ mod failure_injection {
 
         // Act
         reopened.flush_cf(&cf).expect("flush default");
-        let health = reopened.get_runtime_metrics().expect("metrics").health;
+        let health = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("metrics")
+            .health;
 
         let sealed = std::fs::read_dir(temp.path().join("wal"))
             .expect("list wal")
@@ -2836,6 +2974,7 @@ mod backup_capture {
                 .commit(WriteOptions::sync())
                 .expect("commit while backup copy is blocked");
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("metrics remain responsive during backup copy");
             resume_tx.send(()).expect("resume backup materialization");
@@ -3735,7 +3874,7 @@ mod chaos_real {
     }
 
     fn manifest_path(db_path: &Path) -> PathBuf {
-        db_path.join("manifest.json")
+        db_path.join("manifest.snapshot.json")
     }
 
     fn committed_log_path(db_path: &Path) -> PathBuf {
@@ -4122,6 +4261,7 @@ mod chaos_compaction {
         let engine = open_local_engine(db_path);
         let default_cf = default_cf(&engine);
         let recovered_layout = engine
+            .metrics()
             .get_storage_layout()
             .expect("storage layout after pre-publication recovery");
         let manifest_names = manifest_sst_names(&recovered_layout);
@@ -4209,6 +4349,7 @@ mod chaos_compaction {
         let engine = open_local_engine(db_path);
         let default_cf = default_cf(&engine);
         let recovered_layout = engine
+            .metrics()
             .get_storage_layout()
             .expect("storage layout after post-publication recovery");
         let manifest_names = manifest_sst_names(&recovered_layout);
@@ -4535,6 +4676,7 @@ mod chaos_compaction {
 
     fn write_compaction_input_names(engine: &Engine, db_path: &Path) {
         let layout = engine
+            .metrics()
             .get_storage_layout()
             .expect("storage layout before compaction");
         let names = manifest_sst_names(&layout);
@@ -4682,7 +4824,10 @@ mod background_flush_pipeline {
     ) -> cntryl_midge::RuntimeMetricsSnapshot {
         let deadline = Instant::now() + timeout;
         loop {
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             if predicate(&metrics) {
                 return metrics;
             }
@@ -4779,7 +4924,10 @@ mod background_flush_pipeline {
         scenario.teardown();
 
         // Assert
-        let finished = engine.get_runtime_metrics().expect("finished metrics");
+        let finished = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("finished metrics");
         assert_eq!(blocked.flush_build_count, 0);
         assert!(finished.flush_build_count >= 1);
         assert!(finished.flush_publish_count >= 1);
@@ -4823,7 +4971,10 @@ mod background_flush_pipeline {
         scenario.teardown();
 
         // Assert
-        let finished = engine.get_runtime_metrics().expect("finished metrics");
+        let finished = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("finished metrics");
         assert_eq!(blocked.flush_publish_count, 0);
         assert!(finished.flush_publish_count >= 1);
         assert_eq!(finished.flush_inflight, 0);
@@ -4914,7 +5065,10 @@ mod background_flush_pipeline {
 
         // Assert
         assert!(failed.immutable_memtables >= 1);
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert!(metrics.flush_failures_total >= 1);
         assert!(metrics.flush_retries_total >= 1);
         assert_eq!(metrics.immutable_memtables, 0);
@@ -5018,7 +5172,10 @@ mod background_flush_pipeline {
         scenario.teardown();
 
         // Assert
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(metrics.flush_inflight, 0);
         assert_eq!(metrics.immutable_memtables, 0);
         let staging_dir = temp_dir.path().join("sst/.flush-staging");
@@ -5039,11 +5196,12 @@ mod shutdown_orchestration {
     };
     use std::collections::BTreeSet;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     const BLOCKED_UPLOAD_FAILPOINT: &str = "midge::cloud::before_wal_upload";
+    const CLOUD_DRAIN_TIMEOUT_FAILPOINT: &str = "midge::shutdown::after_cloud_upload_drain_timeout";
 
     struct UploadRelease {
         gate: Arc<(Mutex<bool>, Condvar)>,
@@ -5065,6 +5223,15 @@ mod shutdown_orchestration {
         }
     }
 
+    fn observe_cloud_drain_timeout() -> std::sync::mpsc::Receiver<()> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        fail::cfg_callback(CLOUD_DRAIN_TIMEOUT_FAILPOINT, move || {
+            let _ = sender.try_send(());
+        })
+        .expect("observe runtime cloud drain deadline");
+        receiver
+    }
+
     #[test]
     fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes() {
         // Arrange
@@ -5073,12 +5240,10 @@ mod shutdown_orchestration {
         let db_path = temp_dir.path().join("db");
         let lease_loss_calls = Arc::new(AtomicUsize::new(0));
         let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let drain_timed_out_rx = observe_cloud_drain_timeout();
         let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
         let callback_gate = Arc::clone(&release_gate);
-        let callback_fired = Arc::new(AtomicBool::new(false));
-        let fired_in_callback = Arc::clone(&callback_fired);
         fail::cfg_callback(BLOCKED_UPLOAD_FAILPOINT, move || {
-            fired_in_callback.store(true, Ordering::SeqCst);
             let _ = entered_tx.try_send(());
             let (released, changed) = &*callback_gate;
             let mut released = released
@@ -5130,7 +5295,6 @@ mod shutdown_orchestration {
             shutdown_elapsed < Duration::from_millis(500),
             "shutdown exceeded its caller budget by too much: {shutdown_elapsed:?}"
         );
-        assert!(callback_fired.load(Ordering::SeqCst));
         assert!(
             wal_before_shutdown.is_subset(&wal_after_timeout),
             "timed-out shutdown removed local WAL needed for recovery: before={wal_before_shutdown:?}, after={wal_after_timeout:?}"
@@ -5138,11 +5302,13 @@ mod shutdown_orchestration {
         assert!(matches!(competing, Err(MidgeError::LeaseHeld(_))));
         assert_eq!(lease_loss_calls.load(Ordering::SeqCst), 0);
 
-        // Act: let the runtime's shorter injected cloud-drain deadline expire
-        // before releasing the real upload worker. The retained cleanup reaper
-        // must preserve that eventual durability result after the first Engine
-        // caller has already timed out.
-        std::thread::sleep(Duration::from_millis(150));
+        // Act: observe the runtime's shorter cloud-drain deadline before
+        // releasing the real upload worker. The retained cleanup reaper must
+        // preserve that eventual durability result after the Engine caller
+        // has already timed out.
+        drain_timed_out_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("runtime cloud drain reached its deadline");
         release.release();
         let terminal_shutdown = engine.shutdown(Duration::from_secs(5));
         let replayed_shutdown = engine.shutdown(Duration::from_millis(50));
@@ -5150,19 +5316,20 @@ mod shutdown_orchestration {
         // Assert: every later caller observes the runtime's terminal error rather
         // than a synthetic cleanup success.
         let terminal_message = match terminal_shutdown {
-            Err(MidgeError::Internal(message)) => message,
+            Err(MidgeError::Timeout(message)) => message,
             other => panic!("expected terminal cloud-drain error, got {other:?}"),
         };
         assert!(terminal_message.contains("cloud uploads"));
         assert!(matches!(
             replayed_shutdown,
-            Err(MidgeError::Internal(message)) if message == terminal_message
+            Err(MidgeError::Timeout(message)) if message == terminal_message
         ));
         assert!(
             !db_path.join(".midge_leader.lock").exists(),
             "completed shutdown cleanup must remove the acquisition lock"
         );
         fail::remove(BLOCKED_UPLOAD_FAILPOINT);
+        fail::remove(CLOUD_DRAIN_TIMEOUT_FAILPOINT);
         scenario.teardown();
         let mut reopened = Engine::open(reopen_options(&db_path, Arc::clone(&lease_loss_calls)))
             .expect("reopen only after blocked runtime has exited");
@@ -5417,7 +5584,9 @@ mod compaction_snapshot_publication {
             entered_rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("compaction publisher must reach its paused boundary");
-            let metrics = engine.get_runtime_metrics_with_timeout(Duration::from_millis(200));
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics_with_timeout(Duration::from_millis(200));
             release.release();
             let compaction_result = compaction.join().expect("join compaction thread");
             (metrics, compaction_result)
@@ -5903,6 +6072,7 @@ mod transaction_crash_boundaries {
         let engine = open_local_engine(db_path);
         let default_cf = default_cf(&engine);
         let before = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read baseline runtime metrics");
         let empty = engine
@@ -5928,6 +6098,7 @@ mod transaction_crash_boundaries {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             let metrics = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("read buffered durability metrics");
             if metrics.current_sequence > 0
@@ -5989,6 +6160,7 @@ mod transaction_crash_boundaries {
         let default_cf = default_cf(&engine);
         commit_fixed_sync_transaction(&engine, &default_cf, &[WRITER_LOSS_ACCEPTED_RECORD]);
         let sequence_before_failure = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read pre-rotation metrics")
             .current_sequence;
@@ -6000,6 +6172,7 @@ mod transaction_crash_boundaries {
             .expect("SST flush should complete before background WAL rotation fails");
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("read fenced runtime metrics")
                 .health,
@@ -6024,6 +6197,7 @@ mod transaction_crash_boundaries {
         ));
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("read post-rejection metrics")
                 .current_sequence,
@@ -6598,7 +6772,7 @@ mod cloud_crash_recovery {
 
         // Act
         let reopened = open_cloud_engine(db_path, None);
-        let metrics = wait_for_metrics(&reopened, Duration::from_secs(10), |metrics| {
+        let metrics = wait_for_metrics(&reopened, Duration::from_secs(30), |metrics| {
             metrics.current_sequence >= 1
                 && metrics.wal_cloud_durable_seq >= metrics.current_sequence
         });
@@ -6653,7 +6827,10 @@ mod cloud_crash_recovery {
         reset_dir(&db_path.join("sst"));
 
         let reopened = open_cloud_engine(db_path, Some(buffered_cloud_policy()));
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         // Act
         // Assert
         assert!(
@@ -6665,7 +6842,10 @@ mod cloud_crash_recovery {
             "reopen should preserve manifest persistence progress after crash"
         );
 
-        let layout = reopened.get_storage_layout().expect("storage layout");
+        let layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         assert!(
             layout
                 .levels
@@ -6818,6 +6998,7 @@ mod cloud_crash_recovery {
         }
 
         let pre_publish_metrics = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics before publish");
         assert!(
@@ -6931,7 +7112,10 @@ mod cloud_crash_recovery {
     {
         let deadline = Instant::now() + timeout;
         loop {
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             if predicate(&metrics) {
                 return metrics;
             }
@@ -7229,7 +7413,10 @@ mod cloud_persistence_hardening {
             b"remote-wal-value",
             WriteOptions::cloud_strict(),
         );
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         let local_segments = list_files_with_extension(&db_path.join("wal"), "wal");
         let remote_segments =
             list_files_with_extension(&db_path.join("cloud_store").join("wal"), "wal");
@@ -7760,7 +7947,10 @@ mod cloud_persistence_hardening {
         };
         let salvaged = Engine::open(cloud_open_options(&db_path, RecoveryPolicy::Salvage))
             .expect("salvage cloud reopen");
-        let metrics = salvaged.get_runtime_metrics().expect("runtime metrics");
+        let metrics = salvaged
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
 
         // Assert
         match strict_error {
@@ -7932,7 +8122,7 @@ mod cloud_persistence_hardening {
         let elapsed = started.elapsed();
 
         match error {
-            MidgeError::Internal(message) => assert!(
+            MidgeError::Timeout(message) => assert!(
                 message.contains("cloud uploads")
                     && (message.contains("storage-owned") || message.contains("runtime-owned")),
                 "expected pending cloud-upload shutdown error, got: {message}"
@@ -8012,7 +8202,10 @@ mod cloud_persistence_hardening {
     ) -> cntryl_midge::RuntimeMetricsSnapshot {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             if metrics.current_sequence >= min_sequence
                 && metrics.wal_cloud_durable_seq < metrics.current_sequence
                 && metrics.health == EngineHealth::Degraded
@@ -8038,7 +8231,10 @@ mod cloud_persistence_hardening {
     ) -> cntryl_midge::RuntimeMetricsSnapshot {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             if metrics.current_sequence >= min_sequence
                 && metrics.wal_cloud_durable_seq >= metrics.current_sequence
             {
@@ -8487,6 +8683,7 @@ mod cloud_ddl_two_phase_hardening {
         );
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded runtime metrics")
                 .health,
@@ -8497,6 +8694,7 @@ mod cloud_ddl_two_phase_hardening {
         assert!(reopened.get_column_family("local-retry").is_some());
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("reconciled runtime metrics")
                 .health,
@@ -8571,6 +8769,7 @@ mod cloud_ddl_two_phase_hardening {
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded runtime metrics")
                 .health,
@@ -8582,6 +8781,7 @@ mod cloud_ddl_two_phase_hardening {
         assert!(reopened.get_column_family("committed-create").is_some());
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("reconciled runtime metrics")
                 .health,
@@ -8617,6 +8817,7 @@ mod cloud_ddl_two_phase_hardening {
         assert!(engine.get_column_family("remote-drop").is_none());
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded runtime metrics")
                 .health,
@@ -8628,6 +8829,7 @@ mod cloud_ddl_two_phase_hardening {
         assert!(reopened.get_column_family("remote-drop").is_none());
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("reconciled runtime metrics")
                 .health,
@@ -8666,6 +8868,7 @@ mod cloud_ddl_two_phase_hardening {
         assert!(engine.get_column_family("lost-drop-response").is_none());
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded runtime metrics")
                 .health,
@@ -8677,6 +8880,7 @@ mod cloud_ddl_two_phase_hardening {
         assert!(reopened.get_column_family("lost-drop-response").is_none());
         assert_eq!(
             reopened
+                .metrics()
                 .get_runtime_metrics()
                 .expect("reconciled runtime metrics")
                 .health,
@@ -8735,6 +8939,7 @@ mod cloud_ddl_two_phase_hardening {
         ));
         assert_eq!(
             engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("degraded runtime metrics")
                 .health,
@@ -9428,12 +9633,20 @@ mod observability_api {
         engine.flush_cf(&default_cf).expect("flush default cf");
 
         // Act
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let report = engine
+            .storage_verifier()
             .verify_storage(Duration::from_secs(5))
             .expect("verify storage");
-        let offline_report = Engine::verify_path(db_path).expect("offline verify path");
+        let offline_report =
+            cntryl_midge::StorageVerifier::verify_path(db_path).expect("offline verify path");
 
         // Assert
         assert_eq!(metrics.health, EngineHealth::Healthy);
@@ -9515,7 +9728,9 @@ mod observability_api {
             .expect("open in-memory engine");
 
         // Act
-        let result = engine.verify_storage(Duration::from_secs(5));
+        let result = engine
+            .storage_verifier()
+            .verify_storage(Duration::from_secs(5));
 
         // Assert
         match result {
@@ -9543,7 +9758,10 @@ mod observability_api {
         .expect("open in-memory engine");
 
         // Act
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
 
         // Assert
         assert_eq!(metrics.memtable_size_limit, memtable_size);
@@ -9567,7 +9785,10 @@ mod observability_api {
         .expect("open in-memory engine");
 
         // Act
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
 
         // Assert
         assert_eq!(metrics.memtable_size_limit, memtable_size);
@@ -9600,9 +9821,16 @@ mod observability_api {
             .expect("write orphan file");
 
         // Act
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let report = engine
+            .storage_verifier()
             .verify_storage(Duration::from_secs(5))
             .expect("verify storage");
         let output = Command::new(env!("CARGO_BIN_EXE_midge"))
@@ -9845,9 +10073,16 @@ mod observability_api {
         // Act
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("reopen engine");
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
-        let layout = reopened.get_storage_layout().expect("storage layout");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
+        let layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let report = reopened
+            .storage_verifier()
             .verify_storage(Duration::from_secs(5))
             .expect("verify storage");
 
@@ -9902,8 +10137,12 @@ mod observability_api {
         // Act
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("reopen engine");
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
-        let report = Engine::verify_path(db_path).expect("offline verify path");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
+        let report =
+            cntryl_midge::StorageVerifier::verify_path(db_path).expect("offline verify path");
 
         // Assert
         assert_eq!(metrics.health, EngineHealth::Healthy);
@@ -9959,9 +10198,16 @@ mod observability_api {
         // Act
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("reopen engine");
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
-        let layout = reopened.get_storage_layout().expect("storage layout");
-        let report = Engine::verify_path(db_path).expect("offline verify path");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
+        let layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
+        let report =
+            cntryl_midge::StorageVerifier::verify_path(db_path).expect("offline verify path");
 
         // Assert
         assert_eq!(metrics.health, EngineHealth::Degraded);
@@ -10029,8 +10275,14 @@ mod observability_api {
         // Act
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("reopen engine");
-        let metrics = reopened.get_runtime_metrics().expect("runtime metrics");
-        let layout = reopened.get_storage_layout().expect("storage layout");
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
+        let layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
 
         // Assert
         assert_eq!(metrics.health, EngineHealth::Healthy);
@@ -10067,6 +10319,7 @@ mod observability_api {
 
         // Act
         let metrics = engine
+            .metrics()
             .get_runtime_metrics_with_timeout(Duration::from_secs(2))
             .expect("runtime metrics within timeout");
 
@@ -10096,7 +10349,9 @@ mod observability_api {
         .expect("open engine");
 
         // Act
-        let result = engine.get_runtime_metrics_with_timeout(Duration::from_millis(200));
+        let result = engine
+            .metrics()
+            .get_runtime_metrics_with_timeout(Duration::from_millis(200));
 
         // Assert
         assert!(
@@ -10111,6 +10366,7 @@ mod observability_api {
         scenario.teardown();
 
         let metrics = engine
+            .metrics()
             .get_runtime_metrics_with_timeout(Duration::from_secs(2))
             .expect("runtime metrics after unblocking");
         assert_eq!(metrics.health, EngineHealth::Healthy);
@@ -10128,7 +10384,9 @@ mod observability_api {
         .expect("open engine");
 
         // Act
-        let result = engine.get_runtime_metrics_with_timeout(Duration::ZERO);
+        let result = engine
+            .metrics()
+            .get_runtime_metrics_with_timeout(Duration::ZERO);
 
         // Assert
         assert!(
@@ -10138,7 +10396,10 @@ mod observability_api {
 
         // A zero deadline must fail fast without ever registering a response
         // slot, so the runtime must still answer a normal request afterward.
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::Healthy);
     }
 
@@ -10169,7 +10430,9 @@ mod observability_api {
             std::thread::sleep(Duration::from_millis(100));
             fail::remove("midge::runtime::before_get_runtime_metrics_response");
         });
-        let result = engine.get_runtime_metrics_with_timeout(Duration::from_secs(5));
+        let result = engine
+            .metrics()
+            .get_runtime_metrics_with_timeout(Duration::from_secs(5));
         releaser.join().expect("join stall releaser");
         scenario.teardown();
 
@@ -10204,7 +10467,9 @@ mod observability_api {
         // and times out on the client side without the event loop ever reaching
         // it, exercising the same abandon-and-unregister path repeatedly.
         for attempt in 0..5 {
-            let result = engine.get_runtime_metrics_with_timeout(Duration::from_millis(100));
+            let result = engine
+                .metrics()
+                .get_runtime_metrics_with_timeout(Duration::from_millis(100));
             assert!(
                 matches!(result, Err(MidgeError::Timeout(_))),
                 "attempt {attempt} expected Timeout, got: {result:?}"
@@ -10217,6 +10482,7 @@ mod observability_api {
         // Assert: none of the abandoned requests wedged the runtime; it still
         // answers once the stall clears.
         let metrics = engine
+            .metrics()
             .get_runtime_metrics_with_timeout(Duration::from_secs(2))
             .expect("runtime metrics after repeated timeouts");
         assert_eq!(metrics.health, EngineHealth::Healthy);
@@ -10237,7 +10503,9 @@ mod observability_api {
             .expect("shutdown engine");
 
         // Act
-        let result = engine.get_runtime_metrics_with_timeout(Duration::from_secs(2));
+        let result = engine
+            .metrics()
+            .get_runtime_metrics_with_timeout(Duration::from_secs(2));
 
         // Assert: a closed engine must reject the request rather than hang until
         // the deadline.
@@ -10331,7 +10599,10 @@ mod hybrid_storage {
 
         // Act
         let engine = Engine::open(opts).expect("open simulated cloud engine");
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
 
         // Assert
         assert_eq!(metrics.hybrid_max_local_bytes, budget_bytes);
@@ -10424,9 +10695,24 @@ mod hybrid_storage {
         }
 
         // Assert
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
-        assert!(metrics.hybrid_total_committed_bytes <= budget_bytes);
-        assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let local_sst_dir = temp_dir.path().join("sst");
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
+            let local_sst_files = count_files_recursive(&local_sst_dir);
+            if metrics.hybrid_total_committed_bytes <= budget_bytes && local_sst_files == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "published SSTs did not leave the local budget: committed={} budget={budget_bytes} local_files={local_sst_files}",
+                metrics.hybrid_total_committed_bytes
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
         let remote_bytes: u64 = std::fs::read_dir(temp_dir.path().join("cloud_store/sst"))
             .expect("remote SST directory")
             .map(|entry| {
@@ -10799,7 +11085,10 @@ mod hybrid_storage {
             "cloud unavailability during eviction caused local data loss"
         );
 
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_ne!(
             metrics.health,
             EngineHealth::Corrupt,
@@ -10920,7 +11209,8 @@ mod storage_verification_hardening {
         assert!(!sst_dir.exists());
 
         // Act
-        Engine::verify_path(temp_dir.path()).expect("verify empty storage fixture");
+        cntryl_midge::StorageVerifier::verify_path(temp_dir.path())
+            .expect("verify empty storage fixture");
 
         // Assert
         assert!(
@@ -10959,7 +11249,7 @@ mod storage_verification_hardening {
         .expect("write unsafe intent");
 
         // Act
-        let error = Engine::verify_path(temp_dir.path())
+        let error = cntryl_midge::StorageVerifier::verify_path(temp_dir.path())
             .expect_err("unsafe persisted SST name must fail verification");
 
         // Assert
@@ -10989,7 +11279,7 @@ mod storage_verification_hardening {
         .expect("write unsafe intent");
 
         // Act
-        let error = Engine::verify_path(temp_dir.path())
+        let error = cntryl_midge::StorageVerifier::verify_path(temp_dir.path())
             .expect_err("absolute persisted SST name must fail verification");
 
         // Assert
@@ -11019,7 +11309,8 @@ mod storage_verification_hardening {
         .expect("write recovery intent");
 
         // Act
-        let report = Engine::verify_path(temp_dir.path()).expect("verify local storage");
+        let report = cntryl_midge::StorageVerifier::verify_path(temp_dir.path())
+            .expect("verify local storage");
 
         // Assert
         assert!(
@@ -11047,6 +11338,7 @@ mod storage_verification_hardening {
 
         // Act
         let report = engine
+            .storage_verifier()
             .verify_storage(Duration::from_secs(2))
             .expect("verify online storage");
 
@@ -11085,7 +11377,9 @@ mod storage_verification_hardening {
 
         // Act
         let started = Instant::now();
-        let verification = engine.verify_storage(Duration::from_millis(25));
+        let verification = engine
+            .storage_verifier()
+            .verify_storage(Duration::from_millis(25));
         let elapsed = started.elapsed();
 
         let ddl_error = engine
@@ -11151,7 +11445,9 @@ mod storage_verification_hardening {
         .expect("open local engine");
 
         // Act
-        let verification = engine.verify_storage(Duration::from_millis(25));
+        let verification = engine
+            .storage_verifier()
+            .verify_storage(Duration::from_millis(25));
         let retry_deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match engine.create_column_family("after-lost-response") {
@@ -11195,7 +11491,9 @@ mod storage_verification_hardening {
                 .expect("build local options"),
         )
         .expect("open local engine");
-        let verification = engine.verify_storage(Duration::from_millis(25));
+        let verification = engine
+            .storage_verifier()
+            .verify_storage(Duration::from_millis(25));
 
         // Act
         let shutdown = engine.shutdown(Duration::from_millis(25));

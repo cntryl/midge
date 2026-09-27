@@ -1,5 +1,6 @@
 //! Bloom filter writer for building filters during SST creation
 
+#[cfg(any(test, feature = "internal-testing"))]
 use super::reader::BloomReader;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
@@ -18,14 +19,16 @@ pub enum BloomTestResult {
 
 impl BloomTestResult {
     /// Returns true if the key might be present (useful for conditional logic)
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
-    pub fn might_be_present(&self) -> bool {
+    pub fn might_be_present(self) -> bool {
         matches!(self, BloomTestResult::MightBePresent)
     }
 
     /// Returns true if the key is definitely not present
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
-    pub fn definitely_not_present(&self) -> bool {
+    pub fn definitely_not_present(self) -> bool {
         matches!(self, BloomTestResult::DefinitelyNotPresent)
     }
 }
@@ -33,9 +36,11 @@ impl BloomTestResult {
 /// Trait for bloom filter operations
 pub trait BloomFilterOps: Send + Sync + std::fmt::Debug {
     /// Test if a key might be in the filter
+    #[cfg(any(test, feature = "internal-testing"))]
     fn contains(&self, key: &[u8]) -> BloomTestResult;
 
     /// Get the size of the filter in bytes
+    #[cfg(any(test, feature = "internal-testing"))]
     fn size_bytes(&self) -> usize;
 
     /// Serialize the filter to bytes
@@ -134,6 +139,7 @@ impl BloomWriter {
     }
 
     /// Finalize and return the bloom filter reader
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn finish(self) -> BloomReader {
         BloomReader {
@@ -151,6 +157,7 @@ impl BloomWriter {
     }
 
     /// Get the actual key count
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn key_count(&self) -> usize {
         self.key_count
@@ -158,6 +165,7 @@ impl BloomWriter {
 }
 
 impl BloomFilterOps for BloomWriter {
+    #[cfg(any(test, feature = "internal-testing"))]
     fn contains(&self, key: &[u8]) -> BloomTestResult {
         // Compute both hashes ONCE (Kirsch-Mitzenmacher optimization)
         let h1 = xxh3_64_with_seed(key, SEED1);
@@ -183,6 +191,7 @@ impl BloomFilterOps for BloomWriter {
         BloomTestResult::MightBePresent
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     fn size_bytes(&self) -> usize {
         self.bits.len()
     }

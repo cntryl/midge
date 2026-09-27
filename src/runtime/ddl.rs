@@ -10,6 +10,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::traits::{FsPath, OpenMode, OpenOptions};
+use crate::io::FsError;
 use crate::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
 use crate::runtime::RuntimeState;
 use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
@@ -216,7 +217,7 @@ fn local_prepare_exists(state: &RuntimeState) -> MidgeResult<bool> {
     state
         .fs
         .exists(&FsPath::new(LOCAL_DDL_PREPARE_FILE))
-        .map_err(MidgeError::from)
+        .map_err(FsError::into_midge)
 }
 
 fn read_local_prepare(state: &RuntimeState) -> MidgeResult<Option<DdlPrepare>> {
@@ -224,7 +225,7 @@ fn read_local_prepare(state: &RuntimeState) -> MidgeResult<Option<DdlPrepare>> {
         return Ok(None);
     }
     let path = FsPath::new(LOCAL_DDL_PREPARE_FILE);
-    let metadata = state.fs.metadata(&path).map_err(MidgeError::from)?;
+    let metadata = state.fs.metadata(&path).map_err(FsError::into_midge)?;
     let file = state
         .fs
         .open(
@@ -236,8 +237,8 @@ fn read_local_prepare(state: &RuntimeState) -> MidgeResult<Option<DdlPrepare>> {
                 truncate: false,
             },
         )
-        .map_err(MidgeError::from)?;
-    let bytes = file.read_at(0, metadata.len).map_err(MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
+    let bytes = file.read_at(0, metadata.len).map_err(FsError::into_midge)?;
     Ok(Some(deserialize(&bytes)?))
 }
 
@@ -269,11 +270,11 @@ fn clear_local_prepare(state: &RuntimeState) -> MidgeResult<()> {
     state
         .fs
         .remove_file(&FsPath::new(LOCAL_DDL_PREPARE_FILE))
-        .map_err(MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
     state
         .fs
         .sync_dir(&FsPath::new("."), crate::io::traits::Durability::Durable)
-        .map_err(MidgeError::from)
+        .map_err(FsError::into_midge)
 }
 
 fn read_remote_registry(
@@ -403,7 +404,7 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
     crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
         MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
     ));
-    state.manifest = candidate;
+    state.manifest.replace(candidate);
     if let Some(edit_id) = journaled_id {
         state.manifest.note_applied_journal_edit(edit_id);
     }

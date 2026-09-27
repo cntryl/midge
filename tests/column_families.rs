@@ -99,6 +99,7 @@ fn should_create_column_family_with_custom_config_given_config_when_creating() {
             .create_column_family("test_cf")
             .expect("create column family under configured engine");
         let metrics = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read configured runtime metrics");
 
@@ -782,6 +783,7 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
             }
         }
         let layout_before = engine
+            .metrics()
             .get_storage_layout()
             .expect("layout before compact all");
         let l0_before = layout_before
@@ -798,6 +800,7 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
 
         // Assert
         let layout_after = engine
+            .metrics()
             .get_storage_layout()
             .expect("layout after compact all");
         let l0_after = layout_after

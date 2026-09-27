@@ -54,7 +54,6 @@ impl CloudWritePolicy {
 #[derive(Debug, Clone)]
 pub(crate) struct CloudWritePolicyConfig {
     pub(crate) policy: CloudWritePolicy,
-    pub(crate) storage_io_timeout: Duration,
     pub(crate) shutdown_drain_timeout: Duration,
     pub(crate) local_storage_budget_bytes: Option<u64>,
 }
@@ -63,7 +62,6 @@ impl Default for CloudWritePolicyConfig {
     fn default() -> Self {
         Self {
             policy: CloudWritePolicy::default(),
-            storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             shutdown_drain_timeout: crate::config::DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT,
             local_storage_budget_bytes: None,
         }

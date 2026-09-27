@@ -12,16 +12,8 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Re-read the manifest and intent log from disk after another writer
-    /// may have advanced them.
-    ///
-    /// The flush worker publishes by doing load-modify-save on both files,
-    /// while the event loop treats its in-memory copies as authoritative and
-    /// rewrites each file wholesale. A publication that fails after the
-    /// journal append or the durable intent leaves disk ahead of memory, and
-    /// the next publication from the event loop would write memory back over
-    /// it, erasing an SST that is already published. Reloading here is what
-    /// makes the two views agree again before anything else publishes.
+    /// Re-read the manifest and intent log after a local metadata write had
+    /// an uncertain result. No other runtime writer may advance either file.
     pub(crate) fn reload_persisted_metadata(&mut self) -> MidgeResult<()> {
         if self.is_memory_mode() {
             return Ok(());
@@ -42,7 +34,7 @@ impl RuntimeState {
         });
         match loaded {
             Ok((manifest, intents)) => {
-                self.manifest = manifest;
+                self.manifest.replace(manifest);
                 self.intent_log = intents;
                 self.recovery.metadata = super::MetadataSync::Current;
                 Ok(())
@@ -78,6 +70,11 @@ impl RuntimeState {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn fence_metadata_until_reloaded(&mut self) {
+        self.recovery.metadata = super::MetadataSync::ReloadRequired;
+        self.mark_persistence_anomaly();
     }
 
     pub(super) fn persist_intent_entries(
@@ -205,7 +202,31 @@ impl RuntimeState {
         Ok(())
     }
 
-    #[cfg(test)]
+    pub(crate) fn record_flush_publication_intent(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sequence: u64,
+        file_meta: &crate::runtime::FileMeta,
+    ) -> MidgeResult<()> {
+        let mut proposed = self.intent_log.clone();
+        proposed.retain(|entry| {
+            !matches!(
+                entry,
+                crate::runtime::IntentLogEntry::FlushPublish { file_meta: existing, .. }
+                    if existing.name == file_meta.name
+            )
+        });
+        proposed.push(crate::runtime::IntentLogEntry::FlushPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id,
+            sequence,
+            file_meta: file_meta.clone(),
+        });
+        self.persist_intent_entries(&proposed)?;
+        self.intent_log = proposed;
+        Ok(())
+    }
+
     pub fn clear_flush_publication_intent(&mut self, sst_name: &str) -> MidgeResult<()> {
         let mut proposed = self.intent_log.clone();
         proposed.retain(|entry| {
@@ -217,6 +238,68 @@ impl RuntimeState {
         });
         self.persist_intent_entries(&proposed)?;
         self.intent_log = proposed;
+        Ok(())
+    }
+
+    pub(crate) fn commit_flush_publication(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sequence: u64,
+        file_meta: &crate::runtime::FileMeta,
+        next_sst_seq: u64,
+        require_snapshot: bool,
+    ) -> MidgeResult<()> {
+        self.ensure_metadata_current()?;
+        let manifest_meta: crate::metadata::FileMeta = file_meta.into();
+        let next_sst_seq = self
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(1)
+            .max(next_sst_seq);
+        match self
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.name == manifest_meta.name)
+        {
+            Some(existing) if existing.same_identity(&manifest_meta) => {}
+            Some(_) => {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "flush output conflicts with existing SST {}",
+                    manifest_meta.name
+                )));
+            }
+            None => {
+                crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
+                let edit_id = self.manifest_store.append_batch(&[
+                    crate::metadata::ManifestEdit::BumpNextSstSeq {
+                        cf_id,
+                        next_seq: next_sst_seq,
+                    },
+                    crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
+                ])?;
+                self.manifest.add_file(manifest_meta);
+                self.manifest.note_applied_journal_edit(edit_id);
+                crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
+            }
+        }
+        self.manifest
+            .next_sst_seqs
+            .entry(cf_id)
+            .and_modify(|next| *next = (*next).max(next_sst_seq))
+            .or_insert(next_sst_seq);
+        self.manifest.last_persisted_sequence = self.manifest.last_persisted_sequence.max(sequence);
+        self.clear_flush_publication_intent(&file_meta.name)?;
+        match self.manifest_store.save_snapshot(&self.manifest) {
+            Ok(written) => written.adopt_into(&mut self.manifest),
+            Err(error) if !require_snapshot => {
+                self.mark_persistence_anomaly();
+                tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
+            }
+            Err(error) => return Err(error),
+        }
         Ok(())
     }
 
@@ -339,19 +422,7 @@ impl RuntimeState {
             return false;
         }
 
-        self.manifest.files.push(crate::metadata::FileMeta {
-            name: file_meta.name.clone(),
-            level: file_meta.level,
-            size_bytes: file_meta.size_bytes,
-            content_crc32c: file_meta.content_crc32c,
-            cf_id: file_meta.cf_id,
-            smallest_key: file_meta.smallest_key.clone(),
-            largest_key: file_meta.largest_key.clone(),
-            smallest_seq: file_meta.smallest_seq,
-            largest_seq: file_meta.largest_seq,
-            key_bounds_complete: file_meta.key_bounds_complete,
-            ..Default::default()
-        });
+        self.manifest.add_file(file_meta.into());
         true
     }
 
@@ -361,7 +432,7 @@ impl RuntimeState {
         added: &[crate::runtime::FileMeta],
     ) -> bool {
         let mut changed = false;
-        self.manifest.files.retain(|file| {
+        self.manifest.retain_files(|file| {
             let keep = !removed.contains(&file.name);
             if !keep {
                 changed = true;
@@ -385,21 +456,7 @@ impl RuntimeState {
         }
 
         self.manifest_store
-            .append(&crate::metadata::ManifestEdit::AddSst(
-                crate::metadata::FileMeta {
-                    name: file_meta.name.clone(),
-                    level: file_meta.level,
-                    size_bytes: file_meta.size_bytes,
-                    content_crc32c: file_meta.content_crc32c,
-                    cf_id: file_meta.cf_id,
-                    smallest_key: file_meta.smallest_key.clone(),
-                    largest_key: file_meta.largest_key.clone(),
-                    smallest_seq: file_meta.smallest_seq,
-                    largest_seq: file_meta.largest_seq,
-                    key_bounds_complete: file_meta.key_bounds_complete,
-                    ..Default::default()
-                },
-            ))
+            .append(&crate::metadata::ManifestEdit::AddSst(file_meta.into()))
             .map(|_| ())
     }
 
@@ -417,21 +474,7 @@ impl RuntimeState {
             edits.push(crate::metadata::ManifestEdit::RemoveSst { name: name.clone() });
         }
         for file_meta in added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(
-                crate::metadata::FileMeta {
-                    name: file_meta.name.clone(),
-                    level: file_meta.level,
-                    size_bytes: file_meta.size_bytes,
-                    content_crc32c: file_meta.content_crc32c,
-                    cf_id: file_meta.cf_id,
-                    smallest_key: file_meta.smallest_key.clone(),
-                    largest_key: file_meta.largest_key.clone(),
-                    smallest_seq: file_meta.smallest_seq,
-                    largest_seq: file_meta.largest_seq,
-                    key_bounds_complete: file_meta.key_bounds_complete,
-                    ..Default::default()
-                },
-            ));
+            edits.push(crate::metadata::ManifestEdit::AddSst(file_meta.into()));
         }
 
         if edits.is_empty() {

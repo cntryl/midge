@@ -7,9 +7,7 @@ pub(crate) use config::{
 };
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
-#[cfg(test)]
-use crate::common::MidgeError;
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
 use crate::types::EntryType;
 use std::path::Path;
@@ -81,6 +79,12 @@ pub(crate) fn execute_compaction_at_target(
     output_sink: Option<&CompactionOutputSink<'_>>,
     output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
+    if plan.input_files != strategy::combined_input_files(&plan.source_files, &plan.target_files) {
+        return Err(MidgeError::Corruption(
+            "compaction replacement set differs from source and target inputs".into(),
+        ));
+    }
+
     // An empty plan is a planner no-op and must not create an unreferenced
     // output. The executor separately rejects non-empty plans whose selected
     // inputs decode to no versions or range tombstones.
@@ -91,23 +95,11 @@ pub(crate) fn execute_compaction_at_target(
     // --- 1. Open bounded source streams and chained level spans ------------
     let budget = resources.budget;
     let target_sst_size = resources.target_sst_size;
-    let (source_files, target_files, source_level) =
-        if plan.source_files.is_empty() && plan.target_files.is_empty() {
-            // Compatibility for focused executor tests and explicitly constructed
-            // internal plans: treat the legacy combined vector as source streams.
-            (plan.input_files.as_slice(), &[][..], 0)
-        } else {
-            (
-                plan.source_files.as_slice(),
-                plan.target_files.as_slice(),
-                plan.source_level,
-            )
-        };
     let inputs = executor::collect_compaction_stream_inputs(
         sst_factory,
-        source_files,
-        target_files,
-        source_level,
+        &plan.source_files,
+        &plan.target_files,
+        plan.source_level,
         &budget,
         abort_check,
     )?;
@@ -158,6 +150,7 @@ fn output_filename(plan: &CompactionPlan, partition: u32, output_dir: &Path) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::FsError;
     use crate::sst::traits::SstFactory;
     use tempfile::tempdir;
 
@@ -168,7 +161,8 @@ mod tests {
 
         // Arrange: reproduce the pre-admission writer's on-disk bytes directly.
         let dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let value = vec![b'v'; MAX_DECOMPRESSED_BLOCK_SIZE];
         crate::sst::fs::factory_io::write_legacy_oversized_uncompressed_sst(
             std::sync::Arc::clone(&fs) as std::sync::Arc<dyn crate::io::Fs>,
@@ -185,23 +179,21 @@ mod tests {
         ] {
             let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096)
                 .with_compression_policy(CompressionPolicy::Fixed(algo));
-            assert_eq!(
-                factory
-                    .open(Path::new("legacy.sst"))?
-                    .get(b"legacy")?
-                    .as_deref(),
-                Some(value.as_slice())
+            assert!(
+                matches!(factory.open(Path::new("legacy.sst"))?.get_state(b"legacy")?,
+                crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
             );
             let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
             plan.compaction_memory_limit = 1024 * 1024 * 1024;
-            plan.input_files.push("legacy.sst".to_string());
+            plan.add_test_source("legacy.sst".to_string());
 
             // Act
             let outputs = execute_compaction(&plan, &factory, dir.path(), None)?;
 
             // Assert
             let reader = factory.open(Path::new(&outputs[0]))?;
-            assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
+            assert!(matches!(reader.get_state(b"legacy")?,
+                crate::types::KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice()));
             assert!(matches!(
                 reader.get_state(b"legacy")?,
                 crate::types::KeyState::Value(_, 7, Some(u64::MAX), _)
@@ -216,7 +208,8 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         for index in 0..128_u8 {
@@ -228,7 +221,7 @@ mod tests {
         }
         writer.finish_to_path(&dir.path().join("ranges.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
-        plan.input_files.push("ranges.sst".into());
+        plan.add_test_source("ranges.sst");
         plan.target_sst_size = 128 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
         let sink =
@@ -264,7 +257,8 @@ mod tests {
         // soft target can roll. A span of range tombstones with no surviving
         // points must still roll instead of holding every tombstone at once.
         let dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         for index in 0..512_u32 {
@@ -276,7 +270,7 @@ mod tests {
         }
         writer.finish_to_path(&dir.path().join("ranges.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
-        plan.input_files.push("ranges.sst".into());
+        plan.add_test_source("ranges.sst");
         plan.target_sst_size = 16 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
         let sink =
@@ -313,7 +307,8 @@ mod tests {
     fn should_roll_before_next_key_when_individual_records_fit_local_staging() -> MidgeResult<()> {
         // Arrange
         let dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096).with_compression_policy(
             crate::codec::CompressionPolicy::Fixed(crate::codec::CompressionAlgo::None),
         );
@@ -330,7 +325,7 @@ mod tests {
                 None,
             )?;
             writer.finish_to_path(&dir.path().join(&name))?;
-            plan.input_files.push(name);
+            plan.add_test_source(name);
         }
         let observed = std::cell::RefCell::new(Vec::new());
         let sink =
@@ -371,7 +366,8 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(
@@ -383,7 +379,7 @@ mod tests {
         )?;
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
-        plan.input_files.push("input.sst".into());
+        plan.add_test_source("input.sst");
 
         // Act
         let result = execute_compaction_with_output_sink(
@@ -409,7 +405,8 @@ mod tests {
     fn should_drain_each_completed_partition_before_building_the_next_output() -> MidgeResult<()> {
         // Arrange
         let dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096).with_compression_policy(
             crate::codec::CompressionPolicy::Fixed(crate::codec::CompressionAlgo::None),
         );
@@ -425,7 +422,7 @@ mod tests {
         }
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
-        plan.input_files.push("input.sst".into());
+        plan.add_test_source("input.sst");
         plan.target_sst_size = 32 * 1024;
         plan.compaction_memory_limit = 128 * 1024;
         let drained = std::cell::RefCell::new(Vec::new());
@@ -621,7 +618,9 @@ mod tests {
     fn should_produce_no_output_given_empty_compaction_input() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
         let output_path = temp_dir
@@ -641,12 +640,14 @@ mod tests {
     fn should_reject_nonempty_plan_when_selected_sst_contains_no_entries() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let input = factory.create()?;
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("empty-input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
-        plan.input_files.push("empty-input.sst".to_string());
+        plan.add_test_source("empty-input.sst".to_string());
 
         // Act
         let result = execute_compaction(&plan, &factory, temp_dir.path(), None);
@@ -658,18 +659,53 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_plan_when_replacement_set_differs_from_merge_inputs() -> MidgeResult<()> {
+        // Arrange: the omitted SST must never be removed from a manifest edit
+        // without contributing its contents to the replacement output.
+        let dir = tempdir()?;
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        for (name, key) in [
+            ("source.sst", &b"source"[..]),
+            ("omitted.sst", &b"omitted"[..]),
+        ] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(key, Some(b"value"), 1, EntryType::Put, None)?;
+            writer.finish_to_path(&dir.path().join(name))?;
+        }
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
+        plan.source_files = vec!["source.sst".into()];
+        plan.input_files = vec!["omitted.sst".into(), "source.sst".into()];
+        let output = output_filename(&plan, 0, dir.path());
+
+        // Act
+        let result = execute_compaction(&plan, &factory, dir.path(), None);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+        assert!(
+            !output.exists(),
+            "invalid plan must not write an output SST"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn should_not_drop_unexpired_value_given_compaction_time_before_expiration() -> MidgeResult<()>
     {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let expiration = u64::MAX - 1;
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"live", Some(b"value"), 7, EntryType::Put, Some(expiration))?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(41);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -691,7 +727,9 @@ mod tests {
         // Arrange: compaction is deliberately time-independent. It preserves
         // raw TTL metadata so a snapshot can apply its own read timestamp.
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let expiration = 100;
         let mut writer = factory.create()?;
@@ -704,7 +742,7 @@ mod tests {
         )?;
         crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("expired.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(49);
-        plan.input_files.push("expired.sst".to_string());
+        plan.add_test_source("expired.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -729,7 +767,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut older = factory.create()?;
         older.add_with_meta(b"same", Some(b"old"), 3, EntryType::Put, None)?;
@@ -738,8 +778,8 @@ mod tests {
         newer.add_with_meta(b"same", None, 4, EntryType::Delete, None)?;
         crate::sst::fs::finish_writer_to_path(newer, &temp_dir.path().join("newer.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(50);
-        plan.input_files
-            .extend(["older.sst".to_string(), "newer.sst".to_string()]);
+        plan.add_test_source("older.sst");
+        plan.add_test_source("newer.sst");
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -760,7 +800,9 @@ mod tests {
         // logical payload is identical. Conflicting payloads are rejected by
         // the adjacent fail-closed corruption regression.
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         for name in ["first.sst", "second.sst"] {
             let mut writer = factory.create()?;
@@ -768,8 +810,8 @@ mod tests {
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(51);
-        plan.input_files
-            .extend(["first.sst".to_string(), "second.sst".to_string()]);
+        plan.add_test_source("first.sst");
+        plan.add_test_source("second.sst");
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -790,7 +832,9 @@ mod tests {
     {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
 
         let mut input_writer = factory.create()?;
@@ -799,7 +843,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -829,7 +873,9 @@ mod tests {
     fn should_preserve_recent_point_tombstones_when_snapshot_horizon_exists() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
 
         let mut input_writer = factory.create()?;
@@ -840,7 +886,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 0, 1)
             .with_output_seq(43)
             .with_snapshot_horizon(Some(10));
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -863,7 +909,9 @@ mod tests {
     {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"alpha", None, 5, EntryType::Delete, None)?;
@@ -872,7 +920,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(45)
             .with_tombstone_gc_eligibility(true, false);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -895,7 +943,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let input_name = crate::cloud_layout::file_name(0, 0, 1);
         let mut input_writer = factory.create()?;
@@ -944,7 +994,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let source_name = crate::cloud_layout::file_name(0, 1, 1);
         let target_name = crate::cloud_layout::file_name(0, 2, 2);
@@ -1013,7 +1065,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"point", None, 11, EntryType::Delete, None)?;
@@ -1023,7 +1077,7 @@ mod tests {
             .with_output_seq(49)
             .with_snapshot_horizon(Some(10))
             .with_tombstone_gc_eligibility(true, true);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1043,7 +1097,9 @@ mod tests {
     fn should_remove_covered_value_before_dropping_obsolete_range_tombstone() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut value_writer = factory.create()?;
         value_writer.add_with_meta(b"middle", Some(b"deleted"), 1, EntryType::Put, None)?;
@@ -1058,8 +1114,9 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(46)
             .with_tombstone_gc_eligibility(true, true);
-        plan.input_files
-            .extend(["values.sst".to_string(), "range-delete.sst".to_string()]);
+        plan.add_test_source("values.sst");
+        plan.target_files.push("range-delete.sst".into());
+        plan.input_files = strategy::combined_input_files(&plan.source_files, &plan.target_files);
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1083,7 +1140,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"deleted", None, 5, EntryType::Delete, None)?;
@@ -1091,7 +1150,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(47)
             .with_tombstone_gc_eligibility(true, false);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1110,7 +1169,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         for (name, value) in [
             ("first.sst", b"first".as_slice()),
@@ -1121,8 +1182,8 @@ mod tests {
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(48);
-        plan.input_files
-            .extend(["first.sst".to_string(), "second.sst".to_string()]);
+        plan.add_test_source("first.sst");
+        plan.add_test_source("second.sst");
 
         // Act
         let error = execute_compaction(&plan, &factory, temp_dir.path(), None)
@@ -1141,7 +1202,9 @@ mod tests {
     fn should_leave_inputs_untouched_when_compaction_is_cancelled() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let input_name = "input.sst";
         let input_path = temp_dir.path().join(input_name);
@@ -1151,7 +1214,7 @@ mod tests {
         let input_bytes = std::fs::read(&input_path)?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(44);
-        plan.input_files.push(input_name.to_string());
+        plan.add_test_source(input_name.to_string());
         let cancelled = || true;
 
         // Act
@@ -1175,7 +1238,9 @@ mod tests {
         // Arrange: make cancellation happen after input collection and the
         // first streaming check, immediately after output finalization.
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let input_name = "input.sst";
         let input_path = temp_dir.path().join(input_name);
@@ -1185,7 +1250,7 @@ mod tests {
         let input_bytes = std::fs::read(&input_path)?;
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(45);
-        plan.input_files.push(input_name.to_string());
+        plan.add_test_source(input_name.to_string());
         let checks = AtomicUsize::new(0);
         let cancelled_after_finalize = || checks.fetch_add(1, Ordering::SeqCst) >= 3;
 
@@ -1211,98 +1276,126 @@ mod tests {
         Ok(())
     }
 
+    struct RejectFinishBytesWriter {
+        inner: Box<dyn crate::sst::traits::DynSstWriter>,
+    }
+
+    impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
+        fn estimated_size_bytes(&self) -> usize {
+            self.inner.estimated_size_bytes()
+        }
+
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            self.inner.encoded_size_upper_bound()
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Option<usize> {
+            self.inner
+                .encoded_size_upper_bound_after_sorted_entry(key, value)
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            start: &[u8],
+            end: &[u8],
+        ) -> Option<usize> {
+            self.inner
+                .additional_range_tombstone_size_upper_bound(start, end)
+        }
+
+        #[cfg(test)]
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_sorted_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
+            self.inner.add_range_tombstone(start, end, seq)
+        }
+
+        fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+            self.inner.finish_to_path(path)
+        }
+
+        fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+            Err(MidgeError::Internal(
+                "finish_bytes must not be used by compaction".to_string(),
+            ))
+        }
+    }
+
+    struct RejectFinishBytesFactory {
+        inner: crate::sst::FsSstFactoryIo,
+    }
+
+    impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
+        fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+            self.inner.output_fs()
+        }
+
+        fn compaction_scratch_cleanup_verified(&self) -> bool {
+            self.inner.compaction_scratch_cleanup_verified()
+        }
+
+        fn create_for_compaction(
+            &self,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(RejectFinishBytesWriter {
+                inner: self.inner.create_for_compaction(budget)?,
+            }))
+        }
+
+        fn open_for_compaction(
+            &self,
+            path: &Path,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.inner.open_for_compaction(path, budget)
+        }
+
+        #[cfg(test)]
+        fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(RejectFinishBytesWriter {
+                inner: self.inner.create()?,
+            }))
+        }
+
+        fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.inner.open(path)
+        }
+    }
+
     #[test]
     fn should_stream_compaction_finalization_when_finish_bytes_is_rejected() -> MidgeResult<()> {
         // Arrange
-        struct RejectFinishBytesWriter {
-            inner: Box<dyn crate::sst::traits::DynSstWriter>,
-        }
-
-        impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
-            fn encoded_size_upper_bound(&self) -> Option<usize> {
-                self.inner.encoded_size_upper_bound()
-            }
-
-            fn encoded_size_upper_bound_after_sorted_entry(
-                &self,
-                key: &[u8],
-                value: Option<&[u8]>,
-            ) -> Option<usize> {
-                self.inner
-                    .encoded_size_upper_bound_after_sorted_entry(key, value)
-            }
-
-            fn additional_range_tombstone_size_upper_bound(
-                &self,
-                start: &[u8],
-                end: &[u8],
-            ) -> Option<usize> {
-                self.inner
-                    .additional_range_tombstone_size_upper_bound(start, end)
-            }
-
-            fn add_with_meta(
-                &mut self,
-                key: &[u8],
-                value: Option<&[u8]>,
-                seq: u64,
-                op_type: EntryType,
-                expiration: Option<u64>,
-            ) -> MidgeResult<()> {
-                self.inner
-                    .add_with_meta(key, value, seq, op_type, expiration)
-            }
-
-            fn add_sorted_with_meta(
-                &mut self,
-                key: &[u8],
-                value: Option<&[u8]>,
-                seq: u64,
-                op_type: EntryType,
-                expiration: Option<u64>,
-            ) -> MidgeResult<()> {
-                self.inner
-                    .add_sorted_with_meta(key, value, seq, op_type, expiration)
-            }
-
-            fn add_range_tombstone(
-                &mut self,
-                start: &[u8],
-                end: &[u8],
-                seq: u64,
-            ) -> MidgeResult<()> {
-                self.inner.add_range_tombstone(start, end, seq)
-            }
-
-            fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-                self.inner.finish_to_path(path)
-            }
-
-            fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-                Err(MidgeError::Internal(
-                    "finish_bytes must not be used by compaction".to_string(),
-                ))
-            }
-        }
-
-        struct RejectFinishBytesFactory {
-            inner: crate::sst::FsSstFactoryIo,
-        }
-
-        impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
-            fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-                Ok(Box::new(RejectFinishBytesWriter {
-                    inner: self.inner.create()?,
-                }))
-            }
-
-            fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
-                self.inner.open(path)
-            }
-        }
-
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = base_factory.create()?;
         input.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
@@ -1311,7 +1404,7 @@ mod tests {
             inner: base_factory,
         };
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(46);
-        plan.input_files.push("input.sst".to_string());
+        plan.add_test_source("input.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1319,7 +1412,9 @@ mod tests {
         // Assert
         assert_eq!(outputs.len(), 1);
         let reader = factory.open(Path::new(&outputs[0]))?;
-        assert_eq!(reader.get(b"key")?.as_deref(), Some(b"value".as_slice()));
+        assert!(
+            matches!(reader.get_state(b"key")?, crate::types::KeyState::Value(value, _, _, _) if value.as_ref() == b"value")
+        );
         Ok(())
     }
 
@@ -1327,7 +1422,9 @@ mod tests {
     fn should_partition_compaction_output_at_soft_target_between_user_keys() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = factory.create()?;
         let value = vec![b'v'; 512];
@@ -1344,7 +1441,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("large-input.sst"))?;
         let mut plan = CompactionPlan::new(7, 0, 1).with_output_seq(52);
         plan.target_sst_size = 4096;
-        plan.input_files.push("large-input.sst".to_string());
+        plan.add_test_source("large-input.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1389,7 +1486,9 @@ mod tests {
     fn should_include_filter_metadata_when_partitioning_many_small_keys() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = factory.create()?;
         for index in 0..50_000u64 {
@@ -1399,7 +1498,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("small-keys.sst"))?;
         let mut plan = CompactionPlan::new(8, 0, 1).with_output_seq(53);
         plan.target_sst_size = 64 * 1024;
-        plan.input_files.push("small-keys.sst".to_string());
+        plan.add_test_source("small-keys.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1421,7 +1520,9 @@ mod tests {
     fn should_fragment_range_tombstone_at_compaction_partition_boundaries() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = factory.create()?;
         let value = vec![b'v'; 512];
@@ -1439,7 +1540,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("range-input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(53);
         plan.target_sst_size = 4096;
-        plan.input_files.push("range-input.sst".to_string());
+        plan.add_test_source("range-input.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1475,7 +1576,9 @@ mod tests {
     fn should_include_range_tombstone_metadata_in_partition_rollover() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
             .with_compression_policy(crate::codec::CompressionPolicy::None);
         let mut input = factory.create()?;
@@ -1505,8 +1608,7 @@ mod tests {
         )?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(54);
         plan.target_sst_size = 64 * 1024;
-        plan.input_files
-            .push("metadata-heavy-input.sst".to_string());
+        plan.add_test_source("metadata-heavy-input.sst");
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1529,7 +1631,9 @@ mod tests {
     fn should_stream_tombstone_only_compaction_output() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = factory.create()?;
         input.add_range_tombstone(b"a", b"z", 17)?;
@@ -1538,8 +1642,7 @@ mod tests {
             &temp_dir.path().join("tombstone-only-input.sst"),
         )?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(54);
-        plan.input_files
-            .push("tombstone-only-input.sst".to_string());
+        plan.add_test_source("tombstone-only-input.sst");
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1559,7 +1662,9 @@ mod tests {
     fn should_never_split_equal_user_keys_across_compaction_partitions() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = factory.create()?;
         let large_value = vec![b'x'; 8 * 1024];
@@ -1577,7 +1682,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("same-key.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(55);
         plan.target_sst_size = 4096;
-        plan.input_files.push("same-key.sst".to_string());
+        plan.add_test_source("same-key.sst".to_string());
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1659,6 +1764,7 @@ mod tests {
                 self.inner.estimated_size_bytes()
             }
 
+            #[cfg(test)]
             fn add_with_meta(
                 &mut self,
                 key: &[u8],
@@ -1710,6 +1816,23 @@ mod tests {
         }
 
         impl crate::sst::traits::SstFactory for CountingFactory {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
+            fn open_for_compaction(
+                &self,
+                path: &Path,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open_for_compaction(path, budget)
+            }
+
+            #[cfg(test)]
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 Ok(Box::new(CountingWriter {
                     inner: self.inner.create()?,
@@ -1733,7 +1856,9 @@ mod tests {
         }
 
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = base_factory.create()?;
         let value = vec![b'v'; 512];
@@ -1756,7 +1881,7 @@ mod tests {
         };
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(56);
         plan.target_sst_size = 4096;
-        plan.input_files.push("cancel-input.sst".to_string());
+        plan.add_test_source("cancel-input.sst".to_string());
         let abort = || finalized.load(std::sync::atomic::Ordering::SeqCst) > 0;
 
         // Act
@@ -1783,7 +1908,9 @@ mod tests {
     fn should_compact_sixty_five_target_files_with_two_merge_heads() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let source_name = "source.sst".to_string();
         let mut source = factory.create()?;
@@ -1806,8 +1933,7 @@ mod tests {
         let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(57);
         plan.source_files.push(source_name);
         plan.target_files.clone_from(&target_names);
-        plan.input_files.extend(plan.source_files.clone());
-        plan.input_files.extend(target_names);
+        plan.input_files = strategy::combined_input_files(&plan.source_files, &target_names);
         let budget =
             crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
         let streams = executor::collect_compaction_stream_inputs(
@@ -1867,7 +1993,9 @@ mod tests {
     fn should_drain_equal_key_history_across_adjacent_target_files() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         for (name, sequence, value) in [
             ("source.sst", 3, b"source".as_slice()),
@@ -1884,8 +2012,7 @@ mod tests {
             "target-left.sst".to_string(),
             "target-right.sst".to_string(),
         ]);
-        plan.input_files.extend(plan.source_files.clone());
-        plan.input_files.extend(plan.target_files.clone());
+        plan.input_files = strategy::combined_input_files(&plan.source_files, &plan.target_files);
 
         // Act
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -1912,6 +2039,15 @@ mod tests {
         }
 
         impl crate::sst::SstFactory for TransitionFactory<'_> {
+            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+                self.inner.output_fs()
+            }
+
+            fn compaction_scratch_cleanup_verified(&self) -> bool {
+                self.inner.compaction_scratch_cleanup_verified()
+            }
+
+            #[cfg(test)]
             fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
                 self.inner.create()
             }
@@ -1943,7 +2079,9 @@ mod tests {
 
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let source_name = "transition-source.sst".to_string();
         let mut source = base_factory.create()?;
@@ -1978,8 +2116,8 @@ mod tests {
                 .with_output_seq(100 + u64::try_from(completed_targets).expect("small index"));
             plan.source_files.push(source_name.clone());
             plan.target_files.clone_from(&target_names);
-            plan.input_files.extend(plan.source_files.clone());
-            plan.input_files.extend(plan.target_files.clone());
+            plan.input_files =
+                strategy::combined_input_files(&plan.source_files, &plan.target_files);
             let abort = || cancelled.load(Ordering::SeqCst);
             let error = execute_compaction(&plan, &factory, temp_dir.path(), Some(&abort))
                 .expect_err("transition cancellation must abort compaction");
@@ -1999,7 +2137,9 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
+        );
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let value = vec![b'x'; 512];
         let mut input_names = Vec::new();

@@ -1,4 +1,4 @@
-name: Fuzz
+name: Fuzz Qualification
 
 on:
   workflow_dispatch:
@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   bounded-smoke:
+    name: Bounded fuzz smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -24,8 +25,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - name: Install pinned fuzz toolchain
         run: |

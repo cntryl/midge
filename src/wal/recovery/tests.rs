@@ -1761,10 +1761,14 @@ fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_rec
 }
 
 /// What one walker concluded about a local WAL file: whether it accepts the
-/// file and, if so, the newest writer epoch it saw.
+/// file and, if so, its verified sequence, byte, and epoch frontiers.
 #[derive(Debug, PartialEq, Eq)]
 enum WalkerVerdict {
-    Accepted { newest_epoch: u64 },
+    Accepted {
+        newest_epoch: u64,
+        max_sequence: u64,
+        valid_bytes: u64,
+    },
     Rejected,
 }
 
@@ -1784,6 +1788,11 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
         match validate_wal_with_policy(&storage, &FsPath::new("wal"), ReplayPolicy::Strict, None) {
             Ok(stats) => WalkerVerdict::Accepted {
                 newest_epoch: stats.max_epoch_seen,
+                max_sequence: stats.max_sequence.unwrap_or(0),
+                valid_bytes: stats
+                    .tolerated_active_tail
+                    .as_ref()
+                    .map_or(bytes.len() as u64, |tail| tail.valid_bytes),
             },
             Err(_) => WalkerVerdict::Rejected,
         };
@@ -1809,11 +1818,15 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     let inspector = match super::streaming::inspect_wal_file(file.as_ref(), &path, limits) {
         Ok(prefix) => WalkerVerdict::Accepted {
             newest_epoch: prefix.writer_epoch,
+            max_sequence: prefix.max_sequence,
+            valid_bytes: prefix.valid_bytes as u64,
         },
         // Cloud recovery truncates a torn tail to the verified prefix, as
         // local replay tolerates it.
         Err(failure) if failure.is_incomplete_tail() => WalkerVerdict::Accepted {
             newest_epoch: failure.verified_prefix().writer_epoch,
+            max_sequence: failure.verified_prefix().max_sequence,
+            valid_bytes: failure.verified_prefix().valid_bytes as u64,
         },
         Err(_) => WalkerVerdict::Rejected,
     };
@@ -1839,14 +1852,21 @@ fn should_classify_identically_across_walkers_when_fenced_writer_interleaves() {
     let (replay, inspector) = classify_with_both_walkers(&bytes);
 
     // Assert
-    assert_eq!(replay, WalkerVerdict::Accepted { newest_epoch: 6 });
+    assert_eq!(
+        replay,
+        WalkerVerdict::Accepted {
+            newest_epoch: 6,
+            max_sequence: 5,
+            valid_bytes: bytes.len() as u64,
+        }
+    );
     assert_eq!(inspector, replay);
 }
 
 proptest::proptest! {
     #[test]
     fn should_classify_identically_across_walkers_when_given_fuzzed_wal_bytes(
-        epochs in proptest::collection::vec(1_u64..=4, 1..8),
+        epochs in proptest::collection::vec(0_u64..=4, 1..8),
         damage in proptest::option::of((proptest::prelude::any::<proptest::sample::Index>(), 1_u8..=255)),
         cut in proptest::option::of(proptest::prelude::any::<proptest::sample::Index>()),
     ) {
@@ -1863,8 +1883,33 @@ proptest::proptest! {
         // Act
         let (replay, inspector) = classify_with_both_walkers(&bytes);
 
-        // Assert
-        proptest::prop_assert_eq!(inspector, replay, "bytes: {:?}", bytes);
+        // Assert: inspection includes stale fenced records in its sequence
+        // bound, while replay excludes them from the applied frontier.
+        match (replay, inspector) {
+            (
+                WalkerVerdict::Accepted {
+                    newest_epoch: replay_epoch,
+                    max_sequence: replay_sequence,
+                    valid_bytes: replay_bytes,
+                },
+                WalkerVerdict::Accepted {
+                    newest_epoch: inspected_epoch,
+                    max_sequence: inspected_sequence,
+                    valid_bytes: inspected_bytes,
+                },
+            ) => {
+                proptest::prop_assert_eq!(inspected_epoch, replay_epoch, "bytes: {:?}", bytes);
+                proptest::prop_assert_eq!(inspected_bytes, replay_bytes, "bytes: {:?}", bytes);
+                proptest::prop_assert!(inspected_sequence >= replay_sequence, "bytes: {:?}", bytes);
+                if epochs.windows(2).all(|pair| pair[0] <= pair[1]) {
+                    proptest::prop_assert_eq!(inspected_sequence, replay_sequence, "bytes: {:?}", bytes);
+                }
+            }
+            (WalkerVerdict::Rejected, WalkerVerdict::Rejected) => {}
+            (replay, inspector) => {
+                proptest::prop_assert_eq!(inspector, replay, "bytes: {:?}", bytes);
+            }
+        }
     }
 }
 

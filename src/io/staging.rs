@@ -276,7 +276,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::traits::{DirEntry, File, FileCaps, FsError, FsResult, Metadata};
+    use crate::io::traits::{DirEntry, File, FsError, FsResult, Metadata};
     use parking_lot::Mutex;
 
     struct RecordingFile<'a> {
@@ -307,14 +307,6 @@ mod tests {
             self.inner.sync(durability)?;
             self.events.lock().push("file sync".to_string());
             Ok(())
-        }
-
-        fn close(self: Box<Self>) -> FsResult<()> {
-            self.inner.close()
-        }
-
-        fn caps(&self) -> FileCaps {
-            self.inner.caps()
         }
     }
 

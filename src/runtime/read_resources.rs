@@ -294,13 +294,14 @@ mod concurrency_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::FsError;
     use crate::sst::traits::{SstFactory, SstStateReader};
 
     pub(super) fn write_test_sst(
         temp_dir: &tempfile::TempDir,
         name: &str,
     ) -> MidgeResult<FileMeta> {
-        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
@@ -324,7 +325,7 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             PathBuf::new(),
             64 * 1024,
             CachePolicyType::Lru,
@@ -351,7 +352,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "reader-cache.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -375,7 +376,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "pruned-cache.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -411,7 +412,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let file_meta = write_test_sst(&temp_dir, "evicted-then-deleted.sst")?;
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,
@@ -476,7 +477,7 @@ mod tests {
             ..first_meta.clone()
         };
         let resources = ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             PathBuf::new(),
             1024 * 1024,
             CachePolicyType::Lru,

@@ -84,8 +84,7 @@ publication; unknown provenance conservatively prevents floor advancement.
 
 Explicit `compact_all` requests and their continuations use those same turns.
 Only a pending manual request forces compaction below ordinary background
-thresholds. An ingest barrier waits for active work to drain and cancels an
-unfinished manual request. Local and non-ephemeral modes retain worker overlap
+thresholds. Local and non-ephemeral modes retain worker overlap
 and direct manual continuation, with automatic work using background policy.
 
 Retirement proof work cooperatively yields after acknowledged progress so a
