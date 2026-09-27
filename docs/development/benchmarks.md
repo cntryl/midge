@@ -45,18 +45,12 @@ cargo bench --bench tier4_ycsb_workload_c -- --json
 Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 `latest.md`, and `latest.txt` plus timestamped copies.
 
-## Automation Contract
+## Comparing Changes
 
-The `Benchmarks` GitHub Actions workflow builds and runs the registered benchmark
-tiers on Ubuntu, Windows, and macOS each week or by manual dispatch. It uploads
-a summary for each operating system. Scheduled runs use the default `develop`
-revision; select another ref for a manual run.
-
-Benchmark results are informational because hosted-runner variance makes a
-fixed throughput threshold unreliable. For a performance pull request, compare
-the base and candidate revisions on the same runner and attach the commands,
-measurements, and summary. Add a target to `Cargo.toml` before advertising it
-in this guide.
+Build registered benchmarks with `cargo bench --no-run`, then run the relevant
+tiers on the same runner for both base and candidate revisions. For a performance
+pull request, attach the commands, measurements, and summary. Add a target to
+`Cargo.toml` before advertising it in this guide.
 
 ## Tier Model
 

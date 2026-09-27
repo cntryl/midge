@@ -37,21 +37,24 @@ docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
 
 Pull requests into `develop` and `main` run `ci.yml` on Ubuntu, Windows, and
-macOS. Its Ubuntu job checks formatting, strict Clippy, test conventions, the
-full workspace suite with mock-backed cloud behavior, and the serial
-fault-injection suite. Windows and macOS run release checks, workspace tests,
-and serial fault injection; Windows also runs strict Clippy. The Sqrzl provider
-tests are ignored in the mock-backed suite and run in `cloud-integration.yml`.
+macOS, plus GitHub-managed CodeQL. The Ubuntu CI job checks formatting, strict
+Clippy, test conventions, the full workspace suite with mock-backed cloud
+behavior, and serial fault injection. Windows and macOS run release checks,
+workspace tests, and serial fault injection; Windows also runs strict Clippy.
+The Sqrzl provider tests are ignored in the mock-backed suite and run in
+`cloud-integration.yml`.
+
 CI also runs on pushes to both branches, weekly on the default `develop`
 revision, and by manual dispatch. A manual dispatch can select `main` for
 release qualification. `cloud-integration.yml` runs the ignored provider and
 engine suites against Sqrzl on promotion PRs, on a schedule, or by dispatch.
 
 Promotion pull requests into `main` run CI, cloud integration,
-`Repository Qualification` for docs and packaging, `Docker Qualification` for
-the test image, `Compatibility` for Rust 1.97 and provider-only features,
-CodeQL, and the promotion-source check. `Compatibility` also runs on its
-schedule, manual dispatch, and `main` pushes.
+`Docker Qualification` for the test image, `Compatibility` for Rust 1.97 and
+provider-only features, and GitHub-managed CodeQL for Actions and Rust.
+Reviewers verify that the PR head is this repository's `develop` branch.
+Documentation and packaging checks run in the tagged publish workflow.
+`Compatibility` also runs on its schedule, manual dispatch, and `main` pushes.
 
 Provider features are checked independently so one provider cannot hide a
 dependency on another provider's implementation:

@@ -115,24 +115,6 @@ jobs:
       - name: Sqrzl engine qualification
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
 
-      - name: Trust-critical smoke suite
-        run: cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke
-
-      - name: Recovery correctness suite
-        run: cargo test --test durability -- durability_wal
-
-      - name: Failure injection suite
-        run: cargo test --test fault_injection --features failpoints -- --test-threads=1 failure_injection
-
-      - name: Compaction crash suite
-        run: cargo test --test fault_injection --features failpoints -- --test-threads=1 chaos_compaction
-
-      - name: Iterator correctness suite
-        run: cargo test --test engine_api -- engine_iterators
-
-      - name: Compatibility suite
-        run: cargo test --test storage_layer -- compatibility_fixtures
-
       - name: Validate test conventions
         run: cntryl-tools validate-tests
 
