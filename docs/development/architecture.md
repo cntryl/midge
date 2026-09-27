@@ -30,7 +30,7 @@ write
 flush
   -> SST
 compaction
-  -> new SST levels
+  -> partitioned replacement SSTs (or same-level overlap repair)
 ```
 
 ### Commit flow
@@ -57,7 +57,7 @@ For local storage, Midge persists a database directory containing:
 - `sst/`: immutable SST files produced by flush and compaction
 - manifest files and journal: authoritative published SST set and durable sequence tracking
 - intent log: interrupted publication state for flush and compaction replay
-- lease files: single-writer protection for local mode
+- `.midge_leader`: persistent epoch/holder/timestamp record for the filesystem lease, acquired with CAS-via-rename
 
 The exact filenames can change over time, but the recovery contract is stable:
 
@@ -80,7 +80,7 @@ The WAL is the first durable landing zone for writes in local durable modes.
 
 - WAL files are replayed in segment order, then the active file.
 - Partial tail records are never applied.
-- Strict recovery fails open on corruption at byte 0 or invalid corrupted frames.
+- Strict recovery fails closed on corruption at byte 0 or invalid corrupted frames.
 - Salvage mode keeps the valid prefix and reports degraded recovery.
 
 ### Dependency boundary
@@ -89,8 +89,21 @@ The WAL is the first durable landing zone for writes in local durable modes.
 - Byte-level WAL segment interpretation, including cloud WAL object-key formatting and transaction-batch expansion, lives in `src/wal/cloud_segment.rs`.
 - `runtime::hybrid_persistence` owns cloud WAL/SST interpretation, manifest coverage decisions, and guarded-prune orchestration.
 - `HybridStorage` exposes only bounded keyed object I/O, byte-identity readback, provider identities, immutable publication, and conditional deletion. It does not import WAL, SST, or manifest formats.
-- `runtime::hybrid_persistence::CloudPersistence` is the single owner of that format layer. It wraps an `Arc<HybridStorage>` and derefs to it, so raw object I/O stays reachable without the format operations being grafted onto the storage type. Its tests live next to it in `runtime/hybrid_persistence/tests/`; `src/storage` holds only format-neutral tests.
+- `runtime::hybrid_persistence::CloudPersistence` orchestrates cloud WAL/SST proof, manifest coverage, and guarded pruning. WAL byte interpretation also lives in `wal/cloud_segment.rs`, and startup recovery verifies cloud authority. `CloudPersistence` wraps an `Arc<HybridStorage>` and derefs to it so raw object I/O remains available. Its tests live next to it in `runtime/hybrid_persistence/tests/`; `src/storage` holds format-neutral tests.
 - A guarded prune is authorized in the runtime, then rechecks format-neutral object identities in the storage worker immediately before the provider conditional delete.
+
+For cloud WAL, the storage worker emits `CloudAck` only after an immutable
+upload and exact byte readback. The runtime then validates and publishes the
+lease-fenced WAL catalog before advancing cloud durability waiters. An uploaded
+object without that catalog publication remains an orphan, not an acknowledged
+commit. SST publication likewise requires output identity proofs before the
+manifest switches from old inputs to the complete replacement set.
+
+The provider configuration exposes explicit S3 credentials, environment credentials,
+shared profiles, and an AWS-only default chain. Azure supports shared key, SAS, and
+identity credentials; GCS supports HMAC, service-account, authorized-user, and
+bearer credentials. The storage provider consumes the selected source; no
+credential material belongs in a manifest or SST.
 
 ## Memtable
 
@@ -129,6 +142,11 @@ Reads combine:
 3. manifest-visible SST files
 
 Sequence order, tombstones, and range tombstones determine the visible value.
+In hybrid mode, normal SST readers fetch authoritative remote object ranges;
+startup-verified salvage files and internal, non-authoritative repair scratch
+use local reads. The runtime shares
+reader metadata through its cache and quarantines any complete-bound L1+
+overlap from indexed selection until repair publishes a replacement.
 
 ## Flush Publication
 
@@ -153,6 +171,23 @@ Compaction also separates output creation from publication:
 If a crash happens after output creation but before manifest publication, the input SSTs stay authoritative. If the crash happens after manifest publication, recovery finalizes cleanup idempotently.
 
 Compaction workers are transient executors. They must receive plans that are already safe to publish: the event loop/`RuntimeState` scheduling boundary assigns compaction output identity and the current snapshot horizon before a worker starts. Raw plans returned by the strategy layer use `output_seq == 0` as an unpublishable placeholder and must not reach actor execution directly.
+
+An underfull L1+ level can still need maintenance when complete key bounds
+overlap or three files share an inclusive endpoint. The picker selects the full
+connected component for same-level repair before work depending on that level's
+ordering. Large components are merged through bounded local scratch runs that
+remain outside manifest authority. Ephemeral-cache mode uses its reserved
+staging allowance; local-only mode admits at most one eighth of the current
+free space on the SST filesystem. This is a finite snapshot admission, while
+write failures still retain authoritative inputs. Repair preserves versions
+and range tombstones without tombstone GC, then uses the same intent and manifest
+publication sequence as ordinary compaction. A failed worker or a publication
+failure before an intent becomes ambiguous retains the old authoritative inputs
+and keeps reads conservative; the next repair check is deferred by the existing
+30-second maintenance interval. If an intent may have reached durable storage,
+compaction is fenced until recovery reconciles it. Once the manifest switches
+to the replacement set, recovery completes cleanup instead of retrying the
+repair.
 
 ## Recovery Sequence
 

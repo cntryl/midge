@@ -285,15 +285,11 @@ impl RuntimeState {
                 crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
             }
         }
-        self.manifest
-            .next_sst_seqs
-            .entry(cf_id)
-            .and_modify(|next| *next = (*next).max(next_sst_seq))
-            .or_insert(next_sst_seq);
-        self.manifest.last_persisted_sequence = self.manifest.last_persisted_sequence.max(sequence);
+        self.manifest.advance_next_sst_seq(cf_id, next_sst_seq);
+        self.manifest.advance_persisted_sequence(sequence);
         self.clear_flush_publication_intent(&file_meta.name)?;
         match self.manifest_store.save_snapshot(&self.manifest) {
-            Ok(written) => written.adopt_into(&mut self.manifest),
+            Ok(written) => self.manifest.adopt_checkpoint(written),
             Err(error) if !require_snapshot => {
                 self.mark_persistence_anomaly();
                 tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
@@ -490,9 +486,8 @@ impl RuntimeState {
         }
         self.retry_metadata_reload()?;
 
-        self.manifest_store
-            .save_snapshot(&self.manifest)?
-            .adopt_into(&mut self.manifest);
+        let checkpoint = self.manifest_store.save_snapshot(&self.manifest)?;
+        self.manifest.adopt_checkpoint(checkpoint);
         Ok(())
     }
 }

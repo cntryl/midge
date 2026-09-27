@@ -149,10 +149,8 @@ impl ManifestActor {
 
         // Publish a crash-safe snapshot before truncating the journal. Recovery
         // can therefore replay only edits newer than the checkpoint horizon.
-        state
-            .manifest_store
-            .save_snapshot(&state.manifest)?
-            .adopt_into(&mut state.manifest);
+        let checkpoint = state.manifest_store.save_snapshot(&state.manifest)?;
+        state.manifest.adopt_checkpoint(checkpoint);
 
         tracing::debug!("Manifest persisted");
 

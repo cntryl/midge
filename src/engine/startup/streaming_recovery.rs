@@ -338,12 +338,10 @@ fn reserve_sst_sequence(
     })?;
     // Reserve the immutable object name durably before any upload. A restart
     // must never reuse an orphan's name for a different replay partition.
-    state.manifest.next_sst_seqs.insert(cf_id, next_seq);
+    state.manifest.set_next_sst_seq(cf_id, next_seq);
     crate::failpoints::fail_point!("midge::recovery::before_name_reservation");
-    state
-        .manifest_store
-        .save_snapshot(&state.manifest)?
-        .adopt_into(&mut state.manifest);
+    let checkpoint = state.manifest_store.save_snapshot(&state.manifest)?;
+    state.manifest.adopt_checkpoint(checkpoint);
     if let Some(cloud) = &materialized.cloud_metadata_storage_for_mirror {
         validate_lease(config)?;
         super::CloudStartupRecovery::mirror_cloud_metadata(

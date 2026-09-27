@@ -52,7 +52,11 @@ fn proof_state(mask: usize) -> RuntimeState {
         }
         let cf_id = u32::try_from(bit / LEVELS).expect("proof column family ID");
         let level = u32::try_from(bit % LEVELS).expect("proof level");
-        state.manifest.files.push(proof_file(cf_id, level, bit));
+        state
+            .manifest
+            .test_mut()
+            .files
+            .push(proof_file(cf_id, level, bit));
     }
     state
 }
@@ -103,9 +107,10 @@ fn apply_plan(state: &mut RuntimeState, plan: &crate::compaction::CompactionPlan
         .sum();
     state
         .manifest
+        .test_mut()
         .files
         .retain(|file| !input_names.contains(&file.name));
-    state.manifest.files.push(FileMeta {
+    state.manifest.test_mut().files.push(FileMeta {
         name: format!("proof-output-mask-{}-step-{step}.sst", state.sequence),
         level: plan.target_level,
         size_bytes: output_size,
@@ -180,6 +185,7 @@ fn should_round_robin_every_critical_column_family_without_starvation() {
     for cf_id in 0..u32::try_from(COLUMN_FAMILIES).expect("proof CF count") {
         state
             .manifest
+            .test_mut()
             .files
             .extend((0..2).map(|ordinal| proof_file(cf_id, 0, ordinal)));
     }

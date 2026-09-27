@@ -811,6 +811,7 @@ fn should_schedule_compaction_after_l0_flush_when_threshold_reached(
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .extend((1..=3).map(|seq| test_manifest_l0_file_meta(&format!("pre-{seq}.sst"), seq)));
 
@@ -858,6 +859,7 @@ fn should_schedule_compaction_from_existing_l0_files_during_startup_maintenance(
         event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .push(test_manifest_l0_file_meta(&name, sequence));
     }
@@ -894,6 +896,7 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
         event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .push(test_manifest_l0_file_meta(&name, sequence));
     }
@@ -929,6 +932,7 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
         event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .push(test_manifest_l0_file_meta(&name, sequence));
     }
@@ -1001,6 +1005,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
         event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .extend((1..=3).map(|sequence| {
                 test_manifest_l0_file_meta(&format!("gated-{sequence}.sst"), sequence)
@@ -1050,6 +1055,7 @@ fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::comm
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .extend((1..=3).map(|seq| test_manifest_l0_file_meta(&format!("pre-{seq}.sst"), seq)));
 
@@ -1259,6 +1265,7 @@ fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: crate::cloud_layout::file_name(0, 0, 1),
@@ -1641,6 +1648,7 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: crate::cloud_layout::compaction_file_name(0, 1, 409, 0),
@@ -1736,6 +1744,7 @@ mod compaction_scheduling {
             event_loop
                 .state
                 .manifest
+                .test_mut()
                 .files
                 .push(manifest_file_from_runtime(file));
         }
@@ -2083,6 +2092,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: input_name.clone(),
@@ -2126,11 +2136,13 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .retain(|file| file.name != input_name);
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: output_name.clone(),
@@ -2199,6 +2211,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .push(crate::metadata::FileMeta {
                 name,
@@ -2340,6 +2353,7 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: input_name.clone(),
@@ -2425,6 +2439,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .push(crate::metadata::FileMeta {
                 name: name.clone(),
@@ -2508,6 +2523,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: input_name.clone(),

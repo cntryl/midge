@@ -19,7 +19,7 @@ flowchart TB
     IO["io<br/>real and mock filesystem abstraction"]
     Compaction["compaction<br/>planning, merge, execution"]
     Lease["lease<br/>single-writer fencing"]
-    Telemetry["telemetry<br/>metrics and health"]
+    Telemetry["telemetry<br/>optional OpenTelemetry export"]
     BenchSupport["benches/bench_support<br/>benchmark-local helpers"]
     TestSupport["tests/common<br/>integration-test support"]
 
@@ -55,12 +55,15 @@ flowchart TB
 
 ## Runtime Ownership
 
-The runtime owns mutable engine state. API calls cross into the runtime through messages; actors mutate state only through the event loop.
+The event loop owns authoritative mutable engine state. API calls normally cross
+the request channel; `begin_tx` can use a published snapshot cache directly.
+Actors perform transient work and hand results back to the event loop. Runtime
+diagnostics and metrics remain available without the optional telemetry exporter.
 
 ```mermaid
 flowchart LR
     Engine["Engine facade"]
-    Handle["RuntimeHandle<br/>request channel"]
+    Handle["RuntimeHandle<br/>request channel + shared snapshot pins"]
     Router["ResponseRouter<br/>oneshot responses"]
     Loop["EventLoop<br/>owns RuntimeState"]
 
@@ -74,11 +77,12 @@ flowchart LR
     end
 
     State["RuntimeState<br/>memtables, manifest, WAL state, health"]
-    SnapshotCache["SnapshotCache<br/>published ReadSnapshots"]
+    SnapshotCache["SnapshotCache<br/>published snapshot boundary"]
     Workers["Worker callbacks<br/>compaction and storage events"]
 
     Engine --> Handle
     Engine -->|begin_tx bypass| SnapshotCache
+    Engine -->|register snapshot pin| Handle
     Handle --> Loop
     Loop --> ActorSet
     ActorSet --> Loop
@@ -123,7 +127,7 @@ sequenceDiagram
     else WriteOptions::buffered
         Runtime-->>Engine: return after local append and visibility
     else cloud strict
-        Runtime-->>Engine: wait until CloudAck covers sequence
+        Runtime-->>Engine: wait until catalog-published cloud frontier covers sequence
     end
 
     Engine-->>Caller: commit result
@@ -138,7 +142,7 @@ flowchart TB
     Caller["Caller"]
     BeginTx["Engine::begin_tx"]
     Cache["SnapshotCache<br/>lock-free published boundary"]
-    Register["RuntimeMsg::RegisterSnapshot<br/>SST pin tracking"]
+    Register["RuntimeHandle shared<br/>SnapshotPinRegistry"]
     Snapshot["ReadSnapshot<br/>visible sequence + CF state"]
     Fallback["Event-loop read handlers<br/>fallback: Read, RangeScan, CaptureReadSnapshot"]
     Active["Active memtable"]
@@ -154,6 +158,7 @@ flowchart TB
     BeginTx -. cache miss or stale cache .-> Fallback
     BeginTx --> Register
     Fallback -. fallback path .-> Snapshot
+    Register --> Snapshot
     Snapshot --> Active
     Snapshot --> Immutable
     Snapshot --> Manifest
@@ -244,7 +249,8 @@ flowchart TB
     Hybrid["HybridStorage<br/>raw bounded object I/O"]
     LocalWal["Local WAL segment"]
     CloudWal["Cloud object<br/>wal/{segment}.wal"]
-    CloudAck["StorageEvent::CloudAck"]
+    CloudAck["StorageEvent::CloudAck<br/>upload + exact readback"]
+    Catalog["Runtime catalog publication<br/>lease validation"]
     CloudFail["StorageEvent::CloudFail"]
 
     FlushActor["FlushActor"]
@@ -260,7 +266,8 @@ flowchart TB
     CloudWal --> CloudAck
     CloudWal --> CloudFail
     CloudAck --> Proofs
-    Proofs --> Runtime
+    Proofs --> Catalog
+    Catalog --> Runtime
     CloudFail --> Runtime
 
     Runtime --> FlushActor
@@ -281,13 +288,13 @@ stateDiagram-v2
     Visible --> Sealed: rotate WAL segment
     Sealed --> PendingUpload: enqueue_wal_segment
     PendingUpload --> InProgress: process_uploads
-    InProgress --> UploadedOrphan: immutable upload success
-    UploadedOrphan --> CatalogPublished: lease-fenced catalog CAS
-    CatalogPublished --> CloudDurable: exact readback and lease recheck
+    InProgress --> UploadedOrphan: immutable upload and exact byte readback
+    UploadedOrphan --> CatalogPublished: CloudAck lets runtime publish catalog under lease
+    CatalogPublished --> CloudDurable: durable frontier advances
     InProgress --> Retry: upload failure below retry budget
     Retry --> InProgress
     InProgress --> Failed: retry budget exhausted
-    CloudDurable --> Acked: CloudAck
+    CloudDurable --> Acked: complete waiting commit
     Failed --> FailedEvent: CloudFail
     Acked --> [*]
     FailedEvent --> [*]
