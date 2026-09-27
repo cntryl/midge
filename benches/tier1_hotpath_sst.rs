@@ -28,11 +28,9 @@ fn sst_logical_operation_count(entry_count: usize) -> u64 {
 
 fn record_sst_batch_parameters(ctx: &mut StressContext, entry_count: usize) {
     ctx.parameter("entry_count_per_sample", entry_count);
-    ctx.parameter(
-        "entries_per_logical_operation",
-        SST_ENTRIES_PER_LOGICAL_OPERATION,
-    );
+    ctx.parameter("entries_per_batch", SST_ENTRIES_PER_LOGICAL_OPERATION);
     ctx.parameter("logical_unit", "sst_entry_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 }
 
 // ---------------------------------------------------------------------------

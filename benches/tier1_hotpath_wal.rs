@@ -174,11 +174,9 @@ fn run_decode_record(ctx: &mut StressContext, scenario: &'static str) {
         .collect();
     ctx.parameter("scenario", scenario);
     ctx.parameter("decode_batch_size", decode_batch_size);
-    ctx.parameter(
-        "records_per_logical_operation",
-        WAL_RECORDS_PER_LOGICAL_OPERATION,
-    );
+    ctx.parameter("records_per_batch", WAL_RECORDS_PER_LOGICAL_OPERATION);
     ctx.parameter("logical_unit", "wal_decode_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     let measurement_name = format!("decode_{scenario}");
     stress_config::measure_hot_path_batch(

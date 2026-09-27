@@ -1,16 +1,14 @@
-//! Tier 2 — Read Amplification under Mixed Workload
+//! Tier 2 — simulated read amplification under mixed workload
 //!
 //! **Target Runtime:** 3-6 seconds total
-//! **Run Frequency:** CI / Pre-commit
+//! **Run Frequency:** manual diagnostic only (`simulated-read-amp-bench`)
 //!
-//! **Purpose**: Measures read amplification (blocks read per query) under realistic
-//! mixed workloads. Validates that LSM design effectively controls amplification
-//! through bloom filters, caching, and compaction.
+//! **Purpose**: Exercises an in-file LSM model under mixed workloads. This does
+//! not measure Midge's read path or validate its amplification.
 //!
-//! **Tier-2 Compliance**:
-//! - Subsystem interaction: Multiple SSTs → Iterator merge → Cache → Bloom filters
-//! - System metrics: Blocks read per query, cache hit rate, amplification factor
-//! - Realistic patterns: Zipfian key distribution, mixed get/scan operations
+//! The model has simulated SSTs and a simple cache. Its throughput and cache
+//! counters are model diagnostics only; use Engine-backed benchmarks for Midge
+//! performance decisions.
 
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};

@@ -116,7 +116,8 @@ fn batch_100_lookups_mixed(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", lookup_keys.len());
     ctx.parameter("lookup_repeats", MIXED_LOOKUP_REPEATS);
     ctx.parameter("logical_unit", "bloom_lookup_batch");
-    ctx.parameter("lookups_per_logical_operation", lookup_keys.len());
+    ctx.parameter("batch_per_logical_operation", 1);
+    ctx.parameter("lookups_per_batch", lookup_keys.len());
 
     stress_config::measure_hot_path_batch(
         ctx,

@@ -18,6 +18,12 @@ pedantic = "deny"
 [lib]
 name = "cntryl_midge"
 path = "src/lib.rs"
+bench = false
+
+[[bin]]
+name = "midge"
+path = "src/bin/midge.rs"
+bench = false
 
 # =============================================================================
 # Dependencies
@@ -128,6 +134,7 @@ cloud-aws = [
 ]
 
 sqrzl-tests = []
+simulated-read-amp-bench = []
 
 # Exposes `cntryl_midge::__internal` for this crate's own tests, benches and
 # fuzz targets. Never enable it from a downstream crate: nothing behind it is
@@ -267,6 +274,7 @@ harness = false
 name = "tier2_subsystem_read_amplification"
 path = "benches/tier2_subsystem_read_amplification.rs"
 harness = false
+required-features = ["simulated-read-amp-bench"]
 
 [[bench]]
 name = "tier2_subsystem_event_loop"

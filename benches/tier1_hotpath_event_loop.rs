@@ -42,9 +42,10 @@ fn build_messages(count: usize) -> Vec<MessageKind> {
 
 #[stress(tier = 1, metadata(component = "event_loop", scenario = "direct_call"))]
 fn direct_call(ctx: &mut StressContext) {
-    ctx.parameter("calls_per_logical_operation", DIRECT_CALLS_PER_BATCH);
+    ctx.parameter("calls_per_batch", DIRECT_CALLS_PER_BATCH);
     ctx.parameter("batch_repeats", DIRECT_BATCH_REPEATS);
     ctx.parameter("logical_unit", "direct_call_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -80,9 +81,10 @@ fn run_message_batches(messages: &[MessageKind]) -> u64 {
 )]
 fn dispatch_only(ctx: &mut StressContext) {
     let messages = build_messages(MESSAGE_BATCH_SIZE);
-    ctx.parameter("messages_per_logical_operation", MESSAGE_BATCH_SIZE);
+    ctx.parameter("messages_per_batch", MESSAGE_BATCH_SIZE);
     ctx.parameter("batch_repeats", MESSAGE_BATCH_REPEATS);
     ctx.parameter("logical_unit", "message_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -118,9 +120,10 @@ fn run_mailbox_batches(messages: &[MessageKind], queue: &mut VecDeque<MessageKin
 fn mailbox_vecdeque(ctx: &mut StressContext) {
     let messages = build_messages(MESSAGE_BATCH_SIZE);
     let mut queue = VecDeque::with_capacity(messages.len());
-    ctx.parameter("messages_per_logical_operation", MESSAGE_BATCH_SIZE);
+    ctx.parameter("messages_per_batch", MESSAGE_BATCH_SIZE);
     ctx.parameter("batch_repeats", MESSAGE_BATCH_REPEATS);
     ctx.parameter("logical_unit", "mailbox_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     stress_config::measure_hot_path_batch(
         ctx,
