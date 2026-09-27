@@ -89,7 +89,8 @@ fn put_batch_100(ctx: &mut StressContext) {
     ctx.parameter("rounds", PUT_BATCH_ROUNDS);
     ctx.parameter("value_size", value.len());
     ctx.parameter("logical_unit", "memtable_put_batch");
-    ctx.parameter("items_per_logical_operation", keys.len());
+    ctx.parameter("batch_per_logical_operation", 1);
+    ctx.parameter("items_per_batch", keys.len());
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -279,11 +280,9 @@ fn size_bytes(ctx: &mut StressContext) {
     ctx.parameter("key_count", keys.len());
     ctx.parameter("value_size", value.len());
     ctx.parameter("batch_size", SIZE_BYTES_BATCH_SIZE);
-    ctx.parameter(
-        "size_reads_per_logical_operation",
-        SIZE_BYTES_PER_LOGICAL_OPERATION,
-    );
+    ctx.parameter("size_reads_per_batch", SIZE_BYTES_PER_LOGICAL_OPERATION);
     ctx.parameter("logical_unit", "memtable_size_bytes_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     stress_config::measure_hot_path_batch(
         ctx,

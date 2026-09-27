@@ -45,6 +45,15 @@ cargo bench --bench tier4_ycsb_workload_c -- --json
 Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 `latest.md`, and `latest.txt` plus timestamped copies.
 
+The bounded compaction qualification needs explicit dataset, path, and output
+arguments. It is excluded from plain `cargo bench` by its existing `failpoints`
+feature requirement; use the commands in
+[Bounded Compaction Qualification](bounded-compaction-qualification.md).
+
+The simulated read amplification target exercises an in-file model rather than
+Midge. It is excluded from plain `cargo bench` and can be run for model-only
+diagnostics with `--features simulated-read-amp-bench`.
+
 To qualify the Tier 3 lifecycle benchmark on Ubuntu, Windows, and macOS,
 dispatch `CI` with `tier3_lifecycle_bench` enabled. This runs only the
 `tier3_system_lifecycle` benchmark target as an opt-in platform check.
@@ -56,6 +65,11 @@ Build registered benchmarks with `cargo bench --no-run`, then run the relevant
 tiers on the same runner for both base and candidate revisions. For a performance
 pull request, attach the commands, measurements, and summary. Add a target to
 `Cargo.toml` before advertising it in this guide.
+
+Run comparisons on an otherwise idle host. Concurrent tests, browser automation,
+and filesystem indexing can change CPU scheduling and disk latency enough to
+make variance reports unsuitable for optimization decisions. Repeat a noisy row
+after the competing load ends before changing its workload or trust class.
 
 ## Tier Model
 
@@ -107,20 +121,28 @@ Use these metadata and parameter keys:
   `duration`
 - `logical_unit`: what one counted operation means, for example
   `engine_put_commit`, `sst_point_lookup`, or `block_byte`
-- `items_per_logical_operation`
-- `lookups_per_logical_operation`
+- `items_per_batch` and `lookups_per_batch` when the counted operation is a batch
+- `batch_per_logical_operation = 1` for a row whose counted unit is one batch;
+  `cntryl-stress` requires an explicit normalization basis for batch rows
 - `operations_per_client`
 - `validated_micro`
 - `trust_class`
 
 Examples:
 
-- `24.9 ns/block_byte`
+- `800 ns/block` for a Tier 1 compression row counted by blocks
 - `31.2 us/transaction`
 - `185.4 Kops/s` with `question=logical_unit=transaction, mode=duration`
 
-If one measured call completes a batch, either count the true logical work
-directly or declare the normalization basis explicitly.
+The displayed unit must match the measured count. A row that counts 100 batches
+of 1,000 lookups reports time per batch and records `lookups_per_batch = 1000`
+and `batch_per_logical_operation = 1`.
+To report time per lookup, it must count 100,000 lookups instead. Metadata alone
+does not divide the measured time.
+
+The corrected Tier 1 batch and compression units change report labels and
+comparison meaning. Start a new saved baseline for those rows before using them
+to judge a code optimization.
 
 ## Authoring Rules
 

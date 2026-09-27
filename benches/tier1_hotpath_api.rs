@@ -63,7 +63,8 @@ fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: us
     ctx.parameter("batch_size", batch_size);
     ctx.parameter("rounds", BATCH_PUT_ROUNDS);
     ctx.parameter("logical_unit", "put_transaction_batch");
-    ctx.parameter("items_per_logical_operation", batch_size);
+    ctx.parameter("batch_per_logical_operation", 1);
+    ctx.parameter("items_per_batch", batch_size);
     ctx.parameter("storage_profile", "memory");
 
     ctx.benchmark(scenario)

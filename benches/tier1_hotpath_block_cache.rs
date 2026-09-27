@@ -101,7 +101,8 @@ fn get_batch_hit_1000(ctx: &mut StressContext) {
     ctx.parameter("lookup_batch_size", num_blocks);
     ctx.parameter("batch_repeats", CACHE_BATCH_LOOKUP_REPEATS);
     ctx.parameter("logical_unit", "cache_lookup_batch");
-    ctx.parameter("lookups_per_logical_operation", num_blocks);
+    ctx.parameter("batch_per_logical_operation", 1);
+    ctx.parameter("lookups_per_batch", num_blocks);
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -144,7 +145,8 @@ fn get_batch_miss_1000(ctx: &mut StressContext) {
     ctx.parameter("lookup_batch_size", num_blocks);
     ctx.parameter("batch_repeats", CACHE_BATCH_LOOKUP_REPEATS);
     ctx.parameter("logical_unit", "cache_lookup_batch");
-    ctx.parameter("lookups_per_logical_operation", num_blocks);
+    ctx.parameter("batch_per_logical_operation", 1);
+    ctx.parameter("lookups_per_batch", num_blocks);
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -178,7 +180,8 @@ fn insert_batch_100(ctx: &mut StressContext) {
     ctx.parameter("num_blocks", num_blocks);
     ctx.parameter("rounds", INSERT_BATCH_ROUNDS);
     ctx.parameter("logical_unit", "cache_insert_batch");
-    ctx.parameter("inserts_per_logical_operation", num_blocks);
+    ctx.parameter("batch_per_logical_operation", 1);
+    ctx.parameter("inserts_per_batch", num_blocks);
 
     stress_config::measure_hot_path_batch(
         ctx,
