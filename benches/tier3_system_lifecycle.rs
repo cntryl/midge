@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
 use std::time::Duration;
 
@@ -28,50 +28,47 @@ fn row_metadata(
 
 fn run_flush_cycle(ctx: &mut StressContext, scenario: &'static str, mode: &'static str) {
     row_metadata(ctx, "write_and_flush_cycle", mode, FLUSH_CYCLES_PER_SAMPLE);
+    let mut opts = stress_config::opts_for_mode(mode);
+    // Repeated forced flushes exhaust L0 slots unless compaction can recycle them.
+    opts.enable_compaction = true;
     let engine =
-        stress_config::bench_stress::open_engine_no_compaction(stress_config::opts_for_mode(mode));
+        Engine::open(opts.to_open_options()).expect("open lifecycle flush benchmark engine");
     let cf = engine
         .create_column_family("lifecycle")
         .expect("create lifecycle CF");
     let mut batch = 0_u64;
-    let mut failures = 0_u64;
-
     let _ = ctx.measure_batch(scenario, FLUSH_CYCLES_PER_SAMPLE, || {
         for _ in 0..FLUSH_CYCLES_PER_SAMPLE {
-            let Ok(mut tx) = engine.begin_tx(cf.id(), TransactionMode::ReadWrite) else {
-                failures += 1;
-                return;
-            };
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap_or_else(|error| panic!("{mode} batch {batch} begin_tx failed: {error}"));
             for offset in 0..FLUSH_BATCH_SIZE {
                 let key = stress_config::bench_stress::key16_u64_be(
                     batch * FLUSH_BATCH_SIZE as u64 + offset as u64,
                 );
-                if tx
-                    .put(
-                        key.to_vec(),
-                        vec![u8::try_from(offset).expect("byte fits"); 64],
-                        None,
-                    )
-                    .is_err()
-                {
-                    failures += 1;
-                    return;
-                }
+                tx.put(
+                    key.to_vec(),
+                    vec![u8::try_from(offset).expect("byte fits"); 64],
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{mode} batch {batch} put offset {offset} failed: {error}")
+                });
             }
-            batch = batch.wrapping_add(1);
             let write_options = if mode == "cloud" {
                 WriteOptions::cloud_async()
             } else {
                 WriteOptions::buffered()
             };
-            if tx.commit(write_options).is_err() || engine.flush_cf(&cf).is_err() {
-                failures += 1;
-                return;
-            }
+            tx.commit(write_options)
+                .unwrap_or_else(|error| panic!("{mode} batch {batch} commit failed: {error}"));
+            engine
+                .flush_cf(&cf)
+                .unwrap_or_else(|error| panic!("{mode} batch {batch} flush failed: {error}"));
+            batch = batch.wrapping_add(1);
         }
     });
 
-    assert_eq!(failures, 0, "measured write-and-flush cycles must succeed");
     drop(engine);
 }
 
