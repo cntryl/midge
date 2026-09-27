@@ -240,6 +240,115 @@ mod telemetry_integration {
 #[path = "../benches/bench_support/read_amp.rs"]
 mod read_amp_bench_fixture;
 
+#[path = "../benches/bench_support/config.rs"]
+mod config;
+#[path = "../benches/bench_support/ycsb.rs"]
+mod ycsb_bench_support;
+
+mod ycsb_benchmark_observations {
+    use super::ycsb_bench_support::{record_runtime_report, RuntimePerfReport};
+    use cntryl_stress::{
+        LogicalUnit, ObservationUnit, OperationOutcome, StressRunner, StressRunnerConfig,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn should_expose_typed_runtime_observations_when_ycsb_sample_completes() {
+        // Arrange
+        let report = RuntimePerfReport {
+            write_stalls_total: 2,
+            wal_append_count: 11,
+            cache_hits: 3,
+            cache_misses: 1,
+            candidate_sst_files_checked: 17,
+            data_blocks_read: 9,
+            cloud_async_wal_uploads_completed: 4,
+            cloud_async_wal_uploads_failed: 1,
+            ..RuntimePerfReport::default()
+        };
+
+        // Act
+        let observations = report.diagnostic_observations();
+
+        // Assert
+        assert!(observations.contains(&("write_stalls", 2.0, ObservationUnit::Count)));
+        assert!(observations.contains(&("wal_append_count", 11.0, ObservationUnit::Count)));
+        assert!(observations.contains(&("cache_hit_ratio", 0.75, ObservationUnit::Ratio)));
+        assert!(observations.contains(&(
+            "candidate_sst_files_checked",
+            17.0,
+            ObservationUnit::Count
+        )));
+        assert!(observations.contains(&("data_blocks_read", 9.0, ObservationUnit::Count)));
+        assert!(observations.contains(&(
+            "cloud_async_wal_uploads_completed",
+            4.0,
+            ObservationUnit::Count
+        )));
+        assert!(observations.contains(&(
+            "cloud_async_wal_uploads_failed",
+            1.0,
+            ObservationUnit::Count
+        )));
+    }
+
+    #[test]
+    fn should_keep_large_runtime_counter_finite_when_recording_observation() {
+        // Arrange
+        let large_report = RuntimePerfReport {
+            wal_append_count: u64::MAX,
+            cache_hits: u64::MAX,
+            ..RuntimePerfReport::default()
+        };
+
+        // Act
+        let observations = large_report.diagnostic_observations();
+
+        // Assert
+        assert!(observations.iter().any(|(name, value, unit)| {
+            *name == "wal_append_count" && value.is_finite() && *unit == ObservationUnit::Count
+        }));
+        assert!(observations.contains(&("cache_hit_ratio", 1.0, ObservationUnit::Ratio)));
+    }
+
+    #[test]
+    fn should_count_cloud_upload_failures_when_ycsb_report_is_recorded() {
+        // Arrange
+        let output = tempfile::tempdir().expect("temporary stress artifacts");
+        let mut config = StressRunnerConfig::default();
+        config.samples = 1;
+        config.warmup_samples = 0;
+        config.output_dir = output.path().to_path_buf();
+        let mut runner = StressRunner::with_config("ycsb-runtime-observations-test", config);
+        runner.reporters(Vec::new());
+        let report = RuntimePerfReport {
+            cloud_async_wal_uploads_failed: 2,
+            ..RuntimePerfReport::default()
+        };
+
+        // Act
+        runner.run("cloud_upload_failures", |ctx| {
+            ctx.record_external_outcome(
+                "cloud_upload_failures",
+                Duration::from_millis(1),
+                LogicalUnit::new("operation"),
+                OperationOutcome::new(3, 1),
+            );
+            record_runtime_report(ctx, &report);
+        });
+        let run = runner.finish();
+
+        // Assert
+        let summary = &run.summaries[0];
+        assert!(!summary.correctness.passed);
+        assert_eq!(summary.correctness.counters.failures, 2);
+        assert!(summary.observations.iter().any(|observation| {
+            observation.name == "cloud_async_wal_uploads_failed"
+                && observation.unit == ObservationUnit::Count
+        }));
+    }
+}
+
 mod read_amplification_benchmark {
     use super::read_amp_bench_fixture::{
         metrics_delta, run_workload, ReadAmpFixture, ReadWorkload,
