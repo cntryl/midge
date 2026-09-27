@@ -113,10 +113,14 @@ pub(crate) fn execute_compaction_at_target(
     let target_sst_size = resources.target_sst_size;
     let fan_in = resources.source_fan_in;
     let mut scratch = if same_level_repair && plan.source_files.len() > fan_in {
+        let admitted_scratch = match output_size_limit {
+            Some(limit) => limit / 2,
+            None => repair::RepairScratch::local_capacity(sst_factory)?,
+        };
         Some(repair::RepairScratch::new(
             sst_factory,
             output_dir,
-            output_size_limit.map_or(usize::MAX, |limit| limit / 2),
+            admitted_scratch,
         )?)
     } else {
         None

@@ -16,11 +16,42 @@ pub(crate) struct RepairScratch {
 }
 
 impl RepairScratch {
+    /// Admit repair scratch against a conservative snapshot of free space on
+    /// the filesystem that owns the SST directory. One eighth remains a
+    /// finite upper bound for this repair, leaving room for normal writes and
+    /// final output publication. The snapshot is advisory; filesystem errors
+    /// still abort repair while preserving the authoritative inputs.
+    pub(crate) fn local_capacity(factory: &dyn SstFactory) -> MidgeResult<usize> {
+        let fs = factory.output_fs();
+        let addressing = fs.host_addressing().ok_or_else(|| {
+            MidgeError::ResourceLimit(
+                "overlap repair cannot identify local scratch capacity".into(),
+            )
+        })?;
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let available = disks
+            .iter()
+            .filter(|disk| addressing.root.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().as_os_str().len())
+            .map(sysinfo::Disk::available_space)
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit(
+                    "overlap repair cannot determine local scratch capacity".into(),
+                )
+            })?;
+        admitted_local_capacity(available)
+    }
+
     pub(crate) fn new(
         factory: &dyn SstFactory,
         output_dir: &Path,
         admitted_bytes: usize,
     ) -> MidgeResult<Self> {
+        if admitted_bytes == 0 {
+            return Err(MidgeError::ResourceLimit(
+                "overlap repair has no admitted local scratch capacity".into(),
+            ));
+        }
         let fs = factory.output_fs();
         let directory = output_dir.join(".compaction-repair");
         let key = crate::sst::fs::fs_relative_sst_path(&fs, &directory)?;
@@ -134,10 +165,50 @@ impl RepairScratch {
     }
 }
 
+fn admitted_local_capacity(available_bytes: u64) -> MidgeResult<usize> {
+    let admitted = usize::try_from(available_bytes / 8).unwrap_or(usize::MAX);
+    if admitted == 0 {
+        return Err(MidgeError::ResourceLimit(
+            "overlap repair has no admitted local scratch capacity".into(),
+        ));
+    }
+    Ok(admitted)
+}
+
 impl Drop for RepairScratch {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
             tracing::warn!(%error, "retaining non-authoritative overlap-repair scratch");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_admit_only_one_eighth_of_reported_local_capacity() -> MidgeResult<()> {
+        // Arrange
+        let available_bytes = 8_000;
+
+        // Act
+        let admitted = admitted_local_capacity(available_bytes)?;
+
+        // Assert
+        assert_eq!(admitted, 1_000);
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_zero_local_scratch_capacity() {
+        // Arrange
+        let available_bytes = 7;
+
+        // Act
+        let result = admitted_local_capacity(available_bytes);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
     }
 }

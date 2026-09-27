@@ -176,8 +176,11 @@ An underfull L1+ level can still need maintenance when complete key bounds
 overlap or three files share an inclusive endpoint. The picker selects the full
 connected component for same-level repair before work depending on that level's
 ordering. Large components are merged through bounded local scratch runs that
-remain outside manifest authority. Repair preserves versions and range
-tombstones without tombstone GC, then uses the same intent and manifest
+remain outside manifest authority. Ephemeral-cache mode uses its reserved
+staging allowance; local-only mode admits at most one eighth of the current
+free space on the SST filesystem. This is a finite snapshot admission, while
+write failures still retain authoritative inputs. Repair preserves versions
+and range tombstones without tombstone GC, then uses the same intent and manifest
 publication sequence as ordinary compaction. A failed worker or a publication
 failure before an intent becomes ambiguous retains the old authoritative inputs
 and keeps reads conservative; the next repair check is deferred by the existing
