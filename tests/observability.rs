@@ -237,6 +237,51 @@ mod telemetry_integration {
     }
 }
 
+#[path = "../benches/bench_support/read_amp.rs"]
+mod read_amp_bench_fixture;
+
+mod read_amplification_benchmark {
+    use super::read_amp_bench_fixture::{
+        metrics_delta, run_workload, ReadAmpFixture, ReadWorkload,
+    };
+
+    #[test]
+    fn should_record_engine_read_metrics_when_ssts_are_flushed() {
+        // Arrange
+        let fixture = ReadAmpFixture::new();
+        let workload = ReadWorkload::new(64, 4);
+        let read_before = fixture.engine.metrics().get_read_amp_metrics().unwrap();
+        let runtime_before = fixture.engine.metrics().get_runtime_metrics().unwrap();
+        let path_before = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+
+        // Act
+        let result = run_workload(&fixture, &workload);
+        let read_after = fixture.engine.metrics().get_read_amp_metrics().unwrap();
+        let runtime_after = fixture.engine.metrics().get_runtime_metrics().unwrap();
+        let path_after = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+        let delta = metrics_delta(&read_before, &read_after, &runtime_before, &runtime_after);
+
+        // Assert
+        assert_eq!(result.point_reads, workload.expected_point_reads());
+        assert_eq!(result.point_hits, 48);
+        assert_eq!(result.point_misses, 16);
+        assert_eq!(result.scans, workload.expected_scans());
+        assert_eq!(result.scan_rows, 32);
+        assert_eq!(delta.reads, result.point_reads);
+        assert!(delta.ssts_touched >= result.point_hits);
+        assert!(delta.l0_ssts_touched >= result.point_hits);
+        assert!(delta.blocks_read > 0);
+        assert!(delta.cache_hits > 0);
+        assert!(delta.cache_misses > 0);
+        assert!(path_after.bloom_checks > path_before.bloom_checks);
+        assert!(path_after.bloom_rejects > path_before.bloom_rejects);
+    }
+}
+
 mod read_amp_api {
     use cntryl_midge::{
         ColumnFamilyHandle, Engine, MidgeResult, OpenOptions, TransactionMode, WriteOptions,
