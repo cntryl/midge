@@ -3371,7 +3371,7 @@ mod tests {
         // Assert
         assert!(
             matches!(result, Err(MidgeError::Internal(ref message)) if message.contains("access_token")),
-            "empty access tokens must fail closed: {result:?}"
+            "empty access tokens must fail closed"
         );
     }
 

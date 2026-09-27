@@ -43,6 +43,10 @@ jobs:
         with:
           shared-key: "cloud"
 
+      - name: Set Sqrzl credential
+        shell: bash
+        run: echo "SQRZL_SECRET_ACCESS_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Start Sqrzl emulator
         run: docker compose up -d sqrzl
 

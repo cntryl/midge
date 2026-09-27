@@ -48,6 +48,7 @@ a waiting flush. They do not claim per-block progress or replace the fixed timeo
 Run the default two profiles (6 MiB WAL / 2 MiB local, then 12 MiB / 4 MiB):
 
 ```sh
+export SQRZL_SECRET_ACCESS_KEY="$(openssl rand -hex 32)"
 docker compose up -d sqrzl
 MIDGE_QUALIFICATION_ARTIFACT_DIR=/tmp/midge-cloud-evidence \
   cargo test --test cloud_provider_engine_qualification \
@@ -201,5 +202,4 @@ latency guarantee. Slow-provider regressions verify that work can advance
 even when a successful request takes longer than the slice.
 Retained proof memory is deducted from compaction execution and publication
 allowances so alternating workers cannot each claim the full maintenance pool.
-
 
