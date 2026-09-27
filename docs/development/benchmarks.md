@@ -45,6 +45,10 @@ cargo bench --bench tier4_ycsb_workload_c -- --json
 Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 `latest.md`, and `latest.txt` plus timestamped copies.
 
+To qualify the Tier 3 lifecycle benchmark on Ubuntu, Windows, and macOS,
+dispatch `CI` with `tier3_lifecycle_bench` enabled. This runs only the
+`tier3_system_lifecycle` benchmark target as an opt-in platform check.
+
 ## Comparing Changes
 
 Build registered benchmarks with `cargo bench --no-run`, then run the relevant
