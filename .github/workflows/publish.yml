@@ -110,9 +110,13 @@ jobs:
         run: cargo test --test fault_injection --all-features -- --test-threads=1
 
       - name: Sqrzl provider qualification
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
         run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
 
       - name: Sqrzl engine qualification
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
 
       - name: Validate test conventions

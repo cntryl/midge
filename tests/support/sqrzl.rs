@@ -7,7 +7,7 @@ use std::time::Duration;
 const SQRZL_ENDPOINT: &str = "http://127.0.0.1:9000";
 const SQRZL_SOCKET: &str = "127.0.0.1:9000";
 const SQRZL_ACCESS_KEY: &str = "admin";
-const SQRZL_SECRET_KEY: &str = "easy-peasy";
+const SQRZL_SECRET_KEY_ENV: &str = "SQRZL_SECRET_ACCESS_KEY";
 const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
@@ -52,6 +52,12 @@ pub(super) fn sqrzl_is_available() -> bool {
     };
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
+
+fn sqrzl_secret_key() -> String {
+    std::env::var(SQRZL_SECRET_KEY_ENV)
+        .expect("set SQRZL_SECRET_ACCESS_KEY to the credential used by the local Sqrzl emulator")
+}
+
 pub(super) fn ensure_sqrzl_s3_bucket(bucket: &str) -> Result<(), String> {
     signed_s3_request("PUT", &format!("/{bucket}"), b"").map(|_| ())
 }
@@ -100,7 +106,7 @@ pub(super) fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result
         scope,
         hex::encode(Sha256::digest(canonical_request.as_bytes()))
     );
-    let k_date = hmac_sha256(format!("AWS4{SQRZL_SECRET_KEY}").as_bytes(), &date);
+    let k_date = hmac_sha256(format!("AWS4{}", sqrzl_secret_key()).as_bytes(), &date);
     let k_region = hmac_sha256(&k_date, region);
     let k_service = hmac_sha256(&k_region, "s3");
     let k_signing = hmac_sha256(&k_service, "aws4_request");
@@ -169,8 +175,9 @@ pub(super) fn signed_gcs_request(
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
     let string_to_sign = format!("{method}\n\n{content_type}\n{date}\n{path}");
-    let mut mac = Hmac::<Sha1>::new_from_slice(SQRZL_SECRET_KEY.as_bytes())
-        .map_err(|error| error.to_string())?;
+    let secret_key = sqrzl_secret_key();
+    let mut mac =
+        Hmac::<Sha1>::new_from_slice(secret_key.as_bytes()).map_err(|error| error.to_string())?;
     mac.update(string_to_sign.as_bytes());
     let signature = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -314,8 +321,9 @@ pub(super) fn azure_shared_key_signature(string_to_sign: &str) -> Result<String,
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
-    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, SQRZL_SECRET_KEY)
-        .unwrap_or_else(|_| SQRZL_SECRET_KEY.as_bytes().to_vec());
+    let secret_key = sqrzl_secret_key();
+    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &secret_key)
+        .unwrap_or_else(|_| secret_key.into_bytes());
     let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| error.to_string())?;
     mac.update(string_to_sign.as_bytes());
     Ok(base64::Engine::encode(
