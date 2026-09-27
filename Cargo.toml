@@ -59,10 +59,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OpenTelemetry (Observability)
-opentelemetry = { version = "0.32", optional = true }
-opentelemetry-otlp = { version = "0.32", optional = true, features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio"] }
-tracing-opentelemetry = { version = "0.33", optional = true }
+opentelemetry = { version = "0.33", optional = true }
+opentelemetry-otlp = { version = "0.33", optional = true, features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.33", optional = true, features = ["rt-tokio"] }
+tracing-opentelemetry = { version = "0.34", optional = true }
 
 # System Utilities
 hex = "0.4"
@@ -93,7 +93,7 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
 proptest = "1.11"
-cntryl-stress = "0.4"
+cntryl-stress = "0.5"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
 # without those modules being public API for downstream consumers.
