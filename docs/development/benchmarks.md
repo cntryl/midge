@@ -50,9 +50,14 @@ arguments. It is excluded from plain `cargo bench` by its existing `failpoints`
 feature requirement; use the commands in
 [Bounded Compaction Qualification](bounded-compaction-qualification.md).
 
-The simulated read amplification target exercises an in-file model rather than
-Midge. It is excluded from plain `cargo bench` and can be run for model-only
-diagnostics with `--features simulated-read-amp-bench`.
+The Tier 2 read amplification target opens a local Engine with three overlapping
+flushed SSTs. It records Engine point-read amplification and block-cache deltas
+alongside point-only and mixed point/short-scan throughput. The metrics are
+captured outside the measured window, and scans are excluded from the
+point-read amplification denominator. Cache and bloom observations cover the
+whole measured workload.
+Its row names and results start a new baseline; old simulator numbers cannot
+be compared with Engine throughput or block counts.
 
 To qualify the Tier 3 lifecycle benchmark on Ubuntu, Windows, and macOS,
 dispatch `CI` with `tier3_lifecycle_bench` enabled. This runs only the
