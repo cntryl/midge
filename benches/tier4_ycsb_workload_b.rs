@@ -98,6 +98,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
 
     // Flush to ensure warmup data is durable before measured phase
     ycsb::flush_after_phase(engine.as_ref(), &cf).expect("flush warmup phase");
+    let perf_start = ycsb::capture_runtime_perf_snapshot(engine.as_ref());
 
     // Phase 3: Measured (duration-based; multi-client)
     let client_suffix = if clients == 1 { "client" } else { "clients" };
@@ -151,6 +152,8 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     });
 
     measured.record_latencies(ctx);
+    let perf = ycsb::runtime_perf_report(engine.as_ref(), perf_start);
+    ycsb::record_runtime_report(ctx, &perf);
 }
 
 #[stress(tier = 4)]

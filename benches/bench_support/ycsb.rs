@@ -17,7 +17,7 @@ use hdrhistogram::Histogram;
 use cntryl_midge::{
     ColumnFamilyHandle, Engine, MidgeError, MidgeResult, TransactionMode, WriteOptions,
 };
-use cntryl_stress::StressContext;
+use cntryl_stress::{ObservationDirection, ObservationUnit, StressContext};
 
 use super::config::{MidgeOptions, StorageMode};
 
@@ -122,6 +122,36 @@ pub struct RuntimePerfReport {
 
 impl RuntimePerfReport {
     #[must_use]
+    pub fn diagnostic_observations(&self) -> Vec<(&'static str, f64, ObservationUnit)> {
+        self.tags()
+            .into_iter()
+            .filter_map(|(name, value)| match name {
+                "write_stalls"
+                | "wal_append_count"
+                | "cache_hits"
+                | "cache_misses"
+                | "candidate_sst_files_checked"
+                | "data_blocks_read"
+                | "cloud_async_wal_uploads_completed"
+                | "cloud_async_wal_uploads_failed" => {
+                    Some((name, observation_f64(value), ObservationUnit::Count))
+                }
+                "cache_hit_ratio_ppm" => {
+                    let hits = observation_f64(self.cache_hits);
+                    let misses = observation_f64(self.cache_misses);
+                    let ratio = if hits + misses == 0.0 {
+                        0.0
+                    } else {
+                        hits / (hits + misses)
+                    };
+                    Some(("cache_hit_ratio", ratio, ObservationUnit::Ratio))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn tags(&self) -> Vec<(&'static str, u64)> {
         let mut tags = Vec::with_capacity(64);
         self.push_write_wal_cache_tags(&mut tags);
@@ -146,11 +176,17 @@ impl RuntimePerfReport {
             ("wal_fsync_count", self.wal_fsync_count),
             (
                 "avg_wal_append_us",
-                average_u64(self.wal_append_ns_total, self.wal_append_count * 1_000),
+                average_u64(
+                    self.wal_append_ns_total,
+                    self.wal_append_count.saturating_mul(1_000),
+                ),
             ),
             (
                 "avg_wal_sync_us",
-                average_u64(self.wal_fsync_ns_total, self.wal_fsync_count * 1_000),
+                average_u64(
+                    self.wal_fsync_ns_total,
+                    self.wal_fsync_count.saturating_mul(1_000),
+                ),
             ),
             ("cache_hits", self.cache_hits),
             ("cache_misses", self.cache_misses),
@@ -293,6 +329,12 @@ impl RuntimePerfReport {
     }
 }
 
+fn observation_f64(value: u64) -> f64 {
+    let high = u32::try_from(value >> 32).expect("upper counter bits fit in u32");
+    let low = u32::try_from(value & u64::from(u32::MAX)).expect("lower counter bits fit in u32");
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
+
 impl MultiClientRunStats {
     /// Attach a bounded, deterministic approximation of the aggregate
     /// operation-latency distribution to the latest stress measurement.
@@ -334,8 +376,15 @@ pub fn configure_workload_parameters(
     );
 }
 
-/// Add asynchronous cloud-upload failures to the latest measurement's
-/// canonical correctness counters.
+/// Attach measured-window runtime diagnostics and cloud-upload failures to the
+/// latest YCSB measurement.
+pub fn record_runtime_report(ctx: &mut StressContext, report: &RuntimePerfReport) {
+    for (name, value, unit) in report.diagnostic_observations() {
+        ctx.record_observation(name, value, unit, ObservationDirection::Informational);
+    }
+    record_runtime_correctness(ctx, report);
+}
+
 pub fn record_runtime_correctness(ctx: &mut StressContext, report: &RuntimePerfReport) {
     let _ = ctx
         .correctness()

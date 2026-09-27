@@ -195,5 +195,11 @@ Human and markdown reports now surface:
 - the measurement mode
 - the trust class
 
+Tier 4 YCSB A–F rows also record measured-window write stalls, WAL appends,
+cache hits and misses, SST candidate checks, data-block reads, and cloud WAL
+upload outcomes. `cache_hit_ratio` is a 0–1 ratio. These observations are
+captured outside the timed window; asynchronous cloud WAL upload failures also
+contribute to the row's correctness failures.
+
 That output is the truth surface for deciding whether a row should stay a gate,
 move to diagnostic, or be rewritten.
