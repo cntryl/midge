@@ -39,8 +39,10 @@ docker build --file Dockerfile.tests --tag midge-tests:local .
 Pull requests into `develop` and `main` run `ci.yml` on Ubuntu, Windows, and
 macOS, plus GitHub-managed CodeQL. The Ubuntu CI job checks formatting, strict
 Clippy, test conventions, the full workspace suite with mock-backed cloud
-behavior, and serial fault injection. Windows and macOS run release checks,
-workspace tests, and serial fault injection; Windows also runs strict Clippy.
+behavior, and serial fault injection. macOS also runs release checks, workspace
+tests, and serial fault injection. Windows runs focused filesystem, cloud
+recovery, and consistent-cut backup tests. Those test commands compile the
+Windows code they exercise.
 The Sqrzl provider tests are ignored in the mock-backed suite and run in
 `cloud-integration.yml`.
 
