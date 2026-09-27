@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * 3"
   push:
     branches: [develop, main]
   pull_request:
@@ -86,3 +89,39 @@ jobs:
 
       - name: Production build has no dead code
         run: cargo rustc --lib --no-default-features --features cloud-all -- -D dead_code
+
+  platform:
+    name: OS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      CARGO_INCREMENTAL: 0
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "platform-${{ matrix.os }}"
+
+      - name: Verify release build
+        run: cargo check --release
+
+      - name: Clippy on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+
+      - name: Test workspace
+        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
+
+      - name: Fault injection suite (serial; failpoints are process-global)
+        run: cargo test --test fault_injection --all-features -- --test-threads=1

@@ -3,7 +3,7 @@
 Use this checklist before publishing a release candidate or stable release.
 
 - [ ] development work is merged into `develop` with passing current-head CI
-- [ ] the `develop` → `main` promotion PR has passing CI, OS matrix, cloud integration, compatibility, repository and Docker qualification, promotion-source, and CodeQL checks on its current head
+- [ ] the `develop` → `main` promotion PR has passing CI on Ubuntu, Windows, and macOS, plus cloud integration, compatibility, repository and Docker qualification, promotion-source, and CodeQL checks on its current head
 - [ ] the promotion uses a merge commit and post-merge `main` checks pass
 - [ ] the release tag points to a commit on `main`
 
