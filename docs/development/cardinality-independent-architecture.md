@@ -15,8 +15,9 @@ The tight read bounds apply after every L1+ SST has complete key bounds and the
 level satisfies the non-overlap invariant. Newly flushed and compacted SSTs set
 `key_bounds_complete`. Legacy files remain readable in a conservative fallback
 bucket until a one-file-at-a-time maintenance pass verifies and durably records
-their complete bounds. A verified overlap quarantines the level instead of
-optimizing through a false invariant.
+their complete bounds. A verified overlap quarantines the level until automatic
+same-level repair publishes a disjoint replacement. Reads stay conservative
+while repair runs.
 
 The L0 bound assumes writes use the current admission path. A database opened
 with historical state already above the ceiling remains readable, stalls new
@@ -50,6 +51,7 @@ Let:
 | Forward or reverse range scan | at most `R + U + (L - 1)` active SST cursors; `R + U <= H` under steady-state admission | `O(R + U + sum(log r_j) + sum(log n_i) + selected files)` |
 | L0 compaction | at most `S + 1` merge heads | target span metadata is linear in overlap count |
 | Inner-level compaction | at most two merge heads | target span metadata is linear in overlap count |
+| L1+ overlap repair | at most the admitted fan-in of independent merge heads per raw pass | scratch bytes are admitted and every version survives until the final pass |
 
 L0 files may overlap arbitrarily, so the read view checks their manifest bounds
 in recency order. A point read opens only files whose complete, valid bounds
@@ -81,8 +83,10 @@ startup inventory cap. Scan work still grows with the files and rows read.
 
 Compaction represents source files and the complete target-level span
 separately. L0 retains one head per bounded selected source plus one chained
-target head. Inner-level compaction retains one chained source head and one
-chained target head. Point versions and range-tombstone start/end events share
+target head. Ordinary inner-level compaction retains one chained source head and
+one chained target head. Overlap repair instead gives each source its own head;
+components above the configured fan-in use repeated bounded raw merges into
+non-authoritative local scratch runs. Point versions and range-tombstone start/end events share
 that stream. Every reader, retained event, merge container, boundary key, and
 output buffer is charged to the derived compaction resource pool; genuine byte
 exhaustion fails closed.
@@ -97,15 +101,23 @@ admission. Disabling background compaction does not disable this ceiling.
 
 The single worker chooses work in this order:
 
-1. Critical L0 debt, round-robin across affected column families.
-2. The globally deepest overfull inner level.
-3. Ordinary soft-L0 work.
+1. The globally deepest complete-bound L1+ overlap component, including an
+   underfull level.
+2. Critical L0 debt, round-robin across affected column families.
+3. The globally deepest overfull inner level.
+4. Ordinary soft-L0 work.
 
 For a logical interval at level `i`, assign rank equal to the number of levels
-remaining below it. Compaction never moves an interval upward. Every successful
-job advances at least one source interval to a strictly deeper level, while a
-deleted interval disappears. With finite levels and no admitted writes, the
-sum of interval ranks strictly decreases. `compact_all()` returns success only
+remaining below it. With no admitted writes, use the lexicographic progress
+measure `(number of complete-bound L1+ defect components, sum of interval ranks)`.
+A successful repair removes one defect component at the same level; its output
+may change the rank sum, but the first coordinate decreases. Ordinary compaction
+does not introduce an L1+ defect, and advances or removes at least one source
+interval, decreasing the second coordinate when the first is unchanged. This
+argument assumes admitted resources and successful storage operations; failures
+before publication retain the old authority and defer retry until the next
+30-second maintenance check. An ambiguous durable intent fences compaction until
+recovery resolves the publication boundary. `compact_all()` returns success only
 after the production debt predicate is clear; debt with no valid plan is an
 invariant error.
 
@@ -163,8 +175,10 @@ than its pool and asserts the recorded peak never exceeds that pool.
 `should_prove_every_small_abstract_manifest_invariant`
 enumerates all 4,096 occupancy states across three column families and four
 levels. It uses the production admission, picker, and debt predicate, applies
-each selected publication, and requires a strictly decreasing rank until every
-family is clear. A separate hot-family schedule must repeat `0, 1, 2, 0, 1, 2`.
+each selected publication, and requires a strictly decreasing rank for these
+non-overlapping layouts until every family is clear. Overlap repair adds the
+first coordinate of the progress measure above. A separate hot-family schedule
+must repeat `0, 1, 2, 0, 1, 2`.
 
 `should_replay_every_compaction_publication_crash_point_to_complete_authority`
 reopens and replays output durability, intent durability, partial mirror,
@@ -206,8 +220,9 @@ is calibration only; no 500-million-key timing is claimed.
 The proof does not remove unavoidable linear costs:
 
 - Manifest persistence and the shared catalog require `O(total SSTs)` storage.
-- A catalog rebuild after a manifest edit performs `O(total SSTs)` work before
-  later snapshots can share it.
+- A catalog rebuild after a manifest file-set edit performs `O(total SSTs)` work
+  before later snapshots can share it. Sequence and journal metadata edits reuse
+  the existing read view.
 - Legacy fallback and quarantined overlap levels are intentionally
   conservative and can exceed the tight candidate bounds until repaired.
 - Range I/O scales with intersecting files and returned data.

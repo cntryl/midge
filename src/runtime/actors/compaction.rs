@@ -254,6 +254,8 @@ pub struct CompactionActor {
     storage_reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     /// Exact manifest inputs owned by the active operation.
     active_input_ssts: Vec<String>,
+    active_input_metadata: Vec<crate::metadata::FileMeta>,
+    active_same_level_repair: bool,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
     /// Cooperative cancellation flag for the active background worker.
@@ -287,6 +289,8 @@ impl CompactionActor {
             last_scheduled_cf: None,
             storage_reservation: None,
             active_input_ssts: Vec::new(),
+            active_input_metadata: Vec::new(),
+            active_same_level_repair: false,
             active_output_generation: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
@@ -376,6 +380,17 @@ impl CompactionActor {
         );
 
         let cf_ids = self.round_robin_cf_ids(state);
+
+        // Any promotion into or out of a defective level depends on its key
+        // order. Heal complete-bound overlap first, even when underfull.
+        for cf_id in &cf_ids {
+            if let Some(plan) = self
+                .compactor
+                .pick_repair_compaction(&state.manifest.files, *cf_id)?
+            {
+                return Ok(Some(self.record_scheduled_plan(plan)));
+            }
+        }
 
         // Critical L0 debt always wins the global worker, but rotates across
         // affected families so one hot tenant cannot monopolize recovery.
@@ -518,7 +533,8 @@ impl CompactionActor {
     ) {
         if hybrid.ephemeral_sst_cache_enabled()
             && error.is_some()
-            && !self.sst_factory.compaction_scratch_cleanup_verified()
+            && (!self.sst_factory.compaction_scratch_cleanup_verified()
+                || !self.repair_scratch_cleanup_verified(state))
         {
             // Error type cannot prove deletion: cancellation, resource limits
             // and corrupt inputs can all follow partial scratch writes.
@@ -537,6 +553,10 @@ impl CompactionActor {
         hybrid: &dyn CompactionStorage,
         token: crate::storage::hybrid::actor::StorageReservationToken,
     ) {
+        if hybrid.ephemeral_sst_cache_enabled() && !self.repair_scratch_cleanup_verified(state) {
+            tracing::warn!(?token, "retaining compaction staging allowance because overlap-repair scratch cleanup is unverified");
+            return;
+        }
         if !hybrid.ephemeral_sst_cache_enabled() {
             hybrid.abort(token);
             return;
@@ -549,6 +569,41 @@ impl CompactionActor {
                 tracing::warn!(%error, ?token, "retaining compaction staging allowance because residue cannot be measured");
             }
         }
+    }
+
+    fn repair_scratch_cleanup_verified(&self, state: &RuntimeState) -> bool {
+        let fs = self.sst_factory.output_fs();
+        let path = state.sst_dir.join(".compaction-repair");
+        let key = match crate::sst::fs::fs_relative_sst_path(&fs, &path) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(%error, "cannot verify overlap-repair scratch cleanup");
+                return false;
+            }
+        };
+        match fs.exists(&key) {
+            Ok(false) => return true,
+            Ok(true) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cannot verify overlap-repair scratch cleanup");
+                return false;
+            }
+        }
+        match fs.list_dir(&key) {
+            Ok(entries) => entries.is_empty(),
+            Err(error) => {
+                tracing::warn!(%error, "cannot verify overlap-repair scratch cleanup");
+                false
+            }
+        }
+    }
+
+    pub(crate) fn captured_input_metadata(&self) -> &[crate::metadata::FileMeta] {
+        &self.active_input_metadata
+    }
+
+    pub(crate) fn active_same_level_repair(&self) -> bool {
+        self.active_same_level_repair
     }
 
     fn retained_output_bytes(&self, output_dir: &std::path::Path) -> MidgeResult<u64> {
@@ -725,6 +780,8 @@ impl CompactionActor {
             tracing::warn!("active compaction accounting was already settled");
         }
         self.active_input_ssts.clear();
+        self.active_input_metadata.clear();
+        self.active_same_level_repair = false;
         self.compaction_running = false;
     }
 
@@ -759,6 +816,14 @@ impl CompactionActor {
         self.compaction_running = true;
         self.active_output_generation = Some((plan.cf_id, plan.target_level, plan.output_seq));
         self.active_input_ssts.clone_from(&plan.input_files);
+        self.active_input_metadata = state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| plan.input_files.contains(&file.name))
+            .cloned()
+            .collect();
+        self.active_same_level_repair = plan.source_level == plan.target_level;
 
         state
             .compaction
@@ -802,6 +867,19 @@ impl CompactionActor {
     }
 
     #[cfg(test)]
+    pub(crate) fn prepare_repair_for_completion_test(
+        &mut self,
+        state: &mut RuntimeState,
+        input_ssts: &[String],
+        level: u32,
+    ) -> MidgeResult<()> {
+        let mut plan = crate::compaction::CompactionPlan::new(0, level, level);
+        plan.source_files = input_ssts.to_vec();
+        plan.input_files = input_ssts.to_vec();
+        self.prepare_compaction(state, &plan, None)
+    }
+
+    #[cfg(test)]
     pub(crate) fn prepare_for_completion_with_storage_test(
         &mut self,
         state: &mut RuntimeState,
@@ -821,6 +899,7 @@ impl CompactionActor {
     ) -> MidgeResult<Vec<String>> {
         let output_ssts = Self::execute_with_storage(
             plan,
+            self.compactor.config.max_compaction_input_files,
             self.sst_factory.as_ref(),
             &state.sst_dir,
             None,
@@ -838,6 +917,7 @@ impl CompactionActor {
 
     fn execute_with_storage(
         plan: &crate::compaction::CompactionPlan,
+        source_fan_in: usize,
         factory: &dyn SstFactory,
         output_dir: &std::path::Path,
         abort_check: Option<&dyn Fn() -> bool>,
@@ -871,6 +951,7 @@ impl CompactionActor {
             plan,
             crate::compaction::CompactionResources {
                 target_sst_size: target,
+                source_fan_in,
                 budget: storage
                     .and_then(|storage| storage.maintenance_memory())
                     .unwrap_or_else(|| {
@@ -904,6 +985,7 @@ impl CompactionActor {
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
+        let source_fan_in = self.compactor.config.max_compaction_input_files;
         store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
 
@@ -914,6 +996,7 @@ impl CompactionActor {
                 let abort_check = || worker_cancel.load(Ordering::Acquire);
                 let result = Self::execute_with_storage(
                     &plan_clone,
+                    source_fan_in,
                     sst_factory.as_ref(),
                     &sst_dir,
                     Some(&abort_check),
@@ -1420,7 +1503,7 @@ mod tests {
         let mut actor = create_test_compaction_actor();
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.set_compaction_enabled(true);
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
             make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
             make_l0_file("cf0_0003.sst", 0, b"c00", b"c99"),
@@ -1441,7 +1524,7 @@ mod tests {
         let mut actor = create_test_compaction_actor();
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.set_compaction_enabled(true);
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
             make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
             make_l0_file("cf0_0003.sst", 0, b"c00", b"c99"),
@@ -1470,7 +1553,7 @@ mod tests {
         let mut actor = create_test_compaction_actor();
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.set_compaction_enabled(true);
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
             make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
             make_l0_file("cf0_0003.sst", 0, b"c00", b"c99"),
@@ -1508,7 +1591,7 @@ mod tests {
         });
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.set_compaction_enabled(true);
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
             make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
         ]);
@@ -1535,7 +1618,7 @@ mod tests {
             .create_cf("tenant_cf".to_string())
             .expect("create non-default cf");
 
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("cf1_0001.sst", cf_id, b"a00", b"a99"),
             make_l0_file("cf1_0002.sst", cf_id, b"b00", b"b99"),
             make_l0_file("cf1_0003.sst", cf_id, b"c00", b"c99"),
@@ -1556,6 +1639,40 @@ mod tests {
     }
 
     #[test]
+    fn should_prioritize_underfull_repair_in_one_family_over_l0_debt_in_another() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        let repair_cf = state.create_cf("repair_cf".to_string()).expect("create cf");
+        let mut left = make_l0_file("repair-left.sst", repair_cf, b"a", b"z");
+        let mut right = make_l0_file("repair-right.sst", repair_cf, b"m", b"n");
+        left.level = 1;
+        right.level = 1;
+        left.key_bounds_complete = true;
+        right.key_bounds_complete = true;
+        state.manifest.test_mut().files.extend([
+            make_l0_file("default-1.sst", 0, b"a", b"b"),
+            make_l0_file("default-2.sst", 0, b"c", b"d"),
+            make_l0_file("default-3.sst", 0, b"e", b"f"),
+            make_l0_file("default-4.sst", 0, b"g", b"h"),
+            left,
+            right,
+        ]);
+
+        // Act
+        let plan = actor
+            .check_compaction(&state)
+            .expect("compaction planning")
+            .expect("repair debt");
+
+        // Assert
+        assert_eq!(plan.cf_id, repair_cf);
+        assert_eq!((plan.source_level, plan.target_level), (1, 1));
+        assert_eq!(plan.input_files.len(), 2);
+    }
+
+    #[test]
     fn should_pick_lowest_column_family_id_when_multiple_non_default_families_need_compaction() {
         // Arrange
         let mut actor = create_test_compaction_actor();
@@ -1564,7 +1681,7 @@ mod tests {
         let cf1_id = state.create_cf("cf1".to_string()).expect("create cf1");
         let cf2_id = state.create_cf("cf2".to_string()).expect("create cf2");
 
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("cf1_0001.sst", cf1_id, b"a00", b"a99"),
             make_l0_file("cf1_0002.sst", cf1_id, b"b00", b"b99"),
             make_l0_file("cf1_0003.sst", cf1_id, b"c00", b"c99"),
@@ -1599,7 +1716,7 @@ mod tests {
             .create_cf("second".to_string())
             .expect("create second cf");
         for (cf_id, prefix) in [(first_cf, "first"), (second_cf, "second")] {
-            state.manifest.files.extend((0..4).map(|index| {
+            state.manifest.test_mut().files.extend((0..4).map(|index| {
                 make_l0_file(
                     &format!("{prefix}_{index}.sst"),
                     cf_id,
@@ -1651,7 +1768,7 @@ mod tests {
             .create_cf("second".to_string())
             .expect("create second");
         for (cf_id, prefix) in [(first_cf, "first"), (second_cf, "second")] {
-            state.manifest.files.extend((0..3).map(|index| {
+            state.manifest.test_mut().files.extend((0..3).map(|index| {
                 make_l0_file(
                     &format!("{prefix}-l0-{index}.sst"),
                     cf_id,
@@ -1660,10 +1777,14 @@ mod tests {
                 )
             }));
         }
-        state
-            .manifest
-            .files
-            .push(make_level_file("deep-overfull.sst", 0, 1, 2, b"a", b"z"));
+        state.manifest.test_mut().files.push(make_level_file(
+            "deep-overfull.sst",
+            0,
+            1,
+            2,
+            b"a",
+            b"z",
+        ));
 
         // Act
         let first = actor
@@ -1699,7 +1820,7 @@ mod tests {
         state.set_compaction_enabled(true);
         state.limits.l0_compaction_trigger = 2;
         state.limits.max_immutable_memtables = 10;
-        state.manifest.files.extend([
+        state.manifest.test_mut().files.extend([
             make_l0_file("l0-a.sst", 0, b"a", b"b"),
             make_l0_file("l0-b.sst", 0, b"c", b"d"),
             make_level_file("l1-overfull.sst", 0, 1, 2, b"e", b"f"),
@@ -1724,6 +1845,7 @@ mod tests {
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state
             .manifest
+            .test_mut()
             .files
             .push(make_l0_file("one-soft-l0.sst", 0, b"a", b"z"));
         assert!(actor
@@ -1742,6 +1864,41 @@ mod tests {
         assert_eq!(plan.source_level, 0);
     }
 
+    fn write_shutdown_compaction_input(
+        state: &mut RuntimeState,
+        factory: &dyn SstFactory,
+        input_name: &str,
+    ) -> Vec<u8> {
+        let input_path = state.sst_dir.join(input_name);
+        let mut input_writer = factory.create().expect("create input SST writer");
+        input_writer
+            .add_with_meta(
+                b"key",
+                Some(b"authoritative value"),
+                1,
+                EntryType::Put,
+                None,
+            )
+            .expect("write input value");
+        crate::sst::fs::finish_writer_to_path(input_writer, &input_path)
+            .expect("finalize input SST");
+        let input_bytes = std::fs::read(&input_path).expect("read input fixture");
+        state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name: input_name.to_string(),
+                level: 0,
+                size_bytes: u64::try_from(input_bytes.len()).expect("input size fits u64"),
+                cf_id: 0,
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                ..Default::default()
+            });
+        input_bytes
+    }
+
     #[test]
     fn should_reconcile_compaction_state_given_shutdown_mid_async_compaction() {
         // Arrange
@@ -1755,28 +1912,8 @@ mod tests {
         let real_fs = Arc::new(crate::io::RealFs::new(&state.sst_dir).expect("create real SST fs"));
         let delegate: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::FsSstFactoryIo::new(real_fs, 4096));
-        let mut input_writer = delegate.create().expect("create input SST writer");
-        input_writer
-            .add_with_meta(
-                b"key",
-                Some(b"authoritative value"),
-                1,
-                EntryType::Put,
-                None,
-            )
-            .expect("write input value");
-        crate::sst::fs::finish_writer_to_path(input_writer, &input_path)
-            .expect("finalize input SST");
-        let input_bytes = std::fs::read(&input_path).expect("read input fixture");
-        state.manifest.files.push(crate::metadata::FileMeta {
-            name: input_name.clone(),
-            level: 0,
-            size_bytes: u64::try_from(input_bytes.len()).expect("input size fits u64"),
-            cf_id: 0,
-            smallest_key: Some(b"key".to_vec()),
-            largest_key: Some(b"key".to_vec()),
-            ..Default::default()
-        });
+        let input_bytes =
+            write_shutdown_compaction_input(&mut state, delegate.as_ref(), &input_name);
 
         let local = Arc::new(
             crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-local"))

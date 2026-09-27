@@ -310,6 +310,16 @@ impl Fs for RemoteSstFs {
     }
     fn immutable_read_view(&self, path: &FsPath) -> FsResult<Option<Arc<dyn Fs>>> {
         if self.pinned.is_none() {
+            // Same-level repair runs are local, non-authoritative inputs. The
+            // generic SST factory asks for an immutable view before opening a
+            // compaction cursor; pinning the remote basename here would look
+            // up an object that must never have been uploaded.
+            if Path::new(&path.0)
+                .components()
+                .any(|component| component.as_os_str() == ".compaction-repair")
+            {
+                return Ok(Some(Arc::clone(&self.local)));
+            }
             if let Some(name) = Path::new(&path.0)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -441,6 +451,37 @@ mod tests {
     use crate::sst::traits::{SstFactory, SstStateReader};
     use crate::storage::test_support::StorageBackendTestExt;
     use crate::types::EntryType;
+
+    #[test]
+    fn should_read_repair_scratch_locally_through_hybrid_compaction_factory(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let remote = tempfile::tempdir()?;
+        let local = Arc::new(crate::io::MockFs::new());
+        local
+            .create_dir_all(&FsPath::new(".compaction-repair"))
+            .map_err(FsError::into_midge)?;
+        let cloud = Arc::new(super::super::filesystem::FileSystem::new(remote.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(
+            Arc::new(RemoteSstFs::new(local, cloud, Duration::from_secs(5))),
+            4096,
+        );
+        let path = Path::new(".compaction-repair/run.sst");
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"local"), 9, EntryType::Put, None)?;
+        writer.finish_to_path(path)?;
+
+        // Act
+        let reader = factory.open_for_compaction(
+            path,
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        )?;
+
+        // Assert
+        assert!(matches!(reader.get_state_at_with_time(b"key", 9, 0)?,
+            crate::types::KeyState::Value(value, 9, None, _) if value.as_ref() == b"local"));
+        Ok(())
+    }
 
     #[test]
     fn should_read_back_unpublished_sst_from_local_output_view() -> crate::common::MidgeResult<()> {

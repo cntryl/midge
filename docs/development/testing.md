@@ -97,16 +97,16 @@ Use this matrix when updating guarantees or reviewing whether Midge is safe enou
 
 | Guarantee | Representative tests |
 |---|---|
-| restart after committed writes restores state | `tests/durability_recovery.rs`, `tests/durability_wal.rs` |
-| truncated WAL tail keeps valid prefix only | `src/wal/recovery.rs`, `tests/durability_wal.rs` |
-| corrupted durable WAL prefix fails strict recovery | `src/wal/recovery.rs`, `tests/durability_wal.rs` |
-| flush failure does not publish orphan SST state | `tests/failure_injection.rs` |
-| flush restart recovers from WAL after interrupted publish | `tests/failure_injection.rs` |
-| compaction crash before publish keeps input SSTs authoritative | `tests/chaos_compaction.rs`, `tests/failure_injection.rs` |
-| compaction crash after publish keeps data visible and cleanup idempotent | `tests/chaos_compaction.rs`, `tests/failure_injection.rs` |
-| iterators honor tombstones and latest-version resolution across SST boundaries | `tests/engine_iterators.rs`, `tests/engine_compaction.rs` |
-| strict vs salvage recovery is explicit | `tests/failure_injection.rs`, `tests/durability_wal.rs` |
-| released-format fixtures open and future-format fixtures fail with `CompatibilityError` | `tests/compatibility_fixtures.rs`, `src/metadata/format.rs` |
+| restart after committed writes restores state | `tests/durability.rs` — `should_restore_committed_write_given_local_restart_when_sync_commit_returned` |
+| truncated WAL tail keeps valid prefix only | `tests/durability.rs` — `should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mode` |
+| corrupted durable WAL prefix fails strict recovery | `tests/durability.rs` — `should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening` |
+| flush failure does not publish orphan SST state | `tests/fault_injection.rs` — `should_ignore_orphan_sst_when_flush_intent_log_save_hits_no_space` |
+| flush restart recovers from WAL after interrupted publish | `tests/fault_injection.rs` — `should_retry_flush_given_transient_publish_failure_when_reopening` |
+| compaction crash before publish keeps input SSTs authoritative | `tests/fault_injection.rs` — `should_retain_input_ssts_given_compaction_failure_before_manifest_publish` |
+| compaction crash after publish keeps data visible and cleanup idempotent | `tests/fault_injection.rs` — `should_not_delete_input_ssts_given_compaction_gc_failure_after_manifest_publish` |
+| iterators honor tombstones and latest-version resolution across SST boundaries | `tests/engine_api.rs` — `should_respect_range_tombstones_given_delete_range_when_scanning`, `should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_scanning` |
+| strict vs salvage recovery is explicit | `tests/durability.rs` — `should_fail_strict_open_when_wal_is_corrupt`, `should_open_in_salvage_mode_when_wal_is_corrupt` |
+| released-format fixtures open and future-format fixtures fail with `CompatibilityError` | `tests/storage_layer.rs` — `should_verify_populated_release_v3_v4_fixture_given_supported_format_when_reopening`, `should_reject_future_v5_fixture_given_unsupported_version_when_reopening` |
 
 ## External-Adopter Gate
 
@@ -145,7 +145,7 @@ method were deleted and its implementation inlined into its caller? If not,
 move the test to the real entry point or explicitly classify it as a local unit
 invariant rather than mechanism-reachability evidence.
 
-`tests/runtime_transaction_coalescing.rs` is the current #120 example: it
+`tests/transactions.rs` (`should_preserve_runtime_coalescing_when_threads_write_concurrently`) is the current #120 example: it
 drives concurrent commits through the engine and compares logical operations
 with physical WAL appends. The deleted caller-side leader/follower grouping is
 not assigned counters because it is no longer a production mechanism.
@@ -174,7 +174,7 @@ transaction coalescing. `durability_waiters_fanned_out_total` counts waiters
 completed through keyed durability events and is distinct from write
 coalescing. V4 point reads expose `sst_bloom_checks_total` and
 `sst_bloom_rejects_total` alongside `sst_data_blocks_read_total`;
-`tests/read_path_diagnostics.rs` proves through the public engine path that a
+`tests/observability.rs` (`should_reject_absent_key_with_bloom_without_reading_data_block`) proves through the public engine path that a
 persisted bloom is consulted and a definite rejection avoids a data block
 read. Add counters only for shipping mechanisms. Do not recreate a sparse-index
 counter after that dormant implementation was removed.

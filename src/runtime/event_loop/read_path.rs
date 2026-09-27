@@ -508,17 +508,21 @@ mod tests {
         writer.add_range_tombstone(b"b", b"z", 9)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
 
-        el.state.manifest.files.push(crate::metadata::FileMeta {
-            name: sst_name,
-            level: 0,
-            size_bytes: std::fs::metadata(&sst_path)?.len(),
-            cf_id: 0,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"a".to_vec()),
-            smallest_seq: Some(10),
-            largest_seq: Some(10),
-            ..Default::default()
-        });
+        el.state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name: sst_name,
+                level: 0,
+                size_bytes: std::fs::metadata(&sst_path)?.len(),
+                cf_id: 0,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"a".to_vec()),
+                smallest_seq: Some(10),
+                largest_seq: Some(10),
+                ..Default::default()
+            });
         el.compaction_actor =
             crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
         Ok((tmp, el, sst_path))
@@ -601,7 +605,7 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let (_tmp, mut event_loop, _sst_path) = create_event_loop_with_test_sst()?;
-        event_loop.state.manifest.files[0].key_bounds_complete = false;
+        event_loop.state.manifest.test_mut().files[0].key_bounds_complete = false;
 
         // Act
         let started = event_loop.backfill_one_legacy_sst_bounds()?;
@@ -627,6 +631,7 @@ mod tests {
         let file = event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .first_mut()
             .expect("legacy manifest file");
@@ -663,7 +668,7 @@ mod tests {
         // Arrange: four legacy files without complete key bounds.
         let (tmp, mut event_loop, sst_path) = create_event_loop_with_test_sst()?;
         let template = event_loop.state.manifest.files[0].clone();
-        event_loop.state.manifest.files.clear();
+        event_loop.state.manifest.test_mut().files.clear();
         for index in 1..=4 {
             let name = format!("{index:08}.sst");
             if index > 1 {
@@ -672,7 +677,7 @@ mod tests {
             let mut file = template.clone();
             file.name = name;
             file.key_bounds_complete = false;
-            event_loop.state.manifest.files.push(file);
+            event_loop.state.manifest.test_mut().files.push(file);
         }
         crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
 
@@ -712,6 +717,7 @@ mod tests {
         let readable = event_loop
             .state
             .manifest
+            .test_mut()
             .files
             .first_mut()
             .expect("legacy manifest file");
@@ -719,7 +725,12 @@ mod tests {
         let readable_name = readable.name.clone();
         let mut unreadable = readable.clone();
         unreadable.name = crate::cloud_layout::file_name(0, 0, 999);
-        event_loop.state.manifest.files.insert(0, unreadable);
+        event_loop
+            .state
+            .manifest
+            .test_mut()
+            .files
+            .insert(0, unreadable);
 
         // Act
         let first = finish_backfill(&mut event_loop);

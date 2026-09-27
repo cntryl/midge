@@ -13,7 +13,6 @@
 use crate::common::MidgeResult;
 use crate::io::FsError;
 use crate::sst::traits::{RawSstVersion, RawSstVersionCursor, SstFactory};
-#[cfg(test)]
 use crate::types::EntryType;
 #[cfg(test)]
 use crate::types::KeyState;
@@ -447,10 +446,11 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
     source_files: &'a [String],
     target_files: &'a [String],
     source_level: u32,
+    same_level_repair: bool,
     budget: &crate::common::resource_budget::ResourceBudget,
     abort_check: Option<&'a dyn Fn() -> bool>,
 ) -> MidgeResult<CompactionStreamInputs<'a>> {
-    let source_streams = if source_level == 0 {
+    let source_streams = if source_level == 0 || same_level_repair {
         source_files.len()
     } else {
         usize::from(!source_files.is_empty())
@@ -464,7 +464,7 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
     let cursor_reservation = budget.reserve(cursor_bytes, "raw cursor containers")?;
     let mut cursors: Vec<CompactionEventCursor<'a>> = Vec::with_capacity(cursor_count);
 
-    if source_level == 0 {
+    if source_level == 0 || same_level_repair {
         for filename in source_files {
             ensure_compaction_not_aborted(abort_check)?;
             cursors.push(Box::new(SstEventCursor::open(
@@ -494,6 +494,66 @@ pub(crate) fn collect_compaction_stream_inputs<'a>(
         cursors,
         _cursor_reservation: cursor_reservation,
     })
+}
+
+/// Make a non-authoritative raw run from at most one admitted fan-in batch.
+/// No version selection or tombstone GC is allowed here: a later pass must
+/// still see every input to validate equal-sequence conflicts and snapshots.
+pub(crate) fn merge_repair_inputs_to_run(
+    sst_factory: &dyn SstFactory,
+    sources: &[String],
+    path: &Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+    byte_limit: usize,
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<()> {
+    let inputs =
+        collect_compaction_stream_inputs(sst_factory, sources, &[], 1, true, budget, abort_check)?;
+    let CompactionStreamInputs {
+        cursors,
+        _cursor_reservation,
+    } = inputs;
+    let mut merged = EventMergeIterator::new(cursors, budget.clone())?;
+    let mut writer = sst_factory.create_for_compaction(budget.clone())?;
+    let mut seen = 0usize;
+    while let Some(event) = merged.next_event()? {
+        if seen.is_multiple_of(1024) {
+            ensure_compaction_not_aborted(abort_check)?;
+        }
+        seen = seen.saturating_add(1);
+        match event {
+            CompactionEvent::Version(version) => writer.add_sorted_with_meta(
+                &version.key,
+                version.value.as_deref(),
+                version.seq,
+                if version.is_tombstone {
+                    EntryType::Delete
+                } else {
+                    EntryType::Put
+                },
+                version.expiration,
+            )?,
+            CompactionEvent::RangeStart(tombstone) => {
+                writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
+            }
+            CompactionEvent::RangeEnd(_) => {}
+        }
+        if writer
+            .encoded_size_upper_bound()
+            .is_none_or(|bytes| bytes > byte_limit)
+        {
+            return Err(crate::common::MidgeError::ResourceLimit(
+                "repair scratch run exceeds admitted local capacity".into(),
+            ));
+        }
+    }
+    if seen == 0 {
+        return Err(crate::common::MidgeError::Corruption(
+            "overlap repair input has no versions or tombstones".into(),
+        ));
+    }
+    ensure_compaction_not_aborted(abort_check)?;
+    writer.finish_to_path(path)
 }
 
 struct OutputSetCleanup {

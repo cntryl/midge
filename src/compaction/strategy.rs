@@ -17,8 +17,9 @@ pub struct CompactionPlan {
     /// Complete manifest replacement set. This remains the vector persisted in
     /// compaction intent and manifest edits.
     pub input_files: Vec<String>,
-    /// Source-level files selected by the picker. L0 files are independent
-    /// merge streams; inner-level files are consumed by one chained cursor.
+    /// Source-level files selected by the picker. L0 and same-level repair
+    /// files are independent merge streams; ordinary inner-level files use
+    /// one chained cursor.
     pub source_files: Vec<String>,
     /// Complete, key-ordered overlap span in the target level. Execution walks
     /// this span with one chained cursor instead of one merge head per file.
@@ -105,8 +106,9 @@ impl CompactionPlan {
 pub struct LeveledCompactionConfig {
     pub l0_compaction_threshold: u64,
     pub l0_file_count_threshold: usize,
-    /// Hard safety bound for simultaneously active source merge streams. The
-    /// complete target overlap span is walked sequentially and is not capped.
+    /// Hard safety bound for simultaneously active source merge streams.
+    /// Same-level repair uses bounded raw scratch passes above this fan-in;
+    /// the complete ordinary target span is walked sequentially.
     pub max_compaction_input_files: usize,
     pub level_multiplier: u64,
     pub l1_target_size: u64,
@@ -143,8 +145,9 @@ impl Compactor {
     /// Check if compaction should be triggered based on read amplification.
     ///
     /// Pick compaction using leveled strategy:
-    ///   1. Check the deepest overfull L1+ level.
-    ///   2. Check ordinary soft-L0 work.
+    ///   1. Repair the deepest defective L1+ level.
+    ///   2. Check the deepest overfull L1+ level.
+    ///   3. Check ordinary soft-L0 work.
     ///
     /// NOTE: This picker is deterministic for a given metadata snapshot.
     #[cfg(test)]
@@ -153,6 +156,9 @@ impl Compactor {
         files: &[FileMeta],
         cf_id: u32,
     ) -> MidgeResult<Option<CompactionPlan>> {
+        if let Some(repair) = self.pick_repair_compaction(files, cf_id)? {
+            return Ok(Some(repair));
+        }
         self.pick_deepest_inner_compaction(files, cf_id)?
             .map_or_else(
                 || self.pick_l0_compaction(files, cf_id, false),
@@ -198,14 +204,52 @@ impl Compactor {
         Ok(None)
     }
 
+    /// Repair the first defective complete-bound component at the deepest
+    /// level. This debt exists even below the ordinary byte threshold and at
+    /// the bottom level, where no deeper compaction can fix the layout.
+    pub(crate) fn pick_repair_compaction(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+    ) -> MidgeResult<Option<CompactionPlan>> {
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(None);
+        };
+        for level in (1..self.config.max_levels).rev() {
+            let Some(component) = crate::compaction::layout::repair_components(&levels[level])
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            let source_files: Vec<_> = component
+                .into_iter()
+                .map(|index| levels[level][index].name.clone())
+                .collect();
+            return Ok(Some(CompactionPlan {
+                input_files: source_files.clone(),
+                source_files,
+                target_files: Vec::new(),
+                source_level: u32::try_from(level).expect("level index fits in u32"),
+                target_level: u32::try_from(level).expect("level index fits in u32"),
+                cf_id,
+                output_seq: 0,
+                target_sst_size: super::DEFAULT_TARGET_SST_SIZE,
+                compaction_memory_limit: super::DEFAULT_COMPACTION_MEMORY_LIMIT,
+                snapshot_horizon: None,
+                point_tombstone_gc_eligible: false,
+                range_tombstone_gc_eligible: false,
+            }));
+        }
+        Ok(None)
+    }
+
     /// Report whether the manifest's logical compaction debt is clear.
     ///
-    /// Every L0 key interval carries one level of mandatory debt. An inner
-    /// level carries debt only while its complete byte set is overfull. A
-    /// successful plan moves at least one source interval to a strictly deeper
-    /// level (or deletes it), and no plan moves an interval upward. With finite
-    /// levels and no new admissions, repeated successful plans therefore
-    /// exhaust this debt.
+    /// Every L0 key interval carries mandatory debt. An inner level carries
+    /// debt when overfull or when complete bounds reveal a repair component.
+    /// With finite levels and no new admissions, successful ordinary plans
+    /// lower interval rank and successful repairs remove defect components.
     pub(crate) fn compaction_debt_is_clear(
         &self,
         files: &[FileMeta],
@@ -214,6 +258,11 @@ impl Compactor {
         let Some(levels) = self.validated_levels(files, cf_id)? else {
             return Ok(true);
         };
+        if (1..self.config.max_levels)
+            .any(|level| !crate::compaction::layout::repair_components(&levels[level]).is_empty())
+        {
+            return Ok(false);
+        }
         if !levels[0].is_empty() {
             return Ok(false);
         }
@@ -952,6 +1001,87 @@ mod tests {
 
         // Assert: no compaction triggered
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn should_repair_underfull_transitive_inner_overlap_before_size_work() {
+        // Arrange
+        let compactor = Compactor::new();
+        let mut files = vec![
+            make_file("a.sst", 0, 1, 10, Some(b"a".to_vec()), Some(b"z".to_vec())),
+            make_file("b.sst", 0, 1, 10, Some(b"b".to_vec()), Some(b"c".to_vec())),
+            make_file("c.sst", 0, 1, 10, Some(b"d".to_vec()), Some(b"e".to_vec())),
+            make_file(
+                "other.sst",
+                0,
+                1,
+                10,
+                Some(b"zz".to_vec()),
+                Some(b"zzz".to_vec()),
+            ),
+        ];
+        for file in &mut files {
+            file.key_bounds_complete = true;
+        }
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("repair plan")
+            .expect("overlap debt");
+
+        // Assert
+        assert_eq!((plan.source_level, plan.target_level), (1, 1));
+        assert_eq!(plan.input_files, ["a.sst", "b.sst", "c.sst"]);
+        assert!(!plan.point_tombstone_gc_eligible);
+        assert!(!plan.range_tombstone_gc_eligible);
+        assert!(!compactor.compaction_debt_is_clear(&files, 0).expect("debt"));
+    }
+
+    #[test]
+    fn should_repair_three_file_equality_without_repairing_two_file_boundary() {
+        // Arrange
+        let compactor = Compactor::new();
+        let mut files = vec![
+            make_file(
+                "left.sst",
+                0,
+                2,
+                10,
+                Some(b"a".to_vec()),
+                Some(b"m".to_vec()),
+            ),
+            make_file(
+                "middle.sst",
+                0,
+                2,
+                10,
+                Some(b"m".to_vec()),
+                Some(b"m".to_vec()),
+            ),
+            make_file(
+                "right.sst",
+                0,
+                2,
+                10,
+                Some(b"m".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+        ];
+        for file in &mut files {
+            file.key_bounds_complete = true;
+        }
+
+        // Act
+        let three = compactor
+            .pick_compaction(&files, 0)
+            .expect("three-way plan");
+        files.remove(1);
+        let two = compactor.pick_compaction(&files, 0).expect("two-way plan");
+
+        // Assert
+        assert_eq!(three.expect("three-way debt").input_files.len(), 3);
+        assert!(two.is_none());
     }
 
     #[test]

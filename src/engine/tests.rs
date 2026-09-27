@@ -2,6 +2,125 @@ use super::*;
 use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
+fn install_underfull_overlap_fixture(
+    directory: &std::path::Path,
+) -> MidgeResult<([String; 2], String)> {
+    use crate::sst::SstFactory;
+    type FixtureRow<'a> = (&'a [u8], &'a [u8], u64);
+
+    let sst_dir = directory.join("sst");
+    let factory = crate::sst::FsSstFactoryIo::new(
+        Arc::new(crate::io::RealFs::new(&sst_dir).map_err(crate::io::FsError::into_midge)?),
+        4096,
+    );
+    let names = [
+        crate::cloud_layout::file_name(0, 1, 1),
+        crate::cloud_layout::file_name(0, 1, 2),
+    ];
+    let disjoint = crate::cloud_layout::file_name(0, 1, 3);
+    let entries: Vec<(&String, Vec<FixtureRow<'_>>)> = vec![
+        (
+            &names[0],
+            vec![(b"a", b"one", 1), (b"b", b"deleted", 1), (b"z", b"old", 1)],
+        ),
+        (&names[1], vec![(b"m", b"two", 2)]),
+        (&disjoint, vec![(b"zz", b"three", 3)]),
+    ];
+    let mut manifest = crate::metadata::ManifestPersistence::load(directory)
+        .map_err(crate::common::MidgeError::Internal)?;
+    for (name, rows) in entries {
+        let mut writer = factory.create()?;
+        for &(key, value, sequence) in &rows {
+            writer.add_with_meta(key, Some(value), sequence, EntryType::Put, None)?;
+        }
+        if name == &names[0] {
+            writer.add_range_tombstone(b"b", b"c", 2)?;
+        }
+        writer.finish_to_path(&sst_dir.join(name))?;
+        let bytes = std::fs::read(sst_dir.join(name))?;
+        manifest.add_file(crate::metadata::FileMeta {
+            name: name.clone(),
+            level: 1,
+            size_bytes: u64::try_from(bytes.len()).expect("fixture SST size fits u64"),
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(rows.first().expect("fixture row").0.to_vec()),
+            largest_key: Some(rows.last().expect("fixture row").0.to_vec()),
+            smallest_seq: rows.iter().map(|row| row.2).min(),
+            largest_seq: rows
+                .iter()
+                .map(|row| row.2)
+                .chain((name == &names[0]).then_some(2))
+                .max(),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
+    }
+    manifest.last_persisted_sequence = 3;
+    manifest.next_sst_seqs.insert(0, 4);
+    crate::metadata::ManifestPersistence::save(directory, &manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+    Ok((names, disjoint))
+}
+
+#[test]
+fn should_automatically_repair_underfull_overlap_after_reopen() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let mut initial = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+    initial.shutdown(Duration::from_secs(5))?;
+    let (inputs, disjoint) = install_underfull_overlap_fixture(directory.path())?;
+
+    // Act
+    let mut engine = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let published = loop {
+        let manifest = crate::metadata::ManifestPersistence::load(directory.path())
+            .map_err(crate::common::MidgeError::Internal)?;
+        if inputs
+            .iter()
+            .all(|name| manifest.files.iter().all(|file| file.name != *name))
+        {
+            break manifest;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(MidgeError::Timeout(
+                "underfull overlap repair did not publish".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    // Assert
+    assert!(published.files.iter().any(|file| file.name == disjoint));
+    assert!(published.files.iter().any(|file| {
+        file.level == 1 && crate::cloud_layout::parse_compaction_file_name(&file.name).is_some()
+    }));
+    assert!(
+        !crate::runtime::sst_read_view::SstReadView::new(0, published.files.clone())
+            .is_level_quarantined(1)
+    );
+    let cf = engine.get_column_family("default").expect("default cf");
+    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+    for (key, expected) in [
+        (b"a".as_slice(), b"one".as_slice()),
+        (b"m".as_slice(), b"two".as_slice()),
+        (b"z".as_slice(), b"old".as_slice()),
+        (b"zz".as_slice(), b"three".as_slice()),
+    ] {
+        assert_eq!(read.get(key)?.as_deref(), Some(expected));
+    }
+    assert!(read.get(b"b")?.is_none());
+    drop(read);
+    engine.shutdown(Duration::from_secs(5))?;
+    let mut reopened = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+    let read = reopened.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+    assert_eq!(read.get(b"m")?.as_deref(), Some(b"two".as_slice()));
+    assert!(read.get(b"b")?.is_none());
+    drop(read);
+    reopened.shutdown(Duration::from_secs(5))
+}
+
 #[test]
 fn should_report_wal_recovery_counters_in_engine_diagnostics_after_replay() -> MidgeResult<()> {
     // Arrange
@@ -1268,12 +1387,16 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
     .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 42);
     let sst_bytes = test_sst_bytes();
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        size_bytes: sst_bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&sst_bytes)),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            size_bytes: sst_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&sst_bytes)),
+            ..Default::default()
+        });
     let backend = Arc::new(ListOmittingCloudBackend::new(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
         "sst/",
@@ -1315,11 +1438,15 @@ fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publicat
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: crate::cloud_layout::file_name(0, 0, 41),
-        size_bytes: 1 << 40,
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: crate::cloud_layout::file_name(0, 0, 41),
+            size_bytes: 1 << 40,
+            ..Default::default()
+        });
     let interrupted = crate::runtime::FileMeta {
         name: crate::cloud_layout::file_name(0, 0, 42),
         level: 0,
@@ -1363,18 +1490,22 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
     .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 1);
     let sst_bytes = test_sst_bytes();
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: sst_bytes.len() as u64,
-        cf_id: 0,
-        sst_seq: 1,
-        smallest_key: Some(b"cloud-list-key".to_vec()),
-        largest_key: Some(b"cloud-list-key".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(1),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: sst_bytes.len() as u64,
+            cf_id: 0,
+            sst_seq: 1,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
         &cloud,
@@ -1414,18 +1545,22 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
         wrong_sst_bytes.len(),
         "test must use a valid cloud SST with different size than the committed manifest"
     );
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: committed_sst_bytes.len() as u64,
-        cf_id: 0,
-        sst_seq: 3,
-        smallest_key: Some(b"cloud-list-key".to_vec()),
-        largest_key: Some(b"cloud-list-key".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(1),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            cf_id: 0,
+            sst_seq: 3,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
         &cloud,
@@ -1460,19 +1595,23 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
     let sst_name = crate::cloud_layout::file_name(0, 0, 4);
     let wrong_sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&wrong_sst_bytes) ^ 0xffff_ffff;
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: wrong_sst_bytes.len() as u64,
-        content_crc32c: Some(expected_crc),
-        cf_id: 0,
-        sst_seq: 4,
-        smallest_key: Some(b"cloud-list-key".to_vec()),
-        largest_key: Some(b"cloud-list-key".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(1),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: wrong_sst_bytes.len() as u64,
+            content_crc32c: Some(expected_crc),
+            cf_id: 0,
+            sst_seq: 4,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
         &cloud,
@@ -1512,18 +1651,22 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
         stale_local_sst_bytes.len(),
         "test must use a stale local SST with different size than the committed manifest"
     );
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: committed_sst_bytes.len() as u64,
-        cf_id: 0,
-        sst_seq: 4,
-        smallest_key: Some(b"cloud-list-key".to_vec()),
-        largest_key: Some(b"cloud-list-key".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(1),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            cf_id: 0,
+            sst_seq: 4,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
     std::fs::write(state.sst_dir.join(&sst_name), &stale_local_sst_bytes)
         .expect("write stale local SST cache");
     let cloud = cloud_with_stale_sst_listing();
@@ -1557,19 +1700,23 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
     let sst_name = crate::cloud_layout::file_name(0, 0, 6);
     let committed_sst_bytes = test_sst_bytes();
     let stale_local_sst_bytes = same_size_sst_with_different_crc(&committed_sst_bytes);
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: committed_sst_bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&committed_sst_bytes)),
-        cf_id: 0,
-        sst_seq: 6,
-        smallest_key: Some(b"cloud-list-key".to_vec()),
-        largest_key: Some(b"cloud-list-key".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(1),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&committed_sst_bytes)),
+            cf_id: 0,
+            sst_seq: 6,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
     std::fs::write(state.sst_dir.join(&sst_name), &stale_local_sst_bytes)
         .expect("write stale same-size local SST cache");
     let cloud = cloud_with_stale_sst_listing();
@@ -1604,19 +1751,23 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
     .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let committed_sst_bytes = test_sst_bytes();
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: committed_sst_bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&committed_sst_bytes)),
-        cf_id: 0,
-        sst_seq: 7,
-        smallest_key: Some(b"cloud-list-key".to_vec()),
-        largest_key: Some(b"cloud-list-key".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(1),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes: committed_sst_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&committed_sst_bytes)),
+            cf_id: 0,
+            sst_seq: 7,
+            smallest_key: Some(b"cloud-list-key".to_vec()),
+            largest_key: Some(b"cloud-list-key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
     std::fs::write(state.sst_dir.join(&sst_name), &committed_sst_bytes)
         .expect("write valid local SST cache");
     let cloud = cloud_with_stale_sst_listing();
@@ -1657,12 +1808,16 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
     .expect("create runtime state");
     let name = crate::cloud_layout::file_name(0, 0, 8);
     let corrupt_bytes = same_size_sst_with_different_crc(&test_sst_bytes());
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name: name.clone(),
-        size_bytes: corrupt_bytes.len() as u64,
-        content_crc32c: None,
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: name.clone(),
+            size_bytes: corrupt_bytes.len() as u64,
+            content_crc32c: None,
+            ..Default::default()
+        });
     std::fs::write(state.sst_dir.join(&name), corrupt_bytes).expect("persist damaged local SST");
     let cloud = cloud_with_stale_sst_listing();
 
@@ -1849,14 +2004,18 @@ mod salvage_removes_definitively_lost_ssts {
         )
         .expect("create runtime state");
         let sst_name = crate::cloud_layout::file_name(0, 0, sst_seq);
-        state.manifest.files.push(crate::metadata::FileMeta {
-            name: sst_name.clone(),
-            level: 0,
-            size_bytes,
-            cf_id: 0,
-            sst_seq,
-            ..Default::default()
-        });
+        state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name: sst_name.clone(),
+                level: 0,
+                size_bytes,
+                cf_id: 0,
+                sst_seq,
+                ..Default::default()
+            });
         crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
             &state.db_path,
             &state.manifest,
@@ -1958,14 +2117,18 @@ mod salvage_removes_definitively_lost_ssts {
         // makes the other metadata check fail indeterminately.
         let (_temp, mut state, missing_name) = salvage_state_with_persisted_sst(10, 128);
         let indeterminate_name = crate::cloud_layout::file_name(0, 0, 11);
-        state.manifest.files.push(crate::metadata::FileMeta {
-            name: indeterminate_name.clone(),
-            level: 0,
-            size_bytes: 128,
-            cf_id: 0,
-            sst_seq: 11,
-            ..Default::default()
-        });
+        state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name: indeterminate_name.clone(),
+                level: 0,
+                size_bytes: 128,
+                cf_id: 0,
+                sst_seq: 11,
+                ..Default::default()
+            });
         crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
             &state.db_path,
             &state.manifest,

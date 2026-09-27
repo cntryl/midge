@@ -54,7 +54,7 @@ impl EventLoop {
             .state
             .manifest_store
             .append(&crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq })?;
-        self.state.manifest.next_sst_seqs.insert(cf_id, next_seq);
+        self.state.manifest.set_next_sst_seq(cf_id, next_seq);
         self.state.manifest.note_applied_journal_edit(edit_id);
         self.mirror_metadata_to_authoritative_cloud()?;
         self.state

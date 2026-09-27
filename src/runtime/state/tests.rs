@@ -70,6 +70,62 @@ fn should_rebuild_manifest_read_view_when_files_change_through_owner() {
 }
 
 #[test]
+fn should_reuse_manifest_read_view_when_only_sequence_metadata_changes() {
+    // Arrange
+    let mut owner = ManifestRuntimeState::new(Manifest::default());
+    let initial = owner.read_view_for(0);
+    assert!(owner.take_rebuilt_live_names().is_some());
+
+    // Act
+    owner.advance_persisted_sequence(42);
+    owner.set_next_sst_seq(0, 7);
+    owner.advance_next_sst_seq(0, 8);
+    owner.note_applied_journal_edit(9);
+    owner.adopt_checkpoint(crate::metadata::persistence::WrittenCheckpoint {
+        edit_checkpoint_id: 9,
+        caller_was_current: true,
+    });
+    owner.apply_edit(&crate::metadata::ManifestEdit::BumpNextSstSeq {
+        cf_id: 0,
+        next_seq: 10,
+    });
+    let after_sequence = owner.read_view_for(0);
+
+    // Assert
+    assert!(Arc::ptr_eq(&initial, &after_sequence));
+    assert!(owner.take_rebuilt_live_names().is_none());
+    assert_eq!(owner.last_persisted_sequence, 42);
+    assert_eq!(owner.next_sst_seqs.get(&0), Some(&10));
+    assert_eq!(owner.edit_checkpoint_id, 9);
+}
+
+#[test]
+fn should_rebuild_one_read_view_after_manifest_file_batch() {
+    // Arrange
+    let mut owner = ManifestRuntimeState::new(Manifest::default());
+    let initial = owner.read_view_for(0);
+    assert!(owner.take_rebuilt_live_names().is_some());
+    let file = |name: &str| crate::metadata::FileMeta {
+        name: name.to_string(),
+        cf_id: 0,
+        ..Default::default()
+    };
+
+    // Act
+    owner.apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
+        crate::metadata::ManifestEdit::AddSst(file("first.sst")),
+        crate::metadata::ManifestEdit::AddSst(file("second.sst")),
+    ]));
+    let updated = owner.read_view_for(0);
+
+    // Assert
+    assert!(!Arc::ptr_eq(&initial, &updated));
+    assert_eq!(updated.pinned_sst_names().len(), 2);
+    assert!(owner.take_rebuilt_live_names().is_some());
+    assert!(owner.take_rebuilt_live_names().is_none());
+}
+
+#[test]
 #[cfg(feature = "failpoints")]
 fn should_count_retained_recovery_files_when_startup_cleanup_fails() -> MidgeResult<()> {
     // Arrange
@@ -152,13 +208,24 @@ fn write_valid_sst_for_recovery_test(
     key: &[u8],
     sequence: u64,
 ) -> crate::runtime::FileMeta {
+    write_sst_entries_for_recovery_test(state, name, level, &[(key, sequence)])
+}
+
+fn write_sst_entries_for_recovery_test(
+    state: &RuntimeState,
+    name: &str,
+    level: u32,
+    entries: &[(&[u8], u64)],
+) -> crate::runtime::FileMeta {
     use crate::sst::SstFactory;
 
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create recovery test SST");
-    writer
-        .add_with_meta(key, Some(b"value"), sequence, EntryType::Put, None)
-        .expect("write recovery test entry");
+    for (key, sequence) in entries {
+        writer
+            .add_with_meta(key, Some(b"value"), *sequence, EntryType::Put, None)
+            .expect("write recovery test entry");
+    }
     let bytes = writer.finish_bytes().expect("finish recovery test SST");
     std::fs::create_dir_all(&state.sst_dir).expect("create recovery test SST directory");
     std::fs::write(state.sst_dir.join(name), &bytes).expect("persist recovery test SST");
@@ -169,10 +236,10 @@ fn write_valid_sst_for_recovery_test(
         size_bytes: u64::try_from(bytes.len()).expect("SST length fits u64"),
         content_crc32c: Some(crc32c::crc32c(&bytes)),
         cf_id: 0,
-        smallest_key: Some(key.to_vec()),
-        largest_key: Some(key.to_vec()),
-        smallest_seq: Some(sequence),
-        largest_seq: Some(sequence),
+        smallest_key: Some(entries.first().expect("nonempty entries").0.to_vec()),
+        largest_key: Some(entries.last().expect("nonempty entries").0.to_vec()),
+        smallest_seq: entries.iter().map(|(_, sequence)| *sequence).min(),
+        largest_seq: entries.iter().map(|(_, sequence)| *sequence).max(),
         key_bounds_complete: true,
     }
 }
@@ -188,6 +255,7 @@ fn manifest_meta_for_recovery_test(file: &crate::runtime::FileMeta) -> crate::me
         largest_key: file.largest_key.clone(),
         smallest_seq: file.smallest_seq,
         largest_seq: file.largest_seq,
+        key_bounds_complete: file.key_bounds_complete,
         ..Default::default()
     }
 }
@@ -205,6 +273,7 @@ fn should_replay_published_compaction_from_remote_ssts_without_local_staging() {
     let output = write_valid_sst_for_recovery_test(&remote_state, &output_name, 1, b"a", 1);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
@@ -635,6 +704,7 @@ fn should_derive_hard_l0_ceiling_from_capacity() {
     state.limits.max_immutable_memtables = 2;
     state
         .manifest
+        .test_mut()
         .files
         .extend((0..4).map(|index| crate::metadata::FileMeta {
             name: format!("l0-{index}.sst"),
@@ -668,6 +738,7 @@ fn should_stall_next_write_after_active_generation_reserves_last_l0_slot() {
     state.limits.memtable_flush_threshold = 1;
     state
         .manifest
+        .test_mut()
         .files
         .extend((0..2).map(|index| crate::metadata::FileMeta {
             name: format!("l0-{index}.sst"),
@@ -1213,6 +1284,24 @@ fn should_sweep_non_authoritative_flush_staging_during_startup_cleanup() {
 }
 
 #[test]
+fn should_sweep_non_authoritative_overlap_repair_runs_during_startup_cleanup() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let repair_dir = state.sst_dir.join(".compaction-repair");
+    std::fs::create_dir_all(&repair_dir).expect("create repair scratch directory");
+    std::fs::write(repair_dir.join("abandoned.sst"), b"non-authoritative")
+        .expect("write abandoned repair run");
+
+    // Act
+    state.cleanup_storage_residue();
+
+    // Assert
+    assert!(!repair_dir.exists());
+    assert!(!state.persistence_anomaly_detected());
+}
+
+#[test]
 fn should_not_apply_wal_record_given_unknown_column_family_when_recovering() {
     // Arrange
     let mut column_families = HashMap::new();
@@ -1268,6 +1357,7 @@ fn should_roll_back_output_durable_compaction_when_manifest_is_still_prepublicat
     let output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"input", 2);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
@@ -1374,105 +1464,150 @@ fn persist_proof_mirror(
         .collect()
 }
 
+fn write_compaction_publication_fixture(
+    state: &RuntimeState,
+    input_names: &[String; 2],
+    output_names: &[String; 2],
+    repair: bool,
+) -> ([crate::runtime::FileMeta; 2], [crate::runtime::FileMeta; 2]) {
+    if repair {
+        (
+            [
+                write_sst_entries_for_recovery_test(
+                    state,
+                    &input_names[0],
+                    1,
+                    &[(b"a", 1), (b"z", 1)],
+                ),
+                write_valid_sst_for_recovery_test(state, &input_names[1], 1, b"m", 2),
+            ],
+            [
+                write_sst_entries_for_recovery_test(
+                    state,
+                    &output_names[0],
+                    1,
+                    &[(b"a", 1), (b"m", 2)],
+                ),
+                write_valid_sst_for_recovery_test(state, &output_names[1], 1, b"z", 1),
+            ],
+        )
+    } else {
+        (
+            [
+                write_valid_sst_for_recovery_test(state, &input_names[0], 0, b"a", 1),
+                write_valid_sst_for_recovery_test(state, &input_names[1], 0, b"z", 2),
+            ],
+            [
+                write_valid_sst_for_recovery_test(state, &output_names[0], 1, b"a", 3),
+                write_valid_sst_for_recovery_test(state, &output_names[1], 1, b"z", 3),
+            ],
+        )
+    }
+}
+
 #[test]
 fn should_replay_every_compaction_publication_crash_point_to_complete_authority() {
-    for crash_point in CompactionPublicationCrashPoint::ALL {
-        // Arrange
-        let temp_dir = tempfile::tempdir().expect("create publication crash directory");
-        let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-        let input_names = [
-            crate::cloud_layout::file_name(0, 0, 1),
-            crate::cloud_layout::file_name(0, 0, 2),
-        ];
-        let output_names = [
-            crate::cloud_layout::compaction_file_name(0, 1, 3, 0),
-            crate::cloud_layout::compaction_file_name(0, 1, 3, 1),
-        ];
-        let inputs = [
-            write_valid_sst_for_recovery_test(&state, &input_names[0], 0, b"a", 1),
-            write_valid_sst_for_recovery_test(&state, &input_names[1], 0, b"z", 2),
-        ];
-        let outputs = [
-            write_valid_sst_for_recovery_test(&state, &output_names[0], 1, b"a", 3),
-            write_valid_sst_for_recovery_test(&state, &output_names[1], 1, b"z", 3),
-        ];
-        let old_authority = inputs
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<HashSet<_>>();
-        let new_authority = outputs
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<HashSet<_>>();
-        state.manifest.files = if crash_point.manifest_published() {
-            outputs
+    for repair in [false, true] {
+        for crash_point in CompactionPublicationCrashPoint::ALL {
+            // Arrange
+            let temp_dir = tempfile::tempdir().expect("create publication crash directory");
+            let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+            let input_level = u32::from(repair);
+            let input_names = [
+                crate::cloud_layout::file_name(0, input_level, 1),
+                crate::cloud_layout::file_name(0, input_level, 2),
+            ];
+            let output_names = [
+                crate::cloud_layout::compaction_file_name(0, 1, 3, 0),
+                crate::cloud_layout::compaction_file_name(0, 1, 3, 1),
+            ];
+            let (inputs, outputs) =
+                write_compaction_publication_fixture(&state, &input_names, &output_names, repair);
+            let old_authority = inputs
                 .iter()
-                .map(manifest_meta_for_recovery_test)
-                .collect()
-        } else {
-            inputs.iter().map(manifest_meta_for_recovery_test).collect()
-        };
-        crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
-            .expect("persist crash-point manifest");
-        if let Some(phase) = crash_point.intent_phase() {
-            state
-                .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
-                    phase,
-                    cf_id: 0,
-                    removed: input_names.to_vec(),
-                    added: outputs.to_vec(),
-                })
-                .expect("persist crash-point intent");
-        }
-        if crash_point.inputs_garbage_collected() {
-            for input_name in &input_names {
-                std::fs::remove_file(state.sst_dir.join(input_name))
-                    .expect("remove garbage-collected proof input");
+                .map(|file| file.name.clone())
+                .collect::<HashSet<_>>();
+            let new_authority = outputs
+                .iter()
+                .map(|file| file.name.clone())
+                .collect::<HashSet<_>>();
+            state.manifest.test_mut().files = if crash_point.manifest_published() {
+                outputs
+                    .iter()
+                    .map(manifest_meta_for_recovery_test)
+                    .collect()
+            } else {
+                inputs.iter().map(manifest_meta_for_recovery_test).collect()
+            };
+            crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
+                .expect("persist crash-point manifest");
+            if let Some(phase) = crash_point.intent_phase() {
+                state
+                    .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+                        phase,
+                        cf_id: 0,
+                        removed: input_names.to_vec(),
+                        added: outputs.to_vec(),
+                    })
+                    .expect("persist crash-point intent");
             }
+            if crash_point.inputs_garbage_collected() {
+                for input_name in &input_names {
+                    std::fs::remove_file(state.sst_dir.join(input_name))
+                        .expect("remove garbage-collected proof input");
+                }
+            }
+            let mirror_dir = temp_dir.path().join("proof-cloud-mirror");
+            let mirrored_output_count = crash_point.mirrored_output_count();
+            let mirrored_names =
+                persist_proof_mirror(&state, &mirror_dir, &outputs, mirrored_output_count);
+            assert_eq!(mirrored_names.len(), mirrored_output_count);
+            assert!(mirrored_names.is_subset(&new_authority));
+            drop(state);
+
+            // Act
+            let mut reopened = RuntimeState::try_new(
+                temp_dir.path().to_path_buf(),
+                false,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .expect("reopen crash-point state");
+            reopened
+                .replay_intent_log()
+                .expect("replay crash-point intent");
+            let recovered_authority = reopened
+                .manifest
+                .files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect::<HashSet<_>>();
+
+            // Assert
+            let expected = if crash_point.manifest_published() {
+                &new_authority
+            } else {
+                &old_authority
+            };
+            assert_eq!(
+                &recovered_authority, expected,
+                "partial authority recovered after {crash_point:?}"
+            );
+            assert!(recovered_authority == old_authority || recovered_authority == new_authority);
+            if repair {
+                assert_eq!(
+                    reopened.manifest.read_view_for(0).is_level_quarantined(1),
+                    !crash_point.manifest_published(),
+                    "repair read selection changed before complete publication at {crash_point:?}"
+                );
+            }
+            assert_eq!(
+                std::fs::read_dir(&mirror_dir)
+                    .expect("re-read proof mirror directory")
+                    .count(),
+                mirrored_output_count,
+                "object mirroring alone changed authority at {crash_point:?}"
+            );
         }
-        let mirror_dir = temp_dir.path().join("proof-cloud-mirror");
-        let mirrored_output_count = crash_point.mirrored_output_count();
-        let mirrored_names =
-            persist_proof_mirror(&state, &mirror_dir, &outputs, mirrored_output_count);
-        assert_eq!(mirrored_names.len(), mirrored_output_count);
-        assert!(mirrored_names.is_subset(&new_authority));
-        drop(state);
-
-        // Act
-        let mut reopened = RuntimeState::try_new(
-            temp_dir.path().to_path_buf(),
-            false,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .expect("reopen crash-point state");
-        reopened
-            .replay_intent_log()
-            .expect("replay crash-point intent");
-        let recovered_authority = reopened
-            .manifest
-            .files
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<HashSet<_>>();
-
-        // Assert
-        let expected = if crash_point.manifest_published() {
-            &new_authority
-        } else {
-            &old_authority
-        };
-        assert_eq!(
-            &recovered_authority, expected,
-            "partial authority recovered after {crash_point:?}"
-        );
-        assert!(recovered_authority == old_authority || recovered_authority == new_authority);
-        assert_eq!(
-            std::fs::read_dir(&mirror_dir)
-                .expect("re-read proof mirror directory")
-                .count(),
-            mirrored_output_count,
-            "object mirroring alone changed authority at {crash_point:?}"
-        );
     }
 }
 
@@ -1485,6 +1620,7 @@ fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() 
     let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"deleted", 1);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
@@ -1522,6 +1658,7 @@ fn should_publish_remove_only_compaction_after_manifest_phase_crash() {
     let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"deleted", 1);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
@@ -1646,6 +1783,7 @@ fn should_recover_published_retry_when_legacy_stale_intent_precedes_it() {
     let retry_output = write_valid_sst_for_recovery_test(&state, &retry_output_name, 1, b"key", 3);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&retry_output));
     state
@@ -1689,6 +1827,7 @@ fn should_recover_manifest_published_retry_when_it_precedes_stale_output_intent(
     let retry_output = write_valid_sst_for_recovery_test(&state, &retry_output_name, 1, b"key", 3);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
@@ -1733,6 +1872,7 @@ fn should_fail_closed_when_multiple_retry_outputs_are_manifest_visible() {
         write_valid_sst_for_recovery_test(&state, &second_output_name, 1, b"key", 3);
     state
         .manifest
+        .test_mut()
         .files
         .extend([&first_output, &second_output].map(manifest_meta_for_recovery_test));
     for output in [first_output, second_output] {
@@ -1768,7 +1908,10 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let cf_id = state.manifest.create_column_family("dropped".to_string());
+    let cf_id = state
+        .manifest
+        .test_mut()
+        .create_column_family("dropped".to_string());
     state
         .column_families
         .insert(cf_id, ColumnFamilyState::new(cf_id, "dropped".to_string()));
@@ -1780,6 +1923,7 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
     output.cf_id = cf_id;
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&input));
     state
@@ -1790,11 +1934,10 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
             added: vec![output],
         })
         .expect("persist late compaction intent");
-    assert!(state.manifest.delete_column_family_with_reclamation(
-        cf_id,
-        2,
-        vec![input_name.clone()]
-    ));
+    assert!(state
+        .manifest
+        .test_mut()
+        .delete_column_family_with_reclamation(cf_id, 2, vec![input_name.clone()]));
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
         .expect("persist dropped column family");
     drop(state);
@@ -1828,6 +1971,7 @@ fn should_fail_closed_when_output_durable_compaction_manifest_is_partial() {
     let output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"a", 3);
     state
         .manifest
+        .test_mut()
         .files
         .push(manifest_meta_for_recovery_test(&first_input));
     state

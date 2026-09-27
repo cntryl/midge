@@ -1,5 +1,7 @@
 mod config;
 pub mod executor;
+pub(crate) mod layout;
+mod repair;
 pub mod strategy;
 
 pub(crate) use config::{
@@ -53,6 +55,7 @@ pub(crate) fn execute_compaction_with_output_sink(
         plan,
         CompactionResources {
             target_sst_size: plan.target_sst_size,
+            source_fan_in: LeveledCompactionConfig::default().max_compaction_input_files,
             budget: crate::common::resource_budget::ResourceBudget::new(
                 plan.compaction_memory_limit,
             ),
@@ -67,6 +70,7 @@ pub(crate) fn execute_compaction_with_output_sink(
 
 pub(crate) struct CompactionResources {
     pub(crate) target_sst_size: usize,
+    pub(crate) source_fan_in: usize,
     pub(crate) budget: crate::common::resource_budget::ResourceBudget,
 }
 
@@ -92,20 +96,54 @@ pub(crate) fn execute_compaction_at_target(
         return Ok(Vec::new());
     }
 
+    let same_level_repair = plan.source_level == plan.target_level;
+    if same_level_repair
+        && (plan.source_level == 0
+            || !plan.target_files.is_empty()
+            || plan.point_tombstone_gc_eligible
+            || plan.range_tombstone_gc_eligible)
+    {
+        return Err(MidgeError::Corruption(
+            "same-level repair must preserve all tombstones and use independent L1+ inputs".into(),
+        ));
+    }
+
     // --- 1. Open bounded source streams and chained level spans ------------
     let budget = resources.budget;
     let target_sst_size = resources.target_sst_size;
+    let fan_in = resources.source_fan_in;
+    let mut scratch = if same_level_repair && plan.source_files.len() > fan_in {
+        Some(repair::RepairScratch::new(
+            sst_factory,
+            output_dir,
+            output_size_limit.map_or(usize::MAX, |limit| limit / 2),
+        )?)
+    } else {
+        None
+    };
+    let repaired_sources = if let Some(scratch) = &mut scratch {
+        Some(scratch.merge_runs(
+            sst_factory,
+            &plan.source_files,
+            fan_in,
+            &budget,
+            abort_check,
+        )?)
+    } else {
+        None
+    };
     let inputs = executor::collect_compaction_stream_inputs(
         sst_factory,
-        &plan.source_files,
+        repaired_sources.as_deref().unwrap_or(&plan.source_files),
         &plan.target_files,
         plan.source_level,
+        same_level_repair,
         &budget,
         abort_check,
     )?;
 
     // --- 2. K-way merge, deduplicate, and write partitioned outputs --------
-    executor::write_partitioned_compaction_outputs(
+    let outputs = executor::write_partitioned_compaction_outputs(
         sst_factory,
         output_dir,
         plan.cf_id,
@@ -122,7 +160,22 @@ pub(crate) fn execute_compaction_at_target(
         abort_check,
         output_sink,
         output_size_limit,
-    )
+    )?;
+    if let Some(scratch) = &mut scratch {
+        if let Err(error) = scratch.cleanup() {
+            let fs = sst_factory.output_fs();
+            for name in &outputs {
+                let path = output_dir.join(name);
+                if let Err(cleanup_error) = crate::sst::fs::fs_relative_sst_path(&fs, &path)
+                    .and_then(|key| fs.remove_file(&key).map_err(crate::io::FsError::into_midge))
+                {
+                    tracing::warn!(file = %path.display(), %cleanup_error, "retaining unpublished repair output after scratch cleanup failure");
+                }
+            }
+            return Err(error);
+        }
+    }
+    Ok(outputs)
 }
 
 fn bounded_partition_target_size(configured_target: usize, compaction_pool: usize) -> usize {
@@ -153,6 +206,186 @@ mod tests {
     use crate::io::FsError;
     use crate::sst::traits::SstFactory;
     use tempfile::tempdir;
+
+    #[test]
+    fn should_merge_repair_component_above_fan_in_without_losing_tombstone_or_ttl(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let dir = tempdir()?;
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
+            .with_compaction_scratch_directory(dir.path().join(".flush-staging"));
+        let mut plan = CompactionPlan::new(0, 1, 1).with_output_seq(400);
+        plan.compaction_memory_limit = 8 * 1024 * 1024;
+        plan.snapshot_horizon = Some(2);
+        for index in 0..=64_u64 {
+            let name = format!("input-{index:03}.sst");
+            let mut writer = factory.create()?;
+            writer.add_with_meta(
+                b"key",
+                Some(&[u8::try_from(index).expect("index fits")]),
+                index + 1,
+                crate::types::EntryType::Put,
+                Some(10_000),
+            )?;
+            if index == 0 {
+                writer.add_range_tombstone(b"a", b"z", 1)?;
+            }
+            writer.finish_to_path(&dir.path().join(&name))?;
+            plan.add_test_source(name);
+        }
+
+        // Act
+        let outputs = execute_compaction_at_target(
+            &plan,
+            CompactionResources {
+                target_sst_size: plan.target_sst_size,
+                source_fan_in: 3,
+                budget: crate::common::resource_budget::ResourceBudget::new(
+                    plan.compaction_memory_limit,
+                ),
+            },
+            &factory,
+            dir.path(),
+            None,
+            None,
+            None,
+        )?;
+
+        // Assert
+        assert!(!outputs.is_empty());
+        let reader = factory.open(Path::new(&outputs[0]))?;
+        assert!(
+            matches!(reader.get_state_at_with_time(b"key", u64::MAX, 100)?,
+            crate::types::KeyState::Value(value, 65, Some(10_000), _) if value.as_ref() == [64])
+        );
+        assert!(reader.range_tombstones().iter().any(|range| range.seq == 1));
+        assert!(dir.path().join("input-000.sst").exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(".compaction-repair"))?.count(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_merge_hybrid_repair_inputs_through_local_scratch() -> MidgeResult<()> {
+        // Arrange
+        let directory = tempdir()?;
+        let local_dir = directory.path().join("local");
+        let remote_dir = directory.path().join("remote");
+        std::fs::create_dir_all(&local_dir)?;
+        std::fs::create_dir_all(remote_dir.join("sst"))?;
+        let local: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(&local_dir).map_err(FsError::into_midge)?);
+        let input_factory = crate::sst::FsSstFactoryIo::new(local.clone(), 4096);
+        let cloud = std::sync::Arc::new(crate::storage::filesystem::FileSystem::new(&remote_dir)?);
+        let remote_reads = std::sync::Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            local,
+            cloud,
+            std::time::Duration::from_secs(5),
+        ));
+        let factory = crate::sst::FsSstFactoryIo::new(remote_reads, 4096)
+            .with_compaction_scratch_directory(local_dir.join(".flush-staging"));
+        let mut plan = CompactionPlan::new(0, 1, 1).with_output_seq(402);
+        plan.compaction_memory_limit = 8 * 1024 * 1024;
+        for index in 0..5_u64 {
+            let name = format!("input-{index}.sst");
+            let mut writer = input_factory.create()?;
+            writer.add_with_meta(
+                b"key",
+                Some(&[u8::try_from(index).expect("small index")]),
+                index + 1,
+                EntryType::Put,
+                None,
+            )?;
+            writer.finish_to_path(&local_dir.join(&name))?;
+            std::fs::copy(local_dir.join(&name), remote_dir.join("sst").join(&name))?;
+            plan.add_test_source(name);
+        }
+
+        // Act
+        let outputs = execute_compaction_at_target(
+            &plan,
+            CompactionResources {
+                target_sst_size: plan.target_sst_size,
+                source_fan_in: 2,
+                budget: crate::common::resource_budget::ResourceBudget::new(
+                    plan.compaction_memory_limit,
+                ),
+            },
+            &factory,
+            &local_dir,
+            None,
+            None,
+            None,
+        )?;
+
+        // Assert
+        let reader = input_factory.open(Path::new(&outputs[0]))?;
+        assert!(
+            matches!(reader.get_state_at_with_time(b"key", u64::MAX, 0)?,
+            crate::types::KeyState::Value(value, 5, None, _) if value.as_ref() == [4])
+        );
+        assert_eq!(
+            std::fs::read_dir(local_dir.join(".compaction-repair"))?.count(),
+            0
+        );
+        assert!(plan
+            .source_files
+            .iter()
+            .all(|name| local_dir.join(name).exists()));
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_repair_inputs_when_scratch_budget_or_equal_sequence_proof_fails(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let dir = tempdir()?;
+        let fs =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
+            .with_compaction_scratch_directory(dir.path().join(".flush-staging"));
+        let mut plan = CompactionPlan::new(0, 1, 1).with_output_seq(401);
+        plan.compaction_memory_limit = 8 * 1024 * 1024;
+        for index in 0..=64_u64 {
+            let name = format!("input-{index:03}.sst");
+            let mut writer = factory.create()?;
+            writer.add_with_meta(
+                b"key",
+                Some(if index == 64 {
+                    b"conflict"
+                } else {
+                    b"original"
+                }),
+                1,
+                crate::types::EntryType::Put,
+                None,
+            )?;
+            writer.finish_to_path(&dir.path().join(&name))?;
+            plan.add_test_source(name);
+        }
+
+        // Act
+        let exhausted =
+            execute_compaction_with_output_sink(&plan, &factory, dir.path(), None, None, Some(1));
+        let conflicting = execute_compaction(&plan, &factory, dir.path(), None);
+
+        // Assert
+        assert!(matches!(exhausted, Err(MidgeError::ResourceLimit(_))));
+        assert!(matches!(conflicting, Err(MidgeError::Corruption(_))));
+        assert!(plan
+            .source_files
+            .iter()
+            .all(|name| dir.path().join(name).exists()));
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(".compaction-repair"))?.count(),
+            0
+        );
+        Ok(())
+    }
 
     #[test]
     fn should_compact_legacy_oversized_uncompressed_entry_without_losing_readability(
@@ -1941,6 +2174,7 @@ mod tests {
             &plan.source_files,
             &plan.target_files,
             plan.source_level,
+            false,
             &budget,
             None,
         )?;
@@ -1979,6 +2213,7 @@ mod tests {
             &source_names,
             &target_names,
             1,
+            false,
             &budget,
             None,
         )?;
@@ -2173,6 +2408,7 @@ mod tests {
             &input_names,
             &[],
             0,
+            false,
             &budget,
             None,
         )?;

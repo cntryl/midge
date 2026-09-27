@@ -139,30 +139,8 @@ impl SstReadView {
                 .then_with(|| left.name.cmp(&right.name))
         });
 
-        let has_true_overlap = ordered.windows(2).any(|pair| {
-            pair[0]
-                .largest_key
-                .as_ref()
-                .expect("complete largest bound")
-                > pair[1]
-                    .smallest_key
-                    .as_ref()
-                    .expect("complete smallest bound")
-        });
-        // Equality at one adjacent boundary is conservative and supported,
-        // but three files sharing one point would exceed the two-candidate
-        // leveled bound and is therefore quarantined as an overlap.
-        let has_three_way_boundary = ordered.windows(3).any(|window| {
-            window[0]
-                .largest_key
-                .as_ref()
-                .expect("complete largest bound")
-                >= window[2]
-                    .smallest_key
-                    .as_ref()
-                    .expect("complete smallest bound")
-        });
-        let quarantined = has_true_overlap || has_three_way_boundary;
+        let complete: Vec<_> = ordered.iter().map(AsRef::as_ref).collect();
+        let quarantined = !crate::compaction::layout::repair_components(&complete).is_empty();
         if quarantined {
             tracing::error!(
                 level,

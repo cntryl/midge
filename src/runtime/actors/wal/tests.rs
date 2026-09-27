@@ -128,17 +128,21 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
     let name = crate::cloud_layout::file_name(0, 0, 1);
     std::fs::create_dir_all(remote.path().join("sst"))?;
     std::fs::write(remote.path().join("sst").join(&name), &bytes)?;
-    state.manifest.files.push(crate::metadata::FileMeta {
-        name,
-        cf_id: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        smallest_key: Some(b"asserted".to_vec()),
-        largest_key: Some(b"asserted".to_vec()),
-        smallest_seq: Some(9),
-        largest_seq: Some(9),
-        ..Default::default()
-    });
+    state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name,
+            cf_id: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            smallest_key: Some(b"asserted".to_vec()),
+            largest_key: Some(b"asserted".to_vec()),
+            smallest_seq: Some(9),
+            largest_seq: Some(9),
+            ..Default::default()
+        });
     // Validation reads through the event loop's resources, which in
     // ephemeral-cache cloud mode sit over the remote SST store.
     let remote_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
@@ -2334,19 +2338,23 @@ fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
         let bytes = writer.finish_bytes()?;
         let name = crate::cloud_layout::file_name(0, 0, file + 1);
         std::fs::write(temp.path().join("sst").join(&name), &bytes)?;
-        state.manifest.files.push(crate::metadata::FileMeta {
-            name,
-            cf_id: 0,
-            level: 1,
-            size_bytes: bytes.len() as u64,
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            smallest_key: file_keys.first().cloned(),
-            largest_key: file_keys.last().cloned(),
-            smallest_seq: Some(1),
-            largest_seq: Some(1),
-            key_bounds_complete: true,
-            ..Default::default()
-        });
+        state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name,
+                cf_id: 0,
+                level: 1,
+                size_bytes: bytes.len() as u64,
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                smallest_key: file_keys.first().cloned(),
+                largest_key: file_keys.last().cloned(),
+                smallest_seq: Some(1),
+                largest_seq: Some(1),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
         keys.extend(file_keys.into_iter().take(keys_per_file));
     }
     let mut actor = WalActor::new(

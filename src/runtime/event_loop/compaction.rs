@@ -452,16 +452,22 @@ impl CompactionCoordinator {
             event_loop.state.diagnostics.record(|m| {
                 m.record_compaction_failure();
             });
-            tracing::warn!(
-                input_count = input_ssts.len(),
-                output_count = output_ssts.len(),
-                "compaction worker failed or aborted; leaving manifest unchanged"
-            );
+            let repair = event_loop.compaction_actor.active_same_level_repair();
             let error = worker_error.unwrap_or_else(|| {
                 crate::common::MidgeError::Internal(
                     "compaction worker failed without an error".to_string(),
                 )
             });
+            tracing::warn!(
+                %error,
+                repair,
+                cf_id,
+                target_level,
+                input_count = input_ssts.len(),
+                output_count = output_ssts.len(),
+                "compaction worker failed or aborted; leaving manifest unchanged"
+            );
+            Self::defer_failed_repair_retry(event_loop, repair, "worker");
             // Partitions uploaded before the failure are named by a reserved,
             // never-reused generation and referenced by no manifest or
             // intent. Reclaim them now, or every retry of a deterministically
@@ -616,7 +622,54 @@ impl CompactionCoordinator {
         let outputs = prepared?;
         let added =
             Self::validate_prepared_output_metadata(cf_id, target_level, output_ssts, &outputs)?;
+        if event_loop.compaction_actor.active_same_level_repair() {
+            Self::validate_repair_replacement_level(
+                event_loop,
+                input_ssts,
+                &added,
+                cf_id,
+                target_level,
+            )?;
+        }
         Ok((output_generation, outputs, added))
+    }
+
+    fn validate_repair_replacement_level(
+        event_loop: &EventLoop,
+        input_ssts: &[String],
+        added: &[crate::runtime::FileMeta],
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+    ) -> crate::common::MidgeResult<()> {
+        let removed: std::collections::HashSet<_> = input_ssts.iter().map(String::as_str).collect();
+        let added_names: std::collections::HashSet<_> =
+            added.iter().map(|file| file.name.as_str()).collect();
+        let added_metadata: Vec<crate::metadata::FileMeta> = added.iter().map(Into::into).collect();
+        let level: Vec<_> = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| {
+                file.cf_id == cf_id
+                    && file.level == target_level
+                    && !removed.contains(file.name.as_str())
+            })
+            .chain(&added_metadata)
+            .collect();
+        if crate::compaction::layout::repair_components(&level)
+            .iter()
+            .any(|component| {
+                component
+                    .iter()
+                    .any(|&index| added_names.contains(level[index].name.as_str()))
+            })
+        {
+            return Err(crate::common::MidgeError::Fenced(
+                "overlap-repair replacement would leave defective target-level coverage".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn validate_output_names(
@@ -720,6 +773,31 @@ impl CompactionCoordinator {
                 "compaction input authority changed before publication".to_string(),
             ));
         }
+        let captured = event_loop.compaction_actor.captured_input_metadata();
+        if !captured.is_empty() {
+            let live: std::collections::HashMap<_, _> = selected_files
+                .iter()
+                .map(|file| (file.name.as_str(), *file))
+                .collect();
+            if captured.len() != selected_files.len()
+                || captured.iter().any(|file| {
+                    live.get(file.name.as_str())
+                        .is_none_or(|current| !file.same_identity(current))
+                })
+            {
+                return Err(crate::common::MidgeError::Fenced(
+                    "compaction input metadata changed before publication".into(),
+                ));
+            }
+        }
+        if event_loop.compaction_actor.active_same_level_repair() {
+            return Self::validate_captured_repair_component(
+                event_loop,
+                &selected,
+                cf_id,
+                target_level,
+            );
+        }
         let min_key = selected_files
             .iter()
             .filter_map(|file| file.smallest_key.as_ref())
@@ -767,6 +845,36 @@ impl CompactionCoordinator {
         if live_target != captured_target {
             return Err(crate::common::MidgeError::Fenced(
                 "compaction target-level span changed before publication".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_captured_repair_component(
+        event_loop: &EventLoop,
+        selected: &std::collections::HashSet<&str>,
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+    ) -> Result<(), crate::common::MidgeError> {
+        let level: Vec<_> = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.cf_id == cf_id && file.level == target_level)
+            .collect();
+        let matches_component = crate::compaction::layout::repair_components(&level)
+            .into_iter()
+            .any(|component| {
+                let names: std::collections::HashSet<_> = component
+                    .iter()
+                    .map(|&index| level[index].name.as_str())
+                    .collect();
+                names == *selected
+            });
+        if !matches_component {
+            return Err(crate::common::MidgeError::Fenced(
+                "overlap-repair component changed before publication".into(),
             ));
         }
         Ok(())
@@ -1046,6 +1154,7 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         error: &crate::common::MidgeError,
     ) {
+        let repair = event_loop.compaction_actor.active_same_level_repair();
         // A failed intent append can still have reached the journal. Keep the
         // outputs and refuse further compaction until restart reconciles them.
         if event_loop
@@ -1066,6 +1175,7 @@ impl CompactionCoordinator {
                 .compaction_actor
                 .settle_failed_compaction_reservation(&event_loop.state, hybrid.as_ref(), token);
         }
+        Self::defer_failed_repair_retry(event_loop, repair, "publication start");
         let wait_error = error.replay();
         Self::respond_publish_failure(event_loop, request_id, error);
         Self::complete_pending_waits(event_loop, false, Some(&wait_error));
@@ -1082,6 +1192,7 @@ impl CompactionCoordinator {
             Self::finish_failed_intent_clear(event_loop, &pending, error);
             return;
         }
+        let repair = event_loop.compaction_actor.active_same_level_repair();
         let input_ssts = &pending.token.input_ssts;
         let output_ssts = &pending.token.output_ssts;
         let authoritative = Self::manifest_authority_switched(event_loop, input_ssts, output_ssts);
@@ -1116,6 +1227,7 @@ impl CompactionCoordinator {
                     );
             }
         }
+        Self::defer_failed_repair_retry(event_loop, repair && !authoritative, "publication");
         let wait_error = error.replay();
         Self::respond_publish_failure(event_loop, pending.token.request_id, error);
         event_loop
@@ -1126,6 +1238,21 @@ impl CompactionCoordinator {
         event_loop.schedule_next_flush_worker();
         event_loop.drain_auto_flush_memtables();
         event_loop.wake_write_stall_waiters();
+    }
+
+    fn defer_failed_repair_retry(event_loop: &mut EventLoop, repair: bool, phase: &'static str) {
+        if !repair || event_loop.compaction_publication_degraded {
+            return;
+        }
+        let retry_after = BACKGROUND_COMPACTION_CHECK_INTERVAL;
+        event_loop
+            .background_compaction_schedule
+            .defer_for(retry_after);
+        tracing::info!(
+            phase,
+            retry_after_ms = u64::try_from(retry_after.as_millis()).unwrap_or(u64::MAX),
+            "deferred failed overlap repair until the next maintenance retry"
+        );
     }
 
     /// The manifest is published, inputs were handed to GC, and the local
