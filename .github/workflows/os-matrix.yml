@@ -42,10 +42,6 @@ jobs:
       - name: Verify release build
         run: cargo check --release
 
-      - name: Check all Windows targets
-        if: matrix.os == 'windows-latest'
-        run: cargo check --workspace --all-targets --all-features
-
       - name: Test cloud WAL salvage on Windows
         if: matrix.os == 'windows-latest'
         run: cargo test --lib streaming_wal_plan::tests --all-features

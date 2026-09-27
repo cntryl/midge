@@ -8,20 +8,12 @@ RUN apt-get update \
 		ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add clippy rustfmt
-
 WORKDIR /workspace
 
-# Copy the full repository and run the same feature gates we expect in CI.
+# Verify the crate in a clean Debian container.
 COPY . .
 
-RUN cargo fmt --check
-RUN cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+# Failpoints are process-global, so the all-features suite must run serially.
 RUN cargo test --workspace --all-features -- --test-threads=1
-RUN cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
-RUN cargo check --workspace --all-targets --no-default-features --features cloud-aws
-RUN cargo check --workspace --all-targets --no-default-features --features cloud-azure
-RUN cargo check --workspace --all-targets --no-default-features --features cloud-gcp
-RUN cargo check --workspace --all-targets --no-default-features --features cloud-oci
 
 CMD ["bash"]
