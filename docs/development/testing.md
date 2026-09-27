@@ -36,20 +36,22 @@ cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
 
-Pull requests into `develop` run `ci.yml` and GitHub-managed CodeQL. The Ubuntu
-CI job checks formatting, strict Clippy, test conventions, the full workspace
-suite with mock-backed cloud behavior, and the serial fault-injection suite.
-The Sqrzl provider tests are ignored in this mock-backed suite and run in
+Pull requests into `develop` and `main` run `ci.yml` on Ubuntu, Windows, and
+macOS, plus GitHub-managed CodeQL. The Ubuntu CI job checks formatting, strict
+Clippy, test conventions, the full workspace suite with mock-backed cloud
+behavior, and serial fault injection. macOS also runs release checks, workspace
+tests, and serial fault injection. Windows runs focused filesystem, cloud
+recovery, and consistent-cut backup tests. Those test commands compile the
+Windows code they exercise.
+The Sqrzl provider tests are ignored in the mock-backed suite and run in
 `cloud-integration.yml`.
 
-`os-matrix.yml` runs the workspace and fault-injection suites on Windows and
-macOS, plus Windows-specific recovery tests and Clippy. `cloud-integration.yml` runs the ignored provider and engine suites
-against Sqrzl. Both run on promotion pull requests into `main`, on a schedule,
-or by manual dispatch; the OS matrix also runs on `main` pushes. Scheduled runs
-test the default `develop` revision, and a manual dispatch can select `main`
-for release qualification.
+CI also runs on pushes to both branches, weekly on the default `develop`
+revision, and by manual dispatch. A manual dispatch can select `main` for
+release qualification. `cloud-integration.yml` runs the ignored provider and
+engine suites against Sqrzl on promotion PRs, on a schedule, or by dispatch.
 
-Promotion pull requests into `main` run CI, OS matrix, cloud integration,
+Promotion pull requests into `main` run CI, cloud integration,
 `Docker Qualification` for the test image, `Compatibility` for Rust 1.97 and
 provider-only features, and GitHub-managed CodeQL for Actions and Rust.
 Reviewers verify that the PR head is this repository's `develop` branch.

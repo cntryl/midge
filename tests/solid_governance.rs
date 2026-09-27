@@ -481,7 +481,7 @@ fn should_keep_wal_retention_in_one_module_when_splitting_event_loop() {
                     .strip_prefix(&event_loop)
                     .expect("event_loop source")
                     .to_string_lossy()
-                    .into_owned();
+                    .replace(std::path::MAIN_SEPARATOR, "/");
                 sources.push((relative.clone(), read(&relative)));
             }
         }

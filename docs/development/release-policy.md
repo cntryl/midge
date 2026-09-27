@@ -9,15 +9,14 @@ This document defines how Midge moves from development builds to release candida
 - `release-candidate/*`: optional release hardening branches; merge their changes into `develop` before promotion, with frozen durability semantics and format/API changes
 - tagged releases: create tags from commits on `main` only after qualification and release checks pass
 
-CI and GitHub-managed CodeQL run on PRs into `develop`. Promotion PRs into
-`main` run CI, OS matrix, cloud integration, compatibility, Docker
-qualification, and GitHub-managed CodeQL. Verify that each promotion PR comes
-from this repository's `develop` branch. Require passing checks on
-the current PR head before merging; verify the resulting `main` checks before
+CI on Ubuntu, Windows, and macOS plus GitHub-managed CodeQL run on PRs into
+`develop`. Promotion PRs into `main` run CI, cloud integration, compatibility,
+Docker qualification, and GitHub-managed CodeQL. Verify that each promotion PR
+comes from this repository's `develop` branch. Require passing checks on the
+current PR head before merging; verify the resulting `main` checks before
 tagging or publishing. Documentation and packaging checks run in the tagged
 publish workflow. Scheduled qualification tests the default `develop` revision.
-Dispatch the OS matrix and cloud integration workflows against `main` when
-qualifying a release.
+Dispatch CI and cloud integration against `main` when qualifying a release.
 
 Promote one PR at a time against the latest `main`. Promotion checks run on
 the proposed merge commit. The `main` ruleset does not require `develop` to
