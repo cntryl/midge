@@ -1,6 +1,6 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{EngineHealth, RecoveryPolicy};
-use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
+use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::types::StorageVerificationReport;
 use std::path::Path;
 use std::sync::Arc;
@@ -64,7 +64,8 @@ impl StorageVerifier {
         let cloud_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
             crate::storage::simulated::simulated_cloud_root(path),
         )?);
-        let local_backend: Arc<dyn Fs> = Arc::new(crate::io::RealFs::open_existing(path)?);
+        let local_backend: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::open_existing(path).map_err(FsError::into_midge)?);
         let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_backend;
         let sst_fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
             local_backend,
@@ -150,19 +151,22 @@ fn verify_manifest_sst(
     // The content checksum and block decoder must observe the same immutable
     // object version even when they open separate range handles.
     let pinned = fs
-        .immutable_read_view(&fs_path)?
+        .immutable_read_view(&fs_path)
+        .map_err(FsError::into_midge)?
         .unwrap_or_else(|| Arc::clone(fs));
     let fs = &pinned;
-    let actual_len = fs.metadata(&fs_path)?.len;
-    let file = fs.open(
-        &fs_path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
+    let actual_len = fs.metadata(&fs_path).map_err(FsError::into_midge)?.len;
+    let file = fs
+        .open(
+            &fs_path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
     // `midge verify` states a verdict about the database rather than deciding
     // whether to keep going, so every proof the manifest can carry is required.
     crate::sst::identity::SstIdentity::of_file(file.as_ref(), actual_len, deadline)?
@@ -235,7 +239,7 @@ fn verify_storage_path_with_sst_fs(
     crate::metadata::validate_format_marker(db_path)?;
 
     let fs: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::open_existing(db_path).map_err(MidgeError::from)?);
+        Arc::new(crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?);
     let manifest =
         crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
@@ -564,10 +568,6 @@ mod tests {
 
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
             unreachable!("verification test file is read-only")
-        }
-
-        fn close(self: Box<Self>) -> FsResult<()> {
-            Ok(())
         }
     }
 

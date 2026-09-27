@@ -746,6 +746,33 @@ fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> Mid
     result
 }
 
+#[test]
+fn should_sweep_legacy_local_sst_before_retiring_local_backend() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let options = || OpenOptions::cloud_simulated(directory.path(), "legacy", "sweep").build();
+    let mut engine = Engine::open(options()?)?;
+    let cf = engine.get_column_family("default").expect("default CF");
+    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    tx.put(b"legacy-key".to_vec(), b"value".to_vec(), None)?;
+    tx.commit(WriteOptions::cloud_strict())?;
+    engine.flush_cf(&cf)?;
+    engine.shutdown(Duration::from_secs(5))?;
+    let manifest =
+        crate::metadata::ManifestPersistence::load(directory.path()).expect("read checkpoint");
+    let name = &manifest.files.first().expect("flushed SST").name;
+    let legacy = directory.path().join("hybrid_local/sst").join(name);
+    std::fs::create_dir_all(legacy.parent().expect("legacy SST directory"))?;
+    std::fs::copy(directory.path().join("cloud_store/sst").join(name), &legacy)?;
+
+    // Act
+    let mut reopened = Engine::open(options()?)?;
+
+    // Assert
+    assert!(!legacy.exists(), "startup must sweep the legacy local copy");
+    reopened.shutdown(Duration::from_secs(5))
+}
+
 fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) -> Vec<u8> {
     let record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
@@ -844,7 +871,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     };
     Engine::blocking_cloud_put(
         &cloud,
-        "metadata/manifest.json",
+        "metadata/manifest.snapshot.json",
         serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
     )
     .expect("upload newer remote manifest");
@@ -861,7 +888,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
         "unexpected stale engine metadata mirror error: {error}"
     );
     let retained: crate::metadata::Manifest = serde_json::from_slice(
-        &Engine::blocking_cloud_get(&cloud, "metadata/manifest.json")
+        &Engine::blocking_cloud_get(&cloud, "metadata/manifest.snapshot.json")
             .expect("download retained remote manifest"),
     )
     .expect("parse retained remote manifest");
@@ -983,7 +1010,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
     };
     Engine::blocking_cloud_put(
         &cloud,
-        "metadata/manifest.json",
+        "metadata/manifest.snapshot.json",
         serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
     )
     .expect("upload readable remote manifest metadata");
@@ -1002,7 +1029,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
 }
 
 #[test]
-fn should_reject_mixed_cloud_manifest_metadata_without_journal() {
+fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -1028,21 +1055,19 @@ fn should_reject_mixed_cloud_manifest_metadata_without_journal() {
     )
     .expect("upload newer manifest");
 
-    let error = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
-        .expect_err("strict hydration must reject mixed manifest metadata without journal");
+    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("legacy manifest mirror is not authoritative");
+    let recovered = crate::metadata::ManifestPersistence::load(temp_dir.path())
+        .expect("load hydrated snapshot");
 
     // Act
     // Assert
-    assert!(
-        error.to_string().contains("mixed")
-            || error.to_string().contains("inconsistent")
-            || error.to_string().contains("sequence"),
-        "unexpected mixed metadata error: {error}"
-    );
+    assert_eq!(recovered.last_persisted_sequence, 10);
+    assert!(!temp_dir.path().join("manifest.json").exists());
 }
 
 #[test]
-fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() {
+fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -1069,16 +1094,76 @@ fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() 
     .expect("upload newer manifest");
 
     Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
-        .expect("salvage hydration should retain the highest sequence manifest metadata");
+        .expect("salvage hydration should use the snapshot");
 
     let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
         .expect("load salvaged manifest metadata");
     // Act
     // Assert
     assert_eq!(
-        hydrated.last_persisted_sequence, 11,
-        "salvage hydration must not let a stale snapshot hide a newer manifest"
+        hydrated.last_persisted_sequence, 10,
+        "legacy manifest mirror must not override the snapshot"
     );
+}
+
+#[test]
+fn should_recover_cloud_database_when_manifest_json_is_absent() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud = crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "midge".to_string(),
+    );
+    let snapshot = crate::metadata::Manifest {
+        last_persisted_sequence: 42,
+        ..Default::default()
+    };
+    Engine::blocking_cloud_put(
+        &cloud,
+        "metadata/manifest.snapshot.json",
+        serde_json::to_vec(&snapshot).expect("serialize snapshot"),
+    )
+    .expect("upload snapshot");
+
+    // Act
+    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("hydrate snapshot without legacy mirror");
+    let recovered = crate::metadata::ManifestPersistence::load(temp_dir.path())
+        .expect("recover hydrated snapshot");
+
+    // Assert
+    assert_eq!(recovered.last_persisted_sequence, 42);
+    assert!(!temp_dir.path().join("manifest.json").exists());
+}
+
+#[test]
+fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud = crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "midge".to_string(),
+    );
+    let legacy = crate::metadata::Manifest {
+        last_persisted_sequence: 42,
+        ..Default::default()
+    };
+    Engine::blocking_cloud_put(
+        &cloud,
+        "metadata/manifest.json",
+        serde_json::to_vec(&legacy).expect("serialize legacy mirror"),
+    )
+    .expect("upload legacy mirror");
+
+    // Act
+    let result = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(_))
+    ));
+    assert!(!temp_dir.path().join("manifest.snapshot.json").exists());
 }
 
 struct ListOmittingCloudBackend {

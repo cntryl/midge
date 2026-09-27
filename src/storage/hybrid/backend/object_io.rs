@@ -23,7 +23,14 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<Vec<u8>, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_read_with_metadata(key, callback_timeout, tx);
+        backend.submit_metadata_read_request(
+            crate::storage::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(callback_timeout),
+                callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(callback_timeout) {
             Ok(Ok((data, _metadata))) => Ok(data),
             Ok(Err(error)) => Err(crate::storage::StorageError::new(
@@ -64,7 +71,14 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_head_with_timeout(key, callback_timeout, tx);
+        backend.submit_head_request(
+            crate::storage::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(callback_timeout),
+                callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: returned_key,
@@ -121,7 +135,10 @@ impl HybridStorage {
         let timeout =
             Self::deadline_timeout(key, "HEAD object existence", callback_timeout, deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_head_with_timeout(key, timeout, tx);
+        backend.submit_head_request(
+            crate::storage::StorageRequest::new(key, *deadline, timeout),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),
@@ -165,7 +182,14 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<bool, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_delete(key, tx);
+        backend.submit_delete_request(
+            crate::storage::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(callback_timeout),
+                callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::DeleteComplete {
                 key: returned_key,

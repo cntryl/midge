@@ -55,12 +55,14 @@ impl CacheKey {
     }
 
     /// Create a cache key for an index block
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn for_index(sst_id: u64, block_offset: u64) -> Self {
         Self::new(sst_id, block_offset, CacheBlockKind::Index)
     }
 
     /// Create a cache key for a filter block
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn for_filter(sst_id: u64, block_offset: u64) -> Self {
         Self::new(sst_id, block_offset, CacheBlockKind::Filter)

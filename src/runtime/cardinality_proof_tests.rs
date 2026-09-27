@@ -44,8 +44,8 @@ fn proof_state(mask: usize) -> RuntimeState {
             .expect("create proof column family");
         assert_eq!(actual, expected);
     }
-    state.l0_compaction_trigger = 1;
-    state.max_immutable_memtables = 2;
+    state.limits.l0_compaction_trigger = 1;
+    state.limits.max_immutable_memtables = 2;
     for bit in 0..MANIFEST_BITS {
         if mask & (1 << bit) == 0 {
             continue;
@@ -176,7 +176,7 @@ fn should_round_robin_every_critical_column_family_without_starvation() {
     let mut actor = CompactionActor::new_with_config(factory, config);
     let mut state = proof_state(0);
     state.set_compaction_enabled(true);
-    state.max_immutable_memtables = 0;
+    state.limits.max_immutable_memtables = 0;
     for cf_id in 0..u32::try_from(COLUMN_FAMILIES).expect("proof CF count") {
         state
             .manifest

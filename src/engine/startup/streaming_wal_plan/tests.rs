@@ -1,4 +1,5 @@
 use super::*;
+use crate::io::FsError;
 use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
 use bytes::Bytes;
 
@@ -145,11 +146,24 @@ fn should_normalize_recovery_sources_without_copying_wal_bytes() -> MidgeResult<
         std::fs::read_dir(fixture.directory.path().join("local/wal"))?.count(),
         1
     );
-    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 2);
+    assert_eq!(
+        recovered
+            .fs
+            .list_dir(&FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+            .len(),
+        2
+    );
     let file = recovered
         .fs
-        .open(&FsPath::new(crate::wal::segment_file_name(2)), READ_ONLY)?;
-    assert_eq!(file.read_at(0, second.len() as u64)?.as_ref(), second);
+        .open(&FsPath::new(crate::wal::segment_file_name(2)), READ_ONLY)
+        .map_err(FsError::into_midge)?;
+    assert_eq!(
+        file.read_at(0, second.len() as u64)
+            .map_err(FsError::into_midge)?
+            .as_ref(),
+        second
+    );
     Ok(())
 }
 
@@ -244,7 +258,11 @@ fn should_truncate_only_incomplete_active_wal_tail_before_virtual_replay() -> Mi
     );
     assert!(!recovered.plan.opened_in_salvage_mode);
     assert_eq!(
-        recovered.fs.metadata(&FsPath::new("wal/wal.log"))?.len,
+        recovered
+            .fs
+            .metadata(&FsPath::new("wal/wal.log"))
+            .map_err(FsError::into_midge)?
+            .len,
         valid.len() as u64
     );
     Ok(())
@@ -315,7 +333,14 @@ fn should_validate_catalog_authority_before_exposing_replay_sources() -> MidgeRe
         vec![1]
     );
     assert!(recovered.plan.active_wal.is_none());
-    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 1);
+    assert_eq!(
+        recovered
+            .fs
+            .list_dir(&FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+            .len(),
+        1
+    );
     assert!(!fixture.directory.path().join("local/wal/wal.log").exists());
     assert!(fixture
         .directory
@@ -369,7 +394,8 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
     bytes.extend(framed_wal(3, 7, b"three"));
     let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
     let fs: Arc<dyn Fs> = Arc::new(crate::io::transient_read::TransientReadFs {
-        inner: crate::io::RealFs::new(fixture.directory.path().join("local"))?,
+        inner: crate::io::RealFs::new(fixture.directory.path().join("local"))
+            .map_err(FsError::into_midge)?,
         fail_from: first.len() as u64,
     });
     let mut plan = CloudWalRecoveryPlan {
@@ -429,7 +455,14 @@ fn should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one
             .collect::<Vec<_>>(),
         vec![1]
     );
-    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 1);
+    assert_eq!(
+        recovered
+            .fs
+            .list_dir(&FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+            .len(),
+        1
+    );
     assert_eq!(
         recovered
             .plan
@@ -575,7 +608,14 @@ fn should_replay_every_segment_when_valid_local_copy_fills_cloud_hole() -> Midge
     let recovered = fixture.build(RecoveryPolicy::Salvage)?;
 
     // Assert
-    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 3);
+    assert_eq!(
+        recovered
+            .fs
+            .list_dir(&FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+            .len(),
+        3
+    );
     assert!(recovered.plan.unreplayed_segments.is_empty());
     assert_eq!(recovered.plan.max_unreplayed_sequence, 0);
     Ok(())
@@ -622,7 +662,14 @@ fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog(
     let recovered = fixture.build(RecoveryPolicy::Salvage)?;
 
     // Assert
-    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 2);
+    assert_eq!(
+        recovered
+            .fs
+            .list_dir(&FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+            .len(),
+        2
+    );
     assert!(recovered.plan.unreplayed_segments.is_empty());
     assert!(leaked.exists(), "the leftover stays where it was");
     Ok(())

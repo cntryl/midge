@@ -123,10 +123,14 @@ impl EventLoop {
         // Stop compaction only after the final checkpoint has settled. Its
         // worker owns staged SST output and must finish while this lease epoch
         // is still valid.
-        let compaction_storage = self.hybrid_storage.as_ref().map(|storage| {
-            std::sync::Arc::clone(storage)
-                as std::sync::Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
-        });
+        let compaction_storage = self
+            .cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .map(|storage| {
+                std::sync::Arc::clone(storage)
+                    as std::sync::Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
+            });
         self.compaction_actor
             .cancel_and_join_worker(&mut self.state, compaction_storage.as_ref());
 
@@ -139,7 +143,7 @@ impl EventLoop {
         } else {
             self.join_cloud_wal_prune_worker();
         }
-        if let Some(storage) = &self.hybrid_storage {
+        if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
             storage.shutdown_background_workers();
         }
 
@@ -165,8 +169,9 @@ impl EventLoop {
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> Option<MidgeError> {
-        let storage = self.hybrid_storage.as_ref()?.clone();
-        while (storage.pending_upload_count() > 0 || self.cloud_wal.has_pending_uploads())
+        let storage = self.cloud_coordinator.hybrid_storage.as_ref()?.clone();
+        while (storage.pending_upload_count() > 0
+            || self.cloud_coordinator.cloud_wal.has_pending_uploads())
             && !deadline.is_expired()
         {
             // UploadQueue and the runtime backlog are two ownership domains
@@ -190,7 +195,7 @@ impl EventLoop {
         }
 
         let storage_pending = storage.pending_upload_count();
-        let runtime_pending = self.cloud_wal.upload_backlog.len();
+        let runtime_pending = self.cloud_coordinator.cloud_wal.upload_backlog.len();
         if storage_pending > 0 || runtime_pending > 0 {
             crate::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
             tracing::warn!(
@@ -322,7 +327,7 @@ impl EventLoop {
         // Bound retries to the authority snapshot observed at shutdown. A
         // failed proof may leak an object, but must not turn cleanup into an
         // unbounded terminal loop.
-        let attempts = self.cloud_wal.acked_segments.len();
+        let attempts = self.cloud_coordinator.cloud_wal.acked_segments.len();
         self.join_cloud_wal_prune_worker();
         self.drain_hybrid_storage_events_within(deadline);
 
@@ -331,7 +336,7 @@ impl EventLoop {
                 break;
             }
             self.prune_cloud_wal_segments_covered_by_manifest();
-            if self.cloud_wal_prune_worker.is_none() {
+            if self.cloud_coordinator.cloud_wal_prune_worker.is_none() {
                 break;
             }
             self.join_cloud_wal_prune_worker();
@@ -451,10 +456,6 @@ mod tests {
             Ok(0)
         }
 
-        fn flush(&self) -> crate::common::MidgeResult<()> {
-            Ok(())
-        }
-
         fn sync(&self) -> crate::common::MidgeResult<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -462,10 +463,6 @@ mod tests {
 
         fn current_pos(&self) -> u64 {
             0
-        }
-
-        fn close(&self) -> crate::common::MidgeResult<()> {
-            Ok(())
         }
     }
 

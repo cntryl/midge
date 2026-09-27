@@ -1,5 +1,6 @@
 //! SST traits for readers and writers
 
+#[cfg(test)]
 use bytes::Bytes;
 use std::path::Path;
 
@@ -53,6 +54,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be scanned or decoded.
+    #[cfg(test)]
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,
@@ -60,6 +62,7 @@ pub trait SstStateReader: Send + Sync {
     ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Snapshot-aware range lookup with a caller-owned TTL clock.
+    #[cfg(test)]
     fn scan_range_state_with_time(
         &self,
         start: Option<&[u8]>,
@@ -69,6 +72,7 @@ pub trait SstStateReader: Send + Sync {
 
     /// Scan persisted state without interpreting TTL expiration. Recovery and
     /// compaction use this to preserve raw value-plus-expiration metadata.
+    #[cfg(test)]
     fn scan_range_raw_state(
         &self,
         start: Option<&[u8]>,
@@ -81,6 +85,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the requested range cannot be read or decoded.
+    #[cfg(test)]
     fn raw_version_cursor(
         self: Box<Self>,
         start: Option<Vec<u8>>,
@@ -108,6 +113,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
+    #[cfg(test)]
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState>;
 
     /// Snapshot-aware lookup with a caller-owned TTL clock.
@@ -301,6 +307,7 @@ pub trait DynSstWriter: Send {
     /// # Errors
     ///
     /// Returns an error when the entry cannot be appended to the SST.
+    #[cfg(test)]
     fn add_with_meta(
         &mut self,
         key: &[u8],
@@ -364,6 +371,7 @@ pub trait SstFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the writer cannot be created.
+    #[cfg(test)]
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
 
     /// Create a writer for a budgeted compaction operation.
@@ -472,6 +480,7 @@ mod tests {
             })
         }
 
+        #[cfg(test)]
         fn scan_range_state(
             &self,
             start: Option<&[u8]>,
@@ -484,6 +493,7 @@ mod tests {
                 .collect())
         }
 
+        #[cfg(test)]
         fn scan_range_raw_state(
             &self,
             start: Option<&[u8]>,
@@ -541,6 +551,7 @@ mod tests {
             None
         }
 
+        #[cfg(test)]
         fn add_with_meta(
             &mut self,
             key: &[u8],

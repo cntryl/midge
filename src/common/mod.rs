@@ -5,7 +5,6 @@ pub mod error;
 #[doc(hidden)]
 pub mod resource_budget;
 pub mod time;
-pub mod tlv;
 
 pub use deadline::OperationDeadline;
 pub(crate) use error::is_no_space;

@@ -64,6 +64,19 @@ use std::sync::Arc;
 
 pub(crate) const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
 
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+pub(crate) fn parse_request_timeout(value: &str) -> Result<std::time::Duration, String> {
+    value
+        .parse::<u64>()
+        .map(std::time::Duration::from_millis)
+        .map_err(|error| format!("invalid internal request timeout: {error}"))
+}
+
 /// Bound the provider request by the same budget the storage adapter waits
 /// on, replacing any timeout the caller already supplied. Without it the
 /// provider falls back to the executor default and a mutation can commit
@@ -103,10 +116,7 @@ pub(crate) fn split_request_timeout_header(
     let mut wire_headers = Vec::with_capacity(headers.len());
     for (name, value) in headers {
         if name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER) {
-            let milliseconds = value
-                .parse::<u64>()
-                .map_err(|error| format!("invalid internal request timeout: {error}"))?;
-            timeout = Some(std::time::Duration::from_millis(milliseconds));
+            timeout = Some(parse_request_timeout(&value)?);
         } else {
             wire_headers.push((name, value));
         }

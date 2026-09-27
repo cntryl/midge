@@ -186,7 +186,7 @@ fn replay_error_action(
 }
 
 fn map_fs_error(err: FsError) -> MidgeError {
-    err.into()
+    err.into_midge()
 }
 
 fn join(dir: &FsPath, leaf: &str) -> FsPath {

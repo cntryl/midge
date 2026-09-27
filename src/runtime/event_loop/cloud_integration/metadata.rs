@@ -1,11 +1,15 @@
 //! Remote metadata snapshots used by callerless WAL cleanup.
 
+use super::super::CloudCoordinator;
 use super::super::EventLoop;
 use crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot;
 
-impl EventLoop {
-    pub(super) fn cloud_metadata_prune_snapshot_for_wal_cleanup(
+impl CloudCoordinator {
+    pub(in crate::runtime::event_loop) fn metadata_prune_snapshot_for_wal_cleanup(
         &self,
+        db_path: &std::path::Path,
+        fs: std::sync::Arc<dyn crate::io::Fs>,
+        metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> crate::common::MidgeResult<Option<CloudMetadataPruneSnapshot>> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(None);
@@ -23,13 +27,26 @@ impl EventLoop {
         Ok(Some(
             CloudMetadataPruneSnapshot::new(
                 cloud.clone(),
-                self.state.db_path.clone(),
-                self.state.fs.clone(),
+                db_path.to_path_buf(),
+                fs,
                 budget,
-                self.metadata_publication_lock.clone(),
+                metadata_publication_lock,
             )
             .with_progress(self.cloud_wal_prune_progress.clone()),
         ))
+    }
+}
+
+impl EventLoop {
+    pub(in crate::runtime::event_loop) fn cloud_metadata_prune_snapshot_for_wal_cleanup(
+        &self,
+    ) -> crate::common::MidgeResult<Option<CloudMetadataPruneSnapshot>> {
+        self.cloud_coordinator
+            .metadata_prune_snapshot_for_wal_cleanup(
+                &self.state.db_path,
+                self.state.fs.clone(),
+                self.metadata_publication_lock.clone(),
+            )
     }
 
     #[cfg(test)]
@@ -118,7 +135,7 @@ mod tests {
     fn should_refuse_remote_snapshot_when_shared_budget_is_missing() {
         // Arrange
         let mut el = create_test_event_loop().unwrap();
-        el.cloud_metadata_storage =
+        el.cloud_coordinator.cloud_metadata_storage =
             Some(Arc::new(crate::storage::cloud::CloudStorage::with_mock()));
 
         // Act
@@ -135,12 +152,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let local =
             Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
-        el.hybrid_storage = Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            local.clone(),
-            local,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-        )));
-        el.cloud_metadata_storage =
+        el.cloud_coordinator.hybrid_storage =
+            Some(Arc::new(crate::storage::HybridStorage::with_policy(
+                local.clone(),
+                local,
+                crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            )));
+        el.cloud_coordinator.cloud_metadata_storage =
             Some(Arc::new(crate::storage::cloud::CloudStorage::with_mock()));
 
         // Act
@@ -149,6 +167,7 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(MidgeError::Internal(_))));
         assert!(el
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
@@ -163,9 +182,10 @@ mod tests {
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .unwrap();
-        el.cloud_metadata_storage =
+        el.cloud_coordinator.cloud_metadata_storage =
             Some(Arc::new(crate::storage::cloud::CloudStorage::with_mock()));
         let budget = el
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()

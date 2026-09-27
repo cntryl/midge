@@ -3,6 +3,7 @@
 //! This module provides SST file reader and factory using the base `io::Fs` trait,
 //! allowing for swappable real and mock filesystem implementations in tests.
 
+use crate::io::FsError;
 pub mod factory_io;
 pub mod reader_io;
 mod scratch;
@@ -28,16 +29,18 @@ pub(crate) fn file_identity(path: &Path) -> MidgeResult<(u64, u32)> {
 /// Compute an SST identity through the same filesystem that published it.
 pub(crate) fn file_identity_with_fs(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult<(u64, u32)> {
     let path = fs_relative_sst_path(fs, path)?;
-    let size = fs.metadata(&path)?.len;
-    let file = fs.open(
-        &path,
-        crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
+    let size = fs.metadata(&path).map_err(FsError::into_midge)?.len;
+    let file = fs
+        .open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
     let identity = crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)?;
     Ok((identity.size_bytes, identity.crc32c))
 }

@@ -5,6 +5,7 @@
 //! returns deltas for the runtime to validate and install.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::FsError;
 use crate::sst::SstFactory;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -239,7 +240,7 @@ impl FlushActor {
             });
         }
 
-        let fs = Arc::new(crate::io::RealFs::new(sst_dir)?);
+        let fs = Arc::new(crate::io::RealFs::new(sst_dir).map_err(FsError::into_midge)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(compression_policy)
@@ -614,16 +615,26 @@ fn finalize_staged_sst(
     budget: &crate::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<()> {
     let final_fs_path = db_relative_fs_path(task, final_path)?;
-    if !task.fs.exists(&final_fs_path)? {
-        task.fs.create_dir_all(&crate::io::FsPath::new("sst"))?;
+    if !task
+        .fs
+        .exists(&final_fs_path)
+        .map_err(FsError::into_midge)?
+    {
+        task.fs
+            .create_dir_all(&crate::io::FsPath::new("sst"))
+            .map_err(FsError::into_midge)?;
         let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
-        task.fs.rename_atomic(&staging_fs_path, &final_fs_path)?;
+        task.fs
+            .rename_atomic(&staging_fs_path, &final_fs_path)
+            .map_err(FsError::into_midge)?;
     }
     validate_final_sst(task, final_path, &task.build.file_meta, budget)?;
-    task.fs.sync_dir(
-        &crate::io::FsPath::new("sst"),
-        crate::io::Durability::Durable,
-    )?;
+    task.fs
+        .sync_dir(
+            &crate::io::FsPath::new("sst"),
+            crate::io::Durability::Durable,
+        )
+        .map_err(FsError::into_midge)?;
     cleanup_non_authoritative_staging(task);
     Ok(())
 }
@@ -850,7 +861,8 @@ mod tests {
         };
         // Rooted at the database directory because this fixture stages flush
         // output beside `sst/` rather than inside it.
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&db_path)?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(&db_path).map_err(FsError::into_midge)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(crate::codec::CompressionPolicy::default()),
@@ -880,7 +892,8 @@ mod tests {
             fail_at_validation,
             validations: AtomicUsize::new(0),
         });
-        let publication_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&db_path)?);
+        let publication_fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(&db_path).map_err(FsError::into_midge)?);
         let task = FlushPublishTask {
             build: FlushBuildOutput {
                 identity,
@@ -936,7 +949,10 @@ mod tests {
         let scratch = fixture.directory.path().join("failed-scratch");
         let factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(
-                Arc::new(crate::io::RealFs::new(fixture.directory.path())?),
+                Arc::new(
+                    crate::io::RealFs::new(fixture.directory.path())
+                        .map_err(FsError::into_midge)?,
+                ),
                 4096,
             )
             .with_compaction_scratch_directory(scratch.clone()),
@@ -1153,7 +1169,9 @@ mod tests {
             reservation: None,
             hybrid_storage: Some(Arc::clone(hybrid)),
         };
-        let fs = Arc::new(crate::io::RealFs::new(fixture.directory.path())?);
+        let fs = Arc::new(
+            crate::io::RealFs::new(fixture.directory.path()).map_err(FsError::into_midge)?,
+        );
         let factory: Arc<crate::sst::FsSstFactoryIo> =
             Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
 
@@ -1177,7 +1195,7 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         let sync_fs = Arc::new(PublicationTestFs {
-            inner: crate::io::RealFs::new(&fixture.db_path)?,
+            inner: crate::io::RealFs::new(&fixture.db_path).map_err(FsError::into_midge)?,
             fail_rename: false,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
@@ -1228,7 +1246,7 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         fixture.task.fs = Arc::new(PublicationTestFs {
-            inner: crate::io::RealFs::new(&fixture.db_path)?,
+            inner: crate::io::RealFs::new(&fixture.db_path).map_err(FsError::into_midge)?,
             fail_rename: true,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),

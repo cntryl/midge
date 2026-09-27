@@ -1,4 +1,5 @@
 use super::*;
+use crate::io::FsError;
 
 #[test]
 fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_duplicate_sequence(
@@ -102,9 +103,6 @@ impl File for PartialAppendFile {
     }
     fn sync(&mut self, durability: FsDurability) -> FsResult<()> {
         self.inner.sync(durability)
-    }
-    fn close(self: Box<Self>) -> FsResult<()> {
-        self.inner.close()
     }
 }
 
@@ -312,7 +310,10 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
             DurabilityPolicy::CloudAsync,
         )?;
         actor.append_prepared_transactions(&mut state, vec![seed])?;
-        let physical_before = fs.metadata(&FsPath::new("wal.log"))?.len;
+        let physical_before = fs
+            .metadata(&FsPath::new("wal.log"))
+            .map_err(FsError::into_midge)?
+            .len;
         fs.fail_next
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
@@ -323,7 +324,12 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         // Assert
         assert!(matches!(result, Err(MidgeError::NoSpace(_))));
         assert!(physical_before > 0);
-        assert_eq!(fs.metadata(&FsPath::new("wal.log"))?.len, physical_before);
+        assert_eq!(
+            fs.metadata(&FsPath::new("wal.log"))
+                .map_err(FsError::into_midge)?
+                .len,
+            physical_before
+        );
         assert_eq!(
             setup.hybrid_storage.budget_snapshot().total_committed_bytes,
             physical_before,
@@ -358,13 +364,7 @@ impl WalWriter for UncertainAppendWriter {
     fn current_pos(&self) -> u64 {
         0
     }
-    fn flush(&self) -> MidgeResult<()> {
-        Ok(())
-    }
     fn sync(&self) -> MidgeResult<()> {
-        Ok(())
-    }
-    fn close(&self) -> MidgeResult<()> {
         Ok(())
     }
 }

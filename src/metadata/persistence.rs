@@ -46,6 +46,7 @@ impl WrittenCheckpoint {
 impl ManifestPersistence {
     /// Manifest file name
     const MANIFEST_FILE: &'static str = super::files::MANIFEST;
+    #[cfg(test)]
     const MANIFEST_FILE_TEMP: &'static str = "manifest.json.tmp";
 
     /// Snapshot file name
@@ -55,7 +56,7 @@ impl ManifestPersistence {
     /// Get the manifest file path
     #[cfg(test)]
     pub fn manifest_path(db_path: &Path) -> PathBuf {
-        db_path.join(Self::MANIFEST_FILE)
+        db_path.join(Self::MANIFEST_SNAPSHOT)
     }
 
     /// Get the manifest snapshot path
@@ -241,7 +242,6 @@ impl ManifestPersistence {
         )?;
         crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)
             .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
-        Self::save_with_fs(fs, manifest)?;
         tracing::warn!(
             preserved = %preserved,
             "checkpointed salvaged manifest and preserved the corrupt journal"
@@ -327,11 +327,11 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<(), String> {
-        Self::save_mirror(fs, manifest).map_err(|error| error.to_string())
+        Self::write_snapshot(fs, manifest).map_err(|error| error.to_string())
     }
 
-    /// Writes the legacy `manifest.json` copy, keeping the I/O error's kind.
-    fn save_mirror(
+    /// Stage a manifest snapshot, keeping the I/O error's kind.
+    fn write_snapshot(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> crate::common::MidgeResult<()> {
@@ -345,8 +345,8 @@ impl ManifestPersistence {
 
         crate::io::staging::stage_bytes_typed(
             fs,
-            &FsPath::new(Self::MANIFEST_FILE_TEMP),
-            &FsPath::new(Self::MANIFEST_FILE),
+            &FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP),
+            &FsPath::new(Self::MANIFEST_SNAPSHOT),
             &json,
             || {
                 crate::failpoints::fail_point!(
@@ -361,7 +361,7 @@ impl ManifestPersistence {
         )?;
 
         tracing::debug!(
-            path = ?Self::MANIFEST_FILE,
+            path = ?Self::MANIFEST_SNAPSHOT,
             size_bytes = json.len(),
             "manifest persisted successfully"
         );
@@ -446,7 +446,16 @@ impl ManifestPersistence {
             MidgeError::Internal("failpoint: manifest snapshot write failed".to_string())
         ));
 
-        crate::io::staging::stage_bytes_typed(fs, &temp, &snap_path, &json, || Ok(()))?;
+        crate::io::staging::stage_bytes_typed(fs, &temp, &snap_path, &json, || {
+            crate::failpoints::fail_point!(
+                "midge::manifest::inject_no_space_on_checkpoint_save",
+                |_| Err(MidgeError::NoSpace(
+                    "failpoint: no space while saving manifest checkpoint".to_string()
+                ))
+            );
+            crate::failpoints::fail_point!("midge::manifest::after_temp_sync_before_rename");
+            Ok(())
+        })?;
 
         crate::failpoints::fail_point!(
             "midge::manifest::after_snapshot_rename_before_journal_truncate",
@@ -456,11 +465,6 @@ impl ManifestPersistence {
         );
 
         crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
-
-        // Keep the legacy manifest filename as a compatibility mirror. The
-        // snapshot remains authoritative during recovery, so a crash while
-        // updating this mirror cannot reintroduce duplicate journal edits.
-        Self::save_mirror(fs, &checkpoint)?;
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
@@ -683,8 +687,8 @@ mod tests {
 
         // Assert
         assert!(
-            manifest_path.ends_with("manifest.json"),
-            "manifest should persist to manifest.json"
+            manifest_path.ends_with("manifest.snapshot.json"),
+            "manifest should persist to manifest.snapshot.json"
         );
         assert!(
             manifest_path.exists(),
@@ -695,6 +699,25 @@ mod tests {
         assert_eq!(loaded.column_families.len(), 2);
         assert_eq!(loaded.column_families[0].name, "default");
         assert_eq!(loaded.column_families[1].name, "secondary");
+    }
+
+    #[test]
+    fn should_recover_when_manifest_json_is_absent_after_checkpoint() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let manifest = Manifest {
+            last_persisted_sequence: 42,
+            ..Default::default()
+        };
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect("save checkpoint");
+        let recovered = ManifestPersistence::load(&test_dir).expect("recover checkpoint");
+
+        // Assert
+        assert!(!test_dir.join("manifest.json").exists());
+        assert_eq!(recovered.last_persisted_sequence, 42);
     }
 
     #[test]
@@ -910,7 +933,11 @@ mod tests {
             size_bytes: 10,
             ..Default::default()
         });
-        ManifestPersistence::save(&test_dir, &manifest_only).expect("save manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE),
+            serde_json::to_vec(&manifest_only).expect("encode legacy manifest"),
+        )
+        .expect("write legacy manifest");
 
         let mut snapshot_only = Manifest::default();
         snapshot_only.files.push(crate::metadata::FileMeta {
@@ -993,7 +1020,11 @@ mod tests {
             size_bytes: 10,
             ..Default::default()
         });
-        ManifestPersistence::save(&test_dir, &manifest_only).expect("save manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE),
+            serde_json::to_vec(&manifest_only).expect("encode legacy manifest"),
+        )
+        .expect("write legacy manifest");
 
         let mut snapshot_manifest = Manifest::default();
         snapshot_manifest.files.push(crate::metadata::FileMeta {
@@ -1434,7 +1465,11 @@ mod tests {
             size_bytes: 10,
             ..Default::default()
         });
-        ManifestPersistence::save(&test_dir, &manifest_only).expect("save manifest");
+        std::fs::write(
+            test_dir.join(ManifestPersistence::MANIFEST_FILE),
+            serde_json::to_vec(&manifest_only).expect("encode legacy manifest"),
+        )
+        .expect("write legacy manifest");
 
         let mut snapshot_manifest = Manifest::default();
         snapshot_manifest.files.push(crate::metadata::FileMeta {

@@ -1,6 +1,6 @@
 use super::RuntimeMsg;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(not(test))]
 const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -13,7 +13,7 @@ pub(crate) struct CloudWalUploadTracker {
     pub(super) upload_backlog: BTreeMap<u64, u64>,
     /// Earliest time at which runtime-owned WAL upload obligations may be
     /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
-    upload_retry_at: Option<Instant>,
+    upload_retry: crate::runtime::retry_schedule::RetrySchedule,
     pub(super) prune_inflight: HashSet<u64>,
 }
 
@@ -22,7 +22,9 @@ impl CloudWalUploadTracker {
         Self {
             acked_segments,
             upload_backlog: BTreeMap::new(),
-            upload_retry_at: None,
+            upload_retry: crate::runtime::retry_schedule::RetrySchedule::new(
+                CLOUD_WAL_RUNTIME_RETRY_DELAY,
+            ),
             prune_inflight: HashSet::new(),
         }
     }
@@ -32,25 +34,21 @@ impl CloudWalUploadTracker {
     }
 
     pub(super) fn uploads_ready(&self) -> bool {
-        !self.upload_backlog.is_empty()
-            && self
-                .upload_retry_at
-                .is_none_or(|retry_at| Instant::now() >= retry_at)
+        !self.upload_backlog.is_empty() && self.upload_retry.is_ready()
     }
 
     pub(super) fn defer_upload_retry(&mut self) {
-        self.upload_retry_at = Some(Instant::now() + CLOUD_WAL_RUNTIME_RETRY_DELAY);
+        self.upload_retry.defer();
     }
 
     pub(super) fn begin_upload_attempt(&mut self) {
-        self.upload_retry_at = None;
+        self.upload_retry.clear();
     }
 
     pub(super) fn upload_retry_deadline_timeout(&self) -> Option<Duration> {
         (!self.upload_backlog.is_empty())
-            .then_some(self.upload_retry_at)
+            .then(|| self.upload_retry.remaining())
             .flatten()
-            .map(|retry_at| retry_at.saturating_duration_since(Instant::now()))
     }
 }
 

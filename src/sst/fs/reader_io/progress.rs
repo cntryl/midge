@@ -5,6 +5,7 @@ use super::{
     SstScanLifecycle,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
+use crate::io::FsError;
 use crate::sst::traits::RawSstVersion;
 #[cfg(test)]
 use crate::types::EntryType;
@@ -76,7 +77,11 @@ impl SstFileIo {
     ) -> MidgeResult<&'a SstFileSummary> {
         if !progress.cursor.complete {
             let reader = Self::open_for_compaction(path, fs, budget.clone())?;
-            let size = reader.fs.metadata(&reader.path)?.len;
+            let size = reader
+                .fs
+                .metadata(&reader.path)
+                .map_err(FsError::into_midge)?
+                .len;
             if !progress.ranges_checked {
                 for tombstone in &reader.range_tombstones {
                     progress.observe(size, &tombstone.start, tombstone.seq, Some(budget))?;
@@ -164,7 +169,7 @@ mod tests {
     fn should_resume_at_unacknowledged_version_after_visitor_failure() -> MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(directory.path())?);
+        let fs = Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let mut writer = factory.create()?;
         for sequence in (1..=3).rev() {

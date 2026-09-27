@@ -38,6 +38,7 @@ impl<'a> BlockingCloudIo<'a> {
         self.io().head_optional(key)
     }
 
+    #[cfg(test)]
     pub(in crate::engine) fn put_with_headers(
         &self,
         key: &str,

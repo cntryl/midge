@@ -6,6 +6,7 @@ use super::{
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
+use crate::io::FsError;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -286,7 +287,7 @@ impl RuntimeStorageMaterialization {
             cloud.cloud_root.clone(),
         )?);
         let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            Arc::new(crate::io::RealFs::new(&storage_path.db_path)?),
+            Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?),
             sst_backend,
             opts.storage_io_timeout(),
         ));
@@ -433,7 +434,7 @@ impl RuntimeStorageMaterialization {
             &metadata_storage,
         )?;
         let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            Arc::new(crate::io::RealFs::new(&storage_path.db_path)?),
+            Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?),
             sst_storage.clone(),
             opts.storage_io_timeout(),
         ));
@@ -747,6 +748,11 @@ impl RuntimeRecoveryMaterialization {
         }
         if let Some(replay) = materialized.streaming_wal.take() {
             super::timing::measure("wal_replay", || replay.replay(&mut materialized))?;
+        }
+        // Legacy hybrid_local SST copies have been swept above. Replay may
+        // publish new SSTs, so retire the secondary backend only afterward.
+        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+            storage.retire_legacy_local_store();
         }
         let recovered_sequence = materialized.state.sequence;
         let recovered_cf_metas = materialized.state.manifest.column_families.clone();

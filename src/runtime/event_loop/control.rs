@@ -83,10 +83,19 @@ impl EventLoop {
             RuntimeResponse::RecoveryMetricsSnapshot {
                 request_id,
                 snapshot: crate::types::RecoveryMetricsSnapshot {
-                    wal_recovery_records_replayed: self.state.wal_recovery_records_replayed,
-                    wal_recovery_bytes_replayed: self.state.wal_recovery_bytes_replayed,
-                    intent_log_replay_runs: self.state.intent_log_replay_runs,
-                    intent_log_entries_replayed: self.state.intent_log_entries_replayed,
+                    wal_recovery_records_replayed: self
+                        .state
+                        .recovery_stats
+                        .wal_recovery_records_replayed,
+                    wal_recovery_bytes_replayed: self
+                        .state
+                        .recovery_stats
+                        .wal_recovery_bytes_replayed,
+                    intent_log_replay_runs: self.state.recovery_stats.intent_log_replay_runs,
+                    intent_log_entries_replayed: self
+                        .state
+                        .recovery_stats
+                        .intent_log_entries_replayed,
                 },
             },
         );
@@ -107,7 +116,7 @@ impl EventLoop {
         snapshot.remote_range_failures_total = read_path.remote_range_failures_total;
         snapshot.remote_range_latency_ns_total = read_path.remote_range_latency_ns_total;
         snapshot.remote_range_latency_ns_max = read_path.remote_range_latency_ns_max;
-        if let Some(storage) = &self.hybrid_storage {
+        if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
             let budget = storage.budget_snapshot();
             snapshot.hybrid_max_local_bytes = budget.max_local_bytes;
             snapshot.hybrid_total_committed_bytes = budget.total_committed_bytes;
@@ -141,10 +150,10 @@ impl EventLoop {
     ) -> HandleOutcome {
         let candidate_memtable_size_limit = update
             .memtable_size_limit
-            .unwrap_or(self.state.memtable_size_limit);
+            .unwrap_or(self.state.limits.memtable_size_limit);
         let candidate_memtable_flush_threshold = update
             .memtable_flush_threshold
-            .unwrap_or(self.state.memtable_flush_threshold);
+            .unwrap_or(self.state.limits.memtable_flush_threshold);
         if let Err(error) = crate::config::validate_memtable_limits(
             candidate_memtable_size_limit,
             candidate_memtable_flush_threshold,
@@ -185,17 +194,17 @@ impl EventLoop {
         }
 
         if let Some(ms) = update.memtable_size_limit {
-            self.state.memtable_size_limit = ms;
+            self.state.limits.memtable_size_limit = ms;
         }
         if let Some(th) = update.memtable_flush_threshold {
-            self.state.memtable_flush_threshold = th;
+            self.state.limits.memtable_flush_threshold = th;
         }
         if let Some(ec) = update.enable_compaction {
             self.state.set_compaction_enabled(ec);
         }
         if let Some(trigger) = update.l0_compaction_trigger {
             let trigger = trigger.max(1);
-            self.state.l0_compaction_trigger = trigger;
+            self.state.limits.l0_compaction_trigger = trigger;
             self.compaction_actor.set_l0_file_count_threshold(trigger);
         }
 
@@ -226,8 +235,8 @@ impl EventLoop {
             request_id,
             RuntimeResponse::RuntimeConfigSnapshot {
                 request_id,
-                memtable_size_limit: self.state.memtable_size_limit,
-                memtable_flush_threshold: self.state.memtable_flush_threshold,
+                memtable_size_limit: self.state.limits.memtable_size_limit,
+                memtable_flush_threshold: self.state.limits.memtable_flush_threshold,
                 enable_compaction: self.state.compaction_enabled(),
                 l0_compaction_trigger: self.compaction_actor.l0_file_count_threshold(),
                 wal_durability_policy: self.wal_actor.durability_policy(),

@@ -834,7 +834,8 @@ mod failure_injection {
             "the retained oldest immutable and younger flush need distinct stable identities"
         );
         let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(temp_dir.path().join("manifest.json")).expect("read manifest"),
+            &std::fs::read(temp_dir.path().join("manifest.snapshot.json"))
+                .expect("read manifest snapshot"),
         )
         .expect("parse manifest");
         assert_eq!(manifest["files"].as_array().map(Vec::len), Some(2));
@@ -3873,7 +3874,7 @@ mod chaos_real {
     }
 
     fn manifest_path(db_path: &Path) -> PathBuf {
-        db_path.join("manifest.json")
+        db_path.join("manifest.snapshot.json")
     }
 
     fn committed_log_path(db_path: &Path) -> PathBuf {

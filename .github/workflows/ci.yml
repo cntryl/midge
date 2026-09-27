@@ -83,3 +83,6 @@ jobs:
         run: |
           cargo rustc --lib -- -D unnameable_types
           cargo rustc --lib --no-default-features -- -D unnameable_types
+
+      - name: Production build has no dead code
+        run: cargo rustc --lib --no-default-features --features cloud-all -- -D dead_code

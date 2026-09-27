@@ -59,6 +59,7 @@ impl Default for TelemetryConfig {
 
 impl TelemetryConfig {
     /// Create a new configuration (disabled by default)
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn new() -> Self {
         Self {
             enabled: false,
@@ -73,6 +74,7 @@ impl TelemetryConfig {
     }
 
     /// Set service name
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn with_service_name(mut self, name: String) -> Self {
         self.service_name = name;
         self
@@ -89,6 +91,7 @@ impl TelemetryConfig {
         self
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn validate(&self) -> crate::common::MidgeResult<()> {
         if !self.trace_sample_rate.is_finite()
             || self.trace_sample_rate <= 0.0

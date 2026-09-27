@@ -1,4 +1,5 @@
 use crate::common::MidgeResult;
+use crate::io::FsError;
 use crate::metadata::manifest::{CloudCheckpoint, FileMeta};
 use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
@@ -204,25 +205,25 @@ pub(crate) fn checkpoint_edit_id_with_fs(
     let snapshot_exists = match fs.exists(&path) {
         Ok(exists) => exists,
         Err(crate::io::traits::FsError::NotFound(_)) => false,
-        Err(error) => return Err(crate::common::MidgeError::from(error)),
+        Err(error) => return Err(FsError::into_midge(error)),
     };
     if !snapshot_exists {
         return Ok(0);
     }
 
-    let file = fs.open(
-        &path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
-    let len = file.len().map_err(crate::common::MidgeError::from)?;
-    let bytes = file
-        .read_at(0, len)
-        .map_err(crate::common::MidgeError::from)?;
+    let file = fs
+        .open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
+    let len = file.len().map_err(FsError::into_midge)?;
+    let bytes = file.read_at(0, len).map_err(FsError::into_midge)?;
     let manifest: crate::metadata::Manifest = serde_json::from_slice(&bytes)
         .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
     Ok(manifest.edit_checkpoint_id)
@@ -332,10 +333,8 @@ pub(crate) fn preserve_corrupt_journal_with_fs_unlocked(
             "manifest journal disappeared before it could be preserved".to_string(),
         ));
     };
-    let len = file.len().map_err(crate::common::MidgeError::from)?;
-    let bytes = file
-        .read_at(0, len)
-        .map_err(crate::common::MidgeError::from)?;
+    let len = file.len().map_err(FsError::into_midge)?;
+    let bytes = file.read_at(0, len).map_err(FsError::into_midge)?;
     drop(file);
     let preserved = format!("{JOURNAL_FILE}.corrupt.{}", millis_since_epoch());
     crate::io::staging::stage_bytes(
@@ -415,27 +414,23 @@ fn append_record_and_marker_with_fs(
     let journal_path = FsPath::new(JOURNAL_FILE);
     // A missing or still-empty journal has never had its directory entry
     // made durable, whether this append creates it or a crash left it empty.
-    let creating_journal = !fs
-        .exists(&journal_path)
-        .map_err(crate::common::MidgeError::from)?
-        || fs
-            .metadata(&journal_path)
-            .map_err(crate::common::MidgeError::from)?
-            .len
-            == 0;
-    let mut file = fs.open(
-        &journal_path,
-        OpenOptions {
-            mode: OpenMode::ReadWrite,
-            create: true,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
+    let creating_journal = !fs.exists(&journal_path).map_err(FsError::into_midge)?
+        || fs.metadata(&journal_path).map_err(FsError::into_midge)?.len == 0;
+    let mut file = fs
+        .open(
+            &journal_path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
 
     let write_start = std::time::Instant::now();
     file.append(bytes::Bytes::from(record))
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
 
     crate::failpoints::fail_point!("midge::manifest::inject_fsync_marker_write_failure", |_| {
         Err(crate::common::MidgeError::Io(std::io::Error::other(
@@ -443,7 +438,7 @@ fn append_record_and_marker_with_fs(
         )))
     });
     file.append(bytes::Bytes::from(marker))
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
     let write_ns = write_start.elapsed().as_nanos();
 
     crate::failpoints::fail_point!("midge::manifest::before_required_sync");
@@ -454,13 +449,13 @@ fn append_record_and_marker_with_fs(
     ));
     let fsync_start = std::time::Instant::now();
     file.sync(Durability::Durable)
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
     if creating_journal {
         // An fsynced file is still lost after a crash if the directory entry
         // naming it was never synced. The acknowledged edit (for example a
         // column-family create) must survive, so sync the directory once.
         fs.sync_dir(&FsPath::new("."), Durability::Durable)
-            .map_err(crate::common::MidgeError::from)?;
+            .map_err(FsError::into_midge)?;
     }
     let fsync_ns = fsync_start.elapsed().as_nanos();
 
@@ -474,16 +469,18 @@ fn repair_partial_journal_tail(
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 
     let journal_path = FsPath::new(JOURNAL_FILE);
-    let file = fs.open(
-        &journal_path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
-    let file_len = file.len().map_err(crate::common::MidgeError::from)?;
+    let file = fs
+        .open(
+            &journal_path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
+    let file_len = file.len().map_err(FsError::into_midge)?;
     if last_valid_offset > file_len {
         return Err(crate::common::MidgeError::Corruption(format!(
             "manifest journal repair offset {last_valid_offset} exceeds file length {file_len}"
@@ -491,7 +488,7 @@ fn repair_partial_journal_tail(
     }
     let valid_prefix = file
         .read_at(0, last_valid_offset)
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
     drop(file);
 
     crate::io::staging::stage_bytes(
@@ -561,7 +558,7 @@ fn replay_journal_with_mode(
         return Ok(JournalReplay::empty());
     };
 
-    let file_len = file.len().map_err(crate::common::MidgeError::from)?;
+    let file_len = file.len().map_err(FsError::into_midge)?;
     let mut state = JournalReplayState::default();
     let mut offset: u64 = 0;
     let mut tail = JournalReplayTail::Clean;
@@ -711,7 +708,7 @@ fn open_journal_for_replay(
     ) {
         Ok(file) => Ok(Some(file)),
         Err(crate::io::traits::FsError::NotFound(_)) => Ok(None),
-        Err(e) => Err(crate::common::MidgeError::from(e)),
+        Err(e) => Err(FsError::into_midge(e)),
     }
 }
 
@@ -721,16 +718,14 @@ fn read_journal_record(
     file_len: u64,
 ) -> MidgeResult<JournalRecordStatus> {
     let record_start = offset;
-    let typ = file
-        .read_at(offset, 1)
-        .map_err(crate::common::MidgeError::from)?[0];
+    let typ = file.read_at(offset, 1).map_err(FsError::into_midge)?[0];
     if typ == 0 {
         // An unsynced append can persist the new file size but not its bytes,
         // leaving a zero-filled end. That is a torn tail (the WAL treats it
         // the same way); zeros followed by data are still corruption.
         let rest = file
             .read_at(offset, file_len - offset)
-            .map_err(crate::common::MidgeError::from)?;
+            .map_err(FsError::into_midge)?;
         if rest.iter().all(|byte| *byte == 0) {
             return Ok(JournalRecordStatus::PartialHeader { record_start });
         }
@@ -741,9 +736,7 @@ fn read_journal_record(
     }
 
     let len_offset = offset + 1;
-    let len_bytes = file
-        .read_at(len_offset, 4)
-        .map_err(crate::common::MidgeError::from)?;
+    let len_bytes = file.read_at(len_offset, 4).map_err(FsError::into_midge)?;
     let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
     let payload_offset = len_offset + 4;
 
@@ -754,7 +747,7 @@ fn read_journal_record(
         // edits (the same shape the WAL rejects after #153).
         let rest = file
             .read_at(payload_offset, file_len - payload_offset)
-            .map_err(crate::common::MidgeError::from)?;
+            .map_err(FsError::into_midge)?;
         if contains_verified_fsync_marker(&rest) {
             return Err(crate::common::MidgeError::Corruption(format!(
                 "manifest journal record length at byte {record_start} overruns EOF and hides a verified later record (len={len}, file_len={file_len})"
@@ -765,11 +758,9 @@ fn read_journal_record(
 
     let payload = file
         .read_at(payload_offset, len as u64)
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
     let crc_offset = payload_offset + len as u64;
-    let crc_bytes = file
-        .read_at(crc_offset, 4)
-        .map_err(crate::common::MidgeError::from)?;
+    let crc_bytes = file.read_at(crc_offset, 4).map_err(FsError::into_midge)?;
     let got_crc = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
 
     Ok(JournalRecordStatus::Record(JournalRecord {
@@ -1061,19 +1052,21 @@ pub(crate) fn truncate_journal_with_fs_unlocked(
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 
     // Opening with truncate=true will set length to 0
-    let mut f = fs.open(
-        &FsPath::new(JOURNAL_FILE),
-        OpenOptions {
-            mode: OpenMode::ReadWrite,
-            create: true,
-            create_new: false,
-            truncate: true,
-        },
-    )?;
+    let mut f = fs
+        .open(
+            &FsPath::new(JOURNAL_FILE),
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            },
+        )
+        .map_err(FsError::into_midge)?;
 
     // Sync file to durable state
     f.sync(crate::io::traits::Durability::Durable)
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(FsError::into_midge)?;
 
     Ok(())
 }

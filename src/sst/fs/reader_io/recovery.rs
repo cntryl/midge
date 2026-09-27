@@ -3,6 +3,7 @@
 use super::{BlockHandle, SstFileIo};
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::FsError;
 #[cfg(test)]
 use crate::types::EntryType;
 use bytes::Bytes;
@@ -68,15 +69,18 @@ impl SstFileIo {
         let budget = self.metadata_budget.as_ref().ok_or_else(|| {
             MidgeError::Internal("recovery reader requires a shared budget".into())
         })?;
-        let file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
+        let file = self
+            .fs
+            .open(
+                &self.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
         let (decoded, reservation) = self.read_framed_block(
             file.as_ref(),
             handle,
@@ -110,7 +114,7 @@ mod tests {
     fn should_release_replaced_blocks_when_the_last_value_is_dropped() -> MidgeResult<()> {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs = Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
         let mut writer = factory.create()?;
         for key in [b"a", b"z"] {
@@ -145,7 +149,7 @@ mod tests {
     {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs = Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(&vec![7; 64 * 1024]), 1, EntryType::Put, None)?;
@@ -172,7 +176,7 @@ mod tests {
     fn should_reject_corrupt_data_before_retaining_a_recovery_block() -> MidgeResult<()> {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs = Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;

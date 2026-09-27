@@ -584,6 +584,7 @@ impl SstEntry {
         self.op_type == EntryType::Delete
     }
 
+    #[cfg(test)]
     pub fn is_expired(&self, now_millis: u64) -> bool {
         crate::common::time::is_expired_at(self.expiration, now_millis)
     }

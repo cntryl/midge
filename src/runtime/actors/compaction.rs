@@ -8,6 +8,7 @@
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
+use crate::io::FsError;
 use crate::runtime::{next_request_id, RuntimeMsg};
 use crate::sst::SstFactory;
 #[cfg(test)]
@@ -138,7 +139,7 @@ impl CompactionStorage for crate::storage::HybridStorage {
         // path deletes this unreferenced object; it cannot lose an input.
         if self.ephemeral_sst_cache_enabled() {
             let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
-            fs.remove_file(&fs_path)?;
+            fs.remove_file(&fs_path).map_err(FsError::into_midge)?;
         }
         Ok(PreparedCompactionOutput {
             metadata,
@@ -566,7 +567,7 @@ impl CompactionActor {
         let entries = match fs.list_dir(&directory) {
             Ok(entries) => entries,
             Err(crate::io::FsError::NotFound(_)) => return Ok(0),
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error.into_midge()),
         };
         let mut bytes = 0_u64;
         for entry in entries {
@@ -588,7 +589,7 @@ impl CompactionActor {
             let entry_path =
                 crate::sst::fs::fs_relative_sst_path(&fs, &output_dir.join(&entry.name))?;
             bytes = bytes
-                .checked_add(fs.metadata(&entry_path)?.len)
+                .checked_add(fs.metadata(&entry_path).map_err(FsError::into_midge)?.len)
                 .ok_or_else(|| {
                     MidgeError::ResourceLimit("compaction residue size overflow".into())
                 })?;
@@ -657,7 +658,7 @@ impl CompactionActor {
         for output in staged_outputs {
             let path = state.sst_dir.join(&output);
             let result = crate::sst::fs::fs_relative_sst_path(&fs, &path)
-                .and_then(|fs_path| fs.remove_file(&fs_path).map_err(Into::into));
+                .and_then(|fs_path| fs.remove_file(&fs_path).map_err(FsError::into_midge));
             match result {
                 Ok(()) => {
                     tracing::debug!(file = %path.display(), "removed canceled compaction output");
@@ -1164,7 +1165,7 @@ mod tests {
         // Arrange
         let temp = tempfile::tempdir()?;
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        let fs = Arc::new(crate::io::RealFs::new(&state.sst_dir)?);
+        let fs = Arc::new(crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?);
         let mut actor = CompactionActor::new(Arc::new(crate::sst::FsSstFactoryIo::new(fs, 4096)));
         let local = Arc::new(crate::storage::filesystem::FileSystem::new(
             temp.path().join("local"),
@@ -1230,6 +1231,7 @@ mod tests {
             self.delegate.open_for_compaction(path, budget)
         }
 
+        #[cfg(test)]
         fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Ok(Box::new(BlockingFinalizeWriter {
                 inner: self.delegate.create()?,
@@ -1299,6 +1301,7 @@ mod tests {
                 .additional_range_tombstone_size_upper_bound(start, end)
         }
 
+        #[cfg(test)]
         fn add_with_meta(
             &mut self,
             key: &[u8],
@@ -1641,8 +1644,8 @@ mod tests {
         let mut actor = create_test_compaction_actor_with_config(config);
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.set_compaction_enabled(true);
-        state.l0_compaction_trigger = 2;
-        state.max_immutable_memtables = 0;
+        state.limits.l0_compaction_trigger = 2;
+        state.limits.max_immutable_memtables = 0;
         let first_cf = state.create_cf("first".to_string()).expect("create first");
         let second_cf = state
             .create_cf("second".to_string())
@@ -1694,8 +1697,8 @@ mod tests {
         let mut actor = create_test_compaction_actor_with_config(config);
         let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
         state.set_compaction_enabled(true);
-        state.l0_compaction_trigger = 2;
-        state.max_immutable_memtables = 10;
+        state.limits.l0_compaction_trigger = 2;
+        state.limits.max_immutable_memtables = 10;
         state.manifest.files.extend([
             make_l0_file("l0-a.sst", 0, b"a", b"b"),
             make_l0_file("l0-b.sst", 0, b"c", b"d"),

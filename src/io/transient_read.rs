@@ -35,9 +35,6 @@ impl File for TransientReadFile<'_> {
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
     }
-    fn close(self: Box<Self>) -> FsResult<()> {
-        self.inner.close()
-    }
 }
 
 impl Fs for TransientReadFs {

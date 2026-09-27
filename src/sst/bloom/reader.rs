@@ -48,18 +48,21 @@ impl BloomReader {
     }
 
     /// Get the number of keys that were added to this filter
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn key_count(&self) -> usize {
         self.key_count
     }
 
     /// Get the number of bits in the filter
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn num_bits(&self) -> usize {
         self.num_bits
     }
 
     /// Calculate the false positive rate of this filter
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn estimated_fpr(&self) -> f64 {
         if self.key_count == 0 {
@@ -204,10 +207,12 @@ fn parse_bloom_header(data: &[u8]) -> MidgeResult<(usize, usize, u8)> {
 }
 
 impl BloomFilterOps for BloomReader {
+    #[cfg(any(test, feature = "internal-testing"))]
     fn contains(&self, key: &[u8]) -> BloomTestResult {
         probe_bits(&self.bits, self.num_bits, self.k, key)
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     fn size_bytes(&self) -> usize {
         self.bits.len()
     }

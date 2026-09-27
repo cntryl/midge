@@ -3,7 +3,7 @@
 //! Deterministic, no I/O, suitable for testing.
 
 use super::traits::{
-    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
 };
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -307,14 +307,6 @@ impl File for MockFile<'_> {
     fn sync(&mut self, _dur: Durability) -> FsResult<()> {
         Ok(())
     }
-
-    fn close(self: Box<Self>) -> FsResult<()> {
-        Ok(())
-    }
-
-    fn caps(&self) -> FileCaps {
-        FileCaps::empty()
-    }
 }
 
 /// Persistent file handle (no lifetime dependency on Fs)
@@ -409,24 +401,6 @@ impl File for MockPersistentFile {
     }
 
     fn sync(&mut self, _dur: Durability) -> FsResult<()> {
-        Ok(())
-    }
-
-    fn close(self: Box<Self>) -> FsResult<()> {
-        Ok(())
-    }
-
-    fn caps(&self) -> FileCaps {
-        FileCaps::empty()
-    }
-
-    fn try_lock_exclusive(&self) -> FsResult<()> {
-        // Mock implementation: always succeed
-        Ok(())
-    }
-
-    fn unlock(&self) -> FsResult<()> {
-        // Mock implementation: always succeed
         Ok(())
     }
 }

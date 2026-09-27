@@ -113,19 +113,17 @@ impl CloudReplay {
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;
         shutdown?;
-        materialized.state.sequence = materialized
-            .state
+        let runtime = &mut materialized.state;
+        runtime.sequence = runtime
             .sequence
             .max(stats.max_sequence.unwrap_or(0))
             .max(self.sequence_floor);
-        materialized.state.wal.local_durable_seq = materialized.state.sequence;
-        materialized.state.compaction_output_generation = materialized
-            .state
+        runtime.wal.frontiers.advance_local_to(runtime.sequence);
+        runtime.compaction_output_generation = runtime
             .compaction_output_generation
-            .max(materialized.state.sequence)
+            .max(runtime.sequence)
             .max(
-                materialized
-                    .state
+                runtime
                     .manifest
                     .next_sst_seqs
                     .values()
@@ -133,26 +131,24 @@ impl CloudReplay {
                     .max()
                     .unwrap_or(0),
             );
-        materialized.state.wal_recovery_records_replayed = stats.record_count;
-        materialized.state.wal_recovery_bytes_replayed = stats.bytes;
+        let recovery_stats = &mut runtime.recovery_stats;
+        recovery_stats.wal_recovery_records_replayed = stats.record_count;
+        recovery_stats.wal_recovery_bytes_replayed = stats.bytes;
         if stats.had_corruption {
-            materialized.state.mark_opened_in_salvage_mode();
-            materialized.state.mark_persistence_anomaly();
+            runtime.mark_opened_in_salvage_mode();
+            runtime.mark_persistence_anomaly();
         }
         for (cf_id, memtable) in memtables {
-            if let Some(cf) = materialized.state.column_families.get_mut(&cf_id) {
+            if let Some(cf) = runtime.column_families.get_mut(&cf_id) {
                 cf.memtable = memtable;
             }
         }
-        materialized.state.total_memtable_bytes = materialized
-            .state
+        runtime.total_memtable_bytes = runtime
             .column_families
             .values()
             .map(|cf| cf.memtable.size_bytes())
             .sum();
-        materialized
-            .state
-            .reinitialize_active_memtable_segment_tracking();
+        runtime.reinitialize_active_memtable_segment_tracking();
         Ok(())
     }
 }

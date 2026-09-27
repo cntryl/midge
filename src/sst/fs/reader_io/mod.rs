@@ -208,7 +208,7 @@ impl SstRawVersionScan {
         ) {
             Ok(file) => (Some(file), SstScanLifecycle::Active),
             Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
-            Err(error) => (None, SstScanLifecycle::Failed(error.into())),
+            Err(error) => (None, SstScanLifecycle::Failed(error.into_midge())),
         };
         Ok(Self {
             reader,
@@ -283,15 +283,20 @@ impl SstRawVersionScan {
         }
 
         let opened_file = if self.file.is_none() {
-            Some(self.reader.fs.open(
-                &self.reader.path,
-                OpenOptions {
-                    mode: OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?)
+            Some(
+                self.reader
+                    .fs
+                    .open(
+                        &self.reader.path,
+                        OpenOptions {
+                            mode: OpenMode::ReadOnly,
+                            create: false,
+                            create_new: false,
+                            truncate: false,
+                        },
+                    )
+                    .map_err(FsError::into_midge)?,
+            )
         } else {
             None
         };
@@ -445,7 +450,7 @@ impl SstStateScan {
         ) {
             Ok(file) => (Some(file), SstScanLifecycle::Active),
             Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
-            Err(error) => (None, SstScanLifecycle::Failed(error.into())),
+            Err(error) => (None, SstScanLifecycle::Failed(error.into_midge())),
         };
         Self {
             reader,
@@ -705,7 +710,8 @@ impl SstFileIo {
     /// Returns an error when the SST footer, metadata, or backing file cannot be read.
     pub fn open(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         let fs = fs
-            .immutable_read_view(&FsPath::new(path_str))?
+            .immutable_read_view(&FsPath::new(path_str))
+            .map_err(FsError::into_midge)?
             .unwrap_or(fs);
         let mut reader = Self::new(path_str, fs);
         reader.load_metadata()?;
@@ -719,7 +725,8 @@ impl SstFileIo {
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
         let fs = fs
-            .immutable_read_view(&FsPath::new(path_str))?
+            .immutable_read_view(&FsPath::new(path_str))
+            .map_err(FsError::into_midge)?
             .unwrap_or(fs);
         let mut reader = Self::new(path_str, fs);
         reader.metadata_reservations.push(budget.reserve(
@@ -744,7 +751,7 @@ impl SstFileIo {
     /// Returns an error when the filesystem cannot be opened or the SST metadata cannot be read.
     pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
         let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fs = Arc::new(crate::io::RealFs::new(parent)?);
+        let fs = Arc::new(crate::io::RealFs::new(parent).map_err(FsError::into_midge)?);
         // Use filename relative to parent dir so RealFs (rooted at parent) resolves it correctly
         let path_str = path
             .file_name()
@@ -759,6 +766,7 @@ impl SstFileIo {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be opened or summarized.
+    #[cfg(test)]
     pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
         Self::open_with_real_fs(path)?.into_streaming_summary()
     }
@@ -774,13 +782,6 @@ impl SstFileIo {
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<SstFileSummary> {
         Self::open_for_compaction(path, fs, budget)?.into_streaming_summary()
-    }
-
-    /// Enable block bloom filter for this reader
-    #[must_use]
-    pub fn with_block_bloom(mut self, block_bloom: BlockBloomFilter) -> Self {
-        self.block_bloom_filter = Some(block_bloom);
-        self
     }
 
     /// Load block bloom filter from footer (if present)
@@ -872,7 +873,11 @@ impl SstFileIo {
     fn into_streaming_summary(self) -> MidgeResult<SstFileSummary> {
         use crate::sst::traits::SstStateReader;
 
-        let size_bytes = self.fs.metadata(&self.path)?.len;
+        let size_bytes = self
+            .fs
+            .metadata(&self.path)
+            .map_err(FsError::into_midge)?
+            .len;
         let budget = self.metadata_budget.clone();
         let mut accumulator = SstSummaryProgress::default();
         for range in &self.range_tombstones {

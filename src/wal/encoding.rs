@@ -617,6 +617,7 @@ fn read_len_prefixed_bytes(input: &mut &[u8], field: &str) -> MidgeResult<Bytes>
 /// Returns an error if the batch is empty, sequence metadata is inconsistent,
 /// a record contains nested transaction markers, metadata does not match the
 /// outer transaction, or encoded lengths exceed `u32::MAX`.
+#[cfg(test)]
 pub fn encode_txn_batch_payload(
     txn_id: u64,
     begin_seq: u64,

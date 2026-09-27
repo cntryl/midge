@@ -1,4 +1,5 @@
 use super::EventLoop;
+use crate::io::FsError;
 use crate::runtime::actors::flush::{
     FlushBuildCompletion, FlushBuildOutput, FlushIdentity, FlushMirrorCompletion, FlushMirrorTask,
     FlushPublicationDelta, FlushPublishCompletion, FlushPublishTask, FlushWorkerResult,
@@ -7,20 +8,6 @@ use crate::runtime::state::{ImmutableFlush, ImmutableFlushPhase};
 use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// What one local WAL prune pass did.
-#[derive(Debug, Default)]
-struct LocalWalPruneOutcome {
-    removed: Vec<u64>,
-    anomaly: bool,
-    lease_lost: bool,
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Whole-file reads of local WAL segments, for tests that bound a prune pass.
-    static RUNTIME_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 
 impl EventLoop {
     pub(super) fn column_family_flush_pipeline_active(&self, cf_id: u32) -> bool {
@@ -129,7 +116,7 @@ impl EventLoop {
     fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
         if !allow_during_shutdown
             && self.cloud_maintenance_enabled()
-            && !self.cloud_maintenance.dispatching
+            && !self.cloud_coordinator.cloud_maintenance.dispatching
         {
             self.schedule_cloud_maintenance();
             return;
@@ -146,7 +133,7 @@ impl EventLoop {
                     return;
                 };
                 let reservation = match crate::runtime::actors::flush::FlushActor::reserve_flush(
-                    self.hybrid_storage.as_ref(),
+                    self.cloud_coordinator.hybrid_storage.as_ref(),
                     cf_id,
                     build.file_meta.size_bytes.saturating_mul(2),
                 ) {
@@ -182,7 +169,7 @@ impl EventLoop {
             identity,
             Arc::clone(&flush.memtable),
             staging_path,
-            self.hybrid_storage.clone(),
+            self.cloud_coordinator.hybrid_storage.clone(),
         ) {
             self.fail_flush_pipeline(flush.flush_id, None, &error);
         }
@@ -226,8 +213,8 @@ impl EventLoop {
             sst_dir: self.state.sst_dir.clone(),
             fs: Arc::clone(&self.state.fs),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
-                self.hybrid_storage.clone(),
-                self.cloud_metadata_storage.clone(),
+                self.cloud_coordinator.hybrid_storage.clone(),
+                self.cloud_coordinator.cloud_metadata_storage.clone(),
             )),
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
@@ -357,7 +344,7 @@ impl EventLoop {
             .get(&cf_id)
             .copied()
             .unwrap_or(1);
-        if self.hybrid_storage.is_some() {
+        if self.cloud_coordinator.hybrid_storage.is_some() {
             // The publish worker uploads before it journals AddSst, so the
             // name must already be durable (as compaction does) or a crash in
             // that window leaves an orphan whose name the next flush reuses.
@@ -536,9 +523,8 @@ impl EventLoop {
             delta.identity.sequence,
             &delta.file_meta,
             delta.next_sst_seq,
-            self.hybrid_storage.is_some(),
+            self.cloud_coordinator.hybrid_storage.is_some(),
         )?;
-        self.invalidate_sst_read_views();
         Ok(())
     }
 
@@ -552,8 +538,8 @@ impl EventLoop {
             reservation,
             fs: Arc::clone(&self.state.fs),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
-                self.hybrid_storage.clone(),
-                self.cloud_metadata_storage.clone(),
+                self.cloud_coordinator.hybrid_storage.clone(),
+                self.cloud_coordinator.cloud_metadata_storage.clone(),
             )),
             metadata_publication_lock: self.metadata_publication_lock.clone(),
             lease_healthy: self.fencing.lease_healthy.clone(),
@@ -642,7 +628,9 @@ impl EventLoop {
         cloud_metadata_published: bool,
     ) {
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(delta.identity.flush_id) else {
-            if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
+            if let (Some(hybrid), Some(token)) =
+                (&self.cloud_coordinator.hybrid_storage, reservation)
+            {
                 hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
             }
             self.flush_actor.finish_pipeline();
@@ -656,7 +644,7 @@ impl EventLoop {
         if let Err(error) = self.refresh_cloud_flush_headroom() {
             tracing::warn!(%error, "flush staging headroom awaits output retirement");
         }
-        if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
+        if let (Some(hybrid), Some(token)) = (&self.cloud_coordinator.hybrid_storage, reservation) {
             hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
         if cloud_metadata_published {
@@ -677,8 +665,10 @@ impl EventLoop {
     }
 
     fn settle_stale_publish_reservation(&mut self, completion: &FlushPublishCompletion) {
-        let (Some(hybrid), Some(token)) = (self.hybrid_storage.clone(), completion.reservation)
-        else {
+        let (Some(hybrid), Some(token)) = (
+            self.cloud_coordinator.hybrid_storage.clone(),
+            completion.reservation,
+        ) else {
             return;
         };
         // A stale failed publisher may have durable local output. Retain
@@ -708,7 +698,7 @@ impl EventLoop {
         ];
         let primary_absent = paths.iter().all(|path| {
             self.runtime_fs_path(path)
-                .and_then(|path| self.state.fs.exists(&path).map_err(Into::into))
+                .and_then(|path| self.state.fs.exists(&path).map_err(FsError::into_midge))
                 .is_ok_and(|exists| !exists)
         });
         if !primary_absent
@@ -735,254 +725,6 @@ impl EventLoop {
         }
     }
 
-    fn prune_local_wal_segments_covered_by_manifest(&mut self) {
-        if self.state.is_memory_mode() || self.wal_actor.is_cloud_async() {
-            return;
-        }
-        if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
-            tracing::warn!(%error, "retaining local WAL because the writer lease is no longer valid");
-            return;
-        }
-        if !self.seal_active_wal_for_prune() {
-            return;
-        }
-
-        let wal_dir = crate::io::FsPath::new("wal");
-        let mut sealed_segments = match self.state.fs.list_dir(&wal_dir) {
-            Ok(entries) => entries
-                .into_iter()
-                .filter(|entry| !entry.is_dir)
-                .filter_map(|entry| {
-                    crate::wal::parse_segment_id(&entry.name).map(|segment_id| {
-                        (
-                            segment_id,
-                            crate::io::FsPath::new(format!("wal/{}", entry.name)),
-                        )
-                    })
-                })
-                .filter(|(segment_id, _)| *segment_id < self.state.wal.current_segment_id)
-                .collect::<Vec<_>>(),
-            Err(error) => {
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(%error, "retaining local WAL because sealed segments could not be listed");
-                return;
-            }
-        };
-        sealed_segments.sort_by_key(|(segment_id, _)| *segment_id);
-        // Memtables flush in FIFO order per column family, so a segment below
-        // the oldest unflushed memtable's first segment holds only data that
-        // is already in published SSTs, including deletes, which the
-        // per-record proof below cannot certify.
-        let flushed_floor = self.state.wal_recovery_floor_segment();
-        let mut proofs = std::mem::take(&mut self.state.wal.local_segment_proofs);
-        let outcome = self.retire_sealed_local_wal(&sealed_segments, flushed_floor, &mut proofs);
-        // Forget proofs for segments that are gone.
-        let listed: std::collections::HashSet<u64> = sealed_segments
-            .iter()
-            .map(|(segment_id, _)| *segment_id)
-            .collect();
-        let removed: std::collections::HashSet<u64> = outcome.removed.iter().copied().collect();
-        proofs.retain(|segment_id, _| listed.contains(segment_id) && !removed.contains(segment_id));
-        self.state.wal.local_segment_proofs = proofs;
-        if outcome.anomaly {
-            self.state.mark_persistence_anomaly();
-        }
-        if outcome.lease_lost {
-            return;
-        }
-
-        if let Err(error) = self.state.fs.sync_dir(
-            &crate::io::FsPath::new("wal"),
-            crate::io::Durability::Durable,
-        ) {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(%error, "failed to sync local WAL directory after pruning");
-        }
-    }
-
-    /// Retires sealed local WAL segments, oldest first. A segment below the
-    /// recovery floor goes whole; one at or above it goes only when every
-    /// record is exactly in the manifest's SSTs.
-    ///
-    /// Every segment is considered, not just a prefix: an idle column family
-    /// can keep the first one uncovered forever while later ones are covered.
-    /// A failed proof is remembered in `proofs` and not repeated until the
-    /// blocking family's SSTs change, so a pass reads only segments whose
-    /// answer could differ (#490).
-    fn retire_sealed_local_wal(
-        &self,
-        sealed_segments: &[(u64, crate::io::FsPath)],
-        flushed_floor: Option<u64>,
-        proofs: &mut std::collections::HashMap<
-            u64,
-            crate::runtime::hybrid_persistence::FailedWalProof,
-        >,
-    ) -> LocalWalPruneOutcome {
-        use crate::runtime::hybrid_persistence::{
-            coverage_fingerprint, FailedWalProof, VerifiedManifestWalCoverage,
-        };
-        let mut outcome = LocalWalPruneOutcome::default();
-        // One prover per pass, built only if a proof is needed, so each
-        // covering SST is opened and verified once per pass.
-        let coverage = std::cell::OnceCell::new();
-        // Each family's fingerprint once per pass, however many segments ask.
-        let mut fingerprints = std::collections::HashMap::new();
-        let mut fingerprint_of = |cf_id: u32| {
-            *fingerprints
-                .entry(cf_id)
-                .or_insert_with(|| coverage_fingerprint(&self.state.manifest, cf_id))
-        };
-        for (segment_id, path) in sealed_segments {
-            let segment_id = *segment_id;
-            if outcome.lease_lost {
-                return outcome;
-            }
-            if flushed_floor.is_some_and(|floor| segment_id < floor) {
-                self.remove_local_wal_segment(segment_id, path, "flushed", &mut outcome);
-                continue;
-            }
-            if proofs
-                .get(&segment_id)
-                .is_some_and(|proof| proof.still_fails(&mut fingerprint_of))
-            {
-                continue;
-            }
-            let bytes = match self.read_runtime_file(path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    outcome.anomaly = true;
-                    tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
-                    continue;
-                }
-            };
-            if bytes.is_empty() {
-                self.remove_local_wal_segment(segment_id, path, "empty", &mut outcome);
-                continue;
-            }
-            let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes) {
-                Ok(readback) => readback,
-                Err(error) => {
-                    outcome.anomaly = true;
-                    tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
-                    continue;
-                }
-            };
-            let prover = coverage.get_or_init(|| {
-                VerifiedManifestWalCoverage::open(&self.state.sst_dir, &self.state.manifest)
-            });
-            match prover.first_uncovered(&readback.data_records) {
-                None => {
-                    self.remove_local_wal_segment(
-                        segment_id,
-                        path,
-                        "exactly covered",
-                        &mut outcome,
-                    );
-                }
-                Some(reason) => match FailedWalProof::remember(reason, &mut fingerprint_of) {
-                    Some(proof) => {
-                        proofs.insert(segment_id, proof);
-                    }
-                    // Unverifiable: prove it again next pass.
-                    None => {
-                        proofs.remove(&segment_id);
-                    }
-                },
-            }
-        }
-        outcome
-    }
-
-    /// Removes one sealed segment. Every removal is preceded by a fresh
-    /// writer-lease check, so a fenced writer stops deleting at once. Reads
-    /// and skipped segments mutate nothing and need no check.
-    fn remove_local_wal_segment(
-        &self,
-        segment_id: u64,
-        path: &crate::io::FsPath,
-        why: &'static str,
-        outcome: &mut LocalWalPruneOutcome,
-    ) {
-        if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
-            tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
-            outcome.lease_lost = true;
-            return;
-        }
-        match self.state.fs.remove_file(path) {
-            Ok(()) => {
-                tracing::debug!(segment_id, why, "removed local WAL segment");
-                outcome.removed.push(segment_id);
-            }
-            Err(crate::io::FsError::NotFound(_)) => outcome.removed.push(segment_id),
-            Err(error) => {
-                outcome.anomaly = true;
-                tracing::warn!(segment_id, why, %error, "failed to remove local WAL segment");
-            }
-        }
-    }
-
-    /// Seals the active WAL segment so it can be retired later. In local
-    /// mode this is the only place segments are sealed, so it must happen
-    /// even while some memtable is unflushed, or `wal.log` would grow without
-    /// bound. An empty active segment has nothing to seal (#490): rotating it
-    /// would only create an empty sealed file for the loop below to delete.
-    ///
-    /// The on-disk length is a sound emptiness test because an append returns
-    /// only after the writer thread has written its bytes, and appends run on
-    /// this thread, so none is in flight here. A failed stat seals as before.
-    /// Returns false when pruning must stop.
-    fn seal_active_wal_for_prune(&mut self) -> bool {
-        let active = crate::io::FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME));
-        if self
-            .state
-            .fs
-            .metadata(&active)
-            .is_ok_and(|metadata| metadata.len == 0)
-        {
-            return true;
-        }
-        if let Err(error) = self.sync_local_wal_before_prune_rotation() {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(%error, "retaining local WAL because buffered records could not be synced");
-            return false;
-        }
-        if let Err(error) = self.rotate_local_wal_transition() {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(%error, "retaining local WAL because the active segment could not be sealed");
-            return false;
-        }
-        true
-    }
-
-    fn read_runtime_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bytes::Bytes> {
-        #[cfg(test)]
-        RUNTIME_FILE_READS.with(|reads| reads.set(reads.get() + 1));
-        let length = self.state.fs.metadata(path)?.len;
-        let file = self.state.fs.open(
-            path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        file.read_at(0, length)
-    }
-
-    fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {
-        self.check_lease_health()?;
-        if let Some(store) = &self.fencing.leader_store {
-            store
-                .validate_epoch(
-                    self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
-                    self.fencing.writer_epoch,
-                )
-                .map_err(|error| error.into_validation_error("local WAL prune"))?;
-        }
-        Ok(())
-    }
-
     fn fail_flush_pipeline(
         &mut self,
         flush_id: u64,
@@ -1004,7 +746,7 @@ impl EventLoop {
         }
         if !retained {
             crate::runtime::actors::flush::FlushActor::release_reservation(
-                self.hybrid_storage.as_ref(),
+                self.cloud_coordinator.hybrid_storage.as_ref(),
                 reservation,
             );
         }
@@ -1215,6 +957,7 @@ impl EventLoop {
 
 #[cfg(test)]
 mod tests {
+    use super::super::wal_retention::{LOCAL_WAL_PROOF_BYTE_BUDGET, RUNTIME_FILE_READS};
     use super::*;
     use std::sync::atomic::AtomicBool;
 
@@ -1541,8 +1284,11 @@ mod tests {
                 create_new: false,
                 truncate: true,
             },
-        )?;
-        staged.write_at(0, bytes::Bytes::from_static(b"orphan"))?;
+        )
+        .map_err(FsError::into_midge)?;
+        staged
+            .write_at(0, bytes::Bytes::from_static(b"orphan"))
+            .map_err(FsError::into_midge)?;
         event_loop.state.fs = injected_fs.clone();
         let reservation = hybrid
             .reserve_for_flush_with_token(256)
@@ -2214,7 +1960,7 @@ mod tests {
             crate::runtime::RuntimeConfig::default(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        let history = u64::try_from(event_loop.state.memtable_flush_threshold)
+        let history = u64::try_from(event_loop.state.limits.memtable_flush_threshold)
             .unwrap_or(u64::MAX)
             .saturating_mul(100);
         event_loop.state.wal.appended_bytes = history;
@@ -2505,6 +2251,67 @@ mod tests {
     }
 
     #[test]
+    fn should_bound_local_wal_proof_reads_per_prune_pass() -> crate::common::MidgeResult<()> {
+        // Arrange: three sealed, uncovered segments above the recovery floor
+        // and a proof budget smaller than one segment.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        for segment_id in 1..=3 {
+            let record = crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from(format!("key-{segment_id}")),
+                Some(bytes::Bytes::from_static(b"value")),
+                segment_id,
+                1,
+            );
+            let mut frame = Vec::new();
+            crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
+            std::fs::write(
+                event_loop
+                    .state
+                    .wal_dir
+                    .join(crate::wal::segment_file_name(segment_id)),
+                frame,
+            )?;
+        }
+        event_loop.state.wal.current_segment_id = 4;
+        let cf = event_loop.state.get_cf_mut(0).expect("default family");
+        cf.memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
+        cf.active_memtable_started_in_segment = 1;
+        LOCAL_WAL_PROOF_BYTE_BUDGET.with(|budget| budget.set(Some(1)));
+        RUNTIME_FILE_READS.with(|reads| reads.set(0));
+
+        // Act
+        let mut reads_per_pass = Vec::new();
+        for _ in 0..4 {
+            event_loop.prune_local_wal_segments_covered_by_manifest();
+            reads_per_pass.push(RUNTIME_FILE_READS.with(|reads| reads.replace(0)));
+        }
+        LOCAL_WAL_PROOF_BYTE_BUDGET.with(|budget| budget.set(None));
+
+        // Assert: each pass reads one segment and the next pass resumes after
+        // it, so every segment is proven once and nothing uncovered is removed.
+        assert_eq!(reads_per_pass, vec![1, 1, 1, 0]);
+        for segment_id in 1..=3 {
+            assert!(event_loop
+                .state
+                .wal_dir
+                .join(crate::wal::segment_file_name(segment_id))
+                .exists());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn should_not_checkpoint_manifest_on_event_loop_for_each_flush_name_reservation(
     ) -> crate::common::MidgeResult<()> {
         // Arrange
@@ -2548,7 +2355,7 @@ mod tests {
         // so the cloud metadata never learns the reserved block.
         let directory = tempfile::tempdir()?;
         let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
-        event_loop.cloud_metadata_storage =
+        event_loop.cloud_coordinator.cloud_metadata_storage =
             Some(Arc::new(crate::storage::cloud::CloudStorage::new(
                 Arc::new(crate::storage::cloud::MockCloudBackend::new()),
                 String::new(),
@@ -2583,7 +2390,7 @@ mod tests {
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             String::new(),
         ));
-        event_loop.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        event_loop.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
         std::fs::write(
             event_loop
                 .state
@@ -2628,7 +2435,7 @@ mod tests {
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             String::new(),
         ));
-        first.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        first.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
         let mut used = Vec::new();
         for _ in 0..20 {
             used.push(first.reserve_flush_sst_seq(0)?);
@@ -2729,7 +2536,8 @@ mod tests {
                 create_new: false,
                 truncate: false,
             },
-        )?;
+        )
+        .map_err(FsError::into_midge)?;
         sync_fs.set_sync_dir_failure(true);
         state.fs = sync_fs.clone();
         let router = Arc::new(crate::runtime::ResponseRouter::new());
@@ -2800,7 +2608,7 @@ mod tests {
             },
         )?;
         let segment_before = event_loop.state.wal.current_segment_id;
-        let durable_before = event_loop.state.wal.local_durable_seq;
+        let durable_before = event_loop.state.wal.frontiers.local_durable();
         let sealed_path = event_loop
             .state
             .wal_dir
@@ -2816,7 +2624,10 @@ mod tests {
 
         // Assert
         assert_eq!(event_loop.state.wal.current_segment_id, segment_before);
-        assert_eq!(event_loop.state.wal.local_durable_seq, durable_before);
+        assert_eq!(
+            event_loop.state.wal.frontiers.local_durable(),
+            durable_before
+        );
         assert!(sealed_path.exists(), "failed sync must retain sealed WAL");
         assert!(
             event_loop

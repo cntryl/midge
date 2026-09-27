@@ -34,7 +34,7 @@ impl RuntimeState {
         });
         match loaded {
             Ok((manifest, intents)) => {
-                self.manifest = manifest;
+                self.manifest.replace(manifest);
                 self.intent_log = intents;
                 self.recovery.metadata = super::MetadataSync::Current;
                 Ok(())
@@ -422,7 +422,7 @@ impl RuntimeState {
             return false;
         }
 
-        self.manifest.files.push(file_meta.into());
+        self.manifest.add_file(file_meta.into());
         true
     }
 
@@ -432,7 +432,7 @@ impl RuntimeState {
         added: &[crate::runtime::FileMeta],
     ) -> bool {
         let mut changed = false;
-        self.manifest.files.retain(|file| {
+        self.manifest.retain_files(|file| {
             let keep = !removed.contains(&file.name);
             if !keep {
                 changed = true;

@@ -42,7 +42,6 @@ pub mod traits;
 pub mod trie;
 pub mod types;
 
-pub use crate::types::KvPair;
 pub use fs::FsSstFactoryIo;
 
 pub use read_amp_metrics::ReadAmpMetrics;

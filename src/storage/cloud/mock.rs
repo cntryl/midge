@@ -161,6 +161,22 @@ impl CloudBackend for MockCloudBackend {
             }
         }
 
+        if let Some((_, expected)) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-if-generation-match"))
+        {
+            let current = self.gens.lock().get(&key).copied();
+            if current.is_none_or(|generation| generation.to_string() != *expected) {
+                let _ = callback.send(CloudEvent::Put {
+                    key,
+                    result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                        "precondition failed".to_string(),
+                    )),
+                });
+                return;
+            }
+        }
+
         // Perform put: store data and bump generation (etag)
         {
             let mut store = self.storage.lock();
@@ -265,6 +281,23 @@ impl CloudBackend for MockCloudBackend {
                 };
                 let _ = callback.send(event);
                 return;
+            }
+        }
+
+        if let Some((_, expected)) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-if-generation-match"))
+        {
+            if let Some(current) = self.gens.lock().get(&key).copied() {
+                if current.to_string() != *expected {
+                    let _ = callback.send(CloudEvent::Delete {
+                        key,
+                        result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                            "precondition failed".to_string(),
+                        )),
+                    });
+                    return;
+                }
             }
         }
 

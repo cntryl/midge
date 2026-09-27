@@ -1,6 +1,7 @@
 use super::{BlockHandle, SstFileIo, SstVerificationStats};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::File;
+use crate::io::FsError;
 use crate::sst::bloom::BlockBloomFilter;
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::trie::TrieReader;
@@ -24,7 +25,11 @@ impl SstFileIo {
         &self,
         deadline: Option<&crate::common::OperationDeadline>,
     ) -> MidgeResult<SstVerificationStats> {
-        let file_size = self.fs.metadata(&self.path)?.len;
+        let file_size = self
+            .fs
+            .metadata(&self.path)
+            .map_err(FsError::into_midge)?
+            .len;
         let footer = self
             .footer
             .as_ref()
@@ -86,23 +91,27 @@ impl SstFileIo {
     pub(super) fn load_metadata(&mut self) -> MidgeResult<()> {
         // Open file in read-only mode
         // Get file size
-        let metadata = self.fs.metadata(&self.path)?;
+        let metadata = self.fs.metadata(&self.path).map_err(FsError::into_midge)?;
         let file_size = metadata.len;
 
         let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V4 footer size fits u64");
-        let file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
+        let file = self
+            .fs
+            .open(
+                &self.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
         if file_size < footer_size {
             if file_size >= 8
                 && file
-                    .read_at(file_size - 8, 8)?
+                    .read_at(file_size - 8, 8)
+                    .map_err(FsError::into_midge)?
                     .as_ref()
                     .eq(&SST_FOOTER_MAGIC.to_le_bytes())
             {
@@ -115,11 +124,15 @@ impl SstFileIo {
             )));
         }
         let footer_offset = file_size - footer_size;
-        let footer_data = file.read_at(footer_offset, footer_size)?;
+        let footer_data = file
+            .read_at(footer_offset, footer_size)
+            .map_err(FsError::into_midge)?;
         let footer = match Footer::decode(&footer_data) {
             Ok(footer) => footer,
             Err(error) => {
-                let trailing_magic = file.read_at(file_size.saturating_sub(8), 8)?;
+                let trailing_magic = file
+                    .read_at(file_size.saturating_sub(8), 8)
+                    .map_err(FsError::into_midge)?;
                 if trailing_magic.as_ref() == SST_FOOTER_MAGIC.to_le_bytes() {
                     return Err(MidgeError::CompatibilityError(
                         "legacy SST V1-V3 is unsupported; this build requires V4".into(),
@@ -271,15 +284,18 @@ impl SstFileIo {
 
     pub(super) fn read_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
-        let file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
+        let file = self
+            .fs
+            .open(
+                &self.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
 
         self.read_block_from(file.as_ref(), handle)
     }
@@ -293,15 +309,18 @@ impl SstFileIo {
             return self.read_block(handle);
         };
 
-        let file = self.fs.open(
-            &self.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
+        let file = self
+            .fs
+            .open(
+                &self.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
         let (decoded, retained_reservation) = self.read_framed_block(
             file.as_ref(),
             handle,
@@ -348,7 +367,9 @@ impl SstFileIo {
                 budget.reserve(size, resource)
             })
             .transpose()?;
-        let buffer = file.read_at(handle.offset, handle.size)?;
+        let buffer = file
+            .read_at(handle.offset, handle.size)
+            .map_err(FsError::into_midge)?;
         let result = Self::decode_framed_block(&buffer, reserve_decoded);
         drop(compressed_reservation);
         result

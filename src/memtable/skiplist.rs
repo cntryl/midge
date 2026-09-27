@@ -333,6 +333,7 @@ impl SkipList {
     ///   - None           → key not visible at this snapshot
     ///   - Some(None)     → key visible as a tombstone
     ///   - Some(Some(..)) → key visible with (value, exp)
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn get_visible_with_exp(
         &self,
         key: &[u8],

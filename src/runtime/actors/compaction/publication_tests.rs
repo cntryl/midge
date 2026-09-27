@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
+use crate::io::FsError;
 use crate::sst::SstStateReader;
 use crate::types::EntryType;
 
@@ -45,11 +46,13 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let _failpoint_guard = crate::failpoints::test_failpoint_guard();
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
-    let factory =
-        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096)
-            .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
-                crate::codec::CompressionAlgo::None,
-            ));
+    let factory = crate::sst::FsSstFactoryIo::new(
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        4096,
+    )
+    .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
+        crate::codec::CompressionAlgo::None,
+    ));
     let mut writer = factory.create()?;
     for key in 0_u64..64 {
         writer.add_with_meta(
@@ -146,8 +149,10 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
     let _failpoint_guard = crate::failpoints::test_failpoint_guard();
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
-    let factory =
-        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096);
+    let factory = crate::sst::FsSstFactoryIo::new(
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        4096,
+    );
     let mut writer = factory.create()?;
     writer.add_with_meta(b"key", Some(b"retained value"), 1, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
@@ -211,7 +216,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         let _failpoint_guard = crate::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir()?;
         let factory = crate::sst::FsSstFactoryIo::new(
-            Arc::new(crate::io::RealFs::new(directory.path())?),
+            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
             4096,
         )
         .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
@@ -360,8 +365,10 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
     // local-only compaction shape.
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("partition.sst");
-    let factory =
-        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096);
+    let factory = crate::sst::FsSstFactoryIo::new(
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        4096,
+    );
     let mut writer = factory.create()?;
     for key in 0_u64..8 {
         writer.add_with_meta(

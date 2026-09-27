@@ -65,6 +65,7 @@ impl FsSstFactoryIo {
     }
 
     /// Create with custom block size
+    #[cfg(test)]
     #[must_use]
     pub fn with_block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
@@ -321,6 +322,7 @@ impl DynSstWriter for FsSstWriter {
         })
     }
 
+    #[cfg(test)]
     fn add_with_meta(
         &mut self,
         key: &[u8],
@@ -498,6 +500,7 @@ impl SstFactory for FsSstFactoryIo {
             == 0
     }
     /// Create a new SST writer
+    #[cfg(test)]
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
         Ok(Box::new(FsSstWriter::new(
             Arc::clone(&self.fs),

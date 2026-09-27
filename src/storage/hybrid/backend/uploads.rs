@@ -405,10 +405,14 @@ impl HybridStorage {
         let expected_data = data.clone();
         let object_key = upload.object_key.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_write_with_headers(
-            &upload.object_key,
+        cloud.submit_write_request(
+            crate::storage::StorageRequest::new(
+                &upload.object_key,
+                crate::common::OperationDeadline::from_budget(callback_timeout),
+                callback_timeout,
+            )
+            .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
             data,
-            vec![("If-None-Match".into(), "*".into())],
             tx,
         );
 
