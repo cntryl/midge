@@ -649,3 +649,17 @@ fn should_register_background_maintenance_with_retry_deadlines() {
         .contains("background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule"));
     assert!(scheduler.contains("Some(self.background_maintenance_timeout())"));
 }
+
+#[test]
+fn should_bound_legacy_sst_backfill_work_when_persisting() {
+    // Arrange
+    let read_path = include_str!("../src/runtime/event_loop/read_path.rs");
+
+    // Act
+    let uses_worker = read_path.contains("midge-legacy-sst-bound-backfill");
+    let batches_edits = read_path.contains("manifest_store.append_batch(&edits)");
+
+    // Assert
+    assert!(uses_worker);
+    assert!(batches_edits);
+}

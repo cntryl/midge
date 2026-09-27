@@ -220,6 +220,10 @@ impl EventLoop {
                 tracing::warn!(%error, "SST key-bound backfill maintenance failed; retaining conservative read fallback");
             }
         }
+        if self.legacy_bound_backfill.is_inflight() {
+            self.background_compaction_schedule
+                .defer_for(STARTUP_CLOUD_MAINTENANCE_DELAY);
+        }
         match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
             Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
             Ok(false) => {}
