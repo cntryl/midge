@@ -36,10 +36,11 @@ cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
 
-Pull requests into `develop` run only `ci.yml`. Its Ubuntu job checks formatting,
-strict Clippy, test conventions, the full workspace suite with mock-backed
-cloud behavior, and the serial fault-injection suite. The Sqrzl provider tests are
-ignored in this mock-backed suite and run in `cloud-integration.yml`.
+Pull requests into `develop` run `ci.yml` and GitHub-managed CodeQL. The Ubuntu
+CI job checks formatting, strict Clippy, test conventions, the full workspace
+suite with mock-backed cloud behavior, and the serial fault-injection suite.
+The Sqrzl provider tests are ignored in this mock-backed suite and run in
+`cloud-integration.yml`.
 
 `os-matrix.yml` runs the workspace and fault-injection suites on Windows and
 macOS, plus Windows-specific recovery tests and Clippy. `cloud-integration.yml` runs the ignored provider and engine suites
@@ -49,10 +50,11 @@ test the default `develop` revision, and a manual dispatch can select `main`
 for release qualification.
 
 Promotion pull requests into `main` run CI, OS matrix, cloud integration,
-`Repository Qualification` for docs and packaging, `Docker Qualification` for
-the test image, `Compatibility` for Rust 1.97 and provider-only features,
-CodeQL, and the promotion-source check. `Compatibility` also runs on its
-schedule, manual dispatch, and `main` pushes.
+`Docker Qualification` for the test image, `Compatibility` for Rust 1.97 and
+provider-only features, and GitHub-managed CodeQL for Actions and Rust.
+Reviewers verify that the PR head is this repository's `develop` branch.
+Documentation and packaging checks run in the tagged publish workflow.
+`Compatibility` also runs on its schedule, manual dispatch, and `main` pushes.
 
 Provider features are checked independently so one provider cannot hide a
 dependency on another provider's implementation:

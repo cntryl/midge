@@ -3,7 +3,7 @@
 Use this checklist before publishing a release candidate or stable release.
 
 - [ ] development work is merged into `develop` with passing current-head CI
-- [ ] the `develop` → `main` promotion PR has passing CI, OS matrix, cloud integration, compatibility, repository and Docker qualification, promotion-source, and CodeQL checks on its current head
+- [ ] the `develop` → `main` promotion PR comes from this repository's `develop` branch and has passing CI, OS matrix, cloud integration, compatibility, Docker qualification, and GitHub-managed CodeQL checks on its current head
 - [ ] the promotion uses a merge commit and post-merge `main` checks pass
 - [ ] the release tag points to a commit on `main`
 
@@ -19,12 +19,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo machete`
 - [ ] `cargo package --locked`
 - [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
-- [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke`
-- [ ] `cargo test --test durability -- durability_wal`
-- [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 failure_injection`
-- [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 chaos_compaction`
-- [ ] `cargo test --test engine_api -- engine_iterators`
-- [ ] `cargo test --test storage_layer -- compatibility_fixtures`
+- [ ] `cargo test --test fault_injection --all-features -- --test-threads=1`
 - [ ] `cntryl-tools validate-tests`
 - [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`
 - [ ] Sqrzl `/healthz` responds successfully

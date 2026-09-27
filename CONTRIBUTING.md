@@ -100,8 +100,9 @@ git checkout -b fix/issue-123
 - `test/` - Test improvements
 
 Create work branches from `develop`. Open feature and fix PRs against `develop`;
-its PR gate runs `.github/workflows/ci.yml`. Maintainers promote `develop` to
-the release branch `main` through a separate PR after release qualification.
+its PR gate runs `.github/workflows/ci.yml` and GitHub-managed CodeQL.
+Maintainers promote `develop` to the release branch `main` through a separate
+PR after release qualification.
 
 ### 2. Make Changes
 
