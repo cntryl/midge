@@ -10,7 +10,7 @@ services:
     environment:
       SQRZL_BLOBS_PATH: /app/blobs
       SQRZL_ACCESS_KEY_ID: admin
-      SQRZL_SECRET_ACCESS_KEY: ${SQRZL_SECRET_ACCESS_KEY:?Set SQRZL_SECRET_ACCESS_KEY for the local emulator}
+      SQRZL_SECRET_ACCESS_KEY: easy-peasy
     volumes:
       - sqrzl-blobs:/app/blobs
 
