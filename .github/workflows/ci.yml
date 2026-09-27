@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      tier3_lifecycle_bench:
+        description: Run Tier 3 lifecycle benchmarks on all supported operating systems
+        type: boolean
+        default: false
   schedule:
     - cron: "41 3 * * 3"
   push:
@@ -144,3 +149,29 @@ jobs:
       - name: Fault injection suite (serial; failpoints are process-global)
         if: matrix.os == 'macos-latest'
         run: cargo test --test fault_injection --all-features -- --test-threads=1
+
+  tier3_lifecycle_bench:
+    name: Tier 3 lifecycle (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' && inputs.tier3_lifecycle_bench
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "tier3-lifecycle-${{ matrix.os }}"
+
+      - name: Run Tier 3 lifecycle benchmark
+        run: cargo bench --bench tier3_system_lifecycle -- --profile default
