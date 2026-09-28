@@ -493,10 +493,14 @@ mod cloud_remote_sst {
             );
         }
         drop(tx);
-        reopened
+        let verification = reopened
             .storage_verifier()
             .verify_storage(Duration::from_secs(30))
             .expect("verify remote-only SSTs");
+        assert!(
+            !verification.authoritative,
+            "cloud-mode verification must not claim full remote authority"
+        );
         reopened
             .shutdown(Duration::from_secs(30))
             .expect("shutdown reopened engine");

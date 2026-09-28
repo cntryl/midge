@@ -9,6 +9,11 @@ Midge is currently in the 0.2 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Added
+
+- Versioned `midge verify --json` success and error output as schema version 1,
+  with operator guidance and full-shape compatibility regressions.
+
 ## [0.2.0] - 2026-09-27
 
 ### Added

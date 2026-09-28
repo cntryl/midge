@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Midge is in the 0.1 release line. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style production or compatibility promise.
+Midge is in the 0.2 release line. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style production or compatibility promise.
 
 ## What Pre-1.0 Means
 

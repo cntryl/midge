@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "verification_scope": "local_path",
+  "manifest_epoch": 0,
+  "manifest_files_verified": 0,
+  "sst_files_verified": 0,
+  "bytes_verified": 0,
+  "data_blocks_verified": 0,
+  "wal_boundary": null,
+  "wal_recovery_records_replayed": 0,
+  "wal_recovery_bytes_replayed": 0,
+  "intent_entries_loaded": 0,
+  "authoritative": true,
+  "health": "Degraded"
+}

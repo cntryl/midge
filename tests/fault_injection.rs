@@ -9890,6 +9890,7 @@ mod observability_api {
         assert_eq!(output.status.code(), Some(0));
         let report: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("parse healthy report");
+        assert_eq!(report["schema_version"], 1);
         assert_eq!(report["health"], "Healthy");
         assert!(output.stderr.is_empty());
     }
@@ -9912,6 +9913,7 @@ mod observability_api {
         assert_eq!(output.status.code(), Some(3));
         let error: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("parse structured error");
+        assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "storage");
         assert!(
@@ -9950,6 +9952,7 @@ mod observability_api {
         assert_eq!(output.status.code(), Some(3));
         let error: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("parse inaccessible-storage error");
+        assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "storage");
         assert!(
@@ -9976,6 +9979,7 @@ mod observability_api {
         assert_eq!(output.status.code(), Some(2));
         let error: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("parse structured usage error");
+        assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "usage");
         assert!(output.stderr.is_empty());
@@ -10049,6 +10053,7 @@ mod observability_api {
         assert_eq!(output.status.code(), Some(4));
         let error: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("parse corruption error");
+        assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "corruption");
         assert!(output.stderr.is_empty());

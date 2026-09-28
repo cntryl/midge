@@ -46,7 +46,11 @@ impl StorageVerifier {
         )
     }
 
-    /// Verify a storage directory without opening an engine runtime.
+    /// Verify a local-mode storage directory without opening an engine runtime.
+    ///
+    /// This path-only check does not load provider configuration or inspect
+    /// remote cloud objects. Use [`Self::verify_storage`] for verification that
+    /// must use the currently open engine's configured storage mode.
     ///
     /// # Errors
     ///
