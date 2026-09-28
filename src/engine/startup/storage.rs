@@ -52,10 +52,11 @@ impl StartupStoragePath {
         }
     }
 
-    pub(super) fn prepare(&self) {
+    pub(super) fn prepare(&self) -> MidgeResult<()> {
         if !self.memory_mode {
-            let _ = std::fs::create_dir_all(&self.db_path);
+            crate::io::durable_dir::create_path_durably(&self.db_path)?;
         }
+        Ok(())
     }
 }
 

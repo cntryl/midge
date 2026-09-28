@@ -868,19 +868,19 @@ impl RuntimeState {
 
     fn cleanup_flush_staging_residue(&mut self) {
         let staging_dir = self.sst_dir.join(".flush-staging");
-        match std::fs::remove_dir_all(&staging_dir) {
+        match self.fs.remove_dir_all(&FsPath::new("sst/.flush-staging")) {
             Ok(()) => {
                 tracing::info!(
                     path = %staging_dir.display(),
                     "deleted non-authoritative flush staging residue during startup"
                 );
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(FsError::NotFound(_)) => {}
             Err(error) => {
                 self.mark_persistence_anomaly();
                 tracing::warn!(
                     path = %staging_dir.display(),
-                    %error,
+                    error = %error,
                     "failed to delete non-authoritative flush staging residue"
                 );
             }
@@ -892,14 +892,17 @@ impl RuntimeState {
     /// directory.
     fn cleanup_repair_scratch_residue(&mut self) {
         let directory = self.sst_dir.join(".compaction-repair");
-        match std::fs::remove_dir_all(&directory) {
+        match self
+            .fs
+            .remove_dir_all(&FsPath::new("sst/.compaction-repair"))
+        {
             Ok(()) => {
                 tracing::info!(path = %directory.display(), "deleted stale overlap-repair scratch");
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(FsError::NotFound(_)) => {}
             Err(error) => {
                 self.mark_persistence_anomaly();
-                tracing::warn!(path = %directory.display(), %error, "retaining unclean overlap-repair scratch");
+                tracing::warn!(path = %directory.display(), error = %error, "retaining unclean overlap-repair scratch");
             }
         }
     }
@@ -1077,26 +1080,19 @@ impl RuntimeState {
     fn ensure_directories(
         db_path: &std::path::Path,
         memory_mode: bool,
-    ) -> (std::path::PathBuf, std::path::PathBuf) {
+    ) -> MidgeResult<(std::path::PathBuf, std::path::PathBuf)> {
         let wal_dir = db_path.join("wal");
         let sst_dir = db_path.join("sst");
 
         if !memory_mode {
-            if let Err(e) = std::fs::create_dir_all(db_path) {
-                tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
-            }
+            crate::io::durable_dir::create_path_durably(db_path)?;
             // Durable: the entries must survive a crash before the first
             // acknowledged write, whatever else syncs the database root (#519).
-            // A failure surfaces again when the WAL writer opens its directory.
-            if let Err(e) = crate::io::durable_dir::create_dir_all_durably(db_path, &wal_dir) {
-                tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
-            }
-            if let Err(e) = crate::io::durable_dir::create_dir_all_durably(db_path, &sst_dir) {
-                tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
-            }
+            crate::io::durable_dir::create_dir_all_durably(db_path, &wal_dir)?;
+            crate::io::durable_dir::create_dir_all_durably(db_path, &sst_dir)?;
         }
 
-        (wal_dir, sst_dir)
+        Ok((wal_dir, sst_dir))
     }
 
     /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;

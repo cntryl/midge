@@ -8,7 +8,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Directories whose entry this process has already made durable.
+/// Canonical directories whose entries this process has already made durable
+/// and has not removed or reinitialized through the rooted filesystem.
 static DURABLE_DIRS: LazyLock<parking_lot::Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashSet::new()));
 
@@ -22,6 +23,107 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn take_synced_dirs() -> Vec<PathBuf> {
     SYNCED_DIRS.with(|synced| std::mem::take(&mut *synced.borrow_mut()))
+}
+
+/// Forget cached directory entries at or below `path` after removing or
+/// recreating that part of the rooted filesystem. A path-only cache entry
+/// cannot prove that a newly created directory is the same durable entry.
+pub(crate) fn forget_durable_dirs_under(path: &Path) {
+    DURABLE_DIRS
+        .lock()
+        .retain(|directory| !directory.starts_with(path));
+}
+
+/// Create a filesystem root and persist every new directory entry on the way
+/// to it. Existing roots have their parent synced as well, covering roots
+/// created by another startup step before Midge begins writing durable state.
+///
+/// # Errors
+///
+/// Fails when any directory cannot be created or its parent cannot be synced.
+pub(crate) fn create_path_durably(path: &Path) -> std::io::Result<()> {
+    let requested = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    let mut missing = Vec::new();
+    let mut ancestor = requested.as_path();
+    loop {
+        match std::fs::metadata(ancestor) {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!(
+                        "filesystem root ancestor is not a directory: {}",
+                        ancestor.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "no existing ancestor for filesystem root {}",
+                            path.display()
+                        ),
+                    )
+                })?;
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "no existing ancestor for filesystem root {}",
+                            path.display()
+                        ),
+                    )
+                })?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut current = std::fs::canonicalize(ancestor)?;
+    for name in missing.into_iter().rev() {
+        current.push(name);
+        match std::fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !std::fs::metadata(&current)?.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        format!(
+                            "filesystem root component is not a directory: {}",
+                            current.display()
+                        ),
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let parent = current.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("filesystem root has no parent: {}", current.display()),
+            )
+        })?;
+        sync_dir_path(parent)?;
+    }
+
+    let canonical = std::fs::canonicalize(path)?;
+    let parent = canonical.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("filesystem root has no parent: {}", canonical.display()),
+        )
+    })?;
+    sync_dir_path(parent)?;
+    forget_durable_dirs_under(&canonical);
+    Ok(())
 }
 
 /// Fsync the directory at `path`.
@@ -64,17 +166,18 @@ pub(crate) fn sync_dir_path(path: &Path) -> std::io::Result<()> {
 /// Create `dir` and every missing ancestor below `root`, and make each entry
 /// from `root` down to `dir` durable by fsyncing its parent.
 ///
-/// Each entry is synced once per process and recorded only after its sync
-/// completes. A caller that finds a directory another thread has created but
-/// not yet synced therefore syncs it itself, rather than trusting that it
-/// exists. `root` must already be durable: its own entry is the caller's.
+/// Each canonical entry is recorded only after its parent sync completes. A
+/// caller that finds a directory another thread has created but not yet synced
+/// therefore syncs it itself, rather than trusting that it exists. Directory
+/// removal and root reinitialization invalidate the affected cache entries.
+/// `root` must already be durable: its own entry is the caller's.
 ///
 /// # Errors
 ///
 /// Fails when a directory cannot be created or synced, or `dir` is not
 /// inside `root`.
 pub(crate) fn create_dir_all_durably(root: &Path, dir: &Path) -> std::io::Result<()> {
-    let relative = dir.strip_prefix(root).map_err(|_| {
+    dir.strip_prefix(root).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -85,7 +188,19 @@ pub(crate) fn create_dir_all_durably(root: &Path, dir: &Path) -> std::io::Result
         )
     })?;
     std::fs::create_dir_all(dir)?;
-    let mut current = root.to_path_buf();
+    let root = std::fs::canonicalize(root)?;
+    let dir = std::fs::canonicalize(dir)?;
+    let relative = dir.strip_prefix(&root).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "durable directory {} resolves outside its root {}",
+                dir.display(),
+                root.display()
+            ),
+        )
+    })?;
+    let mut current = root;
     for component in relative.components() {
         let parent = current.clone();
         current.push(component);
@@ -106,7 +221,7 @@ mod tests {
     fn should_sync_the_parent_of_every_created_directory_below_root() {
         // Arrange
         let temp = tempfile::tempdir().expect("temp dir");
-        let root = temp.path().to_path_buf();
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
         take_synced_dirs();
 
         // Act
@@ -125,7 +240,7 @@ mod tests {
         // Arrange: another thread created the directory and has not yet
         // synced its parent; finding it present proves nothing (#519).
         let temp = tempfile::tempdir().expect("temp dir");
-        let root = temp.path().to_path_buf();
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
         std::fs::create_dir(root.join("sst")).expect("plain mkdir");
         take_synced_dirs();
 
@@ -140,7 +255,7 @@ mod tests {
     fn should_not_resync_a_directory_already_made_durable() {
         // Arrange
         let temp = tempfile::tempdir().expect("temp dir");
-        let root = temp.path().to_path_buf();
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
         create_dir_all_durably(&root, &root.join("wal")).expect("first create");
         take_synced_dirs();
 
@@ -149,6 +264,27 @@ mod tests {
 
         // Assert
         assert!(take_synced_dirs().is_empty());
+    }
+
+    #[test]
+    fn should_resync_parent_when_durable_directory_is_removed_and_recreated() {
+        // Arrange
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+        let directory = root.join("db/wal");
+        create_dir_all_durably(&root, &directory).expect("initial durable create");
+        take_synced_dirs();
+
+        // Act: a database directory can be removed and recreated at the same
+        // path while this process remains alive.
+        let fs = crate::io::real::RealFs::new(&root).expect("real filesystem");
+        take_synced_dirs();
+        crate::io::Fs::remove_dir_all(&fs, &crate::io::FsPath::new("db"))
+            .expect("remove database directory");
+        create_dir_all_durably(&root, &directory).expect("recreate durable directory");
+
+        // Assert: both recreated directory entries need their parent synced.
+        assert_eq!(take_synced_dirs(), [root.clone(), root.join("db")]);
     }
 
     #[test]
