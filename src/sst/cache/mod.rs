@@ -283,6 +283,24 @@ mod tests {
     }
 
     #[test]
+    fn should_enforce_each_shards_capacity_when_admitting_a_large_block() {
+        // Arrange
+        let total_capacity = 8 * 1024 * 1024;
+        let key = CacheKey::for_data(1, 0);
+        let value = Bytes::from(vec![7u8; 256 * 1024]);
+        let sixteen_shards = BlockCache::new(total_capacity, 16, CachePolicyType::Lru);
+        let sixty_four_shards = BlockCache::new(total_capacity, 64, CachePolicyType::Lru);
+
+        // Act
+        let admitted_with_sixteen = sixteen_shards.put(key, &value);
+        let admitted_with_sixty_four = sixty_four_shards.put(key, &value);
+
+        // Assert
+        assert!(admitted_with_sixteen);
+        assert!(!admitted_with_sixty_four);
+    }
+
+    #[test]
     fn should_retrieve_value_after_first_data_block_put_without_prior_admission() {
         // Arrange
         let cache = BlockCache::new_default(1024 * 1024);
