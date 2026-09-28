@@ -29,6 +29,7 @@ pub(crate) const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(1
 /// Key used for the lease object in cloud storage.
 const LEASE_OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY;
 const AUTHORITY_SENTINEL_KEY: &str = "metadata/authority-initialized.v1";
+const AUTHORITY_SENTINEL_PENDING_BODY: &[u8] = b"midge cloud metadata authority v2 pending\n";
 const AUTHORITY_SENTINEL_BODY: &[u8] = b"midge cloud metadata authority v2 initialized\n";
 const METADATA_GENERATIONS_PREFIX: &str = "metadata/generations/";
 const MAX_LEASE_DOCUMENT_BYTES: usize = 4096;
@@ -54,6 +55,13 @@ struct ProviderLeaderStore {
 enum MetadataPointerCasOutcome {
     Committed,
     Retry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthoritySentinelState {
+    Missing,
+    Pending,
+    Active,
 }
 
 impl ProviderLeaderStore {
@@ -183,16 +191,30 @@ impl LeaderStore for ProviderLeaderStore {
             return Err(legacy_metadata_migration_error());
         }
 
-        if existing.is_none() {
-            if provider_read_authority_sentinel(&self.cloud, self.cloud.callback_timeout())? {
+        let sentinel =
+            provider_read_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
+        match (existing.as_ref(), sentinel) {
+            (None, AuthoritySentinelState::Missing) => {
+                // A pending marker survives a failed first lease create. It
+                // becomes active only after the lease CAS has succeeded.
+                provider_create_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
+            }
+            (None, AuthoritySentinelState::Pending) | (Some(_), AuthoritySentinelState::Active) => {
+            }
+            (None, AuthoritySentinelState::Active) => {
                 return Err(missing_initialized_lease_error());
             }
-            // This permanent marker is created before the first V2 lease.
-            // If the lease is later lost, a new process must not bootstrap an
-            // empty pointer over a database with committed cloud metadata.
-            provider_create_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
-        } else {
-            provider_require_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
+            (Some(document), AuthoritySentinelState::Pending)
+                if document.committed_metadata.is_none() => {}
+            (Some(_), AuthoritySentinelState::Missing) => {
+                return Err(missing_authority_sentinel_error());
+            }
+            (Some(_), AuthoritySentinelState::Pending) => {
+                return Err(LeaseError::Indeterminate(
+                    "pending cloud metadata authority marker accompanies committed metadata"
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(existing) = existing.as_ref() {
@@ -233,6 +255,15 @@ impl LeaderStore for ProviderLeaderStore {
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };
         provider_write_doc(&self.cloud, &document, headers)?;
+        provider_activate_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
+        if provider_read_doc_with_timeout(&self.cloud, self.cloud.callback_timeout())?.as_ref()
+            != Some(&document)
+        {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease changed before metadata authority marker activation completed"
+                    .to_string(),
+            ));
+        }
         self.validity.activate(epoch, valid_until)?;
 
         Ok(LeaderRecord {
@@ -271,13 +302,15 @@ impl LeaderStore for ProviderLeaderStore {
                             .to_string(),
                     ));
                 }
-                if provider_read_authority_sentinel(
+                match provider_read_authority_sentinel(
                     &self.cloud,
                     remaining.min(self.cloud.callback_timeout()),
                 )? {
-                    Err(missing_initialized_lease_error())
-                } else {
-                    Ok(CloudMetadataHead::MissingLease)
+                    AuthoritySentinelState::Active => Err(missing_initialized_lease_error()),
+                    AuthoritySentinelState::Missing => Ok(CloudMetadataHead::MissingLease),
+                    AuthoritySentinelState::Pending => Err(LeaseError::Indeterminate(
+                        "pending cloud metadata authority marker has no lease document".to_string(),
+                    )),
                 }
             }
             Some(document) if document.version == LeaseDocumentVersion::Legacy => {
@@ -1492,6 +1525,12 @@ fn missing_initialized_lease_error() -> LeaseError {
     )
 }
 
+fn missing_authority_sentinel_error() -> LeaseError {
+    LeaseError::Indeterminate(
+        "V2 cloud lease is missing its permanent metadata authority sentinel".to_string(),
+    )
+}
+
 fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
     crate::storage::cloud::object_match_precondition_headers(
         &metadata.etag,
@@ -1524,16 +1563,48 @@ fn classify_lease_read_error(
 fn provider_read_authority_sentinel(
     cloud: &CloudStorage,
     timeout: Duration,
-) -> Result<bool, LeaseError> {
+) -> Result<AuthoritySentinelState, LeaseError> {
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_get(AUTHORITY_SENTINEL_KEY, tx);
     match rx.recv_timeout(timeout) {
         Ok(CloudEvent::Get { result, .. }) => match result {
-            CloudOutcome::Ok(bytes) if bytes == AUTHORITY_SENTINEL_BODY => Ok(true),
-            CloudOutcome::Ok(_) => Err(LeaseError::Indeterminate(
-                "cloud metadata authority sentinel is malformed".to_string(),
-            )),
-            CloudOutcome::Err(error) if error.is_not_found() => Ok(false),
+            CloudOutcome::Ok(bytes) => parse_authority_sentinel(&bytes),
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(AuthoritySentinelState::Missing),
+            CloudOutcome::Err(error) => Err(classify_lease_read_error("sentinel GET", &error)),
+        },
+        Ok(other) => Err(LeaseError::Indeterminate(format!(
+            "unexpected cloud metadata authority sentinel response: {other:?}"
+        ))),
+        Err(error) => Err(LeaseError::Timeout(format!(
+            "cloud metadata authority sentinel GET: {error}"
+        ))),
+    }
+}
+
+fn parse_authority_sentinel(bytes: &[u8]) -> Result<AuthoritySentinelState, LeaseError> {
+    if bytes == AUTHORITY_SENTINEL_PENDING_BODY {
+        Ok(AuthoritySentinelState::Pending)
+    } else if bytes == AUTHORITY_SENTINEL_BODY {
+        Ok(AuthoritySentinelState::Active)
+    } else {
+        Err(LeaseError::Indeterminate(
+            "cloud metadata authority sentinel is malformed".to_string(),
+        ))
+    }
+}
+
+fn provider_read_authority_sentinel_with_metadata(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<Option<(AuthoritySentinelState, ObjectMetadata)>, LeaseError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_get_with_metadata(AUTHORITY_SENTINEL_KEY, tx);
+    match rx.recv_timeout(timeout) {
+        Ok(CloudEvent::GetWithMetadata { result, .. }) => match result {
+            CloudOutcome::Ok((bytes, metadata)) => {
+                Ok(Some((parse_authority_sentinel(&bytes)?, metadata)))
+            }
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
             CloudOutcome::Err(error) => Err(classify_lease_read_error("sentinel GET", &error)),
         },
         Ok(other) => Err(LeaseError::Indeterminate(format!(
@@ -1549,12 +1620,12 @@ fn provider_require_authority_sentinel(
     cloud: &CloudStorage,
     timeout: Duration,
 ) -> Result<(), LeaseError> {
-    if provider_read_authority_sentinel(cloud, timeout)? {
-        Ok(())
-    } else {
-        Err(LeaseError::Indeterminate(
-            "V2 cloud lease is missing its permanent metadata authority sentinel".to_string(),
-        ))
+    match provider_read_authority_sentinel(cloud, timeout)? {
+        AuthoritySentinelState::Active => Ok(()),
+        AuthoritySentinelState::Missing => Err(missing_authority_sentinel_error()),
+        AuthoritySentinelState::Pending => Err(LeaseError::Indeterminate(
+            "cloud metadata authority sentinel has not been activated".to_string(),
+        )),
     }
 }
 
@@ -1567,7 +1638,7 @@ fn provider_create_authority_sentinel(
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
         AUTHORITY_SENTINEL_KEY,
-        AUTHORITY_SENTINEL_BODY.to_vec(),
+        AUTHORITY_SENTINEL_PENDING_BODY.to_vec(),
         headers,
         tx,
     );
@@ -1596,6 +1667,68 @@ fn provider_create_authority_sentinel(
             "cloud metadata authority sentinel create: {error}"
         ))),
     }
+}
+
+fn provider_activate_authority_sentinel(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<(), LeaseError> {
+    let started = Instant::now();
+    let Some((state, metadata)) = provider_read_authority_sentinel_with_metadata(cloud, timeout)?
+    else {
+        return Err(missing_authority_sentinel_error());
+    };
+    match state {
+        AuthoritySentinelState::Active => return Ok(()),
+        AuthoritySentinelState::Missing => return Err(missing_authority_sentinel_error()),
+        AuthoritySentinelState::Pending => {}
+    }
+    let headers = mutation_precondition_headers(&metadata).ok_or_else(|| {
+        LeaseError::IoError("pending cloud metadata authority sentinel has no CAS token".into())
+    })?;
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(LeaseError::Timeout(
+            "cloud metadata authority sentinel activation deadline exhausted".into(),
+        ));
+    }
+    let mut headers = headers;
+    crate::storage::cloud::set_request_timeout_header(&mut headers, remaining);
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(
+        AUTHORITY_SENTINEL_KEY,
+        AUTHORITY_SENTINEL_BODY.to_vec(),
+        headers,
+        tx,
+    );
+    let result = match rx.recv_timeout(remaining) {
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Ok(()),
+            ..
+        }) => return Ok(()),
+        Ok(CloudEvent::Put {
+            result: CloudOutcome::Err(error),
+            ..
+        }) => LeaseError::IoError(format!(
+            "cloud metadata authority sentinel activation failed: {error}"
+        )),
+        Ok(other) => LeaseError::Indeterminate(format!(
+            "unexpected cloud metadata authority sentinel activation response: {other:?}"
+        )),
+        Err(error) => LeaseError::Timeout(format!(
+            "cloud metadata authority sentinel activation timed out: {error}"
+        )),
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if !remaining.is_zero()
+        && matches!(
+            provider_read_authority_sentinel(cloud, remaining.min(cloud.callback_timeout())),
+            Ok(AuthoritySentinelState::Active)
+        )
+    {
+        return Ok(());
+    }
+    Err(result)
 }
 
 fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, LeaseError> {

@@ -7,6 +7,27 @@ use crossbeam::channel::Receiver;
 pub(super) struct ManifestCoordinator;
 
 impl ManifestCoordinator {
+    fn ddl_authority(
+        event_loop: &EventLoop,
+    ) -> crate::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>> {
+        if !event_loop.cloud_coordinator.provider_ddl_fencing {
+            return Ok(None);
+        }
+        Ok(Some(crate::runtime::ddl::DdlLeaseAuthority {
+            store: event_loop.fencing.leader_store.clone().ok_or_else(|| {
+                crate::common::MidgeError::Fenced(
+                    "provider cloud DDL requires a leader store".into(),
+                )
+            })?,
+            holder_id: event_loop.fencing.leader_holder_id.clone().ok_or_else(|| {
+                crate::common::MidgeError::Fenced(
+                    "provider cloud DDL requires a lease holder".into(),
+                )
+            })?,
+            writer_epoch: event_loop.fencing.writer_epoch,
+        }))
+    }
+
     #[cfg(test)]
     pub(super) fn add_sst(
         event_loop: &mut EventLoop,
@@ -68,14 +89,28 @@ impl ManifestCoordinator {
         name: &str,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
+        let authority = match Self::ddl_authority(event_loop) {
+            Ok(authority) => authority,
+            Err(error) => {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                return HandleOutcome::Continue;
+            }
+        };
         if let Err(error) = crate::runtime::ddl::validate_column_family_name(name) {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
+        }
+        if let Some(authority) = &authority {
+            if let Err(error) = authority.validate(&deadline) {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                return HandleOutcome::Continue;
+            }
         }
         if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
                 event_loop.cloud_coordinator.hybrid_storage.as_ref(),
+                authority.as_ref(),
                 &deadline,
             ) {
                 Ok(()) => event_loop.fencing.ddl_authority_ambiguous = false,
@@ -111,6 +146,7 @@ impl ManifestCoordinator {
                     &mut event_loop.state,
                     event_loop.cloud_coordinator.hybrid_storage.as_ref(),
                     &edit,
+                    authority.as_ref(),
                     &deadline,
                 )?;
                 event_loop.fencing.ddl_authority_ambiguous = false;
@@ -163,10 +199,24 @@ impl ManifestCoordinator {
         discard_unflushed: bool,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
+        let authority = match Self::ddl_authority(event_loop) {
+            Ok(authority) => authority,
+            Err(error) => {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                return HandleOutcome::Continue;
+            }
+        };
+        if let Some(authority) = &authority {
+            if let Err(error) = authority.validate(&deadline) {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                return HandleOutcome::Continue;
+            }
+        }
         if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
                 event_loop.cloud_coordinator.hybrid_storage.as_ref(),
+                authority.as_ref(),
                 &deadline,
             ) {
                 Ok(()) => {
@@ -207,6 +257,7 @@ impl ManifestCoordinator {
                     &mut event_loop.state,
                     event_loop.cloud_coordinator.hybrid_storage.as_ref(),
                     &edit,
+                    authority.as_ref(),
                     &deadline,
                 )?;
                 event_loop.fencing.ddl_authority_ambiguous = false;

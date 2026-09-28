@@ -75,10 +75,14 @@ Current provider-backed databases commit their mirrored local control files
 through the version 2 lease document. Each generation points to immutable
 copies of `FORMAT`, the manifest snapshot, journal, and intent log under
 `metadata/generations/`; the lease compare-and-swap is the publication step.
-The remote DDL registry has its own authority protocol. The permanent
-`metadata/authority-initialized.v1` marker
-prevents a missing lease object from being mistaken for a new database. Never
-delete the marker, lease document, or objects referenced by its committed
+The remote DDL registry uses a strict version 2 document. On takeover, the new
+holder conditionally rewrites it with its lease epoch before recovery or serving
+requests; a delayed conditional write from the prior holder cannot land after
+that fence. A write that wins earlier is read and reconciled by the successor.
+The `metadata/authority-initialized.v1` marker is pending until the first lease
+is stored, then becomes permanent and active. An active marker prevents a
+missing lease object from being mistaken for a new database. Never delete the
+marker, lease document, or objects referenced by its committed
 generation. An unreferenced staged generation is not recovery authority.
 
 An existing cloud database with a legacy lease and mutable `metadata/` files
@@ -88,9 +92,9 @@ the logical contents through its public API, then import them with this version
 into the new prefix and a fresh local cache. Preserve application data needed
 to reconstruct TTL expirations. Verify the imported data before switching
 clients, and retain the original prefix as the rollback copy. A V2 writer
-rejects a legacy lease; do not copy legacy lease or mutable metadata objects
-into the new prefix. There is no safe automatic in-place upgrade while an old
-writer might resume a metadata PUT.
+rejects a legacy lease; do not copy the legacy lease, DDL registry, or mutable
+metadata objects into the new prefix. There is no safe automatic in-place
+upgrade while an old writer might resume a metadata PUT.
 
 For advanced routing, start with `CloudStorageTopology::new(shared)`, override
 individual locations with `with_wal`, `with_sst`, or `with_control`, and pass

@@ -91,10 +91,14 @@ descriptor names the complete set of mirrored local control files under
 `metadata/generations/`, with exact lengths and CRC32C checksums. The lease CAS
 publishes the descriptor; mutable `metadata/` copies and unreferenced uploads
 do not grant manifest recovery authority. The cloud DDL registry remains a
-separate authority. The permanent
-`metadata/authority-initialized.v1` marker makes loss of the lease object a
-fail-closed condition. A version 2 document intentionally cannot be parsed by
-older binaries, which prevents an old writer from renewing the new lease.
+separate conditional authority. Its version 2 wire format records the active
+lease epoch and omits the legacy required `epoch` field, so older writers cannot
+parse or rewrite it. A successor conditionally fences the registry before
+recovery; a predecessor write that wins first is incorporated before serving.
+The `metadata/authority-initialized.v1` marker starts pending and becomes active
+only after the first lease is stored. Loss of a lease with an active marker is a
+fail-closed condition. A version 2 lease document intentionally cannot be parsed
+by older binaries, which prevents an old writer from renewing the new lease.
 
 Legacy provider-backed cloud databases require offline logical export and
 import into a new empty prefix as described in the

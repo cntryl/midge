@@ -2464,6 +2464,46 @@ impl crate::lease::LeaderStore for NewerHolderLeaderStore {
 }
 
 #[test]
+fn should_fence_existing_cloud_column_family_create_after_lease_takeover(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the local handle already exists, so create takes its idempotent
+    // path without entering the remote DDL registry CAS.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let edit = crate::runtime::ddl::create_edit(&el.state, "already-created")?;
+    crate::runtime::ddl::apply_local_edit(&mut el.state, &edit)?;
+    el.cloud_coordinator.cloud_metadata_storage =
+        Some(Arc::new(crate::storage::cloud::CloudStorage::with_mock()));
+    el.cloud_coordinator.provider_ddl_fencing = true;
+    el.fencing.writer_epoch = 1;
+    el.fencing.leader_store = Some(Arc::new(NewerHolderLeaderStore));
+    el.fencing.leader_holder_id = Some("old-writer".to_string());
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let request_id = 9_606;
+    let response = el.router.register(request_id, "ManifestCreateColumnFamily");
+
+    // Act
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id,
+            name: "already-created".to_string(),
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(_),
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[test]
 fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_publish(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: the new holder has not yet published a higher sequence, so

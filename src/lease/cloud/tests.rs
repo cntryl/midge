@@ -16,15 +16,22 @@ fn test_config() -> CloudLeaseConfig {
     }
 }
 
-/// Test double that intercepts conditional PUTs (the lease acquisition
-/// path) and returns a scripted [`crate::storage::cloud::CloudError`]
+/// Test double that intercepts conditional lease or marker-activation PUTs
+/// and returns a scripted [`crate::storage::cloud::CloudError`]
 /// instead of delegating to the wrapped backend. Everything else
 /// delegates to an inner `MockCloudBackend`, so HEAD/GET/DELETE/LIST
 /// still behave normally.
+enum ScriptedPutTarget {
+    Lease,
+    SentinelActivation,
+}
+
 struct ScriptedConditionalPutBackend {
     inner: crate::storage::cloud::MockCloudBackend,
     scripted_error: crate::storage::cloud::CloudError,
     apply_before_error: bool,
+    scripted_puts_remaining: std::sync::atomic::AtomicUsize,
+    scripted_target: ScriptedPutTarget,
 }
 
 impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
@@ -35,11 +42,29 @@ impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        let is_conditional = key.ends_with(LEASE_OBJECT_KEY)
-            && headers.iter().any(|(name, _)| {
-                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-            });
-        if is_conditional {
+        let is_conditional = match self.scripted_target {
+            ScriptedPutTarget::Lease => {
+                key.ends_with(LEASE_OBJECT_KEY)
+                    && headers.iter().any(|(name, _)| {
+                        name.eq_ignore_ascii_case("if-match")
+                            || name.eq_ignore_ascii_case("if-none-match")
+                    })
+            }
+            ScriptedPutTarget::SentinelActivation => {
+                key.ends_with(AUTHORITY_SENTINEL_KEY)
+                    && headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("if-match"))
+            }
+        };
+        let scripted = is_conditional
+            && self
+                .scripted_puts_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    (remaining > 0).then_some(remaining.saturating_sub(1))
+                })
+                .is_ok();
+        if scripted {
             if self.apply_before_error {
                 let (inner_callback, inner_result) = std::sync::mpsc::channel();
                 crate::storage::cloud::CloudBackend::submit_put(
@@ -121,6 +146,8 @@ fn lease_with_scripted_conditional_put_error(
         inner: crate::storage::cloud::MockCloudBackend::new(),
         scripted_error,
         apply_before_error: false,
+        scripted_puts_remaining: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        scripted_target: ScriptedPutTarget::Lease,
     });
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
         backend,
@@ -140,6 +167,8 @@ fn lease_with_applied_conditional_put_error(
         inner: crate::storage::cloud::MockCloudBackend::new(),
         scripted_error,
         apply_before_error: true,
+        scripted_puts_remaining: std::sync::atomic::AtomicUsize::new(usize::MAX),
+        scripted_target: ScriptedPutTarget::Lease,
     });
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
         backend,
@@ -150,6 +179,33 @@ fn lease_with_applied_conditional_put_error(
         temp_cache_path(),
         cloud,
     ))
+}
+
+fn lease_with_scripted_marker_activation(
+    apply_before_error: bool,
+) -> (
+    Arc<crate::storage::cloud::CloudStorage>,
+    Arc<CloudStorageLease>,
+) {
+    let backend = Arc::new(ScriptedConditionalPutBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        scripted_error: crate::storage::cloud::CloudError::ServerError(
+            "injected marker activation response loss".to_string(),
+        ),
+        apply_before_error,
+        scripted_puts_remaining: std::sync::atomic::AtomicUsize::new(1),
+        scripted_target: ScriptedPutTarget::SentinelActivation,
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend,
+        "midge".to_string(),
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+    (cloud, lease)
 }
 
 /// Test double whose HEAD responses always report no etag and no
@@ -1884,7 +1940,10 @@ fn should_refuse_fresh_lease_when_initialized_authority_loses_lease_object() {
         )
         .expect("commit metadata pointer");
     first.release().expect("release first");
-    assert!(provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap());
+    assert_eq!(
+        provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap(),
+        AuthoritySentinelState::Active
+    );
     delete_remote_lease(&cloud);
     let second = Arc::new(CloudStorageLease::new_provider_backed(
         test_config(),
@@ -1903,7 +1962,205 @@ fn should_refuse_fresh_lease_when_initialized_authority_loses_lease_object() {
     assert!(matches!(read_result, Err(LeaseError::Indeterminate(_))));
     assert!(matches!(acquire_result, Err(LeaseError::Indeterminate(_))));
     assert!(provider_read_doc(&cloud).unwrap().is_none());
-    assert!(provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap());
+    assert_eq!(
+        provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap(),
+        AuthoritySentinelState::Active
+    );
+}
+
+#[test]
+fn should_retry_first_lease_when_pending_sentinel_outlives_failed_create() {
+    // Arrange: the marker write succeeds, but the first lease If-None-Match
+    // request fails without creating the lease object.
+    let backend = Arc::new(ScriptedConditionalPutBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        scripted_error: crate::storage::cloud::CloudError::ServerError(
+            "injected first lease create failure".to_string(),
+        ),
+        apply_before_error: false,
+        scripted_puts_remaining: std::sync::atomic::AtomicUsize::new(1),
+        scripted_target: ScriptedPutTarget::Lease,
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend,
+        "midge".to_string(),
+    ));
+    let make_lease = || {
+        Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ))
+    };
+    let first = make_lease();
+
+    // Act: a new process retries the same still-empty namespace.
+    assert!(Arc::clone(&first).try_acquire().is_err());
+    assert!(provider_read_doc(&cloud).unwrap().is_none());
+    assert!(matches!(
+        first
+            .get_leader_store()
+            .unwrap()
+            .read_committed_metadata(Duration::from_secs(1)),
+        Err(LeaseError::Indeterminate(_))
+    ));
+    let second = make_lease();
+    let acquired = Arc::clone(&second).try_acquire();
+
+    // Assert: the successful retry activates the marker before using the lease.
+    if let Err(error) = acquired {
+        panic!("first-open retry failed: {error:?}");
+    }
+    assert_eq!(second.epoch(), 1);
+    assert!(matches!(
+        second
+            .get_leader_store()
+            .unwrap()
+            .read_committed_metadata(Duration::from_secs(1)),
+        Ok(CloudMetadataHead::Uncommitted)
+    ));
+    second.release().expect("release acquired lease");
+}
+
+#[test]
+fn should_keep_first_lease_inactive_when_marker_activation_fails() {
+    // Arrange: the first lease CAS succeeds, but pending-to-active marker CAS
+    // is rejected before it applies.
+    let (cloud, first) = lease_with_scripted_marker_activation(false);
+
+    // Act
+    let first_result = Arc::clone(&first).try_acquire();
+
+    // Assert: a pending marker never authorizes metadata publication.
+    assert!(first_result.is_err());
+    assert!(!first.acquired.load(Ordering::Acquire));
+    assert_eq!(
+        provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap(),
+        AuthoritySentinelState::Pending
+    );
+    assert!(matches!(
+        first
+            .get_leader_store()
+            .unwrap()
+            .read_committed_metadata(Duration::from_secs(1)),
+        Err(LeaseError::Indeterminate(_))
+    ));
+}
+
+#[test]
+fn should_activate_pending_marker_when_first_activation_failed() {
+    // Arrange: the first lease is stored, but its marker activation fails.
+    let (cloud, first) = lease_with_scripted_marker_activation(false);
+    assert!(Arc::clone(&first).try_acquire().is_err());
+
+    // Arrange: let the inactive lease expire without discarding its pointer.
+    let mut expired = provider_read_doc(&cloud)
+        .unwrap()
+        .expect("first lease exists");
+    assert!(expired.committed_metadata.is_none());
+    expired.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+    put_remote_lease(&cloud, format_lease_document(&expired));
+    let second = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+
+    // Act
+    let second_result = Arc::clone(&second).try_acquire();
+
+    // Assert
+    if let Err(error) = second_result {
+        panic!("successor could not activate pending marker: {error:?}");
+    }
+    assert_eq!(second.epoch(), expired.epoch.unwrap() + 1);
+    assert_eq!(
+        provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap(),
+        AuthoritySentinelState::Active
+    );
+    second.release().expect("release successor");
+}
+
+#[test]
+fn should_confirm_ambiguous_marker_activation_by_exact_readback() {
+    // Arrange: the marker CAS applies but its response reports a server error.
+    let (cloud, lease) = lease_with_scripted_marker_activation(true);
+
+    // Act
+    let result = Arc::clone(&lease).try_acquire();
+
+    // Assert
+    if let Err(error) = result {
+        panic!("applied marker activation was not confirmed: {error:?}");
+    }
+    assert_eq!(
+        provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap(),
+        AuthoritySentinelState::Active
+    );
+    lease.release().expect("release activated lease");
+}
+
+#[test]
+fn should_reject_pending_marker_with_committed_lease_pointer() {
+    // Arrange: this combination cannot be emitted by the two-phase protocol.
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    provider_create_authority_sentinel(&cloud, Duration::from_secs(1))
+        .expect("create pending marker");
+    let old = LeaseDocument {
+        version: LeaseDocumentVersion::V2,
+        epoch: Some(7),
+        holder_id: "previous@host".into(),
+        owner_token: Some("previous-token".into()),
+        acquired_at: (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
+        expires_at: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+        committed_metadata: Some(test_metadata_generation(5)),
+    };
+    put_remote_lease(&cloud, format_lease_document(&old));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+
+    // Act
+    let result = Arc::clone(&lease).try_acquire();
+
+    // Assert
+    assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
+    assert_eq!(provider_read_doc(&cloud).unwrap(), Some(old));
+    assert_eq!(
+        provider_read_authority_sentinel(&cloud, Duration::from_secs(1)).unwrap(),
+        AuthoritySentinelState::Pending
+    );
+}
+
+#[test]
+fn should_reject_malformed_authority_marker_before_first_lease_create() {
+    // Arrange: a near-match must not be treated as a valid pending marker.
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    let mut malformed = AUTHORITY_SENTINEL_PENDING_BODY.to_vec();
+    malformed.push(b' ');
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(AUTHORITY_SENTINEL_KEY, malformed, vec![], tx);
+    assert!(matches!(
+        rx.recv().expect("receive marker put"),
+        CloudEvent::Put {
+            result: CloudOutcome::Ok(()),
+            ..
+        }
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+
+    // Act
+    let result = Arc::clone(&lease).try_acquire();
+
+    // Assert
+    assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
+    assert!(provider_read_doc(&cloud).unwrap().is_none());
 }
 
 #[test]

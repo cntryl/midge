@@ -7,6 +7,7 @@ use super::{
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
 use crate::io::FsError;
+use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -16,6 +17,48 @@ struct CloudClassStores {
     wal: Arc<crate::storage::cloud::CloudStorage>,
     sst: Arc<crate::storage::cloud::CloudStorage>,
     metadata: Arc<crate::storage::cloud::CloudStorage>,
+}
+
+fn fence_provider_ddl(
+    storage: &crate::storage::HybridStorage,
+    lease: &StartupLease,
+    timeout: std::time::Duration,
+) -> MidgeResult<()> {
+    let authority = DdlLeaseAuthority {
+        store: lease.leader_store.clone().ok_or_else(|| {
+            MidgeError::Internal("cloud DDL startup fence requires a leader store".into())
+        })?,
+        holder_id: lease.lease.holder_id(),
+        writer_epoch: lease.writer_epoch,
+    };
+    crate::runtime::ddl::fence_remote_registry_on_startup(
+        storage,
+        &authority,
+        &crate::common::OperationDeadline::from_budget(timeout),
+    )?;
+    lease.ensure_healthy("after cloud DDL registry fencing")
+}
+
+fn reconcile_cloud_ddl(materialized: &mut RuntimeStorageMaterialization) -> MidgeResult<()> {
+    let authority = if materialized.cloud_metadata_storage_for_mirror.is_some() {
+        let config = &materialized.runtime_config;
+        Some(DdlLeaseAuthority {
+            store: config.leader_store.clone().ok_or_else(|| {
+                MidgeError::Internal("cloud DDL recovery requires a leader store".into())
+            })?,
+            holder_id: config.leader_holder_id.clone().ok_or_else(|| {
+                MidgeError::Internal("cloud DDL recovery requires a lease holder".into())
+            })?,
+            writer_epoch: config.writer_epoch,
+        })
+    } else {
+        None
+    };
+    crate::runtime::ddl::reconcile_startup(
+        &mut materialized.state,
+        materialized.runtime_config.hybrid_storage.as_ref(),
+        authority.as_ref(),
+    )
 }
 
 impl StartupStoragePath {
@@ -242,6 +285,7 @@ impl RuntimeStorageMaterialization {
                 opts.storage_io_timeout(),
             )?
         };
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal)?;
         Ok(CloudClassStores { wal, sst, metadata })
     }
 
@@ -426,7 +470,6 @@ impl RuntimeStorageMaterialization {
         let sst_storage = stores.sst;
         let metadata_storage = stores.metadata;
 
-        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal_storage)?;
         let (hybrid_storage, rx) = Self::build_hybrid_storage(
             opts,
             storage_path,
@@ -434,6 +477,7 @@ impl RuntimeStorageMaterialization {
             &sst_storage,
             &metadata_storage,
         )?;
+        fence_provider_ddl(&hybrid_storage, startup_lease, opts.storage_io_timeout())?;
         let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
             Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?),
             sst_storage.clone(),
@@ -491,6 +535,7 @@ impl RuntimeStorageMaterialization {
             sst_read_fs: Some(sst_read_fs),
             hybrid_storage_events: Some(rx),
             cloud_metadata_storage: Some(metadata_storage.clone()),
+            provider_ddl_fencing: true,
             recovered_cloud_wal_segments: recovery_plan.remote_max_sequences(),
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
             recovered_local_wal_segments: recovery_plan.local_max_sequences(),
@@ -726,10 +771,7 @@ impl RuntimeRecoveryMaterialization {
             )?;
         }
 
-        crate::runtime::ddl::reconcile_startup(
-            &mut materialized.state,
-            materialized.runtime_config.hybrid_storage.as_ref(),
-        )?;
+        reconcile_cloud_ddl(&mut materialized)?;
 
         materialized.state.replay_intent_log()?;
         if let Some(root) = materialized.cloud_root.as_deref() {
