@@ -9,9 +9,12 @@ const EXIT_USAGE: i32 = 2;
 const EXIT_STORAGE: i32 = 3;
 const EXIT_CORRUPTION: i32 = 4;
 const EXIT_INTERNAL: i32 = 5;
+const JSON_SCHEMA_VERSION: u32 = 1;
+const JSON_VERIFICATION_SCOPE: &str = "local_path";
 const USAGE: &str = "usage: midge verify [--json] <db-path>";
 const HELP: &str = "midge storage diagnostics\n\n\
 Usage:\n  midge verify [--json] <db-path>\n\n\
+JSON output: schema_version 1, verification_scope local_path\n\n\
 Exit codes:\n  0  storage is healthy\n  1  storage is degraded, in salvage mode, or write-stalled\n  2  command-line usage error\n  3  storage path is missing or inaccessible\n  4  storage corruption or incompatible persisted state\n  5  unexpected internal failure";
 
 fn main() {
@@ -49,9 +52,19 @@ enum ErrorKind {
 
 #[derive(Debug, Serialize)]
 struct ErrorOutput {
+    schema_version: u32,
+    verification_scope: &'static str,
     status: &'static str,
     error_kind: ErrorKind,
     message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonReportOutput<'a> {
+    schema_version: u32,
+    verification_scope: &'static str,
+    #[serde(flatten)]
+    report: &'a StorageVerificationReport,
 }
 
 #[derive(Debug)]
@@ -95,6 +108,8 @@ impl CliOutcome {
             exit_code,
             format,
             payload: OutcomePayload::Error(ErrorOutput {
+                schema_version: JSON_SCHEMA_VERSION,
+                verification_scope: JSON_VERIFICATION_SCOPE,
                 status: "error",
                 error_kind,
                 message: message.into(),
@@ -106,9 +121,14 @@ impl CliOutcome {
         match (&self.payload, self.format) {
             (OutcomePayload::Help, _) => println!("{HELP}"),
             (OutcomePayload::Report(report), OutputFormat::Json) => {
+                let output = JsonReportOutput {
+                    schema_version: JSON_SCHEMA_VERSION,
+                    verification_scope: JSON_VERIFICATION_SCOPE,
+                    report,
+                };
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(report)
+                    serde_json::to_string_pretty(&output)
                         .expect("storage verification reports must serialize")
                 );
             }

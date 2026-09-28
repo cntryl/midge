@@ -5,6 +5,15 @@ the release notes, inspect [format compatibility](../development/format-compatib
 run compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries.
 
+## `midge verify --json` schema version 1
+
+The CLI success and error JSON objects include `schema_version: 1`. Consumers
+of earlier unversioned output should update to require schema version 1 and
+ignore unknown fields. The version applies to the CLI JSON contract, not to the
+crate version or the public Rust `StorageVerificationReport` type. See the
+[storage verification guide](../user-guides/verification.md) for the complete
+field, error, exit-code, and local/cloud coverage contract.
+
 ## 0.1.0 to 0.1.1
 
 Version `0.1.1` is a durability-correctness patch with no public API or
