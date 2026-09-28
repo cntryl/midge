@@ -5,9 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) formatting.
 
-Midge is currently in the 0.1 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
+Midge is currently in the 0.2 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-09-27
+
+### Added
+
+- Consistent-cut backup and restore.
+- Automatic repair of underfull overlapping L1+ SST levels. Reads stay
+  conservative until the replacement set is durably published.
+
+### Changed
+
+- Narrowed the crate surface to canonical re-exports and the prelude. The
+  previously doc-hidden implementation modules and test hooks are now private
+  or available only through the non-default `internal-testing` feature; they
+  were not stable API.
+- Database FORMAT 4 stores manifest key bounds as hex strings. FORMAT 3
+  databases remain readable and are upgraded to FORMAT 4 in place on writable
+  open; both formats use SST V4.
+- Large same-level overlap repairs use bounded, non-authoritative local scratch
+  runs. Capacity or I/O failures leave the original SST set authoritative.
+
+### Fixed
+
+- Hardened WAL sealing, lease fencing, recovery, manifest publication, and
+  compaction cleanup across failure and restart boundaries.
+- Avoided rebuilding SST read metadata for manifest changes that do not alter
+  the file set.
+
+### Upgrade and rollback
+
+- Stop writers, complete shutdown, and preserve a verified copy of the entire
+  database directory and relevant cloud prefix before upgrading from `0.1.1`.
+  Test the upgrade against a separate copy first. A writable `0.2.0` open
+  upgrades a FORMAT 3 database marker to FORMAT 4 in place.
+- Rollback is supported with constraints: restore the pre-upgrade copy and use
+  the prior binary. Directly opening a database that `0.2.0` has writable-opened
+  with `0.1.1` is unsupported. Writes made after the preserved copy was taken
+  are not present in that rollback copy.
+
+### Known risks
+
+- Midge remains pre-1.0 and single-process. Review the support matrix for the
+  qualified topology and runtime guarantees before production use.
 
 ## [0.1.1] - 2026-09-13
 
@@ -255,6 +298,7 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
   to the capabilities and qualification conditions in the support matrix; API,
   operational, and on-disk compatibility may change in a future 0.x minor release.
 
-[Unreleased]: https://github.com/cntryl/midge/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/cntryl/midge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cntryl/midge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/cntryl/midge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cntryl/midge/releases/tag/v0.1.0
