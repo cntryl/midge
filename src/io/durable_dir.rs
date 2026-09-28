@@ -25,13 +25,16 @@ pub(crate) fn take_synced_dirs() -> Vec<PathBuf> {
     SYNCED_DIRS.with(|synced| std::mem::take(&mut *synced.borrow_mut()))
 }
 
-/// Forget cached directory entries at or below `path` after removing or
-/// recreating that part of the rooted filesystem. A path-only cache entry
-/// cannot prove that a newly created directory is the same durable entry.
-pub(crate) fn forget_durable_dirs_under(path: &Path) {
-    DURABLE_DIRS
-        .lock()
-        .retain(|directory| !directory.starts_with(path));
+/// Remove a directory tree and invalidate its cached entries as one
+/// operation relative to durable directory creation.
+pub(crate) fn remove_dir_all_and_forget(
+    path: &Path,
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut durable_dirs = DURABLE_DIRS.lock();
+    let result = remove();
+    durable_dirs.retain(|directory| !directory.starts_with(path));
+    result
 }
 
 /// Create a filesystem root and persist every new directory entry on the way
@@ -42,6 +45,7 @@ pub(crate) fn forget_durable_dirs_under(path: &Path) {
 ///
 /// Fails when any directory cannot be created or its parent cannot be synced.
 pub(crate) fn create_path_durably(path: &Path) -> std::io::Result<()> {
+    let mut durable_dirs = DURABLE_DIRS.lock();
     let requested = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -114,15 +118,27 @@ pub(crate) fn create_path_durably(path: &Path) -> std::io::Result<()> {
         sync_dir_path(parent)?;
     }
 
-    let canonical = std::fs::canonicalize(path)?;
+    let canonical = std::fs::canonicalize(&requested)?;
     let parent = canonical.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("filesystem root has no parent: {}", canonical.display()),
         )
     })?;
+    let requested_parent = requested.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("filesystem root has no parent: {}", requested.display()),
+        )
+    })?;
+    let requested_parent = std::fs::canonicalize(requested_parent)?;
+    if requested_parent != parent {
+        // When the configured root is a symlink, its own directory entry lives
+        // in the configured parent, not beside the resolved target.
+        sync_dir_path(&requested_parent)?;
+    }
     sync_dir_path(parent)?;
-    forget_durable_dirs_under(&canonical);
+    durable_dirs.retain(|directory| !directory.starts_with(&canonical));
     Ok(())
 }
 
@@ -177,7 +193,8 @@ pub(crate) fn sync_dir_path(path: &Path) -> std::io::Result<()> {
 /// Fails when a directory cannot be created or synced, or `dir` is not
 /// inside `root`.
 pub(crate) fn create_dir_all_durably(root: &Path, dir: &Path) -> std::io::Result<()> {
-    dir.strip_prefix(root).map_err(|_| {
+    let mut durable_dirs = DURABLE_DIRS.lock();
+    let relative = dir.strip_prefix(root).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -187,28 +204,81 @@ pub(crate) fn create_dir_all_durably(root: &Path, dir: &Path) -> std::io::Result
             ),
         )
     })?;
-    std::fs::create_dir_all(dir)?;
-    let root = std::fs::canonicalize(root)?;
-    let dir = std::fs::canonicalize(dir)?;
-    let relative = dir.strip_prefix(&root).map_err(|_| {
-        std::io::Error::new(
+    if relative
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "durable directory {} resolves outside its root {}",
+                "durable directory {} traverses above its root {}",
                 dir.display(),
                 root.display()
             ),
-        )
-    })?;
+        ));
+    }
+    let root = std::fs::canonicalize(root)?;
     let mut current = root;
     for component in relative.components() {
-        let parent = current.clone();
-        current.push(component);
-        if DURABLE_DIRS.lock().contains(&current) {
+        let std::path::Component::Normal(name) = component else {
             continue;
+        };
+        let candidate = current.join(name);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "durable directory component is a symlink: {}",
+                        candidate.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!(
+                        "durable directory component is not a directory: {}",
+                        candidate.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::create_dir(&candidate) {
+                    Ok(()) => {}
+                    Err(create_error)
+                        if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(create_error) => return Err(create_error),
+                }
+                let metadata = std::fs::symlink_metadata(&candidate)?;
+                if metadata.file_type().is_symlink() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "durable directory component is a symlink: {}",
+                            candidate.display()
+                        ),
+                    ));
+                }
+                if !metadata.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        format!(
+                            "durable directory component is not a directory: {}",
+                            candidate.display()
+                        ),
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
         }
-        sync_dir_path(&parent)?;
-        DURABLE_DIRS.lock().insert(current.clone());
+
+        if !durable_dirs.contains(&candidate) {
+            sync_dir_path(&current)?;
+            durable_dirs.insert(candidate.clone());
+        }
+        current = candidate;
     }
     Ok(())
 }
@@ -285,6 +355,26 @@ mod tests {
 
         // Assert: both recreated directory entries need their parent synced.
         assert_eq!(take_synced_dirs(), [root.clone(), root.join("db")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_reject_symlinked_storage_directory_before_creating_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        // Arrange
+        let root = tempfile::tempdir().expect("database root");
+        let outside = tempfile::tempdir().expect("outside directory");
+        std::fs::create_dir(root.path().join("sst")).expect("SST directory");
+        std::fs::remove_dir(root.path().join("sst")).expect("remove SST directory");
+        symlink(outside.path(), root.path().join("sst")).expect("symlink SST outside root");
+
+        // Act
+        let result = create_dir_all_durably(root.path(), &root.path().join("sst/created-outside"));
+
+        // Assert
+        assert!(result.is_err());
+        assert!(!outside.path().join("created-outside").exists());
     }
 
     #[test]

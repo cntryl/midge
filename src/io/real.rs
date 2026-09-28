@@ -241,8 +241,8 @@ impl Fs for RealFs {
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path)?;
-        super::durable_dir::forget_durable_dirs_under(&full);
-        fs::remove_dir_all(&full).map_err(|error| file_op_err("remove_dir_all", &full, &error))
+        super::durable_dir::remove_dir_all_and_forget(&full, || fs::remove_dir_all(&full))
+            .map_err(|error| file_op_err("remove_dir_all", &full, &error))
     }
 
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
@@ -663,6 +663,28 @@ mod tests {
 
         // Assert
         assert!(crate::io::durable_dir::take_synced_dirs().contains(&root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_sync_configured_parent_when_filesystem_root_is_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        // Arrange
+        let link_parent = TempDir::new().expect("link parent");
+        let target_parent = TempDir::new().expect("target parent");
+        let link_parent = std::fs::canonicalize(link_parent.path()).expect("canonical link parent");
+        let target = target_parent.path().join("database");
+        std::fs::create_dir(&target).expect("database target");
+        let configured_root = link_parent.join("database");
+        symlink(&target, &configured_root).expect("database root symlink");
+        crate::io::durable_dir::take_synced_dirs();
+
+        // Act
+        let _fs = RealFs::new(&configured_root).expect("open symlinked root");
+
+        // Assert
+        assert!(crate::io::durable_dir::take_synced_dirs().contains(&link_parent));
     }
 
     #[test]
