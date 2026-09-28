@@ -29,10 +29,11 @@ pub struct SstFileSummary {
 }
 
 /// Counts produced by a complete checksummed SST verification pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SstVerificationStats {
     pub size_bytes: u64,
     pub data_blocks: u64,
+    pub summary: SstFileSummary,
 }
 
 /// Physical work performed by one point lookup against one SST.
