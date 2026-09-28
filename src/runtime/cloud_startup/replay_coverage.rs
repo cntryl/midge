@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub(super) struct ReplayCoverage {
+pub(crate) struct ReplayCoverage {
     manifest: crate::metadata::Manifest,
     fs: Arc<dyn Fs>,
     // Keep immutable identities and at most one budgeted reader. Release the
@@ -43,8 +43,46 @@ struct CachedReader {
     reader: crate::sst::fs::SstFileIo,
 }
 
+fn observe_budgeted(
+    proof: &mut crate::runtime::hybrid_persistence::ExactCoverageState,
+    retained_value: &mut Option<crate::common::resource_budget::ResourceReservation>,
+    observed: crate::types::KeyState,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> bool {
+    use crate::types::KeyState;
+
+    let (observed, replacement) = if proof.supersedes(&observed) {
+        match observed {
+            // Do not let the winning value pin an entire decoded block while
+            // the next SST reader is constructed. Keep the old value charged
+            // until observe replaces and drops its copied bytes.
+            KeyState::Value(value, sequence, expiration, operation) => {
+                let Ok(reservation) = budget.reserve(value.len(), "recovery coverage value") else {
+                    return false;
+                };
+                (
+                    KeyState::Value(
+                        bytes::Bytes::copy_from_slice(&value),
+                        sequence,
+                        expiration,
+                        operation,
+                    ),
+                    Some(reservation),
+                )
+            }
+            other => (other, None),
+        }
+    } else {
+        (observed, None)
+    };
+    if proof.observe(observed) {
+        *retained_value = replacement;
+    }
+    true
+}
+
 impl ReplayCoverage {
-    pub(super) fn new(
+    pub(crate) fn new(
         manifest: crate::metadata::Manifest,
         fs: Arc<dyn Fs>,
         memory_bytes: usize,
@@ -65,7 +103,7 @@ impl ReplayCoverage {
         }
     }
 
-    pub(super) fn contains(&self, record: &crate::wal::WalRecord) -> bool {
+    pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {
         let started = std::time::Instant::now();
         self.probes.set(self.probes.get().saturating_add(1));
         let result = self.contains_record(record);
@@ -78,77 +116,31 @@ impl ReplayCoverage {
     }
 
     fn contains_record(&self, record: &crate::wal::WalRecord) -> bool {
-        use crate::types::KeyState;
+        use crate::runtime::hybrid_persistence::{
+            file_covers_wal_point_record, ExactCoverageState,
+        };
         use crate::wal::types::WalOpRole;
         // Keep the existing conservative rule: tombstones are always replayed.
         if !matches!(record.op.role(), WalOpRole::ValueWrite) {
             return false;
         }
-        let mut highest: Option<KeyState> = None;
-        let mut highest_reservation = None;
-        let mut ambiguous = false;
+        let mut retained_value = None;
+        // Drop the proof's copied bytes before their reservation on every exit.
+        let mut proof = ExactCoverageState::default();
         for file in self
             .manifest
             .files
             .iter()
-            .filter(|file| candidate(file, record))
+            .filter(|file| file_covers_wal_point_record(file, record))
         {
             let Some(observed) = self.file_state(file, record.key.as_ref()) else {
                 return false;
             };
-            let Some(sequence) = state_sequence(&observed) else {
-                continue;
-            };
-            match highest.as_ref().and_then(state_sequence) {
-                Some(current) if sequence < current => {}
-                Some(current) if sequence == current => {
-                    ambiguous |= highest.as_ref() != Some(&observed);
-                }
-                _ => {
-                    // Do not let the winning value pin an entire decoded block
-                    // while the next SST reader is constructed.
-                    let (observed, reservation) = match observed {
-                        KeyState::Value(value, sequence, expiration, operation) => {
-                            let Ok(reservation) = self
-                                .read_budget
-                                .reserve(value.len(), "recovery coverage value")
-                            else {
-                                return false;
-                            };
-                            (
-                                KeyState::Value(
-                                    bytes::Bytes::copy_from_slice(&value),
-                                    sequence,
-                                    expiration,
-                                    operation,
-                                ),
-                                Some(reservation),
-                            )
-                        }
-                        other => (other, None),
-                    };
-                    highest = Some(observed);
-                    highest_reservation = reservation;
-                    ambiguous = false;
-                }
+            if !observe_budgeted(&mut proof, &mut retained_value, observed, &self.read_budget) {
+                return false;
             }
         }
-        if ambiguous {
-            return false;
-        }
-        let covered = match highest {
-            Some(KeyState::Value(value, sequence, expiration, operation)) => {
-                sequence > record.seq
-                    || sequence == record.seq
-                        && record.value.as_ref() == Some(&value)
-                        && record.expiration == expiration
-                        && operation.is_value_write()
-            }
-            Some(KeyState::Tombstone(sequence)) => sequence > record.seq,
-            Some(KeyState::Absent) | None => false,
-        };
-        drop(highest_reservation);
-        covered
+        proof.exactly_covers_wal_point(record)
     }
 
     fn file_state(
@@ -185,7 +177,7 @@ impl ReplayCoverage {
                     .read_budget
                     .reserve(window, "recovery SST verification")
                     .ok()?;
-                super::super::streaming_wal_fs::validate_wal_source(
+                super::streaming_wal_fs::validate_wal_source(
                     pinned.as_ref(),
                     &path,
                     file.size_bytes,
@@ -222,7 +214,7 @@ impl ReplayCoverage {
         result
     }
 
-    pub(super) fn release_reader(&self) {
+    pub(crate) fn release_reader(&self) {
         self.release_cached(&mut self.reader.borrow_mut());
         *self.verified.borrow_mut() = HashMap::new();
     }
@@ -249,32 +241,6 @@ impl Drop for ReplayCoverage {
             retained_block_bytes_peak = self.block_peak.get() as u64,
             "recovery coverage work completed");
     }
-}
-
-fn state_sequence(state: &crate::types::KeyState) -> Option<u64> {
-    match state {
-        crate::types::KeyState::Value(_, sequence, _, _)
-        | crate::types::KeyState::Tombstone(sequence) => Some(*sequence),
-        crate::types::KeyState::Absent => None,
-    }
-}
-
-fn candidate(file: &crate::metadata::FileMeta, record: &crate::wal::WalRecord) -> bool {
-    file.cf_id == record.cf_id
-        && file
-            .smallest_seq
-            .is_some_and(|sequence| sequence <= record.seq)
-        && file
-            .largest_seq
-            .is_some_and(|sequence| sequence >= record.seq)
-        && file
-            .smallest_key
-            .as_ref()
-            .is_some_and(|key| key.as_slice() <= record.key.as_ref())
-        && file
-            .largest_key
-            .as_ref()
-            .is_some_and(|key| key.as_slice() >= record.key.as_ref())
 }
 
 #[cfg(test)]
@@ -388,6 +354,43 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_prior_value_charged_until_replacement_is_installed() {
+        // Arrange
+        let budget = crate::common::resource_budget::ResourceBudget::new(15);
+        let mut proof = crate::runtime::hybrid_persistence::ExactCoverageState::default();
+        let mut retained_value = None;
+        let value = |sequence| {
+            crate::types::KeyState::Value(
+                Bytes::from_static(b"0123456789"),
+                sequence,
+                None,
+                crate::types::EntryType::Put,
+            )
+        };
+        assert!(observe_budgeted(
+            &mut proof,
+            &mut retained_value,
+            value(7),
+            &budget,
+        ));
+        assert_eq!(budget.used(), 10);
+
+        // Act
+        let replaced = observe_budgeted(&mut proof, &mut retained_value, value(9), &budget);
+
+        // Assert
+        assert!(
+            !replaced,
+            "both live copied values must fit before replacement"
+        );
+        assert_eq!(budget.used(), 10, "the prior value remains charged");
+        assert!(
+            proof.supersedes(&value(9)),
+            "the prior state remains installed"
+        );
+    }
+
+    #[test]
     fn should_replay_when_aggregate_proof_metadata_exhausts_shared_recovery_budget() {
         // Arrange
         let entries = vec![(Some(b"value".as_slice()), 7, None); 100];
@@ -464,6 +467,71 @@ mod tests {
         );
         record.expiration = expiration;
         record
+    }
+
+    #[test]
+    fn should_agree_with_shared_wal_coverage_rule_given_same_manifest_and_record() {
+        // Arrange
+        type Scenario<'a> = (&'a str, Vec<PersistedEntry<'a>>, WalRecord);
+        let scenarios: Vec<Scenario<'_>> = vec![
+            (
+                "exact version",
+                vec![(Some(b"value"), 7, None)],
+                put(7, None),
+            ),
+            (
+                "newer version",
+                vec![(Some(b"newer"), 9, None)],
+                put(7, None),
+            ),
+            ("newer tombstone", vec![(None, 9, None)], put(7, None)),
+            (
+                "expired exact version",
+                vec![(Some(b"value"), 7, Some(1))],
+                put(7, Some(1)),
+            ),
+            (
+                "expiration differs",
+                vec![(Some(b"value"), 7, Some(u64::MAX))],
+                put(7, None),
+            ),
+            (
+                "equal-sequence tombstone",
+                vec![(None, 7, None)],
+                put(7, None),
+            ),
+            (
+                "disagreeing equal-sequence files",
+                vec![(Some(b"value"), 7, None), (Some(b"conflicting"), 7, None)],
+                put(7, None),
+            ),
+            (
+                "older version only",
+                vec![(Some(b"value"), 5, None)],
+                put(7, None),
+            ),
+        ];
+
+        for (name, entries, record) in scenarios {
+            let (_dir, startup) = fixture(&entries);
+            let mut proven = crate::runtime::hybrid_persistence::ProvenSstIdentities::default();
+            let shared = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+                Arc::clone(&startup.fs),
+                crate::cloud_layout::CloudObjectLayout::SST_PREFIX,
+                &startup.manifest,
+                &mut proven,
+            );
+
+            // Act
+            let startup_covered = startup.contains(&record);
+            let shared_covered = shared.covers_wal_record(&record);
+
+            // Assert
+            assert_eq!(
+                startup_covered, shared_covered,
+                "{name}: cloud startup replay and the shared WAL coverage rule must agree"
+            );
+        }
     }
 
     #[test]

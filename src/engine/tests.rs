@@ -915,7 +915,10 @@ fn should_reject_legacy_segment_only_cloud_wal_without_catalog() {
         .expect("upload legacy WAL alias");
 
     // Act
-    let result = startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(&cloud);
+    let result =
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
+            &cloud,
+        );
 
     // Assert
     assert!(matches!(
@@ -936,7 +939,7 @@ fn should_reject_legacy_segment_only_simulated_cloud_wal_without_catalog() {
 
     // Act
     let result =
-        startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
 
     // Assert
     assert!(matches!(
@@ -962,7 +965,7 @@ fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
 
     // Act
     let result =
-        startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
 
     // Assert
     assert!(matches!(
@@ -2089,7 +2092,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create a file where the SST directory should be");
 
         // Act
-        super::startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
             &mut state,
             cloud_root.path(),
         )
@@ -2141,7 +2144,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create indeterminate SST metadata path");
 
         // Act
-        super::startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
             &mut state,
             cloud_root.path(),
         )
@@ -2157,6 +2160,52 @@ mod salvage_removes_definitively_lost_ssts {
             .files
             .iter()
             .any(|file| file.name == indeterminate_name));
+    }
+
+    /// A cloud whose HEAD requests are refused, so object existence is unknown.
+    struct HeadRefusingCloudBackend {
+        inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    }
+
+    impl crate::storage::cloud::CloudBackend for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            let _ = callback.send(crate::storage::cloud::CloudEvent::Head {
+                key: key.to_string(),
+                result: crate::storage::cloud::CloudOutcome::Err(
+                    crate::storage::cloud::CloudError::Unauthorized("injected HEAD refusal".into()),
+                ),
+            });
+        }
+    }
+
+    #[test]
+    fn should_keep_the_manifest_entry_when_the_cloud_head_request_fails() {
+        // Arrange: the object's existence cannot be established, so nothing is
+        // known about it and the durable manifest must keep listing it.
+        let (_temp, mut state, sst_name) = salvage_state_with_persisted_sst(12, 128);
+        let cloud = crate::storage::cloud::CloudStorage::new(
+            Arc::new(HeadRefusingCloudBackend {
+                inner: Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            }),
+            "midge".to_string(),
+        );
+
+        // Act
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("salvage tolerates an unverifiable authoritative SST");
+
+        // Assert
+        assert!(
+            persisted_names(&state).contains(&sst_name),
+            "an indeterminate HEAD failure must not erase the durable manifest entry"
+        );
+        assert!(state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.name == sst_name));
     }
 
     #[test]

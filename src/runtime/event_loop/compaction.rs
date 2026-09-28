@@ -88,12 +88,7 @@ impl EventLoop {
                 "manifest publication is already in progress".to_string(),
             ));
         }
-        if self.compaction_publication_degraded {
-            return Err(crate::common::MidgeError::Fenced(
-                "compaction publication is unsettled; refusing another compaction until recovery"
-                    .into(),
-            ));
-        }
+        self.compaction_fence.admit_compaction()?;
         self.state.retry_metadata_reload()?;
         let plan = self.prepare_compaction_plan_for_launch(plan)?;
 
@@ -269,6 +264,11 @@ impl EventLoop {
     }
 }
 
+mod fence;
+pub(super) use fence::CompactionPublicationFence;
+mod slot;
+pub(super) use slot::PublicationSlot;
+
 #[cfg(test)]
 mod tests;
 
@@ -397,12 +397,7 @@ impl CompactionCoordinator {
     fn validate_manual_compaction_request(
         event_loop: &EventLoop,
     ) -> crate::common::MidgeResult<()> {
-        if event_loop.compaction_publication_degraded {
-            return Err(crate::common::MidgeError::Fenced(
-                "compaction publication is unsettled; refusing another compaction until recovery"
-                    .into(),
-            ));
-        }
+        event_loop.compaction_fence.admit_compaction()?;
         if event_loop.fencing.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
@@ -426,7 +421,6 @@ impl CompactionCoordinator {
         let worker_error = event_loop.compaction_actor.take_worker_error();
 
         if succeeded {
-            event_loop.last_compaction_publication_error = None;
             event_loop.compaction_actor.join_completed_worker();
             if let Err(error) = Self::start_publication(
                 event_loop,
@@ -436,7 +430,7 @@ impl CompactionCoordinator {
                 cf_id,
                 target_level,
             ) {
-                if event_loop.compaction_publication.is_some() {
+                if event_loop.compaction_publication.is_active() {
                     Self::finish_failed_publication(event_loop, &error);
                 } else {
                     Self::finish_failed_start(
@@ -567,13 +561,21 @@ impl CompactionCoordinator {
                 return Err(error);
             }
         };
-        event_loop.compaction_publication = Some(PendingCompactionPublication {
+        let pending = PendingCompactionPublication {
             token,
             outputs,
             added,
             superseded_outputs,
             expected_phase: CompactionPublishPhase::OutputDurable,
-        });
+        };
+        if let Err(error) = event_loop.compaction_publication.install(
+            &event_loop.publication_gate,
+            publication_owner.clone(),
+            pending,
+        ) {
+            event_loop.publication_gate.release(&publication_owner);
+            return Err(error);
+        }
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::OutputDurable)
     }
 
@@ -885,7 +887,7 @@ impl CompactionCoordinator {
         completion: CompactionPublishCompletion,
     ) {
         event_loop.compaction_publish_actor.finish_task();
-        let Some(pending) = event_loop.compaction_publication.clone() else {
+        let Some(pending) = event_loop.compaction_publication.get().cloned() else {
             tracing::warn!(?completion.phase, "ignored stale compaction publication completion");
             return;
         };
@@ -991,7 +993,7 @@ impl CompactionCoordinator {
         );
         // From here the compaction is settled; any later failure only leaves
         // the cleared intent unmirrored.
-        if let Some(active) = event_loop.compaction_publication.as_mut() {
+        if let Some(active) = event_loop.compaction_publication.get_mut() {
             active.expected_phase = CompactionPublishPhase::IntentCleared;
         }
         let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
@@ -1023,7 +1025,7 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         phase: CompactionPublishPhase,
     ) -> crate::common::MidgeResult<()> {
-        let pending = event_loop.compaction_publication.as_mut().ok_or_else(|| {
+        let pending = event_loop.compaction_publication.get_mut().ok_or_else(|| {
             crate::common::MidgeError::Internal(
                 "compaction publication state disappeared before worker submission".to_string(),
             )
@@ -1071,7 +1073,7 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) {
-        event_loop.compaction_publication_degraded = true;
+        event_loop.compaction_fence.degrade();
         event_loop.publish_snapshot();
         if let (Some(hybrid), Some(token)) =
             (&event_loop.cloud_coordinator.hybrid_storage, reservation)
@@ -1136,10 +1138,9 @@ impl CompactionCoordinator {
                 request_id: pending.token.request_id,
             },
         );
-        event_loop.compaction_publication = None;
         event_loop
-            .publication_gate
-            .release(&Self::publication_owner(&pending.token));
+            .compaction_publication
+            .finish(&mut event_loop.publication_gate);
         Self::complete_pending_waits(event_loop, true, None);
         event_loop.restore_publication_deferred_message();
         event_loop.schedule_next_flush_worker();
@@ -1161,7 +1162,7 @@ impl CompactionCoordinator {
             .state
             .has_compaction_publication_intent(input_ssts, output_ssts)
         {
-            event_loop.compaction_publication_degraded = true;
+            event_loop.compaction_fence.degrade();
         }
         let reservation = event_loop.compaction_actor.finish_publication(
             &mut event_loop.state,
@@ -1184,7 +1185,12 @@ impl CompactionCoordinator {
     }
 
     fn finish_failed_publication(event_loop: &mut EventLoop, error: &crate::common::MidgeError) {
-        let Some(pending) = event_loop.compaction_publication.take() else {
+        // Settling releases the gate here; nothing below reads it before the
+        // deferred messages are restored.
+        let Some(pending) = event_loop
+            .compaction_publication
+            .finish(&mut event_loop.publication_gate)
+        else {
             tracing::warn!(%error, "compaction publication failed without pending state");
             return;
         };
@@ -1213,7 +1219,7 @@ impl CompactionCoordinator {
                 .state
                 .has_compaction_publication_intent(input_ssts, output_ssts)
             {
-                event_loop.compaction_publication_degraded = true;
+                event_loop.compaction_fence.degrade();
             }
             if let (Some(hybrid), Some(token)) =
                 (&event_loop.cloud_coordinator.hybrid_storage, reservation)
@@ -1230,9 +1236,6 @@ impl CompactionCoordinator {
         Self::defer_failed_repair_retry(event_loop, repair && !authoritative, "publication");
         let wait_error = error.replay();
         Self::respond_publish_failure(event_loop, pending.token.request_id, error);
-        event_loop
-            .publication_gate
-            .release(&Self::publication_owner(&pending.token));
         Self::complete_pending_waits(event_loop, false, Some(&wait_error));
         event_loop.restore_publication_deferred_message();
         event_loop.schedule_next_flush_worker();
@@ -1241,7 +1244,7 @@ impl CompactionCoordinator {
     }
 
     fn defer_failed_repair_retry(event_loop: &mut EventLoop, repair: bool, phase: &'static str) {
-        if !repair || event_loop.compaction_publication_degraded {
+        if !repair || event_loop.compaction_fence.is_degraded() {
             return;
         }
         let retry_after = BACKGROUND_COMPACTION_CHECK_INTERVAL;
@@ -1268,13 +1271,12 @@ impl CompactionCoordinator {
             ?error,
             "failed to mirror cleared compaction publication intent"
         );
-        event_loop.compaction_publication_degraded = true;
+        event_loop.compaction_fence.degrade();
         event_loop.publish_snapshot();
         let response_error = crate::common::MidgeError::Internal(format!(
             "failed to mirror cleared compaction publication intent: {error}"
         ));
         let wait_error = response_error.replay();
-        event_loop.last_compaction_publication_error = Some(response_error.replay());
         event_loop.respond(
             pending.token.request_id,
             RuntimeResponse::Error {
@@ -1282,9 +1284,6 @@ impl CompactionCoordinator {
                 error: response_error,
             },
         );
-        event_loop
-            .publication_gate
-            .release(&Self::publication_owner(&pending.token));
         Self::complete_pending_waits(event_loop, false, Some(&wait_error));
         event_loop.restore_publication_deferred_message();
         event_loop.schedule_next_flush_worker();
@@ -1356,7 +1355,6 @@ impl CompactionCoordinator {
         error: &crate::common::MidgeError,
     ) -> bool {
         Self::record_compaction_failure(event_loop);
-        event_loop.last_compaction_publication_error = Some(error.replay());
         tracing::error!(error = ?error, "failed to apply compaction to manifest");
         event_loop.respond(
             request_id,

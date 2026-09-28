@@ -307,7 +307,7 @@ impl RuntimeStorageMaterialization {
             crate::storage::filesystem::FileSystem::new(cloud.cloud_root.clone())?,
         );
         let streaming = super::timing::measure("wal_plan", || {
-            super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+            crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
                 &storage_path.db_path,
                 &wal_backend,
                 &wal_catalog,
@@ -450,7 +450,7 @@ impl RuntimeStorageMaterialization {
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
         let streaming = super::timing::measure("wal_plan", || {
-            super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+            crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
                 &storage_path.db_path,
                 &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
                 &wal_catalog,

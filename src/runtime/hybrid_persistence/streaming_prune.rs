@@ -1,7 +1,7 @@
 //! Exact WAL retirement with memory bounded independently of segment length.
 
 use super::{
-    exact_state_sequence, file_may_contain_record_key, file_may_overlap_record_range,
+    file_may_contain_record_key, file_may_overlap_record_range,
     verify_sst_summary_matches_manifest, CloudWalPruneBatchResults, CloudWalPruneGuard,
     DataCoverageRecord, ExactCoverageState, FileMeta, GuardedObjectProof, HybridStorage, Manifest,
     MidgeError, MidgeResult, PublishedWalSegment, RemoteObjectProof, StorageBackend,
@@ -391,14 +391,7 @@ impl Coverage<'_> {
                                     crate::types::EntryType::Put,
                                 )
                             };
-                            let retain = progress
-                                .state
-                                .state
-                                .as_ref()
-                                .and_then(exact_state_sequence)
-                                .is_none_or(|sequence| version.seq > sequence);
-                            progress.state.observe(raw);
-                            if retain {
+                            if progress.state.observe(raw) {
                                 progress.held_value = Some(held);
                             }
                             Ok(())
