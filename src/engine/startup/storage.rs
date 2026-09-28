@@ -7,7 +7,7 @@ use super::{
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
 use crate::io::FsError;
-use crate::runtime::hybrid_persistence::CloudPersistence;
+use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -445,6 +445,9 @@ impl RuntimeStorageMaterialization {
 
         CloudStartupRecovery::hydrate_cloud_metadata(
             &metadata_storage,
+            startup_lease.leader_store.as_deref().ok_or_else(|| {
+                MidgeError::Internal("cloud metadata hydration requires a leader store".into())
+            })?,
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
@@ -651,6 +654,42 @@ impl RuntimeRecoveryMaterialization {
         Ok(total)
     }
 
+    fn prepare_storage_for_wal_replay(
+        materialized: &mut RuntimeStorageMaterialization,
+        db_path: &Path,
+    ) -> MidgeResult<()> {
+        materialized.state.cleanup_storage_residue();
+        Self::evict_resident_manifest_ssts(materialized)?;
+        if !materialized.state.salvaged_local_ssts.is_empty() {
+            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+                let fs: Arc<dyn crate::io::Fs> = Arc::new(
+                    crate::storage::remote_sst::RemoteSstFs::new(
+                        Arc::clone(&materialized.state.fs),
+                        storage.remote_sst_backend(),
+                        storage.storage_io_timeout(),
+                    )
+                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
+                );
+                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
+                materialized.state.recovery_sst_fs = Some(fs);
+            }
+        }
+        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+            storage.reconcile_local_disk_usage(
+                Self::local_directory_bytes(&materialized.state.sst_dir)?.saturating_add(
+                    Self::local_directory_bytes(&db_path.join("hybrid_local/sst"))?,
+                ),
+                Self::local_directory_bytes(&materialized.state.wal_dir)?.saturating_add(
+                    Self::local_directory_bytes(&db_path.join("hybrid_local/wal"))?,
+                ),
+            );
+            storage.reconcile_startup_scratch_residue(
+                materialized.state.retained_startup_scratch_bytes()?,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn replay_and_repair(
         mut materialized: RuntimeStorageMaterialization,
         db_path: &Path,
@@ -703,10 +742,26 @@ impl RuntimeRecoveryMaterialization {
             )?;
         }
         if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {
+            let config = &materialized.runtime_config;
             CloudStartupRecovery::mirror_cloud_metadata(
                 metadata_storage,
                 db_path,
                 recovery_policy,
+                CloudMetadataMirrorAuthority {
+                    store: config.leader_store.as_deref().ok_or_else(|| {
+                        MidgeError::Internal(
+                            "cloud metadata publication requires a leader store".into(),
+                        )
+                    })?,
+                    holder_id: config.leader_holder_id.as_deref().ok_or_else(|| {
+                        MidgeError::Internal(
+                            "cloud metadata publication requires a lease holder".into(),
+                        )
+                    })?,
+                    writer_epoch: config.writer_epoch,
+                },
+                &config.metadata_publication_lock,
+                |_| super::streaming_recovery::validate_lease(config),
             )?;
         }
 
@@ -718,35 +773,7 @@ impl RuntimeRecoveryMaterialization {
                 .reset_cloud_durable_sequence_for_recovery();
         }
 
-        materialized.state.cleanup_storage_residue();
-        Self::evict_resident_manifest_ssts(&mut materialized)?;
-        if !materialized.state.salvaged_local_ssts.is_empty() {
-            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-                let fs: Arc<dyn crate::io::Fs> = Arc::new(
-                    crate::storage::remote_sst::RemoteSstFs::new(
-                        Arc::clone(&materialized.state.fs),
-                        storage.remote_sst_backend(),
-                        storage.storage_io_timeout(),
-                    )
-                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
-                );
-                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
-                materialized.state.recovery_sst_fs = Some(fs);
-            }
-        }
-        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-            storage.reconcile_local_disk_usage(
-                Self::local_directory_bytes(&materialized.state.sst_dir)?.saturating_add(
-                    Self::local_directory_bytes(&db_path.join("hybrid_local/sst"))?,
-                ),
-                Self::local_directory_bytes(&materialized.state.wal_dir)?.saturating_add(
-                    Self::local_directory_bytes(&db_path.join("hybrid_local/wal"))?,
-                ),
-            );
-            storage.reconcile_startup_scratch_residue(
-                materialized.state.retained_startup_scratch_bytes()?,
-            )?;
-        }
+        Self::prepare_storage_for_wal_replay(&mut materialized, db_path)?;
         if let Some(replay) = materialized.streaming_wal.take() {
             super::timing::measure("wal_replay", || replay.replay(&mut materialized))?;
         }

@@ -2348,15 +2348,36 @@ mod tests {
     #[test]
     fn should_mirror_flush_sst_name_reservation_again_when_mirror_failed(
     ) -> crate::common::MidgeResult<()> {
+        use crate::lease::PrimaryLease as _;
+
         // Arrange: the journal append succeeds but the cloud mirror fails,
         // so the cloud metadata never learns the reserved block.
         let directory = tempfile::tempdir()?;
         let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
-        event_loop.cloud_coordinator.cloud_metadata_storage =
-            Some(Arc::new(crate::storage::cloud::CloudStorage::new(
-                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-                String::new(),
-            )));
+        crate::metadata::ManifestPersistence::save(
+            &event_loop.state.db_path,
+            &event_loop.state.manifest,
+        )
+        .map_err(crate::common::MidgeError::Internal)?;
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            String::new(),
+        ));
+        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+            crate::lease::CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            directory.path().to_path_buf(),
+            Arc::clone(&cloud),
+        ));
+        let _lease_guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire cloud metadata lease");
+        event_loop.fencing.writer_epoch = lease.epoch();
+        event_loop.fencing.leader_holder_id = Some(lease.holder_id());
+        event_loop.fencing.leader_store = lease.get_leader_store();
+        event_loop.cloud_coordinator.cloud_metadata_storage = Some(cloud);
         let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         event_loop.fencing.lease_healthy = Some(Arc::clone(&lease_healthy));
         let failed = event_loop.reserve_flush_sst_seq(0);
@@ -2424,14 +2445,32 @@ mod tests {
     #[test]
     fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_metadata(
     ) -> crate::common::MidgeResult<()> {
+        use crate::lease::PrimaryLease as _;
+
         // Arrange: hand out flush names and a compaction generation, then lose
         // the machine. The replacement sees only the cloud metadata mirror.
         let directory = tempfile::tempdir()?;
         let (mut first, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        crate::metadata::ManifestPersistence::save(&first.state.db_path, &first.state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             String::new(),
         ));
+        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+            crate::lease::CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            directory.path().to_path_buf(),
+            Arc::clone(&cloud),
+        ));
+        let _lease_guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire cloud metadata lease");
+        first.fencing.writer_epoch = lease.epoch();
+        first.fencing.leader_holder_id = Some(lease.holder_id());
+        first.fencing.leader_store = lease.get_leader_store();
         first.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
         let mut used = Vec::new();
         for _ in 0..20 {
@@ -2441,20 +2480,13 @@ mod tests {
             .assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1))?;
         drop(first);
         let replacement = tempfile::tempdir()?;
-        for name in crate::metadata::files::CLOUD_MIRRORED {
-            let (tx, rx) = std::sync::mpsc::channel();
-            cloud.submit_get(
-                &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
-                tx,
-            );
-            if let Ok(crate::storage::cloud::CloudEvent::Get {
-                result: crate::storage::cloud::CloudOutcome::Ok(data),
-                ..
-            }) = rx.recv_timeout(std::time::Duration::from_secs(1))
-            {
-                std::fs::write(replacement.path().join(name), data)?;
-            }
-        }
+        let leader_store = lease.get_leader_store().expect("cloud leader store");
+        crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
+            &cloud,
+            leader_store.as_ref(),
+            replacement.path(),
+            crate::config::RecoveryPolicy::Strict,
+        )?;
 
         // Act
         let (mut second, _hybrid) = event_loop_with_hybrid_storage(&replacement)?;

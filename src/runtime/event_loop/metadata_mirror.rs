@@ -14,6 +14,13 @@ impl EventLoop {
             &self.metadata_publication_lock,
             self.state.manifest.last_persisted_sequence,
             deadline,
+            self.fencing.leader_store.as_deref().map(|store| {
+                crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                    store,
+                    holder_id: self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
+                    writer_epoch: self.fencing.writer_epoch,
+                }
+            }),
             |deadline| self.validate_runtime_writer_lease_within(deadline),
         )
     }

@@ -348,6 +348,21 @@ fn reserve_sst_sequence(
             cloud,
             &state.db_path,
             crate::config::RecoveryPolicy::Strict,
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: config.leader_store.as_deref().ok_or_else(|| {
+                    MidgeError::Internal(
+                        "cloud metadata publication requires a leader store".into(),
+                    )
+                })?,
+                holder_id: config.leader_holder_id.as_deref().ok_or_else(|| {
+                    MidgeError::Internal(
+                        "cloud metadata publication requires a lease holder".into(),
+                    )
+                })?,
+                writer_epoch: config.writer_epoch,
+            },
+            &config.metadata_publication_lock,
+            |_| validate_lease(config),
         )?;
         validate_lease(config)?;
     }
@@ -392,7 +407,7 @@ fn install_checkpoint_output(
     Ok(())
 }
 
-fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {
+pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {
     if config
         .lease_healthy
         .as_ref()

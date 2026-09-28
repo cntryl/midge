@@ -57,6 +57,7 @@ pub(crate) trait FlushStorage: Send + Sync {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         manifest_sequence: u64,
         deadline: &crate::common::OperationDeadline,
+        authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
     ) -> MidgeResult<bool>;
 }
@@ -104,18 +105,25 @@ impl FlushStorage for HybridFlushStorage {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         manifest_sequence: u64,
         deadline: &crate::common::OperationDeadline,
+        authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
     ) -> MidgeResult<bool> {
         let Some(cloud) = &self.cloud_metadata else {
             return Ok(false);
         };
+        let authority = authority.ok_or_else(|| {
+            MidgeError::Fenced("cloud metadata mirror has no leader store".into())
+        })?;
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-            cloud,
-            fs,
-            publication_lock,
-            cloud.callback_timeout(),
-            manifest_sequence,
-            deadline,
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud,
+                fs,
+                publication_lock,
+                lock_wait_budget: cloud.callback_timeout(),
+                local_manifest_sequence: manifest_sequence,
+                deadline,
+                authority,
+            },
             validate_lease,
         )?;
         Ok(true)
@@ -603,6 +611,13 @@ fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
         &task.metadata_publication_lock,
         task.manifest_sequence,
         &deadline,
+        task.leader_store.as_deref().map(|store| {
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store,
+                holder_id: task.leader_holder_id.as_deref().unwrap_or_default(),
+                writer_epoch: task.delta.identity.writer_epoch,
+            }
+        }),
         &mut validate_lease,
     )?;
     crate::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");

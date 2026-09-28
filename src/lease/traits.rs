@@ -419,6 +419,44 @@ pub struct LeaderRecord {
     pub acquired_at: String,
 }
 
+/// One immutable cloud control-metadata body named by a committed lease pointer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudMetadataObject {
+    /// One of the control-metadata filenames mirrored by the engine.
+    pub file_name: String,
+    /// Immutable object key under `metadata/generations/<uuid>/`.
+    pub object_key: String,
+    /// Exact encoded body length.
+    pub len: u64,
+    /// CRC32C of the encoded body.
+    pub crc32c: u32,
+}
+
+/// Complete presence map for one committed cloud metadata generation.
+///
+/// An omitted control-metadata filename is absent from that generation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudMetadataGeneration {
+    /// Manifest sequence observed while capturing these bodies.
+    pub manifest_sequence: u64,
+    /// Present control-metadata bodies. Unchanged bodies may retain keys from
+    /// earlier immutable generations.
+    pub objects: Vec<CloudMetadataObject>,
+}
+
+/// State of the authority pointer in a provider-backed cloud lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudMetadataHead {
+    /// No lease document exists yet, as on a new control store.
+    MissingLease,
+    /// A versioned lease exists but no metadata generation has been committed.
+    Uncommitted,
+    /// The lease points to one complete immutable metadata generation.
+    Committed(CloudMetadataGeneration),
+}
+
 /// Canonical serialization of the checksummed fields, in the fixed order
 /// `format_leader_record` writes them — the exact bytes the checksum covers.
 fn leader_record_checksum_body(rec: &LeaderRecord) -> String {
@@ -522,6 +560,33 @@ pub trait LeaderStore: Send + Sync {
 
     /// Read the current leader record from storage (non-locking).
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError>;
+
+    /// Read the committed cloud control-metadata generation from the lease.
+    ///
+    /// Stores without a provider-backed metadata authority fail closed.
+    fn read_committed_metadata(&self, _timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support cloud metadata authority".to_string(),
+        ))
+    }
+
+    /// Commit a complete immutable generation through the lease object's CAS.
+    ///
+    /// The caller must upload and verify every referenced immutable body first.
+    /// A newer holder cannot be overwritten because acquisition and publication
+    /// compare-exchange the same lease object.
+    fn publish_committed_metadata(
+        &self,
+        _holder_id: &str,
+        _expected_epoch: u64,
+        _expected_previous: Option<&CloudMetadataGeneration>,
+        _generation: CloudMetadataGeneration,
+        _timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support cloud metadata publication".to_string(),
+        ))
+    }
 
     /// Renew backend-specific leadership validity for the current holder.
     ///

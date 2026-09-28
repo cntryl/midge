@@ -60,18 +60,25 @@ impl CloudCoordinator {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         last_persisted_sequence: u64,
         deadline: &crate::common::OperationDeadline,
+        authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: impl FnMut(&crate::common::OperationDeadline) -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
+        let authority = authority.ok_or_else(|| {
+            crate::common::MidgeError::Fenced("cloud metadata mirror has no leader store".into())
+        })?;
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-            cloud,
-            fs,
-            publication_lock,
-            std::time::Duration::ZERO,
-            last_persisted_sequence,
-            deadline,
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud,
+                fs,
+                publication_lock,
+                lock_wait_budget: std::time::Duration::ZERO,
+                local_manifest_sequence: last_persisted_sequence,
+                deadline,
+                authority,
+            },
             validate_lease,
         )
     }

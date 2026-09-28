@@ -71,6 +71,27 @@ The shared location contains `wal/`, `sst/`, `metadata/`,
 versioning. Never point a writer at an empty control namespace while another
 writer can still hold a lease for the same database.
 
+Current provider-backed databases commit their mirrored local control files
+through the version 2 lease document. Each generation points to immutable
+copies of `FORMAT`, the manifest snapshot, journal, and intent log under
+`metadata/generations/`; the lease compare-and-swap is the publication step.
+The remote DDL registry has its own authority protocol. The permanent
+`metadata/authority-initialized.v1` marker
+prevents a missing lease object from being mistaken for a new database. Never
+delete the marker, lease document, or objects referenced by its committed
+generation. An unreferenced staged generation is not recovery authority.
+
+An existing cloud database with a legacy lease and mutable `metadata/` files
+requires an **offline migration to a new, empty database prefix** before this
+version can write it. Stop every old writer, use the previous binary to export
+the logical contents through its public API, then import them with this version
+into the new prefix and a fresh local cache. Preserve application data needed
+to reconstruct TTL expirations. Verify the imported data before switching
+clients, and retain the original prefix as the rollback copy. A V2 writer
+rejects a legacy lease; do not copy legacy lease or mutable metadata objects
+into the new prefix. There is no safe automatic in-place upgrade while an old
+writer might resume a metadata PUT.
+
 For advanced routing, start with `CloudStorageTopology::new(shared)`, override
 individual locations with `with_wal`, `with_sst`, or `with_control`, and pass
 the result to `OpenOptions::cloud_multi`.
@@ -103,8 +124,8 @@ Provision lifecycle behavior by object class:
 | --- | --- | --- |
 | `wal/` | WAL | Never age-expire current objects. Bound cleanup of noncurrent versions after Midge's guarded prune. |
 | `sst/` | SST | Never age-expire current objects. Give noncurrent versions a bounded recovery window. |
-| `metadata/` | control | Never age-expire current objects. Retain only a small, bounded noncurrent recovery window. |
-| `midge_primary_lease.json` | control | Keep current lease state; use the shortest practical noncurrent-version lifetime. |
+| `metadata/` | control | Never age-expire current objects. Retain every immutable object named by the committed lease generation and the permanent authority marker. Bound cleanup of noncurrent versions only. |
+| `midge_primary_lease.json` | control | Keep the current lease document permanently; use the shortest practical noncurrent-version lifetime. |
 
 The WAL store contains epoch-scoped immutable segment objects and two identical
 copies of the mutable publication authority document:

@@ -18,8 +18,10 @@ use std::sync::Arc;
 
 mod catalog;
 mod metadata_snapshot;
-pub(crate) use metadata_snapshot::conditional_metadata_mirror_put;
-pub(crate) use metadata_snapshot::{mirror_control_metadata_within, CloudMetadataPruneSnapshot};
+pub(crate) use metadata_snapshot::{
+    mirror_control_metadata_within, CloudMetadataMirrorAuthority, CloudMetadataMirrorContext,
+    CloudMetadataPruneSnapshot,
+};
 mod streaming_prune;
 use crate::storage::hybrid::backend::ControlObject;
 use catalog::{commit_catalog_within, load_and_repair_catalog_within, AdmittedCatalog};
@@ -53,6 +55,35 @@ pub(crate) struct CloudMetadataPruneProof {
 pub(crate) struct CloudMetadataPruneGuard {
     objects: Vec<GuardedObjectProof>,
     memory: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    authority: Option<CloudMetadataAuthorityProof>,
+}
+
+#[derive(Clone)]
+struct CloudMetadataAuthorityProof {
+    store: Arc<dyn crate::lease::LeaderStore>,
+    holder_id: String,
+    writer_epoch: u64,
+    generation: crate::lease::CloudMetadataGeneration,
+}
+
+impl CloudMetadataAuthorityProof {
+    fn verify_current(&self, deadline: &crate::common::OperationDeadline) -> MidgeResult<()> {
+        self.store
+            .validate_epoch_with_timeout(&self.holder_id, self.writer_epoch, deadline.remaining())
+            .map_err(|error| error.into_validation_error("cloud WAL prune lease check"))?;
+        match self
+            .store
+            .read_committed_metadata(deadline.remaining())
+            .map_err(|error| error.into_validation_error("cloud WAL prune metadata pointer"))?
+        {
+            crate::lease::CloudMetadataHead::Committed(current) if current == self.generation => {
+                Ok(())
+            }
+            _ => Err(MidgeError::Busy(
+                "cloud metadata pointer changed during WAL cleanup proof".into(),
+            )),
+        }
+    }
 }
 
 impl CloudMetadataPruneGuard {
@@ -73,6 +104,7 @@ impl CloudMetadataPruneGuard {
         Self {
             objects,
             memory: None,
+            authority: None,
         }
     }
 }
@@ -706,6 +738,10 @@ impl CloudPersistence {
             return Ok(sorted_cloud_wal_prune_results(results));
         }
 
+        let metadata_authority = guard
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.authority.clone());
         if let Some(metadata) = guard.metadata {
             dependencies.extend(metadata.objects);
         }
@@ -715,6 +751,10 @@ impl CloudPersistence {
         // authority. Dependencies are revalidated before the catalog CAS;
         // post-CAS cleanup needs only the target's conditional identity.
         crate::failpoints::fail_point!("midge::cloud::after_wal_prune_dependency_validation");
+
+        if let Some(authority) = metadata_authority {
+            authority.verify_current(deadline)?;
+        }
 
         // Publication authority is retired before physical deletion. A crash or
         // delete failure after this point can leak an ignored object but cannot
@@ -1374,6 +1414,142 @@ fn verify_sst_summary_matches_manifest(
         crate::sst::identity::ProofPolicy::Legacy,
     )
     .map_err(|mismatch| format!("cloud SST '{sst_name}': {mismatch}"))
+}
+
+#[cfg(test)]
+mod metadata_authority_tests {
+    use super::CloudMetadataAuthorityProof;
+    use crate::lease::{
+        CloudLeaseConfig, CloudMetadataGeneration, CloudMetadataObject, CloudStorageLease,
+        PrimaryLease,
+    };
+    use crate::storage::cloud::CloudStorage;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn generation(sequence: u64) -> CloudMetadataGeneration {
+        let id = uuid::Uuid::new_v4();
+        CloudMetadataGeneration {
+            manifest_sequence: sequence,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| CloudMetadataObject {
+                file_name: file_name.to_string(),
+                object_key: format!("metadata/generations/{id}/{file_name}"),
+                len: 1,
+                crc32c: 0,
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn should_reject_wal_prune_authority_when_committed_pointer_changes() {
+        // Arrange
+        let cache = tempfile::tempdir().expect("lease cache directory");
+        let cloud = Arc::new(CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            cache.path().to_path_buf(),
+            cloud,
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let store = lease.get_leader_store().expect("provider leader store");
+        let holder_id = lease.holder_id();
+        let epoch = lease.epoch();
+        let first = generation(1);
+        store
+            .publish_committed_metadata(
+                &holder_id,
+                epoch,
+                None,
+                first.clone(),
+                Duration::from_secs(5),
+            )
+            .expect("commit first pointer");
+        let proof = CloudMetadataAuthorityProof {
+            store: Arc::clone(&store),
+            holder_id: holder_id.clone(),
+            writer_epoch: epoch,
+            generation: first.clone(),
+        };
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        proof
+            .verify_current(&deadline)
+            .expect("first pointer is current");
+        let second = generation(2);
+
+        // Act
+        store
+            .publish_committed_metadata(
+                &holder_id,
+                epoch,
+                Some(&first),
+                second,
+                Duration::from_secs(5),
+            )
+            .expect("commit successor pointer");
+        let result = proof.verify_current(&deadline);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Busy(_))),
+            "WAL cleanup must reject a superseded metadata pointer: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_wal_prune_authority_after_lease_release() {
+        // Arrange
+        let cache = tempfile::tempdir().expect("lease cache directory");
+        let cloud = Arc::new(CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            cache.path().to_path_buf(),
+            cloud,
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let store = lease.get_leader_store().expect("provider leader store");
+        let holder_id = lease.holder_id();
+        let epoch = lease.epoch();
+        let committed = generation(1);
+        store
+            .publish_committed_metadata(
+                &holder_id,
+                epoch,
+                None,
+                committed.clone(),
+                Duration::from_secs(5),
+            )
+            .expect("commit pointer");
+        let proof = CloudMetadataAuthorityProof {
+            store,
+            holder_id,
+            writer_epoch: epoch,
+            generation: committed,
+        };
+        lease.release().expect("release lease");
+
+        // Act
+        let result = proof.verify_current(&crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ));
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Fenced(_))),
+            "WAL cleanup must reject a released lease before catalog retirement: {result:?}"
+        );
+    }
 }
 
 #[cfg(test)]

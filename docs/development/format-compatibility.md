@@ -11,6 +11,7 @@ The compatibility policy applies to:
 - intent-log persistence format
 - SST file layout and footer/version identifiers
 - cloud WAL publication catalog and epoch-scoped object-key layout
+- cloud lease metadata authority and immutable control-metadata generations
 
 ## Current Local Format
 
@@ -84,6 +85,22 @@ Unknown versions, malformed entries, a future writer epoch, or WAL objects
 without the required catalog fail startup explicitly; salvage mode does not
 invent publication authority. If both catalog copies are invalid, startup
 fails closed.
+
+Provider-backed cloud metadata now uses lease document version 2. Its committed
+descriptor names the complete set of mirrored local control files under
+`metadata/generations/`, with exact lengths and CRC32C checksums. The lease CAS
+publishes the descriptor; mutable `metadata/` copies and unreferenced uploads
+do not grant manifest recovery authority. The cloud DDL registry remains a
+separate authority. The permanent
+`metadata/authority-initialized.v1` marker makes loss of the lease object a
+fail-closed condition. A version 2 document intentionally cannot be parsed by
+older binaries, which prevents an old writer from renewing the new lease.
+
+Legacy provider-backed cloud databases require offline logical export and
+import into a new empty prefix as described in the
+[cloud setup guide](../operations/cloud-setup.md). Current binaries reject
+legacy lease documents and uncommitted legacy metadata. Binary rollback against
+the new prefix is unsupported; keep the original prefix as the rollback copy.
 
 ### At 1.0 and Within 1.x
 
