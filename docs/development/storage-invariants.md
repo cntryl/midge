@@ -96,3 +96,20 @@ Owned by:
 Validated by:
 `tests/durability.rs` (`should_fail_strict_open_when_wal_is_corrupt` and
 `should_open_in_salvage_mode_when_wal_is_corrupt`).
+
+## 9. Database root and storage directory entries are durable before writes
+
+Rationale:
+A synced WAL or SST file is unreachable if a power loss drops the directory
+entry for the database root or one of its storage directories. Startup must
+persist every newly created directory entry before admitting writes.
+
+Owned by:
+`src/io/durable_dir.rs`, `src/io/real.rs`, `src/engine/startup/storage.rs`,
+`src/runtime/state.rs`
+
+Validated by:
+`src/engine/startup/tests.rs`
+(`should_make_new_database_root_chain_durable_before_startup_writes`) and
+`src/io/durable_dir.rs`
+(`should_resync_parent_when_durable_directory_is_removed_and_recreated`).

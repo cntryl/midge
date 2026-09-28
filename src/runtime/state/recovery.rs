@@ -95,7 +95,7 @@ impl RuntimeState {
         replay_wal: bool,
     ) -> MidgeResult<Self> {
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
-        let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, persistence.is_memory());
+        let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, persistence.is_memory())?;
         let fs = Self::initialize_fs(&db_path, persistence.is_memory())?;
         let RecoveryLoadState {
             opened_in_salvage_mode,

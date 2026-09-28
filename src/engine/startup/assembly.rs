@@ -112,7 +112,7 @@ impl EngineStartup {
         let start = std::time::Instant::now();
         Self::trace_open(opts);
         let storage_path = StartupStoragePath::resolve(opts.storage());
-        storage_path.prepare();
+        storage_path.prepare()?;
 
         let minimum_epoch = super::timing::measure("lease_epoch_floor", || {
             super::epoch_floor::StartupEpochFloor::discover(opts, &storage_path)

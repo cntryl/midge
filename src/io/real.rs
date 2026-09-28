@@ -43,7 +43,8 @@ impl RealFs {
     /// Returns an error when the base directory cannot be created.
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
-        fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, &e))?;
+        super::durable_dir::create_path_durably(&path)
+            .map_err(|error| io_err("create_path_durably", &path, &error))?;
         let relative_anchor = std::env::current_dir().ok();
         let path =
             fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
@@ -240,7 +241,8 @@ impl Fs for RealFs {
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path)?;
-        fs::remove_dir_all(&full).map_err(|e| io_err("remove_dir_all", &full, &e))
+        super::durable_dir::remove_dir_all_and_forget(&full, || fs::remove_dir_all(&full))
+            .map_err(|error| file_op_err("remove_dir_all", &full, &error))
     }
 
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
@@ -626,6 +628,63 @@ mod tests {
         // Assert: RealFs::new created the full directory chain
         assert!(nested.is_dir());
         Ok(())
+    }
+
+    #[test]
+    fn should_make_new_filesystem_root_entry_durable() {
+        // Arrange
+        let temp = TempDir::new().expect("temp dir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical temp dir");
+        let database = root.join("nested/database");
+        crate::io::durable_dir::take_synced_dirs();
+
+        // Act
+        let _fs = RealFs::new(&database).expect("create filesystem root");
+
+        // Assert: creating the database root must sync its parent chain before
+        // a successful write can rely on files beneath it.
+        let synced = crate::io::durable_dir::take_synced_dirs();
+        assert!(synced.contains(&root));
+        assert!(synced.contains(&root.join("nested")));
+    }
+
+    #[test]
+    fn should_sync_parent_when_opening_an_existing_filesystem_root() {
+        // Arrange: another component created the root, but its parent entry
+        // may not yet have been synced.
+        let temp = TempDir::new().expect("temp dir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical temp dir");
+        let database = root.join("database");
+        std::fs::create_dir(&database).expect("create database root");
+        crate::io::durable_dir::take_synced_dirs();
+
+        // Act
+        let _fs = RealFs::new(&database).expect("open filesystem root");
+
+        // Assert
+        assert!(crate::io::durable_dir::take_synced_dirs().contains(&root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_sync_configured_parent_when_filesystem_root_is_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        // Arrange
+        let link_parent = TempDir::new().expect("link parent");
+        let target_parent = TempDir::new().expect("target parent");
+        let link_parent = std::fs::canonicalize(link_parent.path()).expect("canonical link parent");
+        let target = target_parent.path().join("database");
+        std::fs::create_dir(&target).expect("database target");
+        let configured_root = link_parent.join("database");
+        symlink(&target, &configured_root).expect("database root symlink");
+        crate::io::durable_dir::take_synced_dirs();
+
+        // Act
+        let _fs = RealFs::new(&configured_root).expect("open symlinked root");
+
+        // Assert
+        assert!(crate::io::durable_dir::take_synced_dirs().contains(&link_parent));
     }
 
     #[test]

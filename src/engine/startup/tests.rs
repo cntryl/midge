@@ -2,6 +2,31 @@ use super::*;
 use crate::common::MidgeError;
 use crate::io::FsError;
 
+#[test]
+fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let parent = std::fs::canonicalize(temp.path())?;
+    let db_path = parent.join("nested/database");
+    let storage_path = StartupStoragePath {
+        db_path: db_path.clone(),
+        memory_mode: false,
+    };
+    crate::io::durable_dir::take_synced_dirs();
+
+    // Act
+    storage_path.prepare()?;
+
+    // Assert: the parent entry for each newly created directory is synced
+    // before startup proceeds to lease, WAL, metadata, or SST writes.
+    assert!(db_path.is_dir());
+    assert_eq!(
+        crate::io::durable_dir::take_synced_dirs(),
+        [parent.clone(), parent.join("nested"), parent.join("nested")]
+    );
+    Ok(())
+}
+
 struct StartupWatchdogLease {
     validity: std::sync::Arc<crate::lease::LeaseValidity>,
     renewals: std::sync::atomic::AtomicUsize,
@@ -186,7 +211,7 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
         .block_cache_policy(crate::engine::BlockCachePolicy::ClockPro)
         .build()?;
     let storage_path = StartupStoragePath::resolve(opts.storage());
-    storage_path.prepare();
+    storage_path.prepare()?;
     let startup_lease = StartupLease::acquire(&opts, 0)?;
 
     // Act
