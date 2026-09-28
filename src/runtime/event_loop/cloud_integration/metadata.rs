@@ -10,6 +10,9 @@ impl CloudCoordinator {
         db_path: &std::path::Path,
         fs: std::sync::Arc<dyn crate::io::Fs>,
         metadata_publication_lock: crate::runtime::MetadataPublicationLock,
+        leader_store: Option<std::sync::Arc<dyn crate::lease::LeaderStore>>,
+        holder_id: &str,
+        writer_epoch: u64,
     ) -> crate::common::MidgeResult<Option<CloudMetadataPruneSnapshot>> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(None);
@@ -24,16 +27,24 @@ impl CloudCoordinator {
                 )
             })?;
 
-        Ok(Some(
-            CloudMetadataPruneSnapshot::new(
-                cloud.clone(),
-                db_path.to_path_buf(),
-                fs,
-                budget,
-                metadata_publication_lock,
-            )
-            .with_progress(self.cloud_wal_prune_progress.clone()),
-        ))
+        let snapshot = CloudMetadataPruneSnapshot::new(
+            cloud.clone(),
+            db_path.to_path_buf(),
+            fs,
+            budget,
+            metadata_publication_lock,
+        )
+        .with_progress(self.cloud_wal_prune_progress.clone());
+        let snapshot = match leader_store {
+            Some(store) => snapshot.with_authority(store, holder_id.to_string(), writer_epoch),
+            None if cfg!(test) => snapshot,
+            None => {
+                return Err(crate::common::MidgeError::Fenced(
+                    "cloud WAL cleanup has no metadata authority".into(),
+                ));
+            }
+        };
+        Ok(Some(snapshot))
     }
 }
 
@@ -46,6 +57,9 @@ impl EventLoop {
                 &self.state.db_path,
                 self.state.fs.clone(),
                 self.metadata_publication_lock.clone(),
+                self.fencing.leader_store.clone(),
+                self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
+                self.fencing.writer_epoch,
             )
     }
 
@@ -120,12 +134,10 @@ mod tests {
             if !path.exists() {
                 continue;
             }
-            crate::runtime::hybrid_persistence::conditional_metadata_mirror_put(
-                cloud,
-                file_name,
+            crate::storage::cloud::BlockingCloud::new(cloud, &deadline).put_with_precondition(
+                &crate::cloud_layout::CloudObjectLayout::metadata_key(file_name),
                 std::fs::read(path)?,
-                0,
-                &deadline,
+                &crate::storage::StoragePrecondition::IfAbsent,
             )?;
         }
         Ok(())

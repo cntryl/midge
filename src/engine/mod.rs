@@ -16,6 +16,8 @@
 
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
+use crate::lease::PrimaryLease;
+#[cfg(test)]
 use crate::runtime::RuntimeState;
 use crate::runtime::{next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse};
 #[cfg(test)]
@@ -145,11 +147,16 @@ impl Engine {
     #[cfg(test)]
     fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
+        lease: &crate::lease::CloudStorageLease,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             cloud,
+            lease
+                .get_leader_store()
+                .expect("provider-backed test lease has a leader store")
+                .as_ref(),
             db_path,
             recovery_policy,
         )
@@ -158,13 +165,24 @@ impl Engine {
     #[cfg(test)]
     fn mirror_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
+        lease: &crate::lease::CloudStorageLease,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
+        let store = lease
+            .get_leader_store()
+            .expect("provider-backed test lease has a leader store");
         crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata(
             cloud,
             db_path,
             recovery_policy,
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: store.as_ref(),
+                holder_id: &lease.holder_id(),
+                writer_epoch: lease.epoch(),
+            },
+            &crate::runtime::MetadataPublicationLock::default(),
+            |_| Ok(()),
         )
     }
 

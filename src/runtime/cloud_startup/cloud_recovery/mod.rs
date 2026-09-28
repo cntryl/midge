@@ -148,72 +148,105 @@ impl CloudStartupRecovery {
 
     pub(crate) fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
+        leader_store: &dyn crate::lease::LeaderStore,
         db_path: &Path,
-        recovery_policy: RecoveryPolicy,
+        _recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
         let staging_fs = Self::recovery_staging_fs(db_path)?;
-        let mut metadata_objects = Vec::new();
-
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-            let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
-                Ok(Some(data)) => data,
-                Ok(None) => continue,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, key = %key, "skipping cloud metadata object during salvage open");
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to download cloud metadata '{key}': {error}"
-                    )))
-                }
-            };
-
-            crate::metadata::files::manifest_sequence(file_name, &data)?;
-
-            metadata_objects.push((*file_name, data));
-        }
-
-        if !metadata_objects
-            .iter()
-            .any(|(name, _)| *name == crate::metadata::files::MANIFEST_SNAPSHOT)
-        {
-            let legacy_key = crate::cloud_layout::CloudObjectLayout::metadata_key(
-                crate::metadata::files::MANIFEST,
-            );
-            match BlockingCloudIo::new(cloud).get_optional(&legacy_key) {
-                Ok(Some(_)) if recovery_policy == RecoveryPolicy::Strict => {
-                    return Err(MidgeError::RecoveryFailed(
-                        "cloud manifest snapshot is missing while a legacy manifest mirror exists"
-                            .into(),
-                    ));
-                }
-                Ok(Some(_)) => {
-                    tracing::warn!(key = %legacy_key, "ignoring legacy manifest mirror without an authoritative snapshot during salvage open");
-                }
-                Ok(None) => {}
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, key = %legacy_key, "could not inspect legacy manifest mirror during salvage open");
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to inspect legacy cloud manifest mirror '{legacy_key}': {error}"
-                    )));
-                }
+        let head = leader_store
+            .read_committed_metadata(cloud.callback_timeout())
+            .map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to read cloud metadata authority from lease: {error}"
+                ))
+            })?;
+        let generation = match head {
+            crate::lease::CloudMetadataHead::MissingLease => {
+                return Err(MidgeError::RecoveryFailed(
+                    "cloud metadata lease disappeared after acquisition".into(),
+                ));
             }
-        }
+            crate::lease::CloudMetadataHead::Uncommitted => {
+                Self::reject_legacy_cloud_metadata_without_generation(cloud)?;
+                for file_name in crate::metadata::files::CLOUD_MIRRORED
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(crate::metadata::files::MANIFEST))
+                {
+                    match std::fs::symlink_metadata(db_path.join(file_name)) {
+                        Ok(_) => {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "local metadata '{file_name}' exists without a committed cloud generation"
+                            )));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                return Ok(());
+            }
+            crate::lease::CloudMetadataHead::Committed(generation) => generation,
+        };
+        let metadata_objects = Self::read_committed_cloud_metadata(cloud, &generation)?;
 
-        for (file_name, data) in metadata_objects {
+        let mut removed_stale_local_metadata = false;
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
+            let Some(data) = metadata_objects.get(*file_name) else {
+                match staging_fs.remove_file(&crate::io::traits::FsPath::new(*file_name)) {
+                    Ok(()) => removed_stale_local_metadata = true,
+                    Err(FsError::NotFound(_)) => {}
+                    Err(error) => return Err(FsError::into_midge(error)),
+                }
+                continue;
+            };
             let temp_path = crate::io::traits::FsPath::new(format!("{file_name}.tmp"));
-            let target_path = crate::io::traits::FsPath::new(file_name);
+            let target_path = crate::io::traits::FsPath::new(*file_name);
             crate::io::staging::stage_bytes(
                 &staging_fs,
                 &temp_path,
                 &target_path,
-                &data,
+                data,
                 MidgeError::RecoveryFailed,
             )?;
+        }
+        if removed_stale_local_metadata {
+            staging_fs
+                .sync_dir(
+                    &crate::io::traits::FsPath::new(""),
+                    crate::io::Durability::Durable,
+                )
+                .map_err(FsError::into_midge)?;
+        }
+
+        crate::metadata::validate_format_marker(db_path).map_err(|error| {
+            MidgeError::RecoveryFailed(format!("committed cloud FORMAT is invalid: {error}"))
+        })?;
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            &staging_fs,
+            RecoveryPolicy::Strict,
+        )
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!("committed cloud manifest is invalid: {error}"))
+        })?;
+        crate::runtime::IntentPersistence::load_with_fs_and_policy(
+            &staging_fs,
+            RecoveryPolicy::Strict,
+        )
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!("committed cloud intent log is invalid: {error}"))
+        })?;
+
+        let current = leader_store
+            .read_committed_metadata(cloud.callback_timeout())
+            .map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to recheck cloud metadata authority after hydration: {error}"
+                ))
+            })?;
+        if current != crate::lease::CloudMetadataHead::Committed(generation) {
+            return Err(MidgeError::RecoveryFailed(
+                "cloud metadata authority changed during hydration".into(),
+            ));
         }
 
         Ok(())
@@ -223,6 +256,9 @@ impl CloudStartupRecovery {
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
+        authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+        validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         let local_manifest = match Self::load_local_manifest_for_cloud_metadata_mirror(db_path) {
             Ok(manifest) => manifest,
@@ -233,54 +269,25 @@ impl CloudStartupRecovery {
             Err(error) => return Err(error),
         };
         let local_manifest_sequence = local_manifest.last_persisted_sequence;
-
-        Self::ensure_remote_manifest_metadata_not_ahead(cloud, local_manifest_sequence)?;
-
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let local_path = db_path.join(file_name);
-            if !local_path.exists() {
-                continue;
-            }
-
-            let data = match std::fs::read(&local_path) {
-                Ok(data) => data,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, file = %local_path.display(), "skipping metadata mirror during salvage open");
-                    if *file_name == crate::metadata::files::FORMAT {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to read local metadata '{}': {}",
-                        local_path.display(),
-                        error
-                    )))
-                }
-            };
-
-            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-            if let Err(error) = Self::blocking_conditional_cloud_metadata_put(
+        let fs = crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?;
+        let deadline = crate::common::OperationDeadline::from_budget(
+            cloud.callback_timeout().saturating_mul(16),
+        );
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
                 cloud,
-                file_name,
-                data,
+                fs: &fs,
+                publication_lock,
+                lock_wait_budget: cloud.callback_timeout(),
                 local_manifest_sequence,
-            ) {
-                if recovery_policy == RecoveryPolicy::Salvage {
-                    tracing::warn!(%error, key = %key, "skipping metadata mirror during salvage open");
-                    if *file_name == crate::metadata::files::FORMAT {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to mirror cloud metadata '{key}': {error}"
-                )));
-            }
-        }
-
-        Ok(())
+                deadline: &deadline,
+                authority,
+            },
+            validate_lease,
+        )
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!("failed to publish cloud metadata: {error}"))
+        })
     }
 
     pub(crate) fn reject_cloud_wal_without_catalog(
