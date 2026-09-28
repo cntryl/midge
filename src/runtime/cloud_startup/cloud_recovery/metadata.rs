@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 impl CloudStartupRecovery {
-    pub(super) fn load_local_manifest_for_cloud_metadata_mirror(
+    pub(crate) fn load_local_manifest_for_cloud_metadata_mirror(
         db_path: &Path,
     ) -> MidgeResult<crate::metadata::Manifest> {
         let fs: Arc<dyn crate::io::traits::Fs> =
@@ -13,7 +13,7 @@ impl CloudStartupRecovery {
             .map_err(MidgeError::Internal)
     }
 
-    pub(super) fn ensure_remote_manifest_metadata_not_ahead(
+    pub(crate) fn ensure_remote_manifest_metadata_not_ahead(
         cloud: &crate::storage::cloud::CloudStorage,
         local_sequence: u64,
     ) -> MidgeResult<()> {
@@ -28,7 +28,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    pub(super) fn blocking_conditional_cloud_metadata_put(
+    pub(crate) fn blocking_conditional_cloud_metadata_put(
         cloud: &crate::storage::cloud::CloudStorage,
         file_name: &str,
         data: Vec<u8>,

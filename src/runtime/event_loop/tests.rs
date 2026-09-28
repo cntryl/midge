@@ -1017,7 +1017,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
                     crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
                 );
             }
-            _ => event_loop.compaction_publication_degraded = true,
+            _ => event_loop.compaction_fence.degrade(),
         }
         // Act
         let result =

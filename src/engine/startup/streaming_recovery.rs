@@ -12,7 +12,7 @@ use crate::wal::recovery::streaming::{replay_wal_with_checkpoint, StreamingRepla
 use std::collections::HashMap;
 use std::sync::Arc;
 
-mod coverage;
+use crate::runtime::cloud_startup::replay_coverage as coverage;
 mod names;
 #[cfg(test)]
 mod tests;

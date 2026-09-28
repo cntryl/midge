@@ -232,7 +232,7 @@ impl EventLoop {
                 }
             }
         }
-        if self.compaction_publication.is_some() {
+        if self.compaction_publication.is_active() {
             return Err(MidgeError::Internal(
                 "compaction publication was left without a worker completion during shutdown"
                     .to_string(),

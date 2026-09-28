@@ -83,6 +83,24 @@ impl Fixture {
         Ok(recovered)
     }
 
+    /// Plans recovery through `local`, a filesystem rooted at the database.
+    fn plan_with_fs(
+        &self,
+        policy: RecoveryPolicy,
+        local: &Arc<dyn Fs>,
+    ) -> MidgeResult<StreamingCloudWalRecovery> {
+        StreamingCloudWalRecovery::build_with_local_fs(
+            &self.directory.path().join("local"),
+            local,
+            &self.cloud,
+            &self.catalog,
+            policy,
+            Duration::from_secs(5),
+            127,
+            limits(),
+        )
+    }
+
     fn plan_only(
         &self,
         policy: RecoveryPolicy,
@@ -875,5 +893,132 @@ fn should_keep_every_acknowledged_record_when_fenced_writer_interleaved_into_act
         assert!(!recovered.plan.opened_in_salvage_mode);
         assert_eq!(std::fs::read(&path)?, bytes);
     }
+    Ok(())
+}
+
+/// A real filesystem whose file handles refuse to truncate, standing in for a
+/// disk that fails the salvage cut.
+struct TruncateFailingFs {
+    inner: crate::io::RealFs,
+}
+
+struct TruncateFailingFile<'a> {
+    inner: Box<dyn crate::io::File + 'a>,
+}
+
+impl crate::io::File for TruncateFailingFile<'_> {
+    fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<Bytes> {
+        self.inner.read_at(offset, len)
+    }
+
+    fn write_at(&mut self, offset: u64, data: Bytes) -> crate::io::FsResult<()> {
+        self.inner.write_at(offset, data)
+    }
+
+    fn truncate(&mut self, len: u64) -> crate::io::FsResult<()> {
+        Err(FsError::NoSpace(format!(
+            "injected truncate failure at {len} bytes"
+        )))
+    }
+
+    fn append(&mut self, data: Bytes) -> crate::io::FsResult<u64> {
+        self.inner.append(data)
+    }
+
+    fn len(&self) -> crate::io::FsResult<u64> {
+        self.inner.len()
+    }
+
+    fn sync(&mut self, dur: crate::io::Durability) -> crate::io::FsResult<()> {
+        self.inner.sync(dur)
+    }
+}
+
+impl Fs for TruncateFailingFs {
+    fn open(
+        &self,
+        path: &FsPath,
+        opts: OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        Ok(Box::new(TruncateFailingFile {
+            inner: self.inner.open(path, opts)?,
+        }))
+    }
+
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        opts: OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        self.inner.open_persistent_handle(path, opts)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+
+    fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(&self, path: &FsPath, dur: crate::io::Durability) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, dur)
+    }
+
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+#[test]
+fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
+    // Arrange: three records with a flipped byte inside the second, so
+    // salvage must cut the active WAL back to the first.
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"one");
+    let second_start = bytes.len();
+    bytes.extend(framed_wal(2, 7, b"two"));
+    bytes.extend(framed_wal(3, 7, b"three"));
+    bytes[second_start + 8] ^= 1;
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+    let local: Arc<dyn Fs> = Arc::new(TruncateFailingFs {
+        inner: crate::io::RealFs::new(fixture.directory.path().join("local"))
+            .map_err(FsError::into_midge)?,
+    });
+
+    // Act
+    let result = fixture.plan_with_fs(RecoveryPolicy::Salvage, &local);
+
+    // Assert
+    assert!(
+        result.is_err(),
+        "a failed salvage truncation must fail recovery instead of replaying"
+    );
+    assert_eq!(
+        std::fs::read(&active)?,
+        bytes,
+        "a failed truncation must leave the active WAL whole"
+    );
+    assert_eq!(
+        std::fs::read(active.with_file_name("wal.log.salvage-retained"))?,
+        bytes,
+        "the retained copy must exist before the cut is attempted"
+    );
     Ok(())
 }

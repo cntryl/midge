@@ -400,7 +400,7 @@ fn should_not_retry_repair_while_compaction_publication_is_degraded() -> MidgeRe
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
     event_loop.background_compaction_schedule.mark_due();
-    event_loop.compaction_publication_degraded = true;
+    event_loop.compaction_fence.degrade();
 
     // Act
     CompactionCoordinator::defer_failed_repair_retry(&mut event_loop, true, "publication");
@@ -590,7 +590,7 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
 
     // Assert
     assert!(
-        event_loop.compaction_publication_degraded,
+        event_loop.compaction_fence.is_degraded(),
         "a stale writer must retain the durable publication obligation"
     );
     assert_eq!(

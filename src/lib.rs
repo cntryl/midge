@@ -5,6 +5,9 @@
 //! Internal modules (implementation details), roughly lowest layer first:
 //!   - `common`      - errors, deadlines, clocks and budgets; imports no
 //!     other midge subsystem
+//!   - `failpoints`  - fault-injection hooks; imports nothing
+//!   - `codec`, `cloud_layout` - block/value compression and cloud object
+//!     key layout; import only `common`
 //!   - `types`, `config` - shared DTOs and configuration; no storage or
 //!     runtime imports
 //!   - `io`          - base filesystem abstraction
@@ -18,6 +21,8 @@
 //!     above `sst` and implements its observer
 //!   - `metadata`    - manifest and version management
 //!   - `storage`     - local, cloud and hybrid object storage
+//!   - `lease`       - single-writer leases over the filesystem or object
+//!     storage; sits above `storage`
 //!   - `compaction`  - compaction planning and execution
 //!   - `runtime`     - event loop, actors and durability coordination
 //!   - `engine`      - the public `Engine` API

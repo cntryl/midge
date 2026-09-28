@@ -108,6 +108,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn get_state(&self, key: &[u8]) -> MidgeResult<crate::types::KeyState> {
         if self.key_outside_persisted_range(key) {
             return Ok(crate::types::KeyState::Absent);

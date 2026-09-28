@@ -112,18 +112,15 @@ impl CloudStartupRecovery {
     /// Validate the authoritative inventory without materializing the local cache.
     /// SST metadata and data blocks are checked when a reader requests them;
     /// ordinary startup must not scan or copy the object-store dataset.
-    pub(in crate::engine) fn ensure_local_sst_cache_from_cloud(
+    pub(crate) fn ensure_local_sst_cache_from_cloud(
         state: &mut RuntimeState,
         cloud_root: &Path,
     ) -> MidgeResult<()> {
         let remote_sst_dir = cloud_root.join("sst");
-        let mut retained_files = Vec::with_capacity(state.manifest.files.len());
-        let mut manifest_changed = false;
-        let mut definitively_lost: Vec<String> = Vec::new();
-
-        for file in state.manifest.files.clone() {
+        Self::reconcile_manifest_ssts(state, |file| {
             let remote_path = remote_sst_dir.join(&file.name);
-            let validation = std::fs::metadata(&remote_path)
+            std::fs::metadata(&remote_path)
+                .map(|metadata| metadata.len())
                 .map_err(|error| {
                     let loss = MidgeError::RecoveryFailed(format!(
                         "authoritative cloud SST '{}' is unavailable: {error}",
@@ -135,30 +132,10 @@ impl CloudStartupRecovery {
                         SstLoss::Indeterminate(loss)
                     }
                 })
-                .and_then(|metadata| {
-                    Self::validate_manifest_sst_size(&file, metadata.len())
-                        .map_err(SstLoss::Definitive)
-                });
-            match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
-                SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
-                    retained_files.push(file);
-                }
-                SstDisposition::DropDefinitive => {
-                    definitively_lost.push(file.name.clone());
-                    manifest_changed = true;
-                }
-            }
-        }
-
-        if manifest_changed {
-            Self::commit_manifest_removals(state, retained_files, &definitively_lost)?;
-            state.restore_sequence_floor_from_manifest();
-        }
-
-        Ok(())
+        })
     }
 
-    pub(super) fn recovery_staging_fs(
+    pub(crate) fn recovery_staging_fs(
         db_path: &Path,
     ) -> MidgeResult<Arc<dyn crate::io::traits::Fs>> {
         let real = crate::io::real::RealFs::new(db_path).map_err(|error| {
@@ -306,7 +283,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    pub(in crate::engine) fn reject_cloud_wal_without_catalog(
+    pub(crate) fn reject_cloud_wal_without_catalog(
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
         let io = BlockingCloudIo::new(cloud);
@@ -330,7 +307,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    pub(in crate::engine) fn reject_simulated_cloud_wal_without_catalog(
+    pub(crate) fn reject_simulated_cloud_wal_without_catalog(
         cloud_wal_dir: &Path,
     ) -> MidgeResult<()> {
         let has_catalog_copy = [
@@ -421,7 +398,7 @@ impl CloudStartupRecovery {
         ))
     }
 
-    pub(super) fn collect_local_wal_paths(
+    pub(crate) fn collect_local_wal_paths(
         local_wal_dir: &Path,
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
@@ -504,65 +481,88 @@ impl CloudStartupRecovery {
         Ok(Some((segment_paths, active_path)))
     }
 
-    pub(super) fn quarantine_local_wal_alias(path: &Path) -> MidgeResult<()> {
-        let retained_path = Self::unused_retained_path(path)?;
-        std::fs::rename(path, &retained_path).map_err(|error| {
+    /// Rename a local WAL file aside, beside itself, through `fs`.
+    pub(crate) fn quarantine_local_wal_alias(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+    ) -> MidgeResult<()> {
+        let retained_path = Self::unused_retained_path(fs, path)?;
+        fs.rename_atomic(path, &retained_path).map_err(|error| {
             MidgeError::RecoveryFailed(format!(
                 "failed to quarantine local WAL alias '{}' as '{}': {error}",
-                path.display(),
-                retained_path.display()
+                path.0, retained_path.0
             ))
         })
     }
 
     /// Durably copy a local WAL file beside itself before salvage rewrites
-    /// it, so the discarded bytes stay available for inspection.
-    pub(super) fn retain_local_wal_copy(path: &Path) -> MidgeResult<()> {
-        let retained_path = Self::unused_retained_path(path)?;
+    /// it, so the discarded bytes stay available for inspection. The caller
+    /// syncs the WAL directory before cutting the original.
+    pub(crate) fn retain_local_wal_copy(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+    ) -> MidgeResult<()> {
+        const COPY_CHUNK: u64 = 1024 * 1024;
+        let retained_path = Self::unused_retained_path(fs, path)?;
         (|| {
-            // Use ordinary file handles for Windows sharing semantics and a
-            // bounded copy, including when the source WAL is open elsewhere.
-            let mut source = std::fs::File::open(path)?;
-            let mut retained = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&retained_path)?;
-            std::io::copy(&mut source, &mut retained)?;
-            retained.sync_all()
+            let source = fs.open(
+                path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )?;
+            let mut retained = fs.open(
+                &retained_path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: false,
+                    create_new: true,
+                    truncate: false,
+                },
+            )?;
+            let length = source.len()?;
+            let mut offset = 0;
+            while offset < length {
+                let chunk = source.read_at(offset, COPY_CHUNK.min(length - offset))?;
+                if chunk.is_empty() {
+                    return Err(FsError::Io(format!(
+                        "short read copying '{}' at byte {offset}",
+                        path.0
+                    )));
+                }
+                offset += chunk.len() as u64;
+                retained.append(chunk)?;
+            }
+            retained.sync(crate::io::Durability::Durable)
         })()
         .map_err(|error| {
             MidgeError::RecoveryFailed(format!(
                 "failed to retain a copy of local WAL '{}' as '{}': {error}",
-                path.display(),
-                retained_path.display()
+                path.0, retained_path.0
             ))
         })
     }
 
-    fn unused_retained_path(path: &Path) -> MidgeResult<PathBuf> {
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                MidgeError::RecoveryFailed(format!(
-                    "local WAL alias '{}' has no UTF-8 filename",
-                    path.display()
-                ))
-            })?;
+    fn unused_retained_path(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+    ) -> MidgeResult<crate::io::FsPath> {
         for suffix in 0_u32..=u32::MAX {
-            let retained_name = if suffix == 0 {
-                format!("{file_name}.salvage-retained")
+            let retained_path = if suffix == 0 {
+                crate::io::FsPath::new(format!("{}.salvage-retained", path.0))
             } else {
-                format!("{file_name}.salvage-retained.{suffix}")
+                crate::io::FsPath::new(format!("{}.salvage-retained.{suffix}", path.0))
             };
-            let retained_path = path.with_file_name(retained_name);
-            if !retained_path.exists() {
+            if !fs.exists(&retained_path).map_err(FsError::into_midge)? {
                 return Ok(retained_path);
             }
         }
         Err(MidgeError::RecoveryFailed(format!(
             "could not allocate quarantine name for local WAL alias '{}'",
-            path.display()
+            path.0
         )))
     }
 
@@ -572,27 +572,40 @@ impl CloudStartupRecovery {
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
+        Self::reconcile_manifest_ssts(state, |file| {
+            let key = crate::cloud_layout::object_key(&file.name);
+            BlockingCloudIo::new(cloud)
+                .head_optional(&key)
+                .map_err(SstLoss::Indeterminate)?
+                .map(|metadata| metadata.size)
+                .ok_or_else(|| {
+                    SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud SST '{}' is missing",
+                        file.name
+                    )))
+                })
+        })
+    }
+
+    /// Check every manifest SST against its authoritative object and, in
+    /// salvage, durably drop the ones that are definitively lost.
+    ///
+    /// `object_size` reports the object's size, `Definitive` when it is known
+    /// to be gone, or `Indeterminate` when the check itself failed. This is the
+    /// one place that decides which manifest SSTs survive startup; the
+    /// simulated and object-store backends differ only in that probe.
+    fn reconcile_manifest_ssts(
+        state: &mut RuntimeState,
+        mut object_size: impl FnMut(&crate::metadata::FileMeta) -> Result<u64, SstLoss>,
+    ) -> MidgeResult<()> {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
         let mut definitively_lost: Vec<String> = Vec::new();
 
         for file in state.manifest.files.clone() {
-            let key = crate::cloud_layout::object_key(&file.name);
-            let validation = BlockingCloudIo::new(cloud)
-                .head_optional(&key)
-                .map_err(SstLoss::Indeterminate)
-                .and_then(|metadata| {
-                    metadata.ok_or_else(|| {
-                        SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
-                            "authoritative cloud SST '{}' is missing",
-                            file.name
-                        )))
-                    })
-                })
-                .and_then(|metadata| {
-                    Self::validate_manifest_sst_size(&file, metadata.size)
-                        .map_err(SstLoss::Definitive)
-                });
+            let validation = object_size(&file).and_then(|size| {
+                Self::validate_manifest_sst_size(&file, size).map_err(SstLoss::Definitive)
+            });
             match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
                 SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
                     retained_files.push(file);
@@ -701,7 +714,7 @@ impl CloudStartupRecovery {
         })
     }
 
-    pub(super) fn retain_verified_local_sst(
+    pub(crate) fn retain_verified_local_sst(
         state: &RuntimeState,
         file: &crate::metadata::FileMeta,
     ) -> MidgeResult<bool> {
@@ -772,15 +785,7 @@ impl CloudStartupRecovery {
                 state, cloud, &cloud_key, &sst_name, proof,
             );
         }
-        Self::restore_named_sst_from_cloud(
-            state,
-            cloud,
-            staging_fs,
-            &cloud_key,
-            &local_path,
-            &sst_name,
-            proof,
-        )
+        Self::restore_named_sst_from_cloud(state, cloud, staging_fs, &cloud_key, &sst_name, proof)
     }
 
     fn validate_named_sst_against_cloud(
@@ -826,7 +831,6 @@ impl CloudStartupRecovery {
         cloud: &crate::storage::cloud::CloudStorage,
         staging_fs: &Arc<dyn crate::io::traits::Fs>,
         cloud_key: &str,
-        local_path: &Path,
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
@@ -862,7 +866,9 @@ impl CloudStartupRecovery {
         }
 
         Self::stage_sst_bytes(staging_fs, sst_name, &cloud_proof.bytes)?;
-        if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(local_path) {
+        let staged_path = crate::io::FsPath::new(crate::cloud_layout::object_key(sst_name));
+        if let Err(error) = crate::sst::fs::SstFileIo::open(&staged_path.0, Arc::clone(staging_fs))
+        {
             if state.recovery_policy() == RecoveryPolicy::Strict {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "restored cloud SST '{sst_name}' is invalid: {error}"
@@ -870,7 +876,15 @@ impl CloudStartupRecovery {
             }
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
-            let _ = std::fs::remove_file(local_path);
+            // Intent replay revalidates every SST before publishing it, so a
+            // discard that fails only leaks the invalid bytes.
+            if let Err(discard_error) = staging_fs.remove_file(&staged_path) {
+                tracing::warn!(
+                    sst_name = %sst_name,
+                    error = %discard_error,
+                    "could not discard invalid cloud SST during salvage staging; leaving it for inspection"
+                );
+            }
             tracing::warn!(
                 sst_name = %sst_name,
                 error = %error,

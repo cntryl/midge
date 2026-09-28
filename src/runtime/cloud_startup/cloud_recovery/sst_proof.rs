@@ -25,7 +25,7 @@ fn expected_sst(
 }
 
 impl CloudStartupRecovery {
-    pub(super) fn validate_sst_bytes_against_proof(
+    pub(crate) fn validate_sst_bytes_against_proof(
         sst_name: &str,
         data: &[u8],
         expected_size_bytes: Option<u64>,
@@ -40,7 +40,7 @@ impl CloudStartupRecovery {
             .map_err(|mismatch| MidgeError::RecoveryFailed(mismatch.to_string()))
     }
 
-    pub(super) fn local_sst_file_matches_proof(
+    pub(crate) fn local_sst_file_matches_proof(
         path: &Path,
         sst_name: &str,
         expected_size_bytes: Option<u64>,
@@ -72,7 +72,7 @@ impl CloudStartupRecovery {
         expected_crc32c.is_some() || reader.verify_all_blocks().is_ok()
     }
 
-    pub(super) fn local_sst_file_matches_manifest(
+    pub(crate) fn local_sst_file_matches_manifest(
         path: &Path,
         file: &crate::metadata::FileMeta,
     ) -> bool {
