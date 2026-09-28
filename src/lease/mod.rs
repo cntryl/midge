@@ -18,7 +18,7 @@
 //! ## Backends
 //!
 //! - **Cloud storage**: Preferred for distributed deployments (blob leases, conditional writes)
-//! - **Filesystem**: Local-only fallback using exclusive file locks (`flock`)
+//! - **Filesystem**: Persistent `.midge_leader` epoch record with CAS-via-rename
 //!
 //! ## Usage
 //!

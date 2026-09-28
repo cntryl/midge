@@ -368,10 +368,7 @@ impl EventLoop {
         let next_sst_seq = sst_seq.saturating_add(1);
         self.state
             .manifest
-            .next_sst_seqs
-            .entry(cf_id)
-            .and_modify(|next| *next = (*next).max(next_sst_seq))
-            .or_insert(next_sst_seq);
+            .advance_next_sst_seq(cf_id, next_sst_seq);
         Ok(sst_seq)
     }
 

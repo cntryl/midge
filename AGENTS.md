@@ -12,7 +12,7 @@ Midge is a Rust embedded LSM key-value engine. Core code lives under `src/`, wit
 - `cargo fmt --check`: verify Rust formatting.
 - `cargo fmt`: apply standard Rust formatting.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`: enforce zero-warning lint policy.
-- `cargo bench`: run registered Criterion benchmarks.
+- `cargo bench`: run registered `cntryl-stress` benchmarks.
 - `cntryl-tools validate-tests`: check test naming and structure when available.
 
 ## Coding Style & Naming Conventions

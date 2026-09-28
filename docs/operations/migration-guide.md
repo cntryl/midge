@@ -18,6 +18,27 @@ both versions write the same persisted formats. Do not roll back a live or
 still-fenced process in place: stop it first and retain all WAL files so the
 selected binary can perform ordinary restart recovery.
 
+## 0.1.1 to 0.2.0
+
+Version `0.2.0` introduces database FORMAT 4. FORMAT 3 remains readable, but a
+writable `0.2.0` open upgrades its marker to FORMAT 4 in place before writing
+manifest state. The manifest key-bound encoding changes from JSON byte arrays
+to hex strings; both formats use SST V4. A read-only `midge verify` does not
+upgrade the marker.
+
+Before upgrading, stop writers, complete `engine.shutdown(timeout)`, and
+preserve the full database directory and relevant cloud prefix. Test with a
+separate copy, run `midge verify`, and exercise application reads, writes, and
+restart recovery before switching traffic. Keep the original copy until the
+new version is qualified in your environment.
+
+Rollback has constraints. Do not open a database that `0.2.0` has writable-
+opened with `0.1.1`; the older binary does not support FORMAT 4. To roll back,
+restore the pre-upgrade database copy and use `0.1.1`. Any writes made after
+that copy was taken will be absent from the restored database. Preserve a
+logical export or application-level recovery path if those writes must be
+retained.
+
 ## FORMAT 3 and SST V4
 
 FORMAT 3 is a breaking local-storage transition. It requires checksummed SST

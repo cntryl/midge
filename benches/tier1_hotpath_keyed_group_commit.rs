@@ -15,7 +15,7 @@ const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 32_768;
 fn run_flush_waiters(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
     ctx.parameter("waiters", waiters);
     ctx.parameter("logical_unit", "accumulator_flush");
-    ctx.parameter("waiters_per_logical_operation", waiters);
+    ctx.parameter("waiters_per_cycle", waiters);
     ctx.metadata("validated_micro", "true");
 
     ctx.measure(scenario, || {
@@ -34,7 +34,7 @@ fn run_submit_and_wait(ctx: &mut StressContext, scenario: &'static str, waiters:
     ctx.parameter("waiters", waiters);
     ctx.parameter("rounds", SUBMIT_AND_WAIT_BATCH_ROUNDS);
     ctx.parameter("logical_unit", "submit_flush_wait_cycle");
-    ctx.parameter("waiters_per_logical_operation", waiters);
+    ctx.parameter("waiters_per_cycle", waiters);
 
     stress_config::measure_hot_path_batch(ctx, scenario, logical_ops, || {
         let mut total = 0u64;

@@ -254,6 +254,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         // Act
         let outputs = CompactionActor::execute_with_storage(
             &plan,
+            crate::compaction::LeveledCompactionConfig::default().max_compaction_input_files,
             &factory,
             directory.path(),
             None,

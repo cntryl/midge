@@ -53,7 +53,7 @@ fn run_compress_raw(ctx: &mut StressContext, name: &'static str, policy: &Compre
     ctx.parameter("codec", name);
     ctx.parameter("block_size", data.len());
     ctx.parameter("batch_size", RAW_COMPRESS_BATCH_SIZE);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("compress_raw_{name}");
     ctx.benchmark(measurement_name)
@@ -79,7 +79,7 @@ fn run_compress_raw_zstd_window(
     ctx.parameter("batch_size", RAW_COMPRESS_BATCH_SIZE);
     ctx.parameter("block_window", RAW_ZSTD_COMPRESS_WINDOW_BLOCKS);
     ctx.parameter("window_repeats", RAW_ZSTD_COMPRESS_WINDOW_REPEATS);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("compress_raw_{name}");
     ctx.benchmark(measurement_name)
@@ -138,7 +138,7 @@ fn compress_raw_none(ctx: &mut StressContext) {
     ctx.parameter("block_size", data.len());
     ctx.parameter("batch_size", RAW_NONE_BATCH_SIZE);
     ctx.parameter("prewarm_repeats", RAW_NONE_PREWARM_REPEATS);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     let mut prewarm_bytes = 0usize;
     for _ in 0..RAW_NONE_PREWARM_REPEATS {
@@ -167,7 +167,7 @@ fn run_decompress_raw(ctx: &mut StressContext, name: &'static str, algo: Compres
     ctx.parameter("codec", name);
     ctx.parameter("block_size", data.len());
     ctx.parameter("batch_size", RAW_DECOMPRESS_BATCH_SIZE);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("decompress_raw_{name}");
     stress_config::measure_hot_path_batch(
@@ -219,7 +219,7 @@ fn run_compress_trailer(ctx: &mut StressContext, name: &'static str, policy: &Co
     ctx.parameter("codec", name);
     ctx.parameter("block_size", data.len());
     ctx.parameter("batch_size", TRAILER_COMPRESS_BATCH_SIZE);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("compress_trailer_{name}");
     stress_config::measure_hot_path_batch(
@@ -244,7 +244,7 @@ fn run_compress_trailer_zstd_window(ctx: &mut StressContext, policy: &Compressio
     ctx.parameter("batch_size", TRAILER_ZSTD_COMPRESS_BATCH_SIZE);
     ctx.parameter("block_window", RAW_ZSTD_COMPRESS_WINDOW_BLOCKS);
     ctx.parameter("window_repeats", TRAILER_ZSTD_COMPRESS_WINDOW_REPEATS);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     ctx.benchmark("compress_trailer_zstd3").measure_batch(
         TRAILER_ZSTD_COMPRESS_BATCH_SIZE as u64,
@@ -287,7 +287,7 @@ fn run_decompress_trailer(ctx: &mut StressContext, name: &'static str, policy: &
     ctx.parameter("codec", name);
     ctx.parameter("block_size", data.len());
     ctx.parameter("batch_size", TRAILER_DECOMPRESS_BATCH_SIZE);
-    ctx.parameter("logical_unit", "block_byte");
+    ctx.parameter("logical_unit", "block");
 
     let measurement_name = format!("decompress_trailer_{name}");
     stress_config::measure_hot_path_batch(
@@ -338,7 +338,7 @@ fn wal_compress_skip_128b(ctx: &mut StressContext) {
     let small_val = vec![0xABu8; 128];
     ctx.parameter("value_size", small_val.len());
     ctx.parameter("batch_size", WAL_SKIP_BATCH_SIZE);
-    ctx.parameter("logical_unit", "wal_value_byte");
+    ctx.parameter("logical_unit", "wal_value");
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -363,7 +363,7 @@ fn wal_compress_lz4_1kb(ctx: &mut StressContext) {
     let medium_val: Vec<u8> = (0u8..64).cycle().take(1024).collect();
     ctx.parameter("value_size", medium_val.len());
     ctx.parameter("batch_size", WAL_LZ4_BATCH_SIZE);
-    ctx.parameter("logical_unit", "wal_value_byte");
+    ctx.parameter("logical_unit", "wal_value");
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -394,7 +394,7 @@ fn wal_decompress_passthrough_128b(ctx: &mut StressContext) {
     let (passthrough, pass_byte) = compress_wal_value(&small_val);
     ctx.parameter("value_size", small_val.len());
     ctx.parameter("batch_size", WAL_PASSTHROUGH_DECOMPRESS_BATCH_SIZE);
-    ctx.parameter("logical_unit", "wal_value_byte");
+    ctx.parameter("logical_unit", "wal_value");
 
     stress_config::measure_hot_path_batch(
         ctx,
@@ -420,7 +420,7 @@ fn wal_decompress_lz4_1kb(ctx: &mut StressContext) {
     let (compressed, comp_byte) = compress_wal_value(&medium_val);
     ctx.parameter("value_size", medium_val.len());
     ctx.parameter("batch_size", WAL_LZ4_DECOMPRESS_BATCH_SIZE);
-    ctx.parameter("logical_unit", "wal_value_byte");
+    ctx.parameter("logical_unit", "wal_value");
 
     stress_config::measure_hot_path_batch(
         ctx,

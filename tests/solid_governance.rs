@@ -554,6 +554,7 @@ fn should_group_runtime_state_fields_by_owner() {
 #[test]
 fn should_route_manifest_file_list_mutation_through_runtime_owner() {
     // Arrange
+    let owner_source = include_str!("../src/runtime/state.rs");
     let production_sources = [
         include_str!("../src/runtime/state/manifest.rs"),
         include_str!("../src/runtime/actors/manifest.rs"),
@@ -578,6 +579,10 @@ fn should_route_manifest_file_list_mutation_through_runtime_owner() {
         .collect();
 
     // Assert
+    assert!(
+        !owner_source.contains("impl std::ops::DerefMut for ManifestRuntimeState"),
+        "mutable dereferencing would allow file-set edits without an explicit owner method"
+    );
     assert!(
         bypasses.is_empty(),
         "manifest file-list owner bypasses: {bypasses:?}"

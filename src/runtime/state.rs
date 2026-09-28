@@ -355,6 +355,53 @@ impl ManifestRuntimeState {
         self.manifest.files.retain(|file| keep(file));
     }
 
+    pub(crate) fn note_applied_journal_edit(&mut self, edit_id: u64) -> bool {
+        self.manifest.note_applied_journal_edit(edit_id)
+    }
+
+    pub(crate) fn advance_persisted_sequence(&mut self, sequence: u64) {
+        self.manifest.last_persisted_sequence = self.manifest.last_persisted_sequence.max(sequence);
+    }
+
+    pub(crate) fn set_next_sst_seq(&mut self, cf_id: u32, sequence: u64) {
+        self.manifest.next_sst_seqs.insert(cf_id, sequence);
+    }
+
+    pub(crate) fn advance_next_sst_seq(&mut self, cf_id: u32, sequence: u64) {
+        let next = self.manifest.next_sst_seqs.entry(cf_id).or_default();
+        *next = (*next).max(sequence);
+    }
+
+    pub(crate) fn adopt_checkpoint(
+        &mut self,
+        checkpoint: crate::metadata::persistence::WrittenCheckpoint,
+    ) {
+        checkpoint.adopt_into(&mut self.manifest);
+    }
+
+    pub(crate) fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) {
+        fn changes_files(edit: &crate::metadata::ManifestEdit) -> bool {
+            use crate::metadata::ManifestEdit;
+            match edit {
+                ManifestEdit::AddSst(_)
+                | ManifestEdit::RemoveSst { .. }
+                | ManifestEdit::ReclaimColumnFamily { .. } => true,
+                ManifestEdit::Batch(edits) => edits.iter().any(changes_files),
+                _ => false,
+            }
+        }
+        if changes_files(edit) {
+            self.read_views.get_mut().invalidate();
+        }
+        self.manifest.apply_edit(edit);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mut(&mut self) -> &mut Manifest {
+        self.read_views.get_mut().invalidate();
+        &mut self.manifest
+    }
+
     pub(crate) fn read_view_for(
         &self,
         cf_id: crate::types::ColumnFamilyId,
@@ -374,13 +421,6 @@ impl std::ops::Deref for ManifestRuntimeState {
 
     fn deref(&self) -> &Self::Target {
         &self.manifest
-    }
-}
-
-impl std::ops::DerefMut for ManifestRuntimeState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.read_views.get_mut().invalidate();
-        &mut self.manifest
     }
 }
 
@@ -763,6 +803,7 @@ impl RuntimeState {
         }
 
         self.cleanup_flush_staging_residue();
+        self.cleanup_repair_scratch_residue();
 
         let residue = self.storage_residue_assessment();
 
@@ -842,6 +883,23 @@ impl RuntimeState {
                     %error,
                     "failed to delete non-authoritative flush staging residue"
                 );
+            }
+        }
+    }
+
+    /// Repair runs never enter the manifest. Cleanup runs only during startup
+    /// after the writer lease is acquired, before a new worker may use the
+    /// directory.
+    fn cleanup_repair_scratch_residue(&mut self) {
+        let directory = self.sst_dir.join(".compaction-repair");
+        match std::fs::remove_dir_all(&directory) {
+            Ok(()) => {
+                tracing::info!(path = %directory.display(), "deleted stale overlap-repair scratch");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.mark_persistence_anomaly();
+                tracing::warn!(path = %directory.display(), %error, "retaining unclean overlap-repair scratch");
             }
         }
     }
@@ -1062,7 +1120,7 @@ impl RuntimeState {
     pub fn restore_sequence_floor_from_manifest(&mut self) {
         let sequence_floor = Self::manifest_visible_sequence_floor(&self.manifest);
         if self.manifest.last_persisted_sequence < sequence_floor {
-            self.manifest.last_persisted_sequence = sequence_floor;
+            self.manifest.advance_persisted_sequence(sequence_floor);
         }
         if self.sequence < sequence_floor {
             self.sequence = sequence_floor;

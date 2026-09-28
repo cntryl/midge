@@ -49,12 +49,13 @@ fn cloud_debt_with_wal_records(
     for cf_id in [0, other] {
         el.state
             .manifest
+            .test_mut()
             .next_sst_seqs
             .insert(cf_id, files_per_cf + 1);
         for number in 1..=files_per_cf {
             let name = crate::cloud_layout::file_name(cf_id, 0, number);
             let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
-            el.state.manifest.files.last_mut().unwrap().cf_id = cf_id;
+            el.state.manifest.test_mut().files.last_mut().unwrap().cf_id = cf_id;
             write_test_file(el.state.sst_dir.join(&name), &bytes);
         }
     }
@@ -197,20 +198,24 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
         let name = crate::cloud_layout::file_name(cf_id, 0, 1);
         let bytes = valid_sst_bytes_for_test(b"local-debt", b"value", 81);
         write_test_file(el.state.sst_dir.join(&name), &bytes);
-        el.state.manifest.files.push(crate::metadata::FileMeta {
-            name,
-            cf_id,
-            level: 0,
-            size_bytes: bytes.len() as u64,
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            smallest_key: Some(b"local-debt".to_vec()),
-            largest_key: Some(b"local-debt".to_vec()),
-            smallest_seq: Some(81),
-            largest_seq: Some(81),
-            key_bounds_complete: true,
-            ..Default::default()
-        });
-        el.state.manifest.next_sst_seqs.insert(cf_id, 2);
+        el.state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name,
+                cf_id,
+                level: 0,
+                size_bytes: bytes.len() as u64,
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                smallest_key: Some(b"local-debt".to_vec()),
+                largest_key: Some(b"local-debt".to_vec()),
+                smallest_seq: Some(81),
+                largest_seq: Some(81),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+        el.state.manifest.test_mut().next_sst_seqs.insert(cf_id, 2);
     }
     let (tx, rx) = crossbeam::channel::unbounded();
     el.worker_msg_tx = Some(tx);

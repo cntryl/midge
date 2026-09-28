@@ -47,11 +47,9 @@ fn measure_find_block(
         assert_eq!(reader.find_block(key), *expected);
     }
     ctx.parameter("lookup_key_count", cases.len());
-    ctx.parameter(
-        "finds_per_logical_operation",
-        TRIE_FINDS_PER_LOGICAL_OPERATION,
-    );
+    ctx.parameter("finds_per_batch", TRIE_FINDS_PER_LOGICAL_OPERATION);
     ctx.parameter("logical_unit", "trie_find_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     stress_config::measure_hot_path_batch(ctx, scenario, find_logical_operation_count(), || {
         let mut found = 0u32;
@@ -76,11 +74,9 @@ fn measure_find_block_stable(
 ) {
     assert_eq!(reader.find_block(key), expected);
     ctx.parameter("lookup_key_count", 1);
-    ctx.parameter(
-        "finds_per_logical_operation",
-        TRIE_FINDS_PER_LOGICAL_OPERATION,
-    );
+    ctx.parameter("finds_per_batch", TRIE_FINDS_PER_LOGICAL_OPERATION);
     ctx.parameter("logical_unit", "trie_find_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     ctx.benchmark(scenario)
         .samples(TRIE_NOISY_SAMPLE_COUNT)
@@ -150,10 +146,11 @@ fn run_prefix_range(ctx: &mut StressContext, scenario: &'static str, prefixes: &
     ctx.parameter("scenario", scenario);
     ctx.parameter("prefix_key_count", prefixes.len());
     ctx.parameter(
-        "prefix_ranges_per_logical_operation",
+        "prefix_ranges_per_batch",
         TRIE_PREFIX_RANGES_PER_LOGICAL_OPERATION,
     );
     ctx.parameter("logical_unit", "trie_prefix_range_batch");
+    ctx.parameter("batch_per_logical_operation", 1);
 
     stress_config::measure_hot_path_batch(ctx, scenario, prefix_logical_operation_count(), || {
         let mut total = 0usize;

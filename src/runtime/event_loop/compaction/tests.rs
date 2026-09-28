@@ -1,9 +1,89 @@
 use super::*;
 use crate::common::{MidgeError, MidgeResult};
+use crate::runtime::event_loop::tests::create_test_local_event_loop;
 use std::sync::Arc;
 
 const LOCAL_BUDGET: u64 = 1_000;
 const STAGING_BYTES: u64 = 500;
+
+#[test]
+fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(crate::runtime::ResponseRouter::new()),
+        crate::runtime::RuntimeConfig::default(),
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+    let file = |name: &str, start: &[u8], end: &[u8]| crate::metadata::FileMeta {
+        name: name.to_string(),
+        cf_id: 0,
+        level: 1,
+        smallest_key: Some(start.to_vec()),
+        largest_key: Some(end.to_vec()),
+        key_bounds_complete: true,
+        ..Default::default()
+    };
+    event_loop
+        .state
+        .manifest
+        .add_file(file("left.sst", b"a", b"m"));
+    event_loop
+        .state
+        .manifest
+        .add_file(file("right.sst", b"b", b"z"));
+    event_loop
+        .state
+        .manifest
+        .add_file(file("neighbor.sst", b"z", b"zz"));
+    let selected = vec!["left.sst".to_string(), "right.sst".to_string()];
+    event_loop
+        .compaction_actor
+        .prepare_repair_for_completion_test(&mut event_loop.state, &selected, 1)?;
+
+    // Act: one equality neighbor is safe; changed identity and a replacement
+    // creating a three-way boundary are rejected.
+    CompactionCoordinator::validate_captured_target_span(&event_loop, &selected, 0, 1)?;
+    let good = crate::runtime::FileMeta::from(&file("new.sst", b"a", b"z"));
+    CompactionCoordinator::validate_repair_replacement_level(
+        &event_loop,
+        &selected,
+        &[good],
+        0,
+        1,
+    )?;
+    let bad = [
+        crate::runtime::FileMeta::from(&file("new-a.sst", b"a", b"z")),
+        crate::runtime::FileMeta::from(&file("new-b.sst", b"z", b"zz")),
+    ];
+    // Assert
+    assert!(CompactionCoordinator::validate_repair_replacement_level(
+        &event_loop,
+        &selected,
+        &bad,
+        0,
+        1
+    )
+    .is_err());
+    event_loop
+        .state
+        .manifest
+        .retain_files(|file| file.name != "right.sst");
+    event_loop
+        .state
+        .manifest
+        .add_file(file("right.sst", b"b", b"y"));
+    assert!(
+        CompactionCoordinator::validate_captured_target_span(&event_loop, &selected, 0, 1).is_err()
+    );
+    event_loop
+        .compaction_actor
+        .finish_publication(&mut event_loop.state, &selected, &[]);
+    Ok(())
+}
 
 struct UnknownScratchFactory;
 
@@ -130,7 +210,12 @@ fn published_output(event_loop: &mut EventLoop) -> String {
         size_bytes: 300,
         ..Default::default()
     };
-    event_loop.state.manifest.files.push(metadata.clone());
+    event_loop
+        .state
+        .manifest
+        .test_mut()
+        .files
+        .push(metadata.clone());
     event_loop
         .state
         .intent_log
@@ -192,6 +277,7 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             event_loop
                 .state
                 .manifest
+                .test_mut()
                 .files
                 .push(crate::metadata::FileMeta {
                     name: input.clone(),
@@ -245,6 +331,85 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    let inputs = ["repair-a.sst".to_string(), "repair-b.sst".to_string()];
+    for (name, start, end) in [
+        (&inputs[0], b"a".as_slice(), b"m".as_slice()),
+        (&inputs[1], b"g".as_slice(), b"z".as_slice()),
+    ] {
+        event_loop
+            .state
+            .manifest
+            .test_mut()
+            .files
+            .push(crate::metadata::FileMeta {
+                name: name.clone(),
+                cf_id: 0,
+                level: 1,
+                smallest_key: Some(start.to_vec()),
+                largest_key: Some(end.to_vec()),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+    }
+    event_loop
+        .compaction_actor
+        .prepare_repair_for_completion_test(&mut event_loop.state, &inputs, 1)?;
+    event_loop
+        .compaction_actor
+        .set_worker_error_for_test(MidgeError::Io(std::io::Error::other(
+            "scratch write failed",
+        )));
+    assert!(event_loop.compaction_actor.active_same_level_repair());
+    event_loop.background_compaction_schedule.mark_due();
+
+    // Act
+    CompactionCoordinator::complete(
+        &mut event_loop,
+        CompactionCompleteRequest {
+            request_id: 7_603,
+            input_ssts: inputs.to_vec(),
+            output_ssts: Vec::new(),
+            cf_id: 0,
+            target_level: 1,
+            succeeded: false,
+        },
+    );
+
+    // Assert
+    assert!(event_loop.state.manifest_has_file(&inputs[0]));
+    assert!(event_loop.state.manifest_has_file(&inputs[1]));
+    let minimum_retry =
+        BACKGROUND_COMPACTION_CHECK_INTERVAL.saturating_sub(std::time::Duration::from_secs(1));
+    assert!(
+        event_loop.background_maintenance_timeout() >= minimum_retry,
+        "retry timeout was {:?}",
+        event_loop.background_maintenance_timeout()
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_retry_repair_while_compaction_publication_is_degraded() -> MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.background_compaction_schedule.mark_due();
+    event_loop.compaction_publication_degraded = true;
+
+    // Act
+    CompactionCoordinator::defer_failed_repair_retry(&mut event_loop, true, "publication");
+
+    // Assert
+    assert_eq!(
+        event_loop.background_maintenance_timeout(),
+        std::time::Duration::ZERO
+    );
     Ok(())
 }
 
@@ -401,6 +566,7 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
     event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .push(crate::metadata::FileMeta {
             name: input.clone(),

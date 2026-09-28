@@ -137,7 +137,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     el.state.wal.frontiers.set_cloud_durable_for_test(81);
     el.state.limits.l0_compaction_trigger = 4;
     el.state.set_compaction_enabled(true);
-    el.state.manifest.next_sst_seqs.insert(0, 5);
+    el.state.manifest.test_mut().next_sst_seqs.insert(0, 5);
     for number in 1..=4 {
         let name = crate::cloud_layout::file_name(0, 0, number);
         let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
@@ -1454,7 +1454,7 @@ fn publish_remote_wal_bytes_for_test(
 
 fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence: u64) {
     el.state.wal.current_segment_id = segment_id + 1;
-    el.state.manifest.last_persisted_sequence = max_sequence;
+    el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
         .acked_segments
@@ -1479,7 +1479,7 @@ fn seed_cloud_prune_candidate_with_records(
     records: Vec<crate::wal::WalRecord>,
 ) {
     el.state.wal.current_segment_id = segment_id + 1;
-    el.state.manifest.last_persisted_sequence = max_sequence;
+    el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
         .acked_segments
@@ -1495,17 +1495,21 @@ fn seed_cloud_prune_candidate_with_records(
 }
 
 fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: 128,
-        cf_id: 0,
-        smallest_key: Some(b"a".to_vec()),
-        largest_key: Some(b"z".to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(max_sequence),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: 128,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
 }
 
 fn add_manifest_sst_meta_for_test(
@@ -1517,18 +1521,22 @@ fn add_manifest_sst_meta_for_test(
     largest_seq: u64,
 ) {
     let bytes = valid_sst_bytes_for_test(key, b"value", largest_seq);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id,
-        smallest_key: Some(key.to_vec()),
-        largest_key: Some(key.to_vec()),
-        smallest_seq: Some(smallest_seq),
-        largest_seq: Some(largest_seq),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id,
+            smallest_key: Some(key.to_vec()),
+            largest_key: Some(key.to_vec()),
+            smallest_seq: Some(smallest_seq),
+            largest_seq: Some(largest_seq),
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
 }
 
@@ -1609,19 +1617,23 @@ fn add_valid_manifest_sst_for_test(
     max_sequence: u64,
 ) -> Vec<u8> {
     let bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", max_sequence);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id: 0,
-        smallest_key: Some(b"prune-candidate".to_vec()),
-        largest_key: Some(b"prune-candidate".to_vec()),
-        smallest_seq: Some(max_sequence),
-        largest_seq: Some(max_sequence),
-        key_bounds_complete: true,
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"prune-candidate".to_vec()),
+            largest_key: Some(b"prune-candidate".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
     bytes
 }
@@ -1635,18 +1647,22 @@ fn add_valid_value_manifest_sst_with_expiration_for_test(
     expiration: u64,
 ) -> Vec<u8> {
     let bytes = valid_value_sst_bytes_with_expiration_for_test(key, value, seq, expiration);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id: 0,
-        smallest_key: Some(key.to_vec()),
-        largest_key: Some(key.to_vec()),
-        smallest_seq: Some(seq),
-        largest_seq: Some(seq),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(key.to_vec()),
+            largest_key: Some(key.to_vec()),
+            smallest_seq: Some(seq),
+            largest_seq: Some(seq),
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
     bytes
 }
@@ -1658,18 +1674,22 @@ fn add_valid_point_tombstone_manifest_sst_for_test(
     seq: u64,
 ) -> Vec<u8> {
     let bytes = valid_point_tombstone_sst_bytes_for_test(key, seq);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id: 0,
-        smallest_key: Some(key.to_vec()),
-        largest_key: Some(key.to_vec()),
-        smallest_seq: Some(seq),
-        largest_seq: Some(seq),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(key.to_vec()),
+            largest_key: Some(key.to_vec()),
+            smallest_seq: Some(seq),
+            largest_seq: Some(seq),
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
     bytes
 }
@@ -1682,18 +1702,22 @@ fn add_valid_range_tombstone_manifest_sst_for_test(
     seq: u64,
 ) -> Vec<u8> {
     let bytes = valid_range_tombstone_sst_bytes_for_test(start, end, seq);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id: 0,
-        smallest_key: Some(start.to_vec()),
-        largest_key: Some(end.to_vec()),
-        smallest_seq: Some(seq),
-        largest_seq: Some(seq),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(start.to_vec()),
+            largest_key: Some(end.to_vec()),
+            smallest_seq: Some(seq),
+            largest_seq: Some(seq),
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
     bytes
 }
@@ -2312,7 +2336,7 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.state.manifest.last_persisted_sequence = 10;
+    el.state.manifest.test_mut().last_persisted_sequence = 10;
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(crate::common::MidgeError::Internal)?;
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -2362,7 +2386,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.state.manifest.last_persisted_sequence = 10;
+    el.state.manifest.test_mut().last_persisted_sequence = 10;
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(crate::common::MidgeError::Internal)?;
 
@@ -2443,7 +2467,7 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.state.manifest.last_persisted_sequence = 30;
+    el.state.manifest.test_mut().last_persisted_sequence = 30;
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(crate::common::MidgeError::Internal)?;
 
@@ -3022,10 +3046,12 @@ fn should_retry_reclamation_discovery_after_journal_append_failure(
     let cf_id = el
         .state
         .manifest
+        .test_mut()
         .create_column_family("journal-retry-drop".to_string());
     assert!(el
         .state
         .manifest
+        .test_mut()
         .delete_column_family_with_reclamation(cf_id, 0, Vec::new()));
     fail::cfg(
         "midge::manifest::inject_no_space_on_append_edit_batch",
@@ -3626,18 +3652,22 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
 
     let input_sst = "cloud-gc-input.sst";
     let input_bytes = valid_sst_bytes_for_test(b"obsolete", b"value", 10);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: input_sst.to_string(),
-        level: 0,
-        size_bytes: input_bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&input_bytes)),
-        cf_id: 0,
-        smallest_key: Some(b"obsolete".to_vec()),
-        largest_key: Some(b"obsolete".to_vec()),
-        smallest_seq: Some(10),
-        largest_seq: Some(10),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: input_sst.to_string(),
+            level: 0,
+            size_bytes: input_bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&input_bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"obsolete".to_vec()),
+            largest_key: Some(b"obsolete".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            ..Default::default()
+        });
     write_test_file(el.state.sst_dir.join(input_sst), &input_bytes);
     cloud_persistence(
         el.cloud_coordinator
@@ -4105,18 +4135,22 @@ fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_
         .set_cloud_durable_for_test(max_sequence);
 
     let bytes = valid_sst_bytes_for_test(b"other-key", b"value", max_sequence);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id: 0,
-        smallest_key: Some(b"prune-candidate".to_vec()),
-        largest_key: Some(b"prune-candidate".to_vec()),
-        smallest_seq: Some(max_sequence),
-        largest_seq: Some(max_sequence),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"prune-candidate".to_vec()),
+            largest_key: Some(b"prune-candidate".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(&el, sst_name), &bytes);
 
     el.prune_cloud_wal_segments_covered_by_manifest();
@@ -4155,18 +4189,22 @@ fn should_not_prune_remote_wal_when_manifest_bounds_cover_absent_value(
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
     let bytes = valid_sst_bytes_without_key_for_test(max_sequence);
-    el.state.manifest.files.push(crate::metadata::FileMeta {
-        name: sst_name.to_string(),
-        level: 0,
-        size_bytes: bytes.len() as u64,
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        cf_id: 0,
-        smallest_key: Some(b"a".to_vec()),
-        largest_key: Some(b"z".to_vec()),
-        smallest_seq: Some(max_sequence),
-        largest_seq: Some(max_sequence),
-        ..Default::default()
-    });
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            smallest_seq: Some(max_sequence),
+            largest_seq: Some(max_sequence),
+            ..Default::default()
+        });
     write_test_file(remote_sst_path_for_test(&el, sst_name), &bytes);
 
     // Act
@@ -4200,7 +4238,7 @@ fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_covera
         .wal
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
-    el.state.manifest.last_persisted_sequence = max_sequence - 1;
+    el.state.manifest.test_mut().last_persisted_sequence = max_sequence - 1;
 
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
@@ -5274,7 +5312,7 @@ fn should_ignore_listing_only_ssts_when_deciding_remote_wal_cleanup(
         .wal
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
-    el.state.manifest.last_persisted_sequence = 0;
+    el.state.manifest.test_mut().last_persisted_sequence = 0;
     write_test_file(
         remote_sst_path_for_test(&el, "uploaded-but-uncommitted.sst"),
         b"listing-only object",

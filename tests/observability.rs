@@ -237,6 +237,160 @@ mod telemetry_integration {
     }
 }
 
+#[path = "../benches/bench_support/read_amp.rs"]
+mod read_amp_bench_fixture;
+
+#[path = "../benches/bench_support/config.rs"]
+mod config;
+#[path = "../benches/bench_support/ycsb.rs"]
+mod ycsb_bench_support;
+
+mod ycsb_benchmark_observations {
+    use super::ycsb_bench_support::{record_runtime_report, RuntimePerfReport};
+    use cntryl_stress::{
+        LogicalUnit, ObservationUnit, OperationOutcome, StressRunner, StressRunnerConfig,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn should_expose_typed_runtime_observations_when_ycsb_sample_completes() {
+        // Arrange
+        let report = RuntimePerfReport {
+            write_stalls_total: 2,
+            wal_append_count: 11,
+            cache_hits: 3,
+            cache_misses: 1,
+            candidate_sst_files_checked: 17,
+            data_blocks_read: 9,
+            cloud_async_wal_uploads_completed: 4,
+            cloud_async_wal_uploads_failed: 1,
+            ..RuntimePerfReport::default()
+        };
+
+        // Act
+        let observations = report.diagnostic_observations();
+
+        // Assert
+        assert!(observations.contains(&("write_stalls", 2.0, ObservationUnit::Count)));
+        assert!(observations.contains(&("wal_append_count", 11.0, ObservationUnit::Count)));
+        assert!(observations.contains(&("cache_hit_ratio", 0.75, ObservationUnit::Ratio)));
+        assert!(observations.contains(&(
+            "candidate_sst_files_checked",
+            17.0,
+            ObservationUnit::Count
+        )));
+        assert!(observations.contains(&("data_blocks_read", 9.0, ObservationUnit::Count)));
+        assert!(observations.contains(&(
+            "cloud_async_wal_uploads_completed",
+            4.0,
+            ObservationUnit::Count
+        )));
+        assert!(observations.contains(&(
+            "cloud_async_wal_uploads_failed",
+            1.0,
+            ObservationUnit::Count
+        )));
+    }
+
+    #[test]
+    fn should_keep_large_runtime_counter_finite_when_recording_observation() {
+        // Arrange
+        let large_report = RuntimePerfReport {
+            wal_append_count: u64::MAX,
+            cache_hits: u64::MAX,
+            ..RuntimePerfReport::default()
+        };
+
+        // Act
+        let observations = large_report.diagnostic_observations();
+
+        // Assert
+        assert!(observations.iter().any(|(name, value, unit)| {
+            *name == "wal_append_count" && value.is_finite() && *unit == ObservationUnit::Count
+        }));
+        assert!(observations.contains(&("cache_hit_ratio", 1.0, ObservationUnit::Ratio)));
+    }
+
+    #[test]
+    fn should_count_cloud_upload_failures_when_ycsb_report_is_recorded() {
+        // Arrange
+        let output = tempfile::tempdir().expect("temporary stress artifacts");
+        let mut config = StressRunnerConfig::default();
+        config.samples = 1;
+        config.warmup_samples = 0;
+        config.output_dir = output.path().to_path_buf();
+        let mut runner = StressRunner::with_config("ycsb-runtime-observations-test", config);
+        runner.reporters(Vec::new());
+        let report = RuntimePerfReport {
+            cloud_async_wal_uploads_failed: 2,
+            ..RuntimePerfReport::default()
+        };
+
+        // Act
+        runner.run("cloud_upload_failures", |ctx| {
+            ctx.record_external_outcome(
+                "cloud_upload_failures",
+                Duration::from_millis(1),
+                LogicalUnit::new("operation"),
+                OperationOutcome::new(3, 1),
+            );
+            record_runtime_report(ctx, &report);
+        });
+        let run = runner.finish();
+
+        // Assert
+        let summary = &run.summaries[0];
+        assert!(!summary.correctness.passed);
+        assert_eq!(summary.correctness.counters.failures, 2);
+        assert!(summary.observations.iter().any(|observation| {
+            observation.name == "cloud_async_wal_uploads_failed"
+                && observation.unit == ObservationUnit::Count
+        }));
+    }
+}
+
+mod read_amplification_benchmark {
+    use super::read_amp_bench_fixture::{
+        metrics_delta, run_workload, ReadAmpFixture, ReadWorkload,
+    };
+
+    #[test]
+    fn should_record_engine_read_metrics_when_ssts_are_flushed() {
+        // Arrange
+        let fixture = ReadAmpFixture::new();
+        let workload = ReadWorkload::new(64, 4);
+        let read_before = fixture.engine.metrics().get_read_amp_metrics().unwrap();
+        let runtime_before = fixture.engine.metrics().get_runtime_metrics().unwrap();
+        let path_before = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+
+        // Act
+        let result = run_workload(&fixture, &workload);
+        let read_after = fixture.engine.metrics().get_read_amp_metrics().unwrap();
+        let runtime_after = fixture.engine.metrics().get_runtime_metrics().unwrap();
+        let path_after = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+        let delta = metrics_delta(&read_before, &read_after, &runtime_before, &runtime_after);
+
+        // Assert
+        assert_eq!(result.point_reads, workload.expected_point_reads());
+        assert_eq!(result.point_hits, 48);
+        assert_eq!(result.point_misses, 16);
+        assert_eq!(result.scans, workload.expected_scans());
+        assert_eq!(result.scan_rows, 32);
+        assert_eq!(delta.reads, result.point_reads);
+        assert!(delta.ssts_touched >= result.point_hits);
+        assert!(delta.l0_ssts_touched >= result.point_hits);
+        assert!(delta.blocks_read > 0);
+        assert!(delta.cache_hits > 0);
+        assert!(delta.cache_misses > 0);
+        assert!(path_after.bloom_checks > path_before.bloom_checks);
+        assert!(path_after.bloom_rejects > path_before.bloom_rejects);
+    }
+}
+
 mod read_amp_api {
     use cntryl_midge::{
         ColumnFamilyHandle, Engine, MidgeResult, OpenOptions, TransactionMode, WriteOptions,

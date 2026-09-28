@@ -640,8 +640,7 @@ impl EventLoop {
             sst_name,
             crate::runtime::PublicationPhase::ManifestPublished,
         )?;
-        self.state.manifest.last_persisted_sequence =
-            self.state.manifest.last_persisted_sequence.max(sequence);
+        self.state.manifest.advance_persisted_sequence(sequence);
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.state.clear_flush_publication_intent(sst_name)?;
         self.mirror_metadata_after_local_commit("test flush publication")?;

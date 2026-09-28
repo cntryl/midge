@@ -202,7 +202,7 @@ fn run_workload_a_with_distribution(
 
     measured.record_latencies(ctx);
     let perf = ycsb::runtime_perf_report(engine.as_ref(), perf_start);
-    ycsb::record_runtime_correctness(ctx, &perf);
+    ycsb::record_runtime_report(ctx, &perf);
 }
 
 fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {

@@ -1543,6 +1543,7 @@ fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> Mi
         .event_loop
         .state
         .manifest
+        .test_mut()
         .files
         .extend((0..2).map(|index| crate::metadata::FileMeta {
             name: format!("l0-{index}.sst"),
