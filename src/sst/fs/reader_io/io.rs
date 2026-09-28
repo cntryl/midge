@@ -1,4 +1,4 @@
-use super::{BlockHandle, SstFileIo, SstVerificationStats};
+use super::{BlockHandle, SstFileIo, SstSummaryProgress, SstVerificationStats};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::File;
 use crate::io::FsError;
@@ -52,6 +52,16 @@ impl SstFileIo {
             let _ = BlockBloomFilter::deserialize(&bloom)?;
         }
 
+        let mut summary = SstSummaryProgress::default();
+        for tombstone in &self.range_tombstones {
+            if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+                return Err(MidgeError::Timeout(
+                    "SST verification deadline expired".into(),
+                ));
+            }
+            summary.observe(file_size, &tombstone.start, tombstone.seq, None)?;
+            summary.observe(file_size, &tombstone.end, tombstone.seq, None)?;
+        }
         for (_, handle) in &index {
             if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
                 return Err(MidgeError::Timeout(
@@ -60,12 +70,42 @@ impl SstFileIo {
             }
             Self::validate_block_handle(*handle, self.block_region_end, "data")?;
             let block = self.read_block(handle)?;
-            let _ = self.scan_block_entries_from_bytes(&block)?;
+            for entry in self.scan_block_entries_from_bytes(&block)? {
+                if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+                    return Err(MidgeError::Timeout(
+                        "SST verification deadline expired".into(),
+                    ));
+                }
+                summary.observe(file_size, &entry.key, entry.sequence, None)?;
+            }
+        }
+
+        if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+            return Err(MidgeError::Timeout(
+                "SST verification deadline expired".into(),
+            ));
+        }
+        let summary = summary
+            .summary
+            .ok_or_else(|| MidgeError::Corruption("SST contains no publishable entries".into()))?;
+        if self
+            .smallest_key
+            .as_ref()
+            .is_some_and(|key| summary.smallest_key.as_slice() < key.as_slice())
+            || self
+                .largest_key
+                .as_ref()
+                .is_some_and(|key| summary.largest_key.as_slice() > key.as_slice())
+        {
+            return Err(MidgeError::Corruption(
+                "SST persisted key range hides decoded entries".into(),
+            ));
         }
 
         Ok(SstVerificationStats {
             size_bytes: file_size,
             data_blocks: u64::try_from(index.len()).unwrap_or(u64::MAX),
+            summary,
         })
     }
 

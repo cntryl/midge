@@ -1583,6 +1583,132 @@ mod compatibility_fixtures {
     }
 
     #[test]
+    fn should_reject_manifest_bounds_when_valid_sst_summary_disagrees() {
+        // Arrange: the release fixture has a valid SST and a readable point value.
+        let baseline = copy_fixture_dir("v3_populated_v4_sst_db");
+        let baseline_report = cntryl_midge::StorageVerifier::verify_path(baseline.path())
+            .expect("verify unmodified fixture");
+        assert_eq!(baseline_report.health, EngineHealth::Healthy);
+        let mut baseline_engine = Engine::open(
+            OpenOptions::local(baseline.path())
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build baseline options"),
+        )
+        .expect("open unmodified fixture");
+        let cf = baseline_engine
+            .get_column_family("default")
+            .expect("fixture column family");
+        let read = baseline_engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin baseline read");
+        assert_eq!(
+            read.get(b"fixture/alpha")
+                .expect("read baseline point")
+                .as_deref(),
+            Some(b"value-alpha".as_slice())
+        );
+        drop(read);
+        baseline_engine
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown baseline engine");
+
+        for wrong_key_bounds in [true, false] {
+            let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+            for name in ["manifest.json", "manifest.snapshot.json"] {
+                let path = temp.path().join(name);
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).expect("read fixture manifest"))
+                        .expect("decode fixture manifest");
+                let file = manifest["files"][0]
+                    .as_object_mut()
+                    .expect("fixture SST metadata");
+                if wrong_key_bounds {
+                    file.insert("smallest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert("largest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert("key_bounds_complete".into(), serde_json::json!(true));
+                } else {
+                    file.insert("smallest_seq".into(), serde_json::json!(99));
+                    file.insert("largest_seq".into(), serde_json::json!(99));
+                }
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&manifest).expect("encode manifest"),
+                )
+                .expect("write modified fixture manifest");
+            }
+
+            // Act: SST bytes and their recorded size and CRC are unchanged.
+            let result = cntryl_midge::StorageVerifier::verify_path(temp.path());
+
+            // Assert: neither incorrect key bounds nor sequence bounds can pass.
+            assert!(
+                matches!(result, Err(MidgeError::Corruption(_))),
+                "wrong_key_bounds={wrong_key_bounds}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_verify_manifest_key_bounds_according_to_trust_state() {
+        for complete in [true, false] {
+            // Arrange: complete bounds agree with the SST; older advisory bounds
+            // may disagree without hiding a point key from readers.
+            let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+            for name in ["manifest.json", "manifest.snapshot.json"] {
+                let path = temp.path().join(name);
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).expect("read fixture manifest"))
+                        .expect("decode fixture manifest");
+                let file = manifest["files"][0]
+                    .as_object_mut()
+                    .expect("fixture SST metadata");
+                file.insert("key_bounds_complete".into(), serde_json::json!(complete));
+                if !complete {
+                    file.insert("smallest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert("largest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                }
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&manifest).expect("encode manifest"),
+                )
+                .expect("write fixture manifest");
+            }
+
+            // Act
+            let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+                .expect("valid complete or advisory bounds must verify");
+            let mut engine = Engine::open(
+                OpenOptions::local(temp.path())
+                    .recovery_policy(RecoveryPolicy::Strict)
+                    .build()
+                    .expect("build fixture options"),
+            )
+            .expect("open fixture");
+            let cf = engine
+                .get_column_family("default")
+                .expect("fixture column family");
+            let read = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin fixture read");
+
+            // Assert
+            assert_eq!(report.health, EngineHealth::Healthy);
+            assert_eq!(
+                read.get(b"fixture/alpha")
+                    .expect("read point through fixture")
+                    .as_deref(),
+                Some(b"value-alpha".as_slice()),
+                "complete={complete}"
+            );
+            drop(read);
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown fixture engine");
+        }
+    }
+
+    #[test]
     fn should_reject_v2_empty_fixture_given_breaking_v4_sst_format() {
         // Arrange
         let temp = copy_fixture_dir("v2_empty_db");
