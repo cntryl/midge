@@ -1,6 +1,6 @@
 # Midge operator runbook
 
-Midge 0.2.0 is an embedded, single-process Rust LSM engine. This is a local-first
+Midge 0.3.0 is an embedded, single-process Rust LSM engine. This is a local-first
 operator checklist for evaluation and controlled deployments; it is not a
 production endorsement.
 

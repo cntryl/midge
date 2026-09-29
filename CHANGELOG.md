@@ -5,14 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) formatting.
 
-Midge is currently in the 0.2 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
+Midge is currently in the 0.3 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-09-29
 
 ### Added
 
 - Versioned `midge verify --json` success and error output as schema version 1,
   with operator guidance and full-shape compatibility regressions.
+
+### Changed
+
+- Provider-backed cloud metadata now commits immutable control-file generations
+  through a version 2 lease descriptor. The version 2 DDL registry is fenced to
+  the successor's lease epoch before recovery or serving requests. Legacy
+  provider-backed prefixes cannot be opened in place by this release.
+- Default block-cache LRU admits concurrent shard reads and samples repeat-hit
+  recency; its first hit after admission still refreshes recency. TinyLFU and
+  CLOCK-Pro retain per-hit updates. Cache accounting charges eight additional
+  bytes per resident entry.
+
+### Fixed
+
+- Persist newly created database directories before startup writes and reject
+  unsafe rooted directory layouts.
+- Check complete manifest and SST key bounds against decoded SST entries during
+  storage verification, preventing a healthy verdict for hidden persisted keys.
+- Keep prior SST coverage values charged until replacement during cloud WAL
+  replay and avoid copying WAL payloads for coverage probes.
+- Bootstrap a fresh provider-backed cloud database with a complete committed
+  metadata generation before recovery. Interrupted pre-commit attempts can
+  retry with the same empty cache; unproved local or remote history still fails
+  closed.
+
+### Upgrade and rollback
+
+- Local database FORMAT 4 and SST V4 are unchanged. Stop writes, complete
+  shutdown, and preserve a verified database copy before upgrading from
+  `0.2.0`; use `midge verify` and application recovery tests on a separate copy.
+  Consumers of earlier unversioned CLI JSON must recognize schema version 1.
+- Provider-backed cloud databases with legacy lease and mutable metadata
+  require offline logical export using `0.2.0` and import with `0.3.0` into a
+  new empty prefix and fresh local cache. Preserve application metadata needed
+  to reconstruct TTL expiration. See the [migration guide](docs/operations/migration-guide.md).
+- Rollback is supported with constraints: restore the preserved pre-upgrade
+  local database or original cloud prefix with `0.2.0`. Binary rollback against
+  a `0.3.0` cloud prefix is unsupported; writes after cutover need separate
+  reconciliation.
+
+### Known risks
+
+- Midge remains pre-1.0 and single-process. The block-cache change improves
+  cache-local read scaling, but paired synthetic Engine diagnostics did not
+  establish an end-to-end latency gain and recorded higher sampled p99 in
+  some workloads. Review the [support matrix](docs/development/support-matrix.md)
+  and qualify deployment-specific cloud configuration and capacity.
 
 ## [0.2.0] - 2026-09-27
 
@@ -303,7 +352,8 @@ Midge is currently in the 0.2 release line. Compatibility expectations for pre-1
   to the capabilities and qualification conditions in the support matrix; API,
   operational, and on-disk compatibility may change in a future 0.x minor release.
 
-[Unreleased]: https://github.com/cntryl/midge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cntryl/midge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cntryl/midge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/cntryl/midge/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/cntryl/midge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cntryl/midge/releases/tag/v0.1.0
