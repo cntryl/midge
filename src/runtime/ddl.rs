@@ -530,6 +530,30 @@ pub(crate) fn fence_remote_registry_on_startup(
     }
 }
 
+/// An uncommitted metadata lease may describe a new database only when the
+/// separately fenced DDL registry has no prior column-family decisions.
+pub(crate) fn require_empty_registry_for_metadata_bootstrap(
+    storage: &HybridStorage,
+    authority: &DdlLeaseAuthority,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    authority.validate(deadline)?;
+    let (remote, _) = read_remote_registry_within(storage, deadline)?;
+    authority.validate(deadline)?;
+    let Some(remote) = remote.as_ref() else {
+        return Err(MidgeError::RecoveryFailed(
+            "cloud DDL registry is missing during metadata bootstrap".into(),
+        ));
+    };
+    require_current_registry(Some(remote), authority)?;
+    if remote.epoch != 0 || !remote.column_families.is_empty() || !remote.operations.is_empty() {
+        return Err(MidgeError::RecoveryFailed(
+            "cannot bootstrap empty cloud metadata over existing DDL state".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
     match edit {
         ManifestEdit::CreateColumnFamily { id, name, .. } => state
