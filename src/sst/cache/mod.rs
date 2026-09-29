@@ -3,6 +3,10 @@
 //! Provides a sharded LRU/TinyLFU/CLOCK-Pro cache for SST blocks with:
 //! - **Sharding**: 16 independent shards to reduce lock contention
 //! - **Pluggable policies**: LRU, `TinyLFU`, CLOCK-Pro eviction
+//! - **LRU hit sampling**: Each shard records the first resident hit after an
+//!   admission and samples about one in eight repeat hits. A later isolated
+//!   hit may be missed; admission, capacity, and metadata-block protection
+//!   remain synchronous. Direct `LruPolicy` calls update on every access.
 //! - **Admission**: Insertion is capacity-gated only; there is no separate
 //!   second-access admission gate.
 //! - **Metrics**: Hit/miss/eviction tracking per shard
@@ -51,7 +55,8 @@ impl BlockCache {
     ///
     /// `capacity_bytes`: Total cache capacity in bytes
     /// `num_shards`: Number of shards (default 16)
-    /// `policy_type`: Eviction policy
+    /// `policy_type`: Eviction policy. LRU samples repeat-hit recency inside
+    /// the cache; `TinyLFU` and CLOCK-Pro update on every hit.
     #[must_use]
     pub fn new(capacity_bytes: u64, num_shards: usize, policy_type: CachePolicyType) -> Self {
         let requested_shards = num_shards.max(1);
@@ -89,7 +94,8 @@ impl BlockCache {
         &self.shards[shard_idx]
     }
 
-    /// Get a cached block
+    /// Get a cached block. LRU records the first hit after an admission and
+    /// samples later hits; all hits are counted in metrics.
     #[must_use]
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).get(key)

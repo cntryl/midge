@@ -411,6 +411,33 @@ impl ClientRunStats {
     }
 }
 
+/// Join every client before reporting a failure, so a partial set of
+/// operation counts can never be mistaken for a successful benchmark run.
+fn collect_client_runs(handles: Vec<thread::JoinHandle<ClientRunStats>>) -> (u64, Histogram<u64>) {
+    let mut total_ops = 0_u64;
+    let mut latency_us = Histogram::<u64>::new(3).expect("create aggregate latency histogram");
+    let mut first_failure = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(result) => {
+                total_ops = total_ops.wrapping_add(result.operations);
+                latency_us
+                    .add(&result.latency_us)
+                    .expect("merge compatible latency histograms");
+            }
+            Err(failure) => {
+                if first_failure.is_none() {
+                    first_failure = Some(failure);
+                }
+            }
+        }
+    }
+    if let Some(failure) = first_failure {
+        std::panic::resume_unwind(failure);
+    }
+    (total_ops, latency_us)
+}
+
 #[derive(Clone, Copy)]
 pub struct XorShift64 {
     state: u64,
@@ -1080,18 +1107,10 @@ where
     thread::sleep(duration);
     stop.store(true, Ordering::Release);
 
-    if let Some(h) = watchdog_handle {
-        let _ = h.join();
-    }
-
-    let mut total_ops: u64 = 0;
-    let mut latency_us = Histogram::<u64>::new(3).expect("create aggregate latency histogram");
-    for h in handles {
-        let result = h.join().unwrap_or_else(|_| ClientRunStats::empty());
-        total_ops = total_ops.wrapping_add(result.operations);
-        latency_us
-            .add(&result.latency_us)
-            .expect("merge compatible latency histograms");
+    let watchdog_failure = watchdog_handle.and_then(|handle| handle.join().err());
+    let (total_ops, latency_us) = collect_client_runs(handles);
+    if let Some(failure) = watchdog_failure {
+        std::panic::resume_unwind(failure);
     }
 
     if total_ops == 0 {
@@ -1159,15 +1178,7 @@ where
     barrier.wait();
     let started_at = Instant::now();
 
-    let mut total_ops = 0u64;
-    let mut latency_us = Histogram::<u64>::new(3).expect("create aggregate latency histogram");
-    for handle in handles {
-        let result = handle.join().unwrap_or_else(|_| ClientRunStats::empty());
-        total_ops = total_ops.wrapping_add(result.operations);
-        latency_us
-            .add(&result.latency_us)
-            .expect("merge compatible latency histograms");
-    }
+    let (total_ops, latency_us) = collect_client_runs(handles);
     stop.store(true, Ordering::Release);
     let elapsed = started_at.elapsed();
 

@@ -6,9 +6,36 @@ use crate::sst::cache::policy::{CachePolicy, CachePolicyType};
 use crate::sst::cache::value::CacheValue;
 use bytes::Bytes;
 use dashmap::DashMap;
+use parking_lot::RwLock;
+use std::cell::Cell;
 use std::convert::TryFrom;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
+
+const LRU_SAMPLE_MASK: u64 = 7;
+const LRU_SEED_STEP: u64 = 0x9e37_79b9_7f4a_7c15;
+static NEXT_LRU_SAMPLE_SEED: AtomicU64 = AtomicU64::new(0xd1b5_4a32_d192_ed03);
+
+thread_local! {
+    static LRU_SAMPLE_STATE: Cell<u64> = Cell::new(
+        NEXT_LRU_SAMPLE_SEED.fetch_add(LRU_SEED_STEP, Ordering::Relaxed) | 1
+    );
+}
+
+/// Record roughly one in eight LRU hits. A per-thread changing sequence keeps
+/// fixed scan positions from always being sampled or always being skipped.
+fn sample_lru_recency() -> bool {
+    LRU_SAMPLE_STATE.with(next_lru_sample)
+}
+
+fn next_lru_sample(state: &Cell<u64>) -> bool {
+    let mut value = state.get();
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    state.set(value);
+    ((value >> 32) & LRU_SAMPLE_MASK) == 0
+}
 
 /// A single cache shard (partition) with concurrent access
 ///
@@ -17,15 +44,25 @@ use std::sync::Mutex;
 /// synchronously before `put` returns.
 pub struct CacheShard {
     /// Map of cache key -> value.
-    entries: DashMap<CacheKey, CacheValue>,
+    entries: DashMap<CacheKey, CachedEntry>,
     /// Eviction policy
     policy: Box<dyn CachePolicy>,
-    /// Serialize cache mutations for consistent policy and metric updates.
-    mutation_lock: Mutex<()>,
+    /// Readers keep membership stable while a writer admits or evicts entries.
+    membership_lock: RwLock<()>,
+    /// LRU samples hit recency; other policies retain their exact hit updates.
+    sample_lru_hits: bool,
+    /// Advances whenever a value is admitted or replaced. A resident's first
+    /// hit after that admission epoch always refreshes LRU recency.
+    admission_epoch: AtomicU64,
     /// Metrics for this shard
     metrics: CacheMetrics,
     /// Maximum size in bytes
     max_bytes: u64,
+}
+
+struct CachedEntry {
+    value: CacheValue,
+    last_recorded_epoch: AtomicU64,
 }
 
 impl CacheShard {
@@ -40,7 +77,9 @@ impl CacheShard {
         Arc::new(Self {
             entries: DashMap::new(),
             policy: policy_type.create(),
-            mutation_lock: Mutex::new(()),
+            membership_lock: RwLock::new(()),
+            sample_lru_hits: policy_type == CachePolicyType::Lru,
+            admission_epoch: AtomicU64::new(0),
             metrics: CacheMetrics::new(),
             max_bytes,
         })
@@ -48,17 +87,43 @@ impl CacheShard {
 
     /// Get a cached value.
     ///
-    /// The entry lookup and policy update share the mutation boundary so a hit
-    /// cannot race an eviction into stale policy state.
+    /// A shared membership guard hides entries until admission and eviction
+    /// finish. LRU records the first hit per resident after each admission and
+    /// samples repeated hits to reduce recency lock contention. Every hit
+    /// still counts in cache metrics.
     pub fn get(&self, key: &CacheKey) -> Option<CacheValue> {
-        // A hit must linearize with eviction: if policy recency were updated
-        // after an evictor removed the entry, the policy could retain a stale
-        // key that no longer exists in the cache. Serialize the entry lookup
-        // and synchronous policy publication with put/remove/eviction.
-        let _lock = self.lock_mutation();
+        self.get_with_repeat_sampler(key, sample_lru_recency)
+    }
+
+    #[cfg(test)]
+    fn get_with_sample_decision(&self, key: &CacheKey, repeat_sample: bool) -> Option<CacheValue> {
+        self.get_with_repeat_sampler(key, || repeat_sample)
+    }
+
+    fn get_with_repeat_sampler(
+        &self,
+        key: &CacheKey,
+        sample_repeat: impl FnOnce() -> bool,
+    ) -> Option<CacheValue> {
+        let _membership = self.membership_lock.read();
         if let Some(value_ref) = self.entries.get(key) {
-            let value = value_ref.value().clone();
-            self.policy.on_access(*key);
+            let entry = value_ref.value();
+            let value = entry.value.clone();
+            let record_recency = if self.sample_lru_hits {
+                let epoch = self.admission_epoch.load(Ordering::Relaxed);
+                let last = entry.last_recorded_epoch.load(Ordering::Relaxed);
+                (last != epoch
+                    && entry
+                        .last_recorded_epoch
+                        .compare_exchange(last, epoch, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok())
+                    || sample_repeat()
+            } else {
+                true
+            };
+            if record_recency {
+                self.policy.on_access(*key);
+            }
             self.metrics.record_hit();
             Some(value)
         } else {
@@ -72,7 +137,7 @@ impl CacheShard {
     /// Returns true only if the value is admitted by capacity and remains visible
     /// after eviction completes.
     pub fn put(&self, key: CacheKey, value: &Bytes) -> bool {
-        let _lock = self.lock_mutation();
+        let _membership = self.membership_lock.write();
 
         let new_size = u64::try_from(CacheValue::charged_bytes(value.len())).unwrap_or(u64::MAX);
         if !self.can_fit_value(new_size) {
@@ -80,9 +145,21 @@ impl CacheShard {
         }
 
         let cache_value = CacheValue::new(value.clone());
-        self.insert_and_update_metrics(key, cache_value);
+        let prior_epoch = if self.sample_lru_hits {
+            self.admission_epoch.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+        self.insert_and_update_metrics(key, cache_value, prior_epoch);
         self.evict_if_needed();
-        self.entries.contains_key(&key)
+        let admitted = self.entries.contains_key(&key);
+        if admitted && self.sample_lru_hits {
+            // The exclusive membership guard keeps readers out until the new
+            // epoch is published. Failed self-eviction leaves it unchanged.
+            self.admission_epoch
+                .store(prior_epoch.wrapping_add(1), Ordering::Relaxed);
+        }
+        admitted
     }
 
     /// No single allocation may make a shard permanently exceed capacity.
@@ -97,13 +174,21 @@ impl CacheShard {
     }
 
     /// Insert value and update metrics accordingly
-    fn insert_and_update_metrics(&self, key: CacheKey, cache_value: CacheValue) {
+    fn insert_and_update_metrics(&self, key: CacheKey, cache_value: CacheValue, prior_epoch: u64) {
         let value_size = cache_value.size_bytes() as u64;
 
         // Check if entry already exists (DashMap returns old value if present)
-        if let Some(existing) = self.entries.insert(key, cache_value) {
+        if let Some(existing) = self.entries.insert(
+            key,
+            CachedEntry {
+                value: cache_value,
+                // Successful admission publishes the next epoch, so the
+                // first resident hit refreshes this key's recency.
+                last_recorded_epoch: AtomicU64::new(prior_epoch),
+            },
+        ) {
             // Updated existing entry - adjust for size difference
-            let old_size = existing.size_bytes() as u64;
+            let old_size = existing.value.size_bytes() as u64;
             self.metrics.add_memory(value_size);
             self.metrics.remove_memory(old_size);
         } else {
@@ -178,7 +263,7 @@ impl CacheShard {
             if let Some((_, value)) = self.entries.remove(&victim_key) {
                 // Successfully evicted - notify policy
                 self.policy.on_remove(victim_key);
-                return Some(value);
+                return Some(value.value);
             }
             // Victim was stale - notify policy and retry
             self.policy.on_stale(victim_key);
@@ -198,12 +283,12 @@ impl CacheShard {
     /// Remove a key from the cache
     #[cfg(any(test, feature = "internal-testing"))]
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
-        let _lock = self.lock_mutation();
+        let _membership = self.membership_lock.write();
         if let Some((_, value)) = self.entries.remove(key) {
             self.metrics
-                .remove_memory(u64::try_from(value.size_bytes()).unwrap_or(u64::MAX));
+                .remove_memory(u64::try_from(value.value.size_bytes()).unwrap_or(u64::MAX));
             self.policy.on_remove(*key);
-            Some(value)
+            Some(value.value)
         } else {
             None
         }
@@ -211,7 +296,7 @@ impl CacheShard {
 
     /// Remove every cached block for one SST.
     pub fn remove_sst(&self, sst_id: u64) -> usize {
-        let _lock = self.lock_mutation();
+        let _membership = self.membership_lock.write();
         let keys: Vec<CacheKey> = self
             .entries
             .iter()
@@ -225,7 +310,7 @@ impl CacheShard {
         for key in keys {
             if let Some((_, value)) = self.entries.remove(&key) {
                 self.metrics
-                    .remove_memory(u64::try_from(value.size_bytes()).unwrap_or(u64::MAX));
+                    .remove_memory(u64::try_from(value.value.size_bytes()).unwrap_or(u64::MAX));
                 self.policy.on_remove(key);
                 removed += 1;
             }
@@ -236,17 +321,10 @@ impl CacheShard {
     /// Clear all entries from the cache
     #[cfg(any(test, feature = "internal-testing"))]
     pub fn clear(&self) {
-        let _lock = self.lock_mutation();
+        let _membership = self.membership_lock.write();
         self.entries.clear();
         self.metrics.set_memory_bytes(0);
         self.policy.clear();
-    }
-
-    fn lock_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
-        match self.mutation_lock.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
     }
 
     /// Get cache metrics
@@ -383,7 +461,9 @@ mod tests {
                 state: Arc::clone(&state),
                 target,
             }),
-            mutation_lock: Mutex::new(()),
+            membership_lock: RwLock::new(()),
+            sample_lru_hits: true,
+            admission_epoch: AtomicU64::new(0),
             metrics: CacheMetrics::new(),
             max_bytes: CacheValue::charged_bytes(1) as u64,
         });
@@ -391,7 +471,7 @@ mod tests {
         state.pause_target.store(true, Ordering::SeqCst);
 
         let hit_shard = Arc::clone(&shard);
-        let hit = thread::spawn(move || hit_shard.get(&target));
+        let hit = thread::spawn(move || hit_shard.get_with_sample_decision(&target, false));
         wait_until(
             || state.target_access_entered.load(Ordering::SeqCst),
             "hit did not reach the policy publication barrier",
@@ -433,6 +513,363 @@ mod tests {
                 .contains(&target),
             "evicted entry must not remain in policy metadata"
         );
+    }
+
+    #[test]
+    fn should_let_unsampled_reader_finish_while_sampled_hit_updates_policy() {
+        // Arrange: pause one sampled hit inside its policy callback.
+        let paused_key = CacheKey::for_data(1, 0);
+        let other_key = CacheKey::for_data(2, 0);
+        let state = Arc::new(PausedHitState {
+            pause_target: AtomicBool::new(false),
+            target_access_entered: AtomicBool::new(false),
+            release_target: AtomicBool::new(false),
+            victim_selected: AtomicBool::new(false),
+            keys: std::sync::Mutex::new(HashSet::new()),
+        });
+        let shard = Arc::new(CacheShard {
+            entries: DashMap::new(),
+            policy: Box::new(PausedHitPolicy {
+                state: Arc::clone(&state),
+                target: paused_key,
+            }),
+            membership_lock: RwLock::new(()),
+            sample_lru_hits: true,
+            admission_epoch: AtomicU64::new(0),
+            metrics: CacheMetrics::new(),
+            max_bytes: 2 * CacheValue::charged_bytes(1) as u64,
+        });
+        assert!(shard.put(paused_key, &Bytes::from_static(b"a")));
+        assert!(shard.put(other_key, &Bytes::from_static(b"b")));
+        // Record each key's guaranteed first hit in this admission epoch so
+        // the second reader below exercises the actual unsampled repeat path.
+        assert!(shard.get_with_sample_decision(&paused_key, false).is_some());
+        assert!(shard.get_with_sample_decision(&other_key, false).is_some());
+        state.pause_target.store(true, Ordering::SeqCst);
+
+        // Act
+        let paused_shard = Arc::clone(&shard);
+        let paused_hit =
+            thread::spawn(move || paused_shard.get_with_sample_decision(&paused_key, true));
+        wait_until(
+            || state.target_access_entered.load(Ordering::SeqCst),
+            "sampled hit did not enter policy callback",
+        );
+        let other_shard = Arc::clone(&shard);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other_hit = thread::spawn(move || {
+            let found = other_shard
+                .get_with_sample_decision(&other_key, false)
+                .is_some();
+            tx.send(found).expect("reader result receiver remains open");
+        });
+        let completed_while_paused = rx.recv_timeout(std::time::Duration::from_secs(1));
+        state.release_target.store(true, Ordering::SeqCst);
+        assert!(paused_hit
+            .join()
+            .expect("sampled reader should finish")
+            .is_some());
+        other_hit.join().expect("unsampled reader should finish");
+
+        // Assert: the unsampled repeat read does not wait for policy callback.
+        assert_eq!(completed_while_paused.ok(), Some(true));
+    }
+
+    #[test]
+    fn should_hide_unadmitted_value_from_concurrent_reader() {
+        // Arrange: the policy pauses after admission inserts a new value,
+        // before the writer evicts that same entry and returns false.
+        let rejected = CacheKey::for_data(1, 0);
+        let resident = CacheKey::for_data(2, 0);
+        let state = Arc::new(PausedHitState {
+            pause_target: AtomicBool::new(false),
+            target_access_entered: AtomicBool::new(false),
+            release_target: AtomicBool::new(false),
+            victim_selected: AtomicBool::new(false),
+            keys: std::sync::Mutex::new(HashSet::new()),
+        });
+        let shard = Arc::new(CacheShard {
+            entries: DashMap::new(),
+            policy: Box::new(PausedHitPolicy {
+                state: Arc::clone(&state),
+                target: rejected,
+            }),
+            membership_lock: RwLock::new(()),
+            sample_lru_hits: true,
+            admission_epoch: AtomicU64::new(0),
+            metrics: CacheMetrics::new(),
+            max_bytes: CacheValue::charged_bytes(1) as u64,
+        });
+        assert!(shard.put(resident, &Bytes::from_static(b"a")));
+        state.pause_target.store(true, Ordering::SeqCst);
+
+        // Act
+        let put_shard = Arc::clone(&shard);
+        let put = thread::spawn(move || put_shard.put(rejected, &Bytes::from_static(b"b")));
+        wait_until(
+            || state.target_access_entered.load(Ordering::SeqCst),
+            "writer did not reach admission callback",
+        );
+        assert!(
+            shard.membership_lock.try_read().is_none(),
+            "writer must retain exclusive membership through eviction"
+        );
+        let read_shard = Arc::clone(&shard);
+        let read_started = Arc::new(AtomicBool::new(false));
+        let read_started_for_thread = Arc::clone(&read_started);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let read = thread::spawn(move || {
+            read_started_for_thread.store(true, Ordering::SeqCst);
+            tx.send(
+                read_shard
+                    .get_with_sample_decision(&rejected, false)
+                    .is_some(),
+            )
+            .expect("reader result receiver remains open");
+        });
+        wait_until(
+            || read_started.load(Ordering::SeqCst),
+            "reader did not start during admission",
+        );
+        let early_read = rx.recv_timeout(std::time::Duration::from_millis(20));
+        state.release_target.store(true, Ordering::SeqCst);
+
+        // Assert: a completed read cannot see a value rejected by admission.
+        let put_result = put.join().expect("writer should finish");
+        let returned_before_commit = early_read.is_ok();
+        let read_result = match early_read {
+            Ok(found) => found,
+            Err(_) => rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("reader should finish after writer"),
+        };
+        read.join().expect("reader should finish");
+        assert!(!returned_before_commit);
+        assert!(!put_result);
+        assert!(!read_result);
+        assert!(shard.get(&resident).is_some());
+    }
+
+    #[test]
+    fn should_keep_hot_blocks_when_sampled_reads_face_cold_admissions() {
+        // Arrange: compare a fixed sample sequence with exact LRU on the same
+        // hot-read/cold-admission stream. This is a cache-quality regression,
+        // not a guarantee that every isolated hot hit changes recency.
+        const HOT_KEYS: usize = 4;
+        const CAPACITY: usize = 8;
+        const COLD_PER_ROUND: usize = 4;
+        const ROUNDS: usize = 1_000;
+        let value = Bytes::from_static(b"v");
+        let capacity = (CAPACITY * CacheValue::charged_bytes(value.len())) as u64;
+        let sampled = CacheShard::new(capacity, CachePolicyType::Lru);
+        let exact = CacheShard::new(capacity, CachePolicyType::Lru);
+        let hot_keys: Vec<_> = (0..HOT_KEYS)
+            .map(|id| CacheKey::for_data(id as u64, 0))
+            .collect();
+        for id in 0..CAPACITY {
+            let key = CacheKey::for_data(id as u64, 0);
+            assert!(sampled.put(key, &value));
+            assert!(exact.put(key, &value));
+        }
+        let random_state = Cell::new(0x5eed_u64);
+        let mut sampled_hot_hits = 0;
+        let mut exact_hot_hits = 0;
+
+        // Act: each round reads the hot set, then admits enough cold blocks to
+        // evict the hot set if its reads did not refresh recency.
+        for round in 0..ROUNDS {
+            for key in &hot_keys {
+                let record_recency = next_lru_sample(&random_state);
+                if sampled
+                    .get_with_sample_decision(key, record_recency)
+                    .is_some()
+                {
+                    sampled_hot_hits += 1;
+                } else {
+                    assert!(sampled.put(*key, &value));
+                }
+                if exact.get_with_sample_decision(key, true).is_some() {
+                    exact_hot_hits += 1;
+                } else {
+                    assert!(exact.put(*key, &value));
+                }
+            }
+            for cold_index in 0..COLD_PER_ROUND {
+                let cold =
+                    CacheKey::for_data((CAPACITY + round * COLD_PER_ROUND + cold_index) as u64, 0);
+                assert!(sampled.put(cold, &value));
+                assert!(exact.put(cold, &value));
+            }
+        }
+
+        // Assert: the first hit after each admission is guaranteed, preserving
+        // the hot set under cold pressure.
+        assert_eq!(exact_hot_hits, HOT_KEYS * ROUNDS);
+        assert!(
+            sampled_hot_hits >= exact_hot_hits * 95 / 100,
+            "sampled hot hits {sampled_hot_hits} vs exact {exact_hot_hits}"
+        );
+        assert_eq!(sampled.len(), CAPACITY);
+        assert!(sampled.size_bytes() <= capacity);
+    }
+
+    #[test]
+    fn should_retain_five_hot_blocks_between_three_cold_admissions_without_repeat_samples() {
+        // Arrange: a small cold group repeatedly turns over an eight-block shard.
+        const HOT_KEYS: usize = 5;
+        const CAPACITY: usize = 8;
+        const COLD_PER_ROUND: usize = 3;
+        const ROUNDS: usize = 1_000;
+        let value = Bytes::from_static(b"v");
+        let capacity = (CAPACITY * CacheValue::charged_bytes(value.len())) as u64;
+        let sampled = CacheShard::new(capacity, CachePolicyType::Lru);
+        let exact = CacheShard::new(capacity, CachePolicyType::Lru);
+        let hot_keys: Vec<_> = (0..HOT_KEYS)
+            .map(|id| CacheKey::for_data(id as u64, 0))
+            .collect();
+        for id in 0..CAPACITY {
+            let key = CacheKey::for_data(id as u64, 0);
+            assert!(sampled.put(key, &value));
+            assert!(exact.put(key, &value));
+        }
+        let mut sampled_hot_hits = 0;
+        let mut exact_hot_hits = 0;
+
+        // Act
+        for round in 0..ROUNDS {
+            for key in &hot_keys {
+                if sampled.get_with_sample_decision(key, false).is_some() {
+                    sampled_hot_hits += 1;
+                } else {
+                    assert!(sampled.put(*key, &value));
+                }
+                if exact.get_with_sample_decision(key, true).is_some() {
+                    exact_hot_hits += 1;
+                } else {
+                    assert!(exact.put(*key, &value));
+                }
+            }
+            for cold_index in 0..COLD_PER_ROUND {
+                let cold =
+                    CacheKey::for_data((CAPACITY + round * COLD_PER_ROUND + cold_index) as u64, 0);
+                assert!(sampled.put(cold, &value));
+                assert!(exact.put(cold, &value));
+            }
+        }
+
+        // Assert: first hits after every admission protect the hot group.
+        assert_eq!(exact_hot_hits, HOT_KEYS * ROUNDS);
+        assert_eq!(sampled_hot_hits, exact_hot_hits);
+    }
+
+    #[test]
+    fn should_record_newly_admitted_keys_first_hit_after_other_key_becomes_newer() {
+        // Arrange
+        let value = Bytes::from_static(b"v");
+        let capacity = 2 * CacheValue::charged_bytes(value.len()) as u64;
+        let shard = CacheShard::new(capacity, CachePolicyType::Lru);
+        let first = CacheKey::for_data(1, 0);
+        let newly_admitted = CacheKey::for_data(2, 0);
+        let incoming = CacheKey::for_data(3, 0);
+        assert!(shard.put(first, &value));
+        assert!(shard.put(newly_admitted, &value));
+
+        // Act: the older key is hit first. Even with repeat sampling disabled,
+        // the new key's first hit must then refresh its recency.
+        assert!(shard.get_with_sample_decision(&first, false).is_some());
+        assert!(shard
+            .get_with_sample_decision(&newly_admitted, false)
+            .is_some());
+        assert!(shard.put(incoming, &value));
+
+        // Assert
+        assert!(shard.get_with_sample_decision(&first, false).is_none());
+        assert!(shard
+            .get_with_sample_decision(&newly_admitted, false)
+            .is_some());
+        assert!(shard.get_with_sample_decision(&incoming, false).is_some());
+    }
+
+    #[test]
+    fn should_charge_the_epoch_added_to_each_resident_entry() {
+        // Arrange
+        let value_bytes = std::mem::size_of::<CacheValue>();
+
+        // Act
+        let resident_bytes = std::mem::size_of::<CachedEntry>();
+
+        // Assert: the eight-byte epoch is the only new per-entry field and
+        // the configured charge preserves the prior 64-byte bookkeeping bias.
+        assert_eq!(
+            resident_bytes,
+            value_bytes + std::mem::size_of::<AtomicU64>()
+        );
+        assert!(ENTRY_OVERHEAD_BYTES >= 64 + resident_bytes - value_bytes);
+    }
+
+    #[test]
+    fn should_not_advance_recency_epoch_for_rejected_data_admissions() {
+        // Arrange: protected metadata fills the shard. Each new data block
+        // can be inserted transiently but must evict itself before put returns.
+        let value = Bytes::from_static(b"v");
+        let shard = CacheShard::new(
+            CacheValue::charged_bytes(value.len()) as u64,
+            CachePolicyType::Lru,
+        );
+        let protected = CacheKey::for_index(1, 0);
+        assert!(shard.put(protected, &value));
+        assert!(shard.get_with_sample_decision(&protected, false).is_some());
+        let epoch_before = shard.admission_epoch.load(Ordering::Relaxed);
+        let last_recorded_before = shard
+            .entries
+            .get(&protected)
+            .expect("metadata remains resident")
+            .last_recorded_epoch
+            .load(Ordering::Relaxed);
+
+        // Act
+        for id in 2..18 {
+            assert!(!shard.put(CacheKey::for_data(id, 0), &value));
+        }
+        assert!(shard.get_with_sample_decision(&protected, false).is_some());
+
+        // Assert: failed puts do not force another metadata recency update.
+        assert_eq!(shard.admission_epoch.load(Ordering::Relaxed), epoch_before);
+        assert_eq!(
+            shard
+                .entries
+                .get(&protected)
+                .expect("metadata remains resident")
+                .last_recorded_epoch
+                .load(Ordering::Relaxed),
+            last_recorded_before
+        );
+        assert_eq!(shard.len(), 1);
+    }
+
+    #[test]
+    fn should_allow_repeat_unsampled_hot_hit_to_be_evicted() {
+        // Arrange
+        let value = Bytes::from_static(b"v");
+        let capacity = 2 * CacheValue::charged_bytes(value.len()) as u64;
+        let shard = CacheShard::new(capacity, CachePolicyType::Lru);
+        let oldest = CacheKey::for_data(1, 0);
+        let newer = CacheKey::for_data(2, 0);
+        let incoming = CacheKey::for_data(3, 0);
+        assert!(shard.put(oldest, &value));
+        assert!(shard.put(newer, &value));
+
+        // Act: both keys get their guaranteed first hit after admission.
+        // The later repeat hit on `newer` skips its LRU update.
+        assert!(shard.get_with_sample_decision(&newer, false).is_some());
+        assert!(shard.get_with_sample_decision(&oldest, false).is_some());
+        assert!(shard.get_with_sample_decision(&newer, false).is_some());
+        assert!(shard.put(incoming, &value));
+
+        // Assert: a repeat hit can still be missed within one admission epoch.
+        assert!(shard.get_with_sample_decision(&oldest, false).is_some());
+        assert!(shard.get_with_sample_decision(&newer, false).is_none());
+        assert!(shard.get_with_sample_decision(&incoming, false).is_some());
     }
 
     #[test]
