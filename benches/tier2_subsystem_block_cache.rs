@@ -4,7 +4,9 @@
 
 use cntryl_midge::__internal::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
-use cntryl_stress::{black_box, stress, stress_main, StressContext};
+use cntryl_stress::{
+    black_box, stress, stress_main, ObservationDirection, ObservationUnit, StressContext,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Barrier;
 
@@ -150,6 +152,147 @@ fn evict_10k(ctx: &mut StressContext) {
             }
             black_box(cache);
         },
+    );
+}
+
+/// Isolates the first writer after a broad hit burst. Cache construction and
+/// the scan run in setup, outside the timed put.
+#[stress(
+    tier = 2,
+    metadata(component = "block_cache", scenario = "scan_then_put")
+)]
+fn scan_then_put(ctx: &mut StressContext) {
+    measure_scan_then_put(ctx, 256, 64);
+    measure_scan_then_put(ctx, 4096, 8);
+}
+
+fn measure_scan_then_put(
+    ctx: &mut StressContext,
+    resident_blocks: usize,
+    operations_per_sample: u64,
+) {
+    let keys = PrecomputedKeys::linear(resident_blocks + 1);
+    let block = make_block_data_static();
+    let sizing_cache = BlockCache::new(1024 * 1024, 1, CachePolicyType::Lru);
+    assert!(sizing_cache.put(keys.get_linear(0), &block));
+    let per_block = sizing_cache.size_bytes();
+    let capacity =
+        u64::try_from(resident_blocks).expect("resident block count fits in u64") * per_block;
+    let next_key = keys.get_linear(resident_blocks);
+
+    let (cache, inserted) = ctx
+        .benchmark(format!("scan_then_put_{resident_blocks}"))
+        .samples(10)
+        .operations_per_sample(operations_per_sample)
+        .logical_unit(cntryl_stress::LogicalUnit::new("cache_block_insert"))
+        .parameter("resident_blocks", resident_blocks)
+        .parameter("scan_hits_before_put", resident_blocks)
+        .parameter("cache_shards", 1)
+        .parameter("cache_capacity_bytes", capacity)
+        .measure_with_setup(
+            || {
+                let cache = BlockCache::new(capacity, 1, CachePolicyType::Lru);
+                for index in 0..resident_blocks {
+                    assert!(cache.put(keys.get_linear(index), &block));
+                }
+                for index in 0..resident_blocks {
+                    assert!(cache.get(&keys.get_linear(index)).is_some());
+                }
+                cache
+            },
+            |cache| {
+                let inserted = cache.put(next_key, &block);
+                assert!(inserted, "post-scan block should be admitted");
+                black_box((cache, inserted))
+            },
+        );
+
+    assert!(inserted);
+    let evicted_originals = (0..resident_blocks)
+        .filter(|&index| cache.get(&keys.get_linear(index)).is_none())
+        .count();
+    assert_eq!(evicted_originals, 1);
+    assert!(cache.get(&next_key).is_some());
+    assert_eq!(cache.len(), resident_blocks);
+    assert!(cache.size_bytes() <= capacity);
+}
+
+/// Measures read throughput and eviction quality while cold admissions keep
+/// changing the cache's recency epoch. A hot miss includes its repair put.
+#[stress(
+    tier = 2,
+    metadata(component = "block_cache", scenario = "hot_cold_churn")
+)]
+fn hot_cold_churn(ctx: &mut StressContext) {
+    const HOT_KEYS: usize = 4;
+    const COLD_PER_ROUND: usize = 4;
+    const RESIDENT_BLOCKS: usize = 8;
+    const ROUNDS: usize = 1_000;
+
+    let keys = PrecomputedKeys::linear(RESIDENT_BLOCKS + COLD_PER_ROUND * ROUNDS);
+    let block = make_block_data_static();
+    let sizing_cache = BlockCache::new(1024 * 1024, 1, CachePolicyType::Lru);
+    assert!(sizing_cache.put(keys.get_linear(0), &block));
+    let per_block = sizing_cache.size_bytes();
+    let capacity = RESIDENT_BLOCKS as u64 * per_block;
+    let mut minimum_hot_hits = usize::MAX;
+
+    let completed = ctx
+        .benchmark("hot_cold_churn")
+        .samples(10)
+        .logical_unit(cntryl_stress::LogicalUnit::new("cache_block_operation"))
+        .parameter("resident_blocks", RESIDENT_BLOCKS)
+        .parameter("hot_keys", HOT_KEYS)
+        .parameter("cold_admissions_per_round", COLD_PER_ROUND)
+        .parameter("rounds", ROUNDS)
+        .parameter("setup_puts_per_batch", RESIDENT_BLOCKS)
+        .parameter("cache_shards", 1)
+        .parameter("cache_capacity_bytes", capacity)
+        .measure_batch(((HOT_KEYS + COLD_PER_ROUND) * ROUNDS) as u64, || {
+            let cache = BlockCache::new(capacity, 1, CachePolicyType::Lru);
+            for index in 0..RESIDENT_BLOCKS {
+                assert!(cache.put(keys.get_linear(index), &block));
+            }
+
+            let mut hot_hits = 0;
+            for round in 0..ROUNDS {
+                for hot_index in 0..HOT_KEYS {
+                    let hot = keys.get_linear(hot_index);
+                    if cache.get(&hot).is_some() {
+                        hot_hits += 1;
+                    } else {
+                        assert!(cache.put(hot, &block));
+                    }
+                }
+                for cold_index in 0..COLD_PER_ROUND {
+                    let cold =
+                        keys.get_linear(RESIDENT_BLOCKS + round * COLD_PER_ROUND + cold_index);
+                    assert!(cache.put(cold, &block));
+                }
+            }
+            minimum_hot_hits = minimum_hot_hits.min(hot_hits);
+            black_box((cache, hot_hits));
+        });
+
+    black_box(completed);
+    let hot_hits = u32::try_from(minimum_hot_hits).expect("hot hits fit in u32");
+    let attempted_hot_reads = u32::try_from(HOT_KEYS * ROUNDS).expect("hot reads fit in u32");
+    ctx.record_observation(
+        "minimum_hot_hits",
+        f64::from(hot_hits),
+        ObservationUnit::Count,
+        ObservationDirection::HigherIsBetter,
+    );
+    ctx.record_observation(
+        "minimum_hot_hit_ratio",
+        f64::from(hot_hits) / f64::from(attempted_hot_reads),
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
+    );
+    assert!(
+        minimum_hot_hits >= HOT_KEYS * ROUNDS * 95 / 100,
+        "hot-cold churn retained only {minimum_hot_hits} of {} hot reads",
+        HOT_KEYS * ROUNDS
     );
 }
 

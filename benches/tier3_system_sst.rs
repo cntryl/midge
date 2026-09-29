@@ -1,15 +1,25 @@
 //! Tier 3 — SST primitives
 //!
-//! Measures: cost of point seek, iterator construction, first advance
+//! Measures: cost of point seek, iterator construction, first advance, and
+//! bounded-cache SST point reads with cold admissions.
 //! NOT: full scans, iteration, payload processing
 
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_stress::{stress, stress_main, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 
-use cntryl_midge::Engine;
+use cntryl_midge::{
+    BlockCachePolicy, ColumnFamilyHandle, ColumnFamilyId, Engine, MemoryBudget, OpenOptions,
+    TransactionMode, WriteOptions,
+};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use stress_config::MidgeOptions;
+use tempfile::TempDir;
 
 const KEY_SIZE: usize = stress_config::bench_stress::KEY_SIZE;
 const VALUE_SIZE: usize = 64;
@@ -18,6 +28,282 @@ const SST_POINT_SEEK_BATCH_SIZE: usize = 1;
 const SST_RANGE_SEEK_BATCH_SIZE: usize = 64;
 const SST_FIXTURE_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const SST_POINT_SEEK_SAMPLE_COUNT: usize = 12;
+const CHURN_MEMORY_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+const CHURN_MEMTABLE_BYTES: usize = 8 * 1024 * 1024;
+const CHURN_KEYS_PER_SST: usize = 16_384;
+const CHURN_VALUE_BYTES: usize = 256;
+const CHURN_PROBES: usize = 512;
+const CHURN_KEYS_PER_PROBE: usize = 64;
+const CHURN_HOT_PROBES: usize = 64;
+const CHURN_MEASURED: Duration = Duration::from_secs(5);
+const CHURN_WARMUP: Duration = Duration::from_secs(1);
+
+struct ChurnProbe {
+    key: [u8; KEY_SIZE],
+    expected: [u8; CHURN_VALUE_BYTES],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChurnReadCounters {
+    block_hits: u64,
+    block_misses: u64,
+    data_blocks_read: u64,
+    candidate_ssts: u64,
+    candidate_blocks: u64,
+}
+
+impl ChurnReadCounters {
+    fn capture(engine: &Engine) -> Self {
+        let snapshot = engine.read_path_diagnostics_snapshot_for_benchmarks();
+        Self {
+            block_hits: snapshot.sst_block_cache_hits,
+            block_misses: snapshot.sst_block_cache_misses,
+            data_blocks_read: snapshot.data_blocks_read,
+            candidate_ssts: snapshot.candidate_sst_files_checked,
+            candidate_blocks: snapshot.candidate_blocks_checked,
+        }
+    }
+
+    fn since(self, before: Self) -> Self {
+        let delta = |end: u64, start: u64| end.checked_sub(start).expect("read counter decreased");
+        Self {
+            block_hits: delta(self.block_hits, before.block_hits),
+            block_misses: delta(self.block_misses, before.block_misses),
+            data_blocks_read: delta(self.data_blocks_read, before.data_blocks_read),
+            candidate_ssts: delta(self.candidate_ssts, before.candidate_ssts),
+            candidate_blocks: delta(self.candidate_blocks, before.candidate_blocks),
+        }
+    }
+
+    fn record(self, ctx: &mut StressContext) {
+        let as_f64 = |value| f64::from(u32::try_from(value).expect("counter fits in u32"));
+        for (name, value) in [
+            ("sst_block_cache_hits", self.block_hits),
+            ("sst_block_cache_misses", self.block_misses),
+            ("data_blocks_read", self.data_blocks_read),
+            ("candidate_sst_files_checked", self.candidate_ssts),
+            ("candidate_blocks_checked", self.candidate_blocks),
+        ] {
+            ctx.record_observation(
+                name,
+                as_f64(value),
+                ObservationUnit::Count,
+                ObservationDirection::Informational,
+            );
+        }
+        ctx.record_observation(
+            "sst_block_cache_hit_ratio",
+            as_f64(self.block_hits) / as_f64(self.block_hits + self.block_misses),
+            ObservationUnit::Ratio,
+            ObservationDirection::Informational,
+        );
+    }
+}
+
+fn churn_value(index: usize) -> [u8; CHURN_VALUE_BYTES] {
+    // Incompressible per-key values keep the flushed data footprint above the
+    // bounded block-cache budget under the default LZ4 SST policy.
+    let mut state = (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    let mut value = [0; CHURN_VALUE_BYTES];
+    for chunk in value.as_chunks_mut::<8>().0 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        chunk.copy_from_slice(&state.to_le_bytes());
+    }
+    value
+}
+
+fn read_churn_probe(engine: &Engine, cf_id: ColumnFamilyId, probe: &ChurnProbe) {
+    let tx = engine
+        .begin_tx(cf_id, TransactionMode::ReadOnly)
+        .expect("begin SST point read");
+    let value = tx.get(&probe.key).expect("read SST point value");
+    assert_eq!(
+        value.as_deref(),
+        Some(probe.expected.as_slice()),
+        "SST point read returned the wrong value"
+    );
+}
+
+fn churn_probe_index(client_id: usize, operation: u64) -> usize {
+    let operation = usize::try_from(operation).expect("benchmark operation index fits in usize");
+    let client_offset = client_id.wrapping_mul(31);
+    if operation % 5 == 0 {
+        // One rotating probe for four hot reads. The 73-step walk is
+        // coprime to 512, so every spaced probe appears before it repeats.
+        ((operation / 5).wrapping_mul(73).wrapping_add(client_offset)) % CHURN_PROBES
+    } else {
+        (operation.wrapping_add(client_offset)) % CHURN_HOT_PROBES
+    }
+}
+
+fn run_churn_clients(
+    engine: &Arc<Engine>,
+    probes: &Arc<Vec<ChurnProbe>>,
+    clients: usize,
+    duration: Duration,
+) -> stress_config::ycsb::MultiClientRunStats {
+    stress_config::ycsb::run_multi_client_for_duration_with_stats(
+        engine,
+        clients,
+        duration,
+        |client_id, _stop| {
+            let probes = Arc::clone(probes);
+            move |engine, cf, operation| {
+                let index = churn_probe_index(client_id, operation);
+                read_churn_probe(engine, cf.id(), &probes[index]);
+            }
+        },
+    )
+}
+
+fn write_churn_ssts(engine: &Engine, cf: &ColumnFamilyHandle) {
+    for generation in 0..2 {
+        let start = generation * CHURN_KEYS_PER_SST;
+        let end = start + CHURN_KEYS_PER_SST;
+        for batch_start in (start..end).step_by(TARGET_BATCH) {
+            let batch_end = (batch_start + TARGET_BATCH).min(end);
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin SST churn fixture write");
+            for index in batch_start..batch_end {
+                tx.put(
+                    stress_config::bench_stress::key16_u64_be(index as u64).to_vec(),
+                    churn_value(index).to_vec(),
+                    None,
+                )
+                .expect("write SST churn fixture value");
+            }
+            tx.commit(WriteOptions::best_effort())
+                .expect("commit SST churn fixture batch");
+        }
+        engine.flush_cf(cf).expect("flush SST churn generation");
+    }
+}
+
+fn record_churn_fixture_layout(ctx: &mut StressContext, engine: &Engine, cache_capacity: usize) {
+    let layout = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("capture flushed SST churn fixture layout");
+    let file_count: usize = layout.levels.iter().map(|level| level.file_count).sum();
+    let sst_bytes: u64 = layout.levels.iter().map(|level| level.total_bytes).sum();
+    assert_eq!(file_count, 2, "fixture should have two flushed SSTs");
+    assert!(
+        sst_bytes > u64::try_from(cache_capacity).expect("cache capacity fits in u64"),
+        "stored SST bytes must exceed block-cache capacity"
+    );
+    ctx.parameter("fixture_ssts", file_count);
+    ctx.parameter("fixture_stored_sst_bytes", sst_bytes);
+}
+
+fn run_sst_cold_admission_churn(ctx: &mut StressContext) {
+    let directory = TempDir::new().expect("create SST churn database directory");
+    let options = OpenOptions::local(directory.path())
+        .memory_budget(MemoryBudget::Bytes(CHURN_MEMORY_BUDGET_BYTES))
+        .with_memtable_size_limit(CHURN_MEMTABLE_BYTES)
+        .with_memtable_flush_threshold(CHURN_MEMTABLE_BYTES)
+        .background_compaction(false)
+        .block_cache_policy(BlockCachePolicy::Lru)
+        .build()
+        .expect("build bounded SST churn options");
+    let logical_data_bytes = (CHURN_KEYS_PER_SST * 2) * (KEY_SIZE + CHURN_VALUE_BYTES);
+    // ReadResources reserves one quarter of the configured read pool for SST
+    // metadata and uses the remaining three quarters for resident blocks.
+    let read_pool_bytes = options.block_cache_size();
+    let cache_capacity = read_pool_bytes.saturating_sub(read_pool_bytes / 4);
+    assert!(
+        logical_data_bytes > cache_capacity,
+        "flushed data must exceed block-cache capacity"
+    );
+    ctx.parameter("storage_profile", "local");
+    ctx.parameter("logical_unit", "engine_point_read");
+    ctx.parameter("operation_surface", "begin_tx_plus_sst_get");
+    ctx.parameter("fixture_keys", CHURN_KEYS_PER_SST * 2);
+    ctx.parameter("fixture_logical_data_bytes", logical_data_bytes);
+    ctx.parameter("sst_read_pool_bytes", read_pool_bytes);
+    ctx.parameter("block_cache_capacity_bytes", cache_capacity);
+    ctx.parameter("probe_keys", CHURN_PROBES);
+    ctx.parameter("probe_stride_keys", CHURN_KEYS_PER_PROBE);
+    ctx.parameter("hot_probe_keys", CHURN_HOT_PROBES);
+    ctx.parameter("rotating_probe_fraction", "1/5");
+    ctx.metadata("diagnostic_reason", "controlled_engine_sst_cache_churn");
+
+    let engine = Arc::new(Engine::open(options).expect("open SST churn engine"));
+    let cf = engine
+        .create_column_family("cf1")
+        .expect("create SST churn column family");
+    write_churn_ssts(&engine, &cf);
+    record_churn_fixture_layout(ctx, &engine, cache_capacity);
+
+    let probes = Arc::new(
+        (0..CHURN_PROBES)
+            .map(|index| {
+                let key_index = ((index * 73) % CHURN_PROBES) * CHURN_KEYS_PER_PROBE;
+                ChurnProbe {
+                    key: stress_config::bench_stress::key16_u64_be(key_index as u64),
+                    expected: churn_value(key_index),
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    // This pass starts with no data-block reads through the Engine, so its
+    // measured misses include actual SST block reads and cache admissions.
+    let before = ChurnReadCounters::capture(&engine);
+    let mut latencies = Vec::with_capacity(CHURN_PROBES);
+    let started_at = Instant::now();
+    for probe in probes.iter() {
+        let read_started_at = Instant::now();
+        read_churn_probe(&engine, cf.id(), probe);
+        latencies.push(read_started_at.elapsed());
+    }
+    let elapsed = started_at.elapsed();
+    let cold = ChurnReadCounters::capture(&engine).since(before);
+    assert!(cold.candidate_ssts > 0 && cold.candidate_blocks > 0);
+    assert!(
+        cold.block_misses >= CHURN_PROBES as u64 / 4,
+        "cold probe pass did not visit enough uncached blocks: {cold:?}"
+    );
+    assert!(cold.data_blocks_read > 0);
+    ctx.record_external_outcome(
+        "tier3_sst_cold_point_admission_local",
+        elapsed,
+        LogicalUnit::new("engine_point_read"),
+        OperationOutcome::success(CHURN_PROBES as u64),
+    );
+    for latency in latencies {
+        ctx.record_latency(latency);
+    }
+    cold.record(ctx);
+
+    for clients in [1, 16] {
+        // Re-warm after the prior read phase so both client rows start with
+        // resident hot blocks, while the spaced cold rotation still churns.
+        for probe in probes.iter().take(CHURN_HOT_PROBES) {
+            read_churn_probe(&engine, cf.id(), probe);
+        }
+        let _warmup = run_churn_clients(&engine, &probes, clients, CHURN_WARMUP);
+        let before = ChurnReadCounters::capture(&engine);
+        let name = format!("tier3_sst_hot_cold_churn_local_{clients}_clients");
+        let measured = stress_config::measure_counted(ctx, name, "engine_point_read", || {
+            let measured = run_churn_clients(&engine, &probes, clients, CHURN_MEASURED);
+            let operations = measured.operations;
+            (measured, operations)
+        });
+        let delta = ChurnReadCounters::capture(&engine).since(before);
+        assert!(delta.block_hits > 0 && delta.block_misses > 0);
+        assert!(
+            delta.block_misses >= measured.operations / 20,
+            "measured reads did not sustain cache churn: {delta:?} over {} reads",
+            measured.operations
+        );
+        assert!(delta.data_blocks_read > 0 && delta.candidate_blocks > 0);
+        measured.record_latencies(ctx);
+        delta.record(ctx);
+    }
+}
 
 fn setup_engine(opts: MidgeOptions) -> Engine {
     stress_config::bench_stress::open_engine_no_compaction(opts)
@@ -219,6 +505,15 @@ fn tier3_sst_range_seek_local(ctx: &mut StressContext) {
 fn tier3_sst_range_seek_cloud(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("cloud");
     run_sst_range_seek_case(ctx, "tier3_sst_range_seek_cloud", opts, 10_000);
+}
+
+#[stress(
+    tier = 3,
+    role = "diagnostic",
+    metadata(component = "engine_sst_cache", scenario = "cold_admission_churn")
+)]
+fn tier3_sst_cold_admission_churn_local(ctx: &mut StressContext) {
+    run_sst_cold_admission_churn(ctx);
 }
 
 stress_main!();

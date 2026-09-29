@@ -7,13 +7,14 @@ use bytes::Bytes;
 /// A cached block costs more than its payload: the shard's `DashMap` stores a
 /// [`crate::sst::cache::CacheKey`] and a `Bytes` handle per entry, and the
 /// eviction policy keeps its own slot plus index entry for the same key.
+/// The shard also stores an eight-byte admission epoch for sampled LRU hits.
 /// Charging a flat constant keeps the configured cache budget close to the
 /// memory the cache actually holds instead of accounting for payloads alone.
 ///
 /// The value is a deliberate under-estimate of the real per-entry cost: it is
 /// better to hold slightly more than the budget suggests than to evict blocks
 /// the budget could have kept.
-pub const ENTRY_OVERHEAD_BYTES: usize = 64;
+pub const ENTRY_OVERHEAD_BYTES: usize = 72;
 
 /// A cached block value.
 ///
