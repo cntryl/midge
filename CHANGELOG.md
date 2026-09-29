@@ -40,7 +40,8 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
   retry with the same empty cache; unproved local or remote history still fails
   closed.
 - Keep the writer lease until cloud WAL uploads and prune workers exit, even
-  when shutdown times out while an upload remains blocked.
+  when shutdown times out while an upload remains blocked. Retry a failed
+  lease release using its original epoch after local write authority is closed.
 
 ### Upgrade and rollback
 

@@ -974,6 +974,8 @@ pub struct CloudStorageLease {
     validity: Arc<LeaseValidity>,
     /// Epoch from the active coordination store, set after successful acquisition.
     acquired_epoch: std::sync::atomic::AtomicU64,
+    /// Identity retained for a conditional release retry after local writes are fenced.
+    pending_release_epoch: Mutex<Option<u64>>,
     /// Backend selected once at construction; all lifecycle dispatch uses this trait.
     leader_store: Arc<dyn LeaderStore>,
     clock_skew_tolerance: Duration,
@@ -1044,6 +1046,7 @@ impl CloudStorageLease {
             acquired: AtomicBool::new(false),
             validity,
             acquired_epoch: std::sync::atomic::AtomicU64::new(0),
+            pending_release_epoch: Mutex::new(None),
             leader_store,
             clock_skew_tolerance,
         }
@@ -1119,6 +1122,7 @@ impl CloudStorageLease {
             acquired: AtomicBool::new(false),
             validity,
             acquired_epoch: std::sync::atomic::AtomicU64::new(0),
+            pending_release_epoch: Mutex::new(None),
             leader_store,
             clock_skew_tolerance,
         }
@@ -1187,6 +1191,16 @@ impl PrimaryLease for CloudStorageLease {
     ) -> Result<LeaseGuard, LeaseError> {
         // Borrow the inner value for field access (auto-deref handles Arc -> &T)
         let inner: &Self = &self;
+        let pending_release = inner
+            .pending_release_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if pending_release.is_some() {
+            return Err(LeaseError::AlreadyAcquired(
+                "prior cloud lease release is still pending".to_string(),
+            ));
+        }
 
         if inner.acquired.load(Ordering::Acquire) {
             return Err(LeaseError::AlreadyAcquired(
@@ -1236,19 +1250,36 @@ impl PrimaryLease for CloudStorageLease {
                 return Err(error);
             }
             self.validity.fence(expected_epoch);
-            self.acquired.store(false, Ordering::Release);
-            self.acquired_epoch.store(0, Ordering::Release);
+            let mut pending_release = self
+                .pending_release_epoch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.acquired.load(Ordering::Acquire)
+                && self.acquired_epoch.load(Ordering::Acquire) == expected_epoch
+            {
+                // Writes are fenced, but a persisted lease from this epoch
+                // may still need a conditional cleanup attempt.
+                *pending_release = Some(expected_epoch);
+                self.acquired.store(false, Ordering::Release);
+                self.acquired_epoch.store(0, Ordering::Release);
+            }
             return Err(error);
         }
         Ok(())
     }
 
     fn release(&self) -> Result<(), LeaseError> {
-        if !self.acquired.load(Ordering::Acquire) {
-            return Ok(()); // Idempotent
-        }
-
-        let released_epoch = self.acquired_epoch.load(Ordering::Acquire);
+        let mut pending_release = self
+            .pending_release_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let released_epoch = if let Some(epoch) = *pending_release {
+            epoch
+        } else if self.acquired.load(Ordering::Acquire) {
+            self.acquired_epoch.load(Ordering::Acquire)
+        } else {
+            return Ok(()); // Idempotent after confirmed release.
+        };
         let result = self
             .leader_store
             .release_leadership(&self.holder_id, released_epoch);
@@ -1257,6 +1288,7 @@ impl PrimaryLease for CloudStorageLease {
         self.validity.deactivate(released_epoch);
         self.acquired.store(false, Ordering::Release);
         self.acquired_epoch.store(0, Ordering::Release);
+        *pending_release = result.as_ref().err().map(|_| released_epoch);
 
         if result.is_ok() {
             tracing::info!(holder_id = %self.holder_id, "cloud storage lease released");
