@@ -39,6 +39,8 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
   metadata generation before recovery. Interrupted pre-commit attempts can
   retry with the same empty cache; unproved local or remote history still fails
   closed.
+- Keep the writer lease until cloud WAL uploads and prune workers exit, even
+  when shutdown times out while an upload remains blocked.
 
 ### Upgrade and rollback
 

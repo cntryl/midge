@@ -220,23 +220,19 @@ impl HybridStorage {
                 continue;
             }
 
-            let Some(tx) = &self.wal_upload_tx else {
-                Self::emit_wal_upload_failure(
-                    upload,
-                    "cloud upload worker is shutting down",
-                    CloudUploadFailureKind::Other,
-                    &self.event_queue,
-                    self.external_event_tx.as_ref(),
-                );
-                continue;
-            };
-            match tx.try_send(upload.clone()) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => {
+            let send_result = self
+                .wal_upload_worker
+                .lock()
+                .tx
+                .as_ref()
+                .map(|tx| tx.try_send(upload.clone()));
+            match send_result {
+                Some(Ok(())) => {}
+                Some(Err(mpsc::TrySendError::Full(_))) => {
                     upload.status = UploadStatus::Pending;
                     break;
                 }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
+                Some(Err(mpsc::TrySendError::Disconnected(_))) => {
                     tracing::warn!(
                         segment_id = upload.segment_id,
                         "cloud upload worker unavailable"
@@ -249,6 +245,13 @@ impl HybridStorage {
                         self.external_event_tx.as_ref(),
                     );
                 }
+                None => Self::emit_wal_upload_failure(
+                    upload,
+                    "cloud upload worker is shutting down",
+                    CloudUploadFailureKind::Other,
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                ),
             }
         }
     }

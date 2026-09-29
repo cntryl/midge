@@ -5202,6 +5202,7 @@ mod shutdown_orchestration {
 
     const BLOCKED_UPLOAD_FAILPOINT: &str = "midge::cloud::before_wal_upload";
     const CLOUD_DRAIN_TIMEOUT_FAILPOINT: &str = "midge::shutdown::after_cloud_upload_drain_timeout";
+    static SHUTDOWN_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct UploadRelease {
         gate: Arc<(Mutex<bool>, Condvar)>,
@@ -5235,6 +5236,9 @@ mod shutdown_orchestration {
     #[test]
     fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes() {
         // Arrange
+        let _test_guard = SHUTDOWN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let scenario = fail::FailScenario::setup();
         let temp_dir = tempfile::TempDir::new().expect("create cloud shutdown directory");
         let db_path = temp_dir.path().join("db");
@@ -5287,6 +5291,10 @@ mod shutdown_orchestration {
         let first_shutdown = engine.shutdown(Duration::from_millis(50));
         let shutdown_elapsed = shutdown_started.elapsed();
         let wal_after_timeout = local_wal_files(&db_path);
+        drain_timed_out_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("runtime cloud drain reached its deadline");
+        let cleanup_while_upload_blocked = engine.shutdown(Duration::from_millis(500));
         let competing = Engine::open(cloud_options(&db_path, Arc::clone(&lease_loss_calls)));
 
         // Assert
@@ -5299,16 +5307,20 @@ mod shutdown_orchestration {
             wal_before_shutdown.is_subset(&wal_after_timeout),
             "timed-out shutdown removed local WAL needed for recovery: before={wal_before_shutdown:?}, after={wal_after_timeout:?}"
         );
-        assert!(matches!(competing, Err(MidgeError::LeaseHeld(_))));
+        assert!(
+            matches!(&cleanup_while_upload_blocked, Err(MidgeError::Timeout(message)) if message.contains("fencing cleanup")),
+            "lease cleanup completed while the WAL upload was still blocked: {cleanup_while_upload_blocked:?}"
+        );
+        assert!(
+            matches!(competing, Err(MidgeError::LeaseHeld(_))),
+            "competing open must remain fenced after drain timeout: {:?}",
+            competing.as_ref().err()
+        );
         assert_eq!(lease_loss_calls.load(Ordering::SeqCst), 0);
 
-        // Act: observe the runtime's shorter cloud-drain deadline before
-        // releasing the real upload worker. The retained cleanup reaper must
-        // preserve that eventual durability result after the Engine caller
-        // has already timed out.
-        drain_timed_out_rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("runtime cloud drain reached its deadline");
+        // Act: release the real upload worker. The retained cleanup reaper
+        // must preserve that eventual durability result after the Engine
+        // caller has already timed out.
         release.release();
         let terminal_shutdown = engine.shutdown(Duration::from_secs(5));
         let replayed_shutdown = engine.shutdown(Duration::from_millis(50));
@@ -5344,6 +5356,103 @@ mod shutdown_orchestration {
         assert_eq!(
             read.get(b"shutdown-key").expect("read recovered value"),
             Some(bytes::Bytes::from_static(b"shutdown-value"))
+        );
+        drop(read);
+        assert_eq!(lease_loss_calls.load(Ordering::SeqCst), 0);
+        reopened
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown reopened engine");
+    }
+
+    #[test]
+    fn should_retain_primary_lease_when_engine_drops_with_blocked_wal_upload() {
+        // Arrange
+        let _test_guard = SHUTDOWN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let scenario = fail::FailScenario::setup();
+        let temp_dir = tempfile::TempDir::new().expect("create cloud drop directory");
+        let db_path = temp_dir.path().join("db");
+        let lease_loss_calls = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let drain_timed_out_rx = observe_cloud_drain_timeout();
+        let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let callback_gate = Arc::clone(&release_gate);
+        fail::cfg_callback(BLOCKED_UPLOAD_FAILPOINT, move || {
+            let _ = entered_tx.try_send(());
+            let (released, changed) = &*callback_gate;
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        })
+        .expect("configure blocked WAL upload boundary");
+        let engine = Engine::open(cloud_options(&db_path, Arc::clone(&lease_loss_calls)))
+            .expect("open cloud engine");
+        let release = UploadRelease { gate: release_gate };
+        let default_cf = engine
+            .get_column_family("default")
+            .expect("default column family");
+        let mut transaction = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+            .expect("begin cloud transaction");
+        transaction
+            .put(b"drop-key".to_vec(), b"drop-value".to_vec(), None)
+            .expect("stage cloud write");
+        transaction
+            .commit(WriteOptions::cloud_async())
+            .expect("commit CloudAsync write");
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("upload worker must reach deterministic blocked boundary");
+
+        // Act: dropping the Engine hands cleanup to its detached reaper.
+        drop(engine);
+        drain_timed_out_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("runtime cloud drain reached its deadline");
+        let blocked_until = Instant::now() + Duration::from_millis(500);
+        loop {
+            let competing = Engine::open(cloud_options(&db_path, Arc::clone(&lease_loss_calls)));
+            assert!(
+                matches!(competing, Err(MidgeError::LeaseHeld(_))),
+                "drop reaper released the lease before WAL upload exit: {:?}",
+                competing.as_ref().err()
+            );
+            if Instant::now() >= blocked_until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Assert: the uploader can finish, then a successor can recover the write.
+        release.release();
+        let reopen_deadline = Instant::now() + Duration::from_secs(5);
+        let mut reopened = loop {
+            match Engine::open(reopen_options(&db_path, Arc::clone(&lease_loss_calls))) {
+                Ok(reopened) => break reopened,
+                Err(MidgeError::LeaseHeld(_)) if Instant::now() < reopen_deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("could not reopen after upload worker exit: {error:?}"),
+            }
+        };
+        fail::remove(BLOCKED_UPLOAD_FAILPOINT);
+        fail::remove(CLOUD_DRAIN_TIMEOUT_FAILPOINT);
+        scenario.teardown();
+        let default_cf = reopened
+            .get_column_family("default")
+            .expect("reopened default column family");
+        let read = reopened
+            .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin recovery read");
+        assert_eq!(
+            read.get(b"drop-key").expect("read recovered value"),
+            Some(bytes::Bytes::from_static(b"drop-value"))
         );
         drop(read);
         assert_eq!(lease_loss_calls.load(Ordering::SeqCst), 0);

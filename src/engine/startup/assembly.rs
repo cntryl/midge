@@ -70,6 +70,7 @@ impl FacadeAssembly {
         })?;
 
         startup_lease.ensure_healthy("before returning the engine")?;
+        let hybrid_storage = started.runtime_handle.storage_budget.clone();
 
         Ok(Engine {
             runtime: Some(started.runtime),
@@ -86,7 +87,7 @@ impl FacadeAssembly {
             )),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
-            lease_state: LeaseState::new(lease, lease_guard, lease_heartbeat),
+            lease_state: LeaseState::new(lease, lease_guard, lease_heartbeat, hybrid_storage),
             ingest_coordinators,
             transaction_memory_pool: Arc::new(
                 crate::runtime::transaction_spill::TransactionMemoryPool::new(

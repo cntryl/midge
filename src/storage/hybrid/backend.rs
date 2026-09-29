@@ -118,6 +118,12 @@ struct ObjectStores {
     control: Arc<dyn StorageBackend>,
 }
 
+/// The sender and worker must be closed together while the lease is held.
+struct WalUploadWorker {
+    tx: Option<mpsc::SyncSender<UploadState>>,
+    handle: Option<JoinHandle<()>>,
+}
+
 pub struct HybridStorage {
     /// Format-neutral object-store routing, separate from admission and worker ownership.
     stores: ObjectStores,
@@ -138,17 +144,14 @@ pub struct HybridStorage {
     /// to avoid polling latency.
     external_event_tx: Option<cb::Sender<StorageEvent>>,
 
-    /// Dedicated WAL upload worker sender.
-    wal_upload_tx: Option<mpsc::SyncSender<UploadState>>,
+    /// Dedicated WAL upload worker, joinable before the last storage owner drops.
+    wal_upload_worker: Mutex<WalUploadWorker>,
 
     /// Maximum wait for a callback-based storage backend to respond.
     callback_timeout: Duration,
 
     /// Flag indicating if WAL upload worker thread failed to spawn
     upload_worker_failed: bool,
-
-    /// Background WAL upload worker thread handle
-    upload_worker_handle: Option<JoinHandle<()>>,
 
     /// Serializes in-process WAL catalog publication and retirement updates.
     /// Provider compare-exchange remains the cross-process authority boundary.
@@ -324,10 +327,12 @@ impl HybridStorage {
             upload_queue,
             event_queue,
             external_event_tx,
-            wal_upload_tx: Some(wal_upload_tx),
+            wal_upload_worker: Mutex::new(WalUploadWorker {
+                tx: Some(wal_upload_tx),
+                handle: upload_worker_handle,
+            }),
             callback_timeout: limits.callback_timeout,
             upload_worker_failed,
-            upload_worker_handle,
             wal_catalog_mutation: Mutex::new(()),
             maintenance_memory: std::sync::OnceLock::new(),
             prune_workers: Mutex::new(PruneWorkerRegistry::new(
@@ -390,6 +395,25 @@ impl HybridStorage {
         debug_assert!(self.ephemeral_sst_cache_enabled());
         self.stores.local.write().take();
     }
+
+    /// Close upload admission and wait for every accepted WAL upload attempt.
+    /// The caller must retain the writer lease until this returns.
+    pub(crate) fn shutdown_wal_upload_worker(&self) {
+        let mut worker = self.wal_upload_worker.lock();
+        worker.tx.take();
+        if let Some(handle) = worker.handle.take() {
+            let start = Instant::now();
+            match handle.join() {
+                Ok(()) => tracing::debug!(
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "HybridStorage WAL upload worker shutdown cleanly"
+                ),
+                Err(_) => {
+                    tracing::warn!("HybridStorage WAL upload worker panicked during shutdown");
+                }
+            }
+        }
+    }
 }
 
 /// Raw per-class object-store handles for tests that assert object placement.
@@ -414,26 +438,7 @@ impl HybridStorage {
 impl Drop for HybridStorage {
     fn drop(&mut self) {
         self.shutdown_background_workers();
-
-        // Drop sender first so worker recv() unblocks and exits promptly.
-        // Waiting for join before dropping sender can deadlock until timeout.
-        let _ = self.wal_upload_tx.take();
-
-        // Join the worker before releasing storage ownership. A detached
-        // uploader could continue mutating cloud state after the lease is
-        // released, violating fencing guarantees.
-        if let Some(handle) = self.upload_worker_handle.take() {
-            let start = Instant::now();
-            match handle.join() {
-                Ok(()) => tracing::debug!(
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "HybridStorage WAL upload worker shutdown cleanly"
-                ),
-                Err(_) => {
-                    tracing::warn!("HybridStorage WAL upload worker panicked during shutdown");
-                }
-            }
-        }
+        self.shutdown_wal_upload_worker();
     }
 }
 
