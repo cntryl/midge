@@ -23,13 +23,13 @@ struct WalSource {
     path: FsPath,
 }
 
-pub(super) struct StreamingWalFs {
+pub(crate) struct StreamingWalFs {
     sources: BTreeMap<String, WalSource>,
     range_buffer_bytes: usize,
 }
 
 impl StreamingWalFs {
-    pub(super) fn new(range_buffer_bytes: usize) -> MidgeResult<Self> {
+    pub(crate) fn new(range_buffer_bytes: usize) -> MidgeResult<Self> {
         validate_buffer_size(range_buffer_bytes)?;
         Ok(Self {
             sources: BTreeMap::new(),
@@ -37,7 +37,7 @@ impl StreamingWalFs {
         })
     }
 
-    pub(super) fn insert(
+    pub(crate) fn insert(
         &mut self,
         canonical_name: String,
         fs: Arc<dyn Fs>,
@@ -179,7 +179,7 @@ fn validate_buffer_size(bytes: usize) -> MidgeResult<()> {
 }
 
 /// Check the catalog's complete-object proof while retaining only one chunk.
-pub(super) fn validate_wal_source(
+pub(crate) fn validate_wal_source(
     fs: &dyn Fs,
     path: &FsPath,
     expected_len: u64,
@@ -210,7 +210,7 @@ pub(super) fn validate_wal_source(
 }
 
 /// Prove exact alias equality without materializing either complete segment.
-pub(super) fn wal_sources_equal(
+pub(crate) fn wal_sources_equal(
     left: (&dyn Fs, &FsPath),
     right: (&dyn Fs, &FsPath),
     range_buffer_bytes: usize,

@@ -37,7 +37,10 @@ pub use heartbeat::LeaseHeartbeat;
 pub(crate) use traits::LeaderRecord;
 pub(crate) use traits::LeaseError;
 pub(crate) use traits::LeaseValidity;
-pub use traits::{LeaderStore, LeaseGuard, PrimaryLease};
+pub use traits::{
+    CloudMetadataGeneration, CloudMetadataHead, CloudMetadataObject, LeaderStore, LeaseGuard,
+    PrimaryLease,
+};
 
 use crate::config::Storage;
 use std::sync::atomic::{AtomicU64, Ordering};

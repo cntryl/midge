@@ -10,6 +10,7 @@ pub(in crate::runtime) struct CloudCoordinator {
     pub(super) hybrid_storage_events:
         Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub(super) cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub(super) provider_ddl_fencing: bool,
     pub(super) cloud_wal: CloudWalUploadTracker,
     pub(super) cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
     pub(super) cloud_wal_prune_progress: CloudWalPruneProgress,
@@ -22,6 +23,7 @@ impl CloudCoordinator {
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            provider_ddl_fencing: config.provider_ddl_fencing,
             cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_segments.clone()),
             cloud_wal_prune_worker: None,
             cloud_wal_prune_progress: CloudWalPruneProgress::default(),
@@ -60,18 +62,25 @@ impl CloudCoordinator {
         publication_lock: &crate::runtime::MetadataPublicationLock,
         last_persisted_sequence: u64,
         deadline: &crate::common::OperationDeadline,
+        authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: impl FnMut(&crate::common::OperationDeadline) -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
+        let authority = authority.ok_or_else(|| {
+            crate::common::MidgeError::Fenced("cloud metadata mirror has no leader store".into())
+        })?;
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-            cloud,
-            fs,
-            publication_lock,
-            std::time::Duration::ZERO,
-            last_persisted_sequence,
-            deadline,
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud,
+                fs,
+                publication_lock,
+                lock_wait_budget: std::time::Duration::ZERO,
+                local_manifest_sequence: last_persisted_sequence,
+                deadline,
+                authority,
+            },
             validate_lease,
         )
     }

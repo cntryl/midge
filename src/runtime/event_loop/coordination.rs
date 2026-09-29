@@ -77,6 +77,10 @@ impl ManifestPublicationGate {
         self.owner.is_some()
     }
 
+    pub(super) fn is_owned_by(&self, owner: &ManifestPublicationOwner) -> bool {
+        self.owner.as_ref() == Some(owner)
+    }
+
     pub(super) fn try_acquire(&mut self, owner: ManifestPublicationOwner) -> bool {
         if self.owner.is_some() {
             return false;

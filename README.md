@@ -2,7 +2,7 @@
 
 # Midge
 
-Midge `0.1.0` is an embedded Rust 2021 LSM key-value engine. It uses explicit
+Midge `0.3.0` is an embedded Rust 2021 LSM key-value engine. It uses explicit
 transactions and explicit write durability policies. The crate MSRV is Rust
 `1.97`.
 

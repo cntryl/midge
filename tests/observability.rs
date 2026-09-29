@@ -349,6 +349,98 @@ mod ycsb_benchmark_observations {
     }
 }
 
+mod ycsb_client_failures {
+    use super::config::MidgeOptions;
+    use super::ycsb_bench_support::{
+        run_multi_client_for_duration_with_stats, run_multi_client_for_operations_with_stats,
+    };
+    use cntryl_midge::Engine;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn engine_with_benchmark_cf() -> Arc<Engine> {
+        let engine = Arc::new(
+            Engine::open(MidgeOptions::default().to_open_options()).expect("open in-memory engine"),
+        );
+        engine
+            .create_column_family("cf1")
+            .expect("create benchmark column family");
+        engine
+    }
+
+    #[test]
+    fn should_propagate_panicked_ycsb_client_after_other_client_succeeds() {
+        // Arrange
+        let engine = engine_with_benchmark_cf();
+        let successful_steps = Arc::new(AtomicU64::new(0));
+
+        // Act: client 0 waits until client 1 completes an operation, then
+        // panics. A partial result must not look like a successful run.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run_multi_client_for_duration_with_stats(
+                &engine,
+                2,
+                Duration::from_millis(25),
+                |client_id, _stop| {
+                    let successful_steps = Arc::clone(&successful_steps);
+                    move |_, _, _| {
+                        if client_id == 0 {
+                            let started = Instant::now();
+                            while successful_steps.load(Ordering::Acquire) == 0 {
+                                assert!(
+                                    started.elapsed() < Duration::from_secs(2),
+                                    "other client never completed an operation"
+                                );
+                                std::thread::yield_now();
+                            }
+                            panic!("intentional YCSB client failure");
+                        }
+                        successful_steps.fetch_add(1, Ordering::Release);
+                    }
+                },
+            )
+        }));
+
+        // Assert
+        assert!(successful_steps.load(Ordering::Acquire) > 0);
+        let panic_payload = result.expect_err("a panicked client must fail the run");
+        assert_eq!(
+            panic_payload.downcast_ref::<&str>(),
+            Some(&"intentional YCSB client failure")
+        );
+    }
+
+    #[test]
+    fn should_propagate_panicked_fixed_operation_client_after_other_client_succeeds() {
+        // Arrange
+        let engine = engine_with_benchmark_cf();
+        let successful_steps = Arc::new(AtomicU64::new(0));
+
+        // Act
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run_multi_client_for_operations_with_stats(&engine, 2, 1, |client_id, _stop| {
+                let successful_steps = Arc::clone(&successful_steps);
+                move |_, _, _| {
+                    if client_id == 0 {
+                        std::panic::panic_any("intentional fixed-operation client failure");
+                    }
+                    successful_steps.fetch_add(1, Ordering::Release);
+                }
+            })
+        }));
+
+        // Assert: the helper joins all clients, then preserves the failure.
+        assert_eq!(successful_steps.load(Ordering::Acquire), 1);
+        let panic_payload = result.expect_err("a panicked client must fail the run");
+        assert_eq!(
+            panic_payload.downcast_ref::<&str>(),
+            Some(&"intentional fixed-operation client failure")
+        );
+    }
+}
+
 mod read_amplification_benchmark {
     use super::read_amp_bench_fixture::{
         metrics_delta, run_workload, ReadAmpFixture, ReadWorkload,

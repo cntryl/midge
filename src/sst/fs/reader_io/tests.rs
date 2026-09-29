@@ -1262,6 +1262,7 @@ fn should_match_summary_bounds_across_reader_modes() -> MidgeResult<()> {
 
     // Act
     let streaming = SstFileIo::summarize_with_fs("summary-parity.sst", Arc::clone(&fs))?;
+    let verified = SstFileIo::open("summary-parity.sst", Arc::clone(&fs))?.verify_all_blocks()?;
     let resumable = SstFileIo::summarize_with_fs_progress(
         "summary-parity.sst",
         fs,
@@ -1272,9 +1273,78 @@ fn should_match_summary_bounds_across_reader_modes() -> MidgeResult<()> {
 
     // Assert
     assert_eq!(&streaming, resumable);
+    assert_eq!(streaming, verified.summary);
     assert_eq!(streaming.smallest_key, b"alpha");
     assert_eq!(streaming.largest_key, b"zulu");
     assert_eq!((streaming.smallest_seq, streaming.largest_seq), (2, 9));
+    Ok(())
+}
+
+#[test]
+fn should_reject_persisted_sst_range_when_it_hides_a_decoded_key() -> MidgeResult<()> {
+    // Arrange: rewrite a checksummed metadata block while leaving the data
+    // blocks intact, as a too-narrow persisted range hides real point keys.
+    let directory = tempfile::tempdir()?;
+    write_unique_key_sst(&directory, "narrow-range.sst")?;
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let reader = SstFileIo::open("narrow-range.sst", Arc::clone(&fs))?;
+    let handle = reader.footer.as_ref().expect("V4 footer").meta_index_handle;
+    let mut metadata = crate::sst::types::SstMetadata::decode(&reader.read_block(&handle)?)?;
+    metadata
+        .key_range
+        .as_mut()
+        .expect("writer records key range")
+        .smallest_key = b"key_0050".to_vec();
+    let encoded = crate::codec::compress_block_with_trailer(
+        &metadata.encode(),
+        &CompressionPolicy::Fixed(CompressionAlgo::None),
+    )?;
+    assert_eq!(
+        u64::try_from(encoded.len()).expect("block length fits u64") + 4,
+        handle.size
+    );
+    let path = directory.path().join("narrow-range.sst");
+    let mut bytes = std::fs::read(&path)?;
+    let block_start = usize::try_from(handle.offset).expect("offset fits usize") + 4;
+    bytes[block_start..block_start + encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(&path, bytes)?;
+    let reader = SstFileIo::open("narrow-range.sst", fs)?;
+    assert_eq!(
+        reader.get_state_at(b"key_0000", u64::MAX)?,
+        crate::types::KeyState::Absent,
+        "the narrowed metadata range must reproduce the hidden read"
+    );
+
+    // Act
+    let result = reader.verify_all_blocks();
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_stop_range_only_sst_verification_when_deadline_has_expired() -> MidgeResult<()> {
+    // Arrange: a range-only SST has no data blocks to enter the block loop.
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+    let mut writer = factory.create()?;
+    writer.add_range_tombstone(b"alpha", b"zulu", 1)?;
+    crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("range-only.sst"))?;
+    let reader = SstFileIo::open("range-only.sst", fs)?;
+    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
+
+    // Act
+    let result = reader.verify_all_blocks_until(Some(&deadline));
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
     Ok(())
 }
 

@@ -145,46 +145,45 @@ use coordination::{ManifestPublicationGate, VerificationBarrier, WriteStallWaite
 /// Owns all actors and is responsible for routing inbound messages.
 #[allow(clippy::struct_excessive_bools)]
 pub struct EventLoop {
-    pub(super) state: RuntimeState,
+    state: RuntimeState,
 
     // Actors
-    pub(super) flush_actor: FlushActor,
-    pub(super) compaction_actor: CompactionActor,
-    pub(super) compaction_publish_actor: CompactionPublishActor,
-    pub(super) wal_actor: WalActor,
+    flush_actor: FlushActor,
+    compaction_actor: CompactionActor,
+    compaction_publish_actor: CompactionPublishActor,
+    wal_actor: WalActor,
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
-    pub(super) cloud_coordinator: CloudCoordinator,
-    pub(super) metadata_publication_lock: MetadataPublicationLock,
-    pub(super) trace_enabled: bool,
-    pub(super) loop_debug: bool,
-    pub(super) loop_debug_wakes: u64,
-    pub(super) loop_debug_batch_total: u64,
+    cloud_coordinator: CloudCoordinator,
+    metadata_publication_lock: MetadataPublicationLock,
+    trace_enabled: bool,
+    loop_debug: bool,
+    loop_debug_wakes: u64,
+    loop_debug_batch_total: u64,
     background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
-    pub(super) durability: DurabilityCoordinator,
+    durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
 
     /// Per-request router (oneshot channels)
-    pub(super) router: Arc<ResponseRouter>,
+    router: Arc<ResponseRouter>,
     /// Direct response channels for hot runtime-internal requests.
-    pub(super) inline_responses: RefCell<HashMap<u64, Sender<RuntimeResponse>>>,
+    inline_responses: RefCell<HashMap<u64, Sender<RuntimeResponse>>>,
 
     /// One buffered message we pulled from the channel while draining writes.
     ///
     /// This preserves FIFO semantics when we opportunistically `try_recv()` to batch writes:
     /// if we encounter a non-write message, we stash it here and handle it next.
-    pub(super) pending_msg: Option<RuntimeMsg>,
+    pending_msg: Option<RuntimeMsg>,
 
     verification_barrier: VerificationBarrier,
     legacy_bound_backfill: read_path::LegacyBoundBackfill,
     publication_gate: ManifestPublicationGate,
 
-    pub(super) flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
-    pub(super) compaction_publish_result_rx:
-        crossbeam::channel::Receiver<CompactionPublishCompletion>,
-    pub(super) compaction_publication: Option<compaction::PendingCompactionPublication>,
+    flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
+    compaction_publish_result_rx: crossbeam::channel::Receiver<CompactionPublishCompletion>,
+    compaction_publication: compaction::PublicationSlot<compaction::PendingCompactionPublication>,
     flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
     inline_flush_worker: bool,
     shutting_down: bool,
@@ -192,25 +191,19 @@ pub struct EventLoop {
 
     /// Sender that worker threads can use to post back completion messages
     /// (compaction threads will use this to report completion).
-    pub(super) worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
+    worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 
-    pub(super) write_stall_waiters: WriteStallWaiters,
+    write_stall_waiters: WriteStallWaiters,
     /// Lock-free snapshot cache shared with Engine for read-path bypass.
-    pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
+    snapshot_cache: Option<Arc<SnapshotCache>>,
     /// Shared SST readers and block cache used by runtime read snapshots.
-    pub(super) read_resources: Option<Arc<ReadResources>>,
+    read_resources: Option<Arc<ReadResources>>,
 
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
     fencing: fencing::RuntimeFence,
-    /// A compaction manifest authority switch completed, but its publication
-    /// intent could not be advanced or settled. Further compaction could
-    /// consume that output and make restart recovery ambiguous, so compaction
-    /// remains fenced until reopen replays the durable intent.
-    compaction_publication_degraded: bool,
-    /// Terminal publication error for the just-completed compaction. This is
-    /// forwarded to a pending `compact_all()` waiter after authority handling.
-    last_compaction_publication_error: Option<crate::common::MidgeError>,
+    /// Refuses further compaction once a publication could not be settled.
+    compaction_fence: compaction::CompactionPublicationFence,
     /// Response budget a caller is given for one runtime request. Cloud work
     /// performed on a caller's behalf shares this budget rather than restarting
     /// a fresh `storage_io_timeout` per round trip.
@@ -324,7 +317,7 @@ impl EventLoop {
             publication_gate: ManifestPublicationGate::default(),
             flush_worker_result_rx,
             compaction_publish_result_rx,
-            compaction_publication: None,
+            compaction_publication: compaction::PublicationSlot::default(),
             flush_barrier_waiters: HashMap::new(),
             inline_flush_worker,
             shutting_down: false,
@@ -340,8 +333,7 @@ impl EventLoop {
                 leader_store: config.leader_store.clone(),
                 leader_holder_id: config.leader_holder_id.clone(),
             },
-            compaction_publication_degraded: false,
-            last_compaction_publication_error: None,
+            compaction_fence: compaction::CompactionPublicationFence::default(),
             runtime_response_timeout: config.runtime_response_timeout,
         };
 

@@ -394,7 +394,7 @@ fn should_keep_conditional_http_headers_at_the_cloud_boundary() {
     // Arrange
     let callers = [
         include_str!("../src/runtime/hybrid_persistence/metadata_snapshot.rs"),
-        include_str!("../src/engine/startup/cloud_recovery/metadata.rs"),
+        include_str!("../src/runtime/cloud_startup/cloud_recovery/metadata.rs"),
         include_str!("../src/storage/hybrid/backend/proofs.rs"),
     ];
 
@@ -559,7 +559,7 @@ fn should_route_manifest_file_list_mutation_through_runtime_owner() {
         include_str!("../src/runtime/state/manifest.rs"),
         include_str!("../src/runtime/actors/manifest.rs"),
         include_str!("../src/runtime/ddl.rs"),
-        include_str!("../src/engine/startup/cloud_recovery/mod.rs"),
+        include_str!("../src/runtime/cloud_startup/cloud_recovery/mod.rs"),
     ];
 
     // Act

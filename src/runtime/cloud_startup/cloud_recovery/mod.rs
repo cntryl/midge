@@ -112,18 +112,15 @@ impl CloudStartupRecovery {
     /// Validate the authoritative inventory without materializing the local cache.
     /// SST metadata and data blocks are checked when a reader requests them;
     /// ordinary startup must not scan or copy the object-store dataset.
-    pub(in crate::engine) fn ensure_local_sst_cache_from_cloud(
+    pub(crate) fn ensure_local_sst_cache_from_cloud(
         state: &mut RuntimeState,
         cloud_root: &Path,
     ) -> MidgeResult<()> {
         let remote_sst_dir = cloud_root.join("sst");
-        let mut retained_files = Vec::with_capacity(state.manifest.files.len());
-        let mut manifest_changed = false;
-        let mut definitively_lost: Vec<String> = Vec::new();
-
-        for file in state.manifest.files.clone() {
+        Self::reconcile_manifest_ssts(state, |file| {
             let remote_path = remote_sst_dir.join(&file.name);
-            let validation = std::fs::metadata(&remote_path)
+            std::fs::metadata(&remote_path)
+                .map(|metadata| metadata.len())
                 .map_err(|error| {
                     let loss = MidgeError::RecoveryFailed(format!(
                         "authoritative cloud SST '{}' is unavailable: {error}",
@@ -135,30 +132,10 @@ impl CloudStartupRecovery {
                         SstLoss::Indeterminate(loss)
                     }
                 })
-                .and_then(|metadata| {
-                    Self::validate_manifest_sst_size(&file, metadata.len())
-                        .map_err(SstLoss::Definitive)
-                });
-            match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
-                SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
-                    retained_files.push(file);
-                }
-                SstDisposition::DropDefinitive => {
-                    definitively_lost.push(file.name.clone());
-                    manifest_changed = true;
-                }
-            }
-        }
-
-        if manifest_changed {
-            Self::commit_manifest_removals(state, retained_files, &definitively_lost)?;
-            state.restore_sequence_floor_from_manifest();
-        }
-
-        Ok(())
+        })
     }
 
-    pub(super) fn recovery_staging_fs(
+    pub(crate) fn recovery_staging_fs(
         db_path: &Path,
     ) -> MidgeResult<Arc<dyn crate::io::traits::Fs>> {
         let real = crate::io::real::RealFs::new(db_path).map_err(|error| {
@@ -171,72 +148,105 @@ impl CloudStartupRecovery {
 
     pub(crate) fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
+        leader_store: &dyn crate::lease::LeaderStore,
         db_path: &Path,
-        recovery_policy: RecoveryPolicy,
+        _recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
         let staging_fs = Self::recovery_staging_fs(db_path)?;
-        let mut metadata_objects = Vec::new();
-
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-            let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
-                Ok(Some(data)) => data,
-                Ok(None) => continue,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, key = %key, "skipping cloud metadata object during salvage open");
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to download cloud metadata '{key}': {error}"
-                    )))
-                }
-            };
-
-            crate::metadata::files::manifest_sequence(file_name, &data)?;
-
-            metadata_objects.push((*file_name, data));
-        }
-
-        if !metadata_objects
-            .iter()
-            .any(|(name, _)| *name == crate::metadata::files::MANIFEST_SNAPSHOT)
-        {
-            let legacy_key = crate::cloud_layout::CloudObjectLayout::metadata_key(
-                crate::metadata::files::MANIFEST,
-            );
-            match BlockingCloudIo::new(cloud).get_optional(&legacy_key) {
-                Ok(Some(_)) if recovery_policy == RecoveryPolicy::Strict => {
-                    return Err(MidgeError::RecoveryFailed(
-                        "cloud manifest snapshot is missing while a legacy manifest mirror exists"
-                            .into(),
-                    ));
-                }
-                Ok(Some(_)) => {
-                    tracing::warn!(key = %legacy_key, "ignoring legacy manifest mirror without an authoritative snapshot during salvage open");
-                }
-                Ok(None) => {}
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, key = %legacy_key, "could not inspect legacy manifest mirror during salvage open");
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to inspect legacy cloud manifest mirror '{legacy_key}': {error}"
-                    )));
-                }
+        let head = leader_store
+            .read_committed_metadata(cloud.callback_timeout())
+            .map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to read cloud metadata authority from lease: {error}"
+                ))
+            })?;
+        let generation = match head {
+            crate::lease::CloudMetadataHead::MissingLease => {
+                return Err(MidgeError::RecoveryFailed(
+                    "cloud metadata lease disappeared after acquisition".into(),
+                ));
             }
-        }
+            crate::lease::CloudMetadataHead::Uncommitted => {
+                Self::reject_legacy_cloud_metadata_without_generation(cloud)?;
+                for file_name in crate::metadata::files::CLOUD_MIRRORED
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(crate::metadata::files::MANIFEST))
+                {
+                    match std::fs::symlink_metadata(db_path.join(file_name)) {
+                        Ok(_) => {
+                            return Err(MidgeError::RecoveryFailed(format!(
+                                "local metadata '{file_name}' exists without a committed cloud generation"
+                            )));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                return Ok(());
+            }
+            crate::lease::CloudMetadataHead::Committed(generation) => generation,
+        };
+        let metadata_objects = Self::read_committed_cloud_metadata(cloud, &generation)?;
 
-        for (file_name, data) in metadata_objects {
+        let mut removed_stale_local_metadata = false;
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
+            let Some(data) = metadata_objects.get(*file_name) else {
+                match staging_fs.remove_file(&crate::io::traits::FsPath::new(*file_name)) {
+                    Ok(()) => removed_stale_local_metadata = true,
+                    Err(FsError::NotFound(_)) => {}
+                    Err(error) => return Err(FsError::into_midge(error)),
+                }
+                continue;
+            };
             let temp_path = crate::io::traits::FsPath::new(format!("{file_name}.tmp"));
-            let target_path = crate::io::traits::FsPath::new(file_name);
+            let target_path = crate::io::traits::FsPath::new(*file_name);
             crate::io::staging::stage_bytes(
                 &staging_fs,
                 &temp_path,
                 &target_path,
-                &data,
+                data,
                 MidgeError::RecoveryFailed,
             )?;
+        }
+        if removed_stale_local_metadata {
+            staging_fs
+                .sync_dir(
+                    &crate::io::traits::FsPath::new(""),
+                    crate::io::Durability::Durable,
+                )
+                .map_err(FsError::into_midge)?;
+        }
+
+        crate::metadata::validate_format_marker(db_path).map_err(|error| {
+            MidgeError::RecoveryFailed(format!("committed cloud FORMAT is invalid: {error}"))
+        })?;
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            &staging_fs,
+            RecoveryPolicy::Strict,
+        )
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!("committed cloud manifest is invalid: {error}"))
+        })?;
+        crate::runtime::IntentPersistence::load_with_fs_and_policy(
+            &staging_fs,
+            RecoveryPolicy::Strict,
+        )
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!("committed cloud intent log is invalid: {error}"))
+        })?;
+
+        let current = leader_store
+            .read_committed_metadata(cloud.callback_timeout())
+            .map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to recheck cloud metadata authority after hydration: {error}"
+                ))
+            })?;
+        if current != crate::lease::CloudMetadataHead::Committed(generation) {
+            return Err(MidgeError::RecoveryFailed(
+                "cloud metadata authority changed during hydration".into(),
+            ));
         }
 
         Ok(())
@@ -246,6 +256,9 @@ impl CloudStartupRecovery {
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
+        authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+        validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         let local_manifest = match Self::load_local_manifest_for_cloud_metadata_mirror(db_path) {
             Ok(manifest) => manifest,
@@ -256,57 +269,28 @@ impl CloudStartupRecovery {
             Err(error) => return Err(error),
         };
         let local_manifest_sequence = local_manifest.last_persisted_sequence;
-
-        Self::ensure_remote_manifest_metadata_not_ahead(cloud, local_manifest_sequence)?;
-
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let local_path = db_path.join(file_name);
-            if !local_path.exists() {
-                continue;
-            }
-
-            let data = match std::fs::read(&local_path) {
-                Ok(data) => data,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, file = %local_path.display(), "skipping metadata mirror during salvage open");
-                    if *file_name == crate::metadata::files::FORMAT {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to read local metadata '{}': {}",
-                        local_path.display(),
-                        error
-                    )))
-                }
-            };
-
-            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-            if let Err(error) = Self::blocking_conditional_cloud_metadata_put(
+        let fs = crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?;
+        let deadline = crate::common::OperationDeadline::from_budget(
+            cloud.callback_timeout().saturating_mul(16),
+        );
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
                 cloud,
-                file_name,
-                data,
+                fs: &fs,
+                publication_lock,
+                lock_wait_budget: cloud.callback_timeout(),
                 local_manifest_sequence,
-            ) {
-                if recovery_policy == RecoveryPolicy::Salvage {
-                    tracing::warn!(%error, key = %key, "skipping metadata mirror during salvage open");
-                    if *file_name == crate::metadata::files::FORMAT {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to mirror cloud metadata '{key}': {error}"
-                )));
-            }
-        }
-
-        Ok(())
+                deadline: &deadline,
+                authority,
+            },
+            validate_lease,
+        )
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!("failed to publish cloud metadata: {error}"))
+        })
     }
 
-    pub(in crate::engine) fn reject_cloud_wal_without_catalog(
+    pub(crate) fn reject_cloud_wal_without_catalog(
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
         let io = BlockingCloudIo::new(cloud);
@@ -330,7 +314,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    pub(in crate::engine) fn reject_simulated_cloud_wal_without_catalog(
+    pub(crate) fn reject_simulated_cloud_wal_without_catalog(
         cloud_wal_dir: &Path,
     ) -> MidgeResult<()> {
         let has_catalog_copy = [
@@ -421,7 +405,7 @@ impl CloudStartupRecovery {
         ))
     }
 
-    pub(super) fn collect_local_wal_paths(
+    pub(crate) fn collect_local_wal_paths(
         local_wal_dir: &Path,
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
@@ -504,65 +488,88 @@ impl CloudStartupRecovery {
         Ok(Some((segment_paths, active_path)))
     }
 
-    pub(super) fn quarantine_local_wal_alias(path: &Path) -> MidgeResult<()> {
-        let retained_path = Self::unused_retained_path(path)?;
-        std::fs::rename(path, &retained_path).map_err(|error| {
+    /// Rename a local WAL file aside, beside itself, through `fs`.
+    pub(crate) fn quarantine_local_wal_alias(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+    ) -> MidgeResult<()> {
+        let retained_path = Self::unused_retained_path(fs, path)?;
+        fs.rename_atomic(path, &retained_path).map_err(|error| {
             MidgeError::RecoveryFailed(format!(
                 "failed to quarantine local WAL alias '{}' as '{}': {error}",
-                path.display(),
-                retained_path.display()
+                path.0, retained_path.0
             ))
         })
     }
 
     /// Durably copy a local WAL file beside itself before salvage rewrites
-    /// it, so the discarded bytes stay available for inspection.
-    pub(super) fn retain_local_wal_copy(path: &Path) -> MidgeResult<()> {
-        let retained_path = Self::unused_retained_path(path)?;
+    /// it, so the discarded bytes stay available for inspection. The caller
+    /// syncs the WAL directory before cutting the original.
+    pub(crate) fn retain_local_wal_copy(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+    ) -> MidgeResult<()> {
+        const COPY_CHUNK: u64 = 1024 * 1024;
+        let retained_path = Self::unused_retained_path(fs, path)?;
         (|| {
-            // Use ordinary file handles for Windows sharing semantics and a
-            // bounded copy, including when the source WAL is open elsewhere.
-            let mut source = std::fs::File::open(path)?;
-            let mut retained = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&retained_path)?;
-            std::io::copy(&mut source, &mut retained)?;
-            retained.sync_all()
+            let source = fs.open(
+                path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )?;
+            let mut retained = fs.open(
+                &retained_path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: false,
+                    create_new: true,
+                    truncate: false,
+                },
+            )?;
+            let length = source.len()?;
+            let mut offset = 0;
+            while offset < length {
+                let chunk = source.read_at(offset, COPY_CHUNK.min(length - offset))?;
+                if chunk.is_empty() {
+                    return Err(FsError::Io(format!(
+                        "short read copying '{}' at byte {offset}",
+                        path.0
+                    )));
+                }
+                offset += chunk.len() as u64;
+                retained.append(chunk)?;
+            }
+            retained.sync(crate::io::Durability::Durable)
         })()
         .map_err(|error| {
             MidgeError::RecoveryFailed(format!(
                 "failed to retain a copy of local WAL '{}' as '{}': {error}",
-                path.display(),
-                retained_path.display()
+                path.0, retained_path.0
             ))
         })
     }
 
-    fn unused_retained_path(path: &Path) -> MidgeResult<PathBuf> {
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                MidgeError::RecoveryFailed(format!(
-                    "local WAL alias '{}' has no UTF-8 filename",
-                    path.display()
-                ))
-            })?;
+    fn unused_retained_path(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+    ) -> MidgeResult<crate::io::FsPath> {
         for suffix in 0_u32..=u32::MAX {
-            let retained_name = if suffix == 0 {
-                format!("{file_name}.salvage-retained")
+            let retained_path = if suffix == 0 {
+                crate::io::FsPath::new(format!("{}.salvage-retained", path.0))
             } else {
-                format!("{file_name}.salvage-retained.{suffix}")
+                crate::io::FsPath::new(format!("{}.salvage-retained.{suffix}", path.0))
             };
-            let retained_path = path.with_file_name(retained_name);
-            if !retained_path.exists() {
+            if !fs.exists(&retained_path).map_err(FsError::into_midge)? {
                 return Ok(retained_path);
             }
         }
         Err(MidgeError::RecoveryFailed(format!(
             "could not allocate quarantine name for local WAL alias '{}'",
-            path.display()
+            path.0
         )))
     }
 
@@ -572,27 +579,40 @@ impl CloudStartupRecovery {
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
+        Self::reconcile_manifest_ssts(state, |file| {
+            let key = crate::cloud_layout::object_key(&file.name);
+            BlockingCloudIo::new(cloud)
+                .head_optional(&key)
+                .map_err(SstLoss::Indeterminate)?
+                .map(|metadata| metadata.size)
+                .ok_or_else(|| {
+                    SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud SST '{}' is missing",
+                        file.name
+                    )))
+                })
+        })
+    }
+
+    /// Check every manifest SST against its authoritative object and, in
+    /// salvage, durably drop the ones that are definitively lost.
+    ///
+    /// `object_size` reports the object's size, `Definitive` when it is known
+    /// to be gone, or `Indeterminate` when the check itself failed. This is the
+    /// one place that decides which manifest SSTs survive startup; the
+    /// simulated and object-store backends differ only in that probe.
+    fn reconcile_manifest_ssts(
+        state: &mut RuntimeState,
+        mut object_size: impl FnMut(&crate::metadata::FileMeta) -> Result<u64, SstLoss>,
+    ) -> MidgeResult<()> {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
         let mut definitively_lost: Vec<String> = Vec::new();
 
         for file in state.manifest.files.clone() {
-            let key = crate::cloud_layout::object_key(&file.name);
-            let validation = BlockingCloudIo::new(cloud)
-                .head_optional(&key)
-                .map_err(SstLoss::Indeterminate)
-                .and_then(|metadata| {
-                    metadata.ok_or_else(|| {
-                        SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
-                            "authoritative cloud SST '{}' is missing",
-                            file.name
-                        )))
-                    })
-                })
-                .and_then(|metadata| {
-                    Self::validate_manifest_sst_size(&file, metadata.size)
-                        .map_err(SstLoss::Definitive)
-                });
+            let validation = object_size(&file).and_then(|size| {
+                Self::validate_manifest_sst_size(&file, size).map_err(SstLoss::Definitive)
+            });
             match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
                 SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
                     retained_files.push(file);
@@ -701,7 +721,7 @@ impl CloudStartupRecovery {
         })
     }
 
-    pub(super) fn retain_verified_local_sst(
+    pub(crate) fn retain_verified_local_sst(
         state: &RuntimeState,
         file: &crate::metadata::FileMeta,
     ) -> MidgeResult<bool> {
@@ -772,15 +792,7 @@ impl CloudStartupRecovery {
                 state, cloud, &cloud_key, &sst_name, proof,
             );
         }
-        Self::restore_named_sst_from_cloud(
-            state,
-            cloud,
-            staging_fs,
-            &cloud_key,
-            &local_path,
-            &sst_name,
-            proof,
-        )
+        Self::restore_named_sst_from_cloud(state, cloud, staging_fs, &cloud_key, &sst_name, proof)
     }
 
     fn validate_named_sst_against_cloud(
@@ -826,7 +838,6 @@ impl CloudStartupRecovery {
         cloud: &crate::storage::cloud::CloudStorage,
         staging_fs: &Arc<dyn crate::io::traits::Fs>,
         cloud_key: &str,
-        local_path: &Path,
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
@@ -862,7 +873,9 @@ impl CloudStartupRecovery {
         }
 
         Self::stage_sst_bytes(staging_fs, sst_name, &cloud_proof.bytes)?;
-        if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(local_path) {
+        let staged_path = crate::io::FsPath::new(crate::cloud_layout::object_key(sst_name));
+        if let Err(error) = crate::sst::fs::SstFileIo::open(&staged_path.0, Arc::clone(staging_fs))
+        {
             if state.recovery_policy() == RecoveryPolicy::Strict {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "restored cloud SST '{sst_name}' is invalid: {error}"
@@ -870,7 +883,15 @@ impl CloudStartupRecovery {
             }
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
-            let _ = std::fs::remove_file(local_path);
+            // Intent replay revalidates every SST before publishing it, so a
+            // discard that fails only leaks the invalid bytes.
+            if let Err(discard_error) = staging_fs.remove_file(&staged_path) {
+                tracing::warn!(
+                    sst_name = %sst_name,
+                    error = %discard_error,
+                    "could not discard invalid cloud SST during salvage staging; leaving it for inspection"
+                );
+            }
             tracing::warn!(
                 sst_name = %sst_name,
                 error = %error,

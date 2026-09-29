@@ -15,7 +15,7 @@ This matrix defines what Midge supports today and what must be true before a cap
 | `WriteOptions::cloud_strict()` | Supported as the waited-for cloud durability mode | Freeze semantics at 1.0 |
 | `RecoveryPolicy::Strict` | Supported | Production recovery default |
 | `RecoveryPolicy::Salvage` | Diagnostic/degraded path | Keep out of production contract unless explicitly promoted |
-| Verification APIs | Present | Stabilize schemas and operator guidance before 1.0 |
+| Verification APIs | Present; CLI JSON uses schema version 1 | Preserve the CLI JSON and process exit-code contracts; stabilize Rust API compatibility and operator guidance before 1.0 |
 | Offline `midge verify` | Present | Required part of upgrade/recovery workflow before 1.0 |
 
 ## Promotion Rules

@@ -11,6 +11,7 @@
 //! - **Actors**: Stateless handlers that process messages and return state updates
 
 pub mod actors;
+pub(crate) mod cloud_startup;
 pub(crate) mod ddl;
 pub mod durability;
 pub mod event_loop;

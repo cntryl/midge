@@ -5,6 +5,15 @@ the release notes, inspect [format compatibility](../development/format-compatib
 run compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries.
 
+## `midge verify --json` schema version 1
+
+The CLI success and error JSON objects include `schema_version: 1`. Consumers
+of earlier unversioned output should update to require schema version 1 and
+ignore unknown fields. The version applies to the CLI JSON contract, not to the
+crate version or the public Rust `StorageVerificationReport` type. See the
+[storage verification guide](../user-guides/verification.md) for the complete
+field, error, exit-code, and local/cloud coverage contract.
+
 ## 0.1.0 to 0.1.1
 
 Version `0.1.1` is a durability-correctness patch with no public API or
@@ -38,6 +47,43 @@ restore the pre-upgrade database copy and use `0.1.1`. Any writes made after
 that copy was taken will be absent from the restored database. Preserve a
 logical export or application-level recovery path if those writes must be
 retained.
+
+## 0.2.0 to 0.3.0
+
+Local databases remain at FORMAT 4 and SST V4. Quiesce writes, complete
+`engine.shutdown(timeout)`, and preserve a verified copy of the full database
+directory before upgrading. Run `midge verify` on a separate copy and test
+application reads, writes, and restart recovery before switching traffic.
+`midge verify --json` now uses schema version 1; update consumers of its
+previously unversioned output as described above.
+
+Provider-backed cloud storage changes its control metadata authority. Version
+`0.3.0` commits immutable `FORMAT`, manifest, journal, and intent files under
+`metadata/generations/` through a version 2 lease descriptor and uses a
+version 2 DDL registry. It rejects the legacy lease and mutable metadata used
+by `0.2.0`. There is no safe in-place upgrade of that prefix:
+
+1. Quiesce application writes. While `0.2.0` can still read the old database,
+   export every column family's logical key/value contents through its public
+   API. Preserve application metadata needed to reconstruct TTL expiration;
+   public scans do not expose the internal expiration timestamps.
+2. Complete `engine.shutdown(timeout)` with `0.2.0`, stop all old writers, and
+   preserve the entire original cloud prefix and local cache as the rollback
+   copy.
+3. With `0.3.0`, create a new empty cloud prefix and fresh local cache. Recreate
+   the column families and import the logical data. Do not copy the old lease,
+   DDL registry, WAL, or mutable metadata objects into the new prefix.
+4. Test reads, writes, restart recovery, and recovery after local-cache loss
+   before switching clients. Use the open-engine storage verifier for cloud
+   diagnostics; the path-only `midge verify` command cannot inspect remote
+   authority. Complete the required Sqrzl and deployment-specific qualification.
+
+Rollback is supported with constraints. For a local database, restore the
+verified pre-upgrade copy and use `0.2.0`. For cloud, binary rollback against
+the new prefix is unsupported: return to the preserved original prefix and
+its `0.2.0` binary. Never let an old writer open the new prefix. Writes made
+after cutover are absent from the preserved copy and require a separate
+application-level reconciliation path.
 
 ## FORMAT 3 and SST V4
 

@@ -410,7 +410,10 @@ pub struct StorageVerificationReport {
     pub wal_recovery_records_replayed: u64,
     pub wal_recovery_bytes_replayed: u64,
     pub intent_entries_loaded: usize,
-    /// Whether the pass covered authoritative storage rather than a cloud cache.
+    /// Whether the storage covered by this pass is configured as authoritative
+    /// rather than a cloud cache. Path-only CLI verification has no provider
+    /// configuration and assumes the supplied path is a local-mode database;
+    /// it cannot detect a cloud cache or establish remote-object authority.
     pub authoritative: bool,
     pub health: EngineHealth,
 }

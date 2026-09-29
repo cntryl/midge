@@ -410,7 +410,7 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
+    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard, None)?;
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -915,7 +915,10 @@ fn should_reject_legacy_segment_only_cloud_wal_without_catalog() {
         .expect("upload legacy WAL alias");
 
     // Act
-    let result = startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(&cloud);
+    let result =
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
+            &cloud,
+        );
 
     // Assert
     assert!(matches!(
@@ -936,7 +939,7 @@ fn should_reject_legacy_segment_only_simulated_cloud_wal_without_catalog() {
 
     // Act
     let result =
-        startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
 
     // Assert
     assert!(matches!(
@@ -962,7 +965,7 @@ fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
 
     // Act
     let result =
-        startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
 
     // Assert
     assert!(matches!(
@@ -972,31 +975,123 @@ fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
     ));
 }
 
+fn provider_metadata_test_lease(
+    backend: Arc<dyn crate::storage::cloud::CloudBackend>,
+) -> Arc<crate::lease::CloudStorageLease> {
+    let coordination_cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend,
+        "midge".to_string(),
+    ));
+    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+        crate::lease::CloudLeaseConfig {
+            bucket: "test".to_string(),
+            prefix: "midge".to_string(),
+        },
+        std::path::PathBuf::new(),
+        coordination_cloud,
+    ));
+    Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire provider-backed metadata test lease");
+    lease
+}
+
+fn publish_test_metadata_generation(
+    cloud: &crate::storage::cloud::CloudStorage,
+    lease: &crate::lease::CloudStorageLease,
+    manifest: &crate::metadata::Manifest,
+    format_marker: Vec<u8>,
+) -> crate::lease::CloudMetadataGeneration {
+    publish_test_metadata_bodies(
+        cloud,
+        lease,
+        manifest.last_persisted_sequence,
+        format_marker,
+        serde_json::to_vec_pretty(manifest).expect("serialize test manifest"),
+    )
+}
+
+fn publish_test_metadata_bodies(
+    cloud: &crate::storage::cloud::CloudStorage,
+    lease: &crate::lease::CloudStorageLease,
+    manifest_sequence: u64,
+    format_marker: Vec<u8>,
+    snapshot: Vec<u8>,
+) -> crate::lease::CloudMetadataGeneration {
+    let generation_id = uuid::Uuid::new_v4();
+    let bodies = [
+        (crate::metadata::files::FORMAT, format_marker),
+        (crate::metadata::files::MANIFEST_SNAPSHOT, snapshot),
+    ];
+    let objects = bodies
+        .into_iter()
+        .map(|(file_name, data)| {
+            let object_key = format!("metadata/generations/{generation_id}/{file_name}");
+            Engine::blocking_cloud_put(cloud, &object_key, data.clone())
+                .expect("upload immutable test metadata");
+            crate::lease::CloudMetadataObject {
+                file_name: file_name.to_string(),
+                object_key,
+                len: u64::try_from(data.len()).expect("test metadata length fits u64"),
+                crc32c: crc32c::crc32c(&data),
+            }
+        })
+        .collect();
+    let generation = crate::lease::CloudMetadataGeneration {
+        manifest_sequence,
+        objects,
+    };
+    lease
+        .get_leader_store()
+        .expect("provider-backed metadata test lease has a leader store")
+        .publish_committed_metadata(
+            &lease.holder_id(),
+            lease.epoch(),
+            None,
+            generation.clone(),
+            Duration::from_secs(5),
+        )
+        .expect("commit test metadata generation");
+    generation
+}
+
+fn current_test_format_marker() -> Vec<u8> {
+    format!(
+        "midge-format-version={}\n",
+        crate::metadata::format::CURRENT_FORMAT_VERSION
+    )
+    .into_bytes()
+}
+
 #[test]
 fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
     let local_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 20,
         ..Default::default()
     };
+    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+        .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &local_manifest)
         .expect("save local manifest");
     let remote_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 21,
         ..Default::default()
     };
-    Engine::blocking_cloud_put(
+    let generation = publish_test_metadata_generation(
         &cloud,
-        "metadata/manifest.snapshot.json",
-        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
-    )
-    .expect("upload newer remote manifest");
+        &lease,
+        &remote_manifest,
+        current_test_format_marker(),
+    );
 
-    let error = Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
-        .expect_err("newer remote manifest metadata must reject stale engine mirror");
+    let error =
+        Engine::mirror_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
+            .expect_err("newer remote manifest metadata must reject stale engine mirror");
 
     // Act
     // Assert
@@ -1007,7 +1102,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
         "unexpected stale engine metadata mirror error: {error}"
     );
     let retained: crate::metadata::Manifest = serde_json::from_slice(
-        &Engine::blocking_cloud_get(&cloud, "metadata/manifest.snapshot.json")
+        &Engine::blocking_cloud_get(&cloud, &generation.objects[1].object_key)
             .expect("download retained remote manifest"),
     )
     .expect("parse retained remote manifest");
@@ -1023,17 +1118,20 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend.clone());
+    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+        .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(
         temp_dir.path(),
         &crate::metadata::Manifest::default(),
     )
     .expect("save local manifest");
-    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+    Engine::mirror_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
         .expect("perform initial metadata mirror");
     backend.clear_history();
 
     // Act
-    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+    Engine::mirror_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
         .expect("repeat unchanged metadata mirror");
 
     // Assert
@@ -1044,7 +1142,7 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
 }
 
 #[test]
-fn should_not_mirror_manifest_when_format_marker_upload_fails_under_salvage() {
+fn should_not_commit_manifest_when_format_marker_upload_fails_under_salvage() {
     // Arrange: a local FORMAT 4 upgrade must reach cloud before its manifest.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     crate::metadata::ensure_or_create_format_marker(temp_dir.path())
@@ -1057,9 +1155,14 @@ fn should_not_mirror_manifest_when_format_marker_upload_fails_under_salvage() {
     let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let original_cloud =
         crate::storage::cloud::CloudStorage::new(inner.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(inner.clone());
     let old_format = b"midge-format-version=3\n".to_vec();
-    Engine::blocking_cloud_put(&original_cloud, "metadata/FORMAT", old_format.clone())
-        .expect("upload prior FORMAT marker");
+    let prior_generation = publish_test_metadata_generation(
+        &original_cloud,
+        &lease,
+        &crate::metadata::Manifest::default(),
+        old_format.clone(),
+    );
     inner.clear_history();
     let cloud = crate::storage::cloud::CloudStorage::new(
         Arc::new(FormatPutFailBackend {
@@ -1069,14 +1172,22 @@ fn should_not_mirror_manifest_when_format_marker_upload_fails_under_salvage() {
     );
 
     // Act
-    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
-        .expect("salvage open tolerates failed FORMAT mirror");
+    Engine::mirror_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Salvage)
+        .expect_err("failed FORMAT upload cannot commit a generation");
 
     // Assert
     assert_eq!(
-        Engine::blocking_cloud_get(&original_cloud, "metadata/FORMAT")
+        Engine::blocking_cloud_get(&original_cloud, &prior_generation.objects[0].object_key)
             .expect("read old FORMAT marker"),
         old_format
+    );
+    assert_eq!(
+        lease
+            .get_leader_store()
+            .expect("provider-backed metadata test lease has a leader store")
+            .read_committed_metadata(Duration::from_secs(5))
+            .expect("read retained metadata authority"),
+        crate::lease::CloudMetadataHead::Committed(prior_generation),
     );
     assert!(
         inner.get_uploads().is_empty(),
@@ -1098,7 +1209,7 @@ impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key.ends_with("/metadata/FORMAT") {
+        if key.ends_with("/FORMAT") {
             let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
                 key: key.to_string(),
                 result: crate::storage::cloud::CloudOutcome::Err(
@@ -1122,19 +1233,20 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
         Arc::clone(&inner),
         "metadata/",
     ));
-    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
     let remote_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 42,
         ..Default::default()
     };
-    Engine::blocking_cloud_put(
+    publish_test_metadata_generation(
         &cloud,
-        "metadata/manifest.snapshot.json",
-        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
-    )
-    .expect("upload readable remote manifest metadata");
+        &lease,
+        &remote_manifest,
+        current_test_format_marker(),
+    );
 
-    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+    Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
         .expect("stale metadata list must not hide directly readable metadata");
 
     let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
@@ -1152,7 +1264,8 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
     let snapshot_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 10,
         ..Default::default()
@@ -1161,12 +1274,12 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
         last_persisted_sequence: 11,
         ..Default::default()
     };
-    Engine::blocking_cloud_put(
+    publish_test_metadata_generation(
         &cloud,
-        "metadata/manifest.snapshot.json",
-        serde_json::to_vec_pretty(&snapshot_manifest).expect("serialize snapshot manifest"),
-    )
-    .expect("upload stale snapshot");
+        &lease,
+        &snapshot_manifest,
+        current_test_format_marker(),
+    );
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
@@ -1174,7 +1287,7 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     )
     .expect("upload newer manifest");
 
-    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+    Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
         .expect("legacy manifest mirror is not authoritative");
     let recovered = crate::metadata::ManifestPersistence::load(temp_dir.path())
         .expect("load hydrated snapshot");
@@ -1190,7 +1303,8 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
     let snapshot_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 10,
         ..Default::default()
@@ -1199,12 +1313,12 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
         last_persisted_sequence: 11,
         ..Default::default()
     };
-    Engine::blocking_cloud_put(
+    publish_test_metadata_generation(
         &cloud,
-        "metadata/manifest.snapshot.json",
-        serde_json::to_vec_pretty(&snapshot_manifest).expect("serialize snapshot manifest"),
-    )
-    .expect("upload stale snapshot");
+        &lease,
+        &snapshot_manifest,
+        current_test_format_marker(),
+    );
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
@@ -1212,7 +1326,7 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     )
     .expect("upload newer manifest");
 
-    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
+    Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Salvage)
         .expect("salvage hydration should use the snapshot");
 
     let hydrated = crate::metadata::ManifestPersistence::load(temp_dir.path())
@@ -1229,23 +1343,17 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
 fn should_recover_cloud_database_when_manifest_json_is_absent() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let cloud = crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-        "midge".to_string(),
-    );
+    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
     let snapshot = crate::metadata::Manifest {
         last_persisted_sequence: 42,
         ..Default::default()
     };
-    Engine::blocking_cloud_put(
-        &cloud,
-        "metadata/manifest.snapshot.json",
-        serde_json::to_vec(&snapshot).expect("serialize snapshot"),
-    )
-    .expect("upload snapshot");
+    publish_test_metadata_generation(&cloud, &lease, &snapshot, current_test_format_marker());
 
     // Act
-    Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+    Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
         .expect("hydrate snapshot without legacy mirror");
     let recovered = crate::metadata::ManifestPersistence::load(temp_dir.path())
         .expect("recover hydrated snapshot");
@@ -1256,13 +1364,128 @@ fn should_recover_cloud_database_when_manifest_json_is_absent() {
 }
 
 #[test]
+fn should_remove_stale_local_intent_when_committed_generation_omits_it() {
+    // Arrange: the pointer's presence map omits an intent log retained in a
+    // reused local cache.
+    let temp_dir = tempfile::tempdir().expect("create cache directory");
+    std::fs::write(
+        temp_dir.path().join("intent_log.json"),
+        b"stale and malformed",
+    )
+    .expect("write stale intent log");
+    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
+    publish_test_metadata_generation(
+        &cloud,
+        &lease,
+        &crate::metadata::Manifest::default(),
+        current_test_format_marker(),
+    );
+
+    // Act
+    Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("hydrate complete committed presence map");
+
+    // Assert
+    assert!(!temp_dir.path().join("intent_log.json").exists());
+}
+
+#[test]
+fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_policy() {
+    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+        for missing in [false, true] {
+            // Arrange: a mutable mirror cannot repair a broken committed
+            // generation, even when salvage recovery is requested.
+            let temp_dir = tempfile::tempdir().expect("create recovery directory");
+            let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+            let cloud =
+                crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+            let lease = provider_metadata_test_lease(backend);
+            let manifest = crate::metadata::Manifest {
+                last_persisted_sequence: 42,
+                ..Default::default()
+            };
+            let generation = publish_test_metadata_generation(
+                &cloud,
+                &lease,
+                &manifest,
+                current_test_format_marker(),
+            );
+            let snapshot_key = &generation.objects[1].object_key;
+            Engine::blocking_cloud_put(
+                &cloud,
+                "metadata/manifest.snapshot.json",
+                serde_json::to_vec(&manifest).expect("encode mutable mirror"),
+            )
+            .expect("upload mutable mirror");
+            if missing {
+                let (tx, rx) = std::sync::mpsc::channel();
+                cloud.submit_delete(snapshot_key, tx);
+                let event = rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("delete committed snapshot response");
+                assert!(matches!(
+                    event,
+                    crate::storage::cloud::CloudEvent::Delete {
+                        result: crate::storage::cloud::CloudOutcome::Ok(()),
+                        ..
+                    }
+                ));
+            } else {
+                Engine::blocking_cloud_put(&cloud, snapshot_key, b"corrupt".to_vec())
+                    .expect("overwrite committed snapshot with corrupt bytes");
+            }
+
+            // Act
+            let result = Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), policy);
+
+            // Assert
+            assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+            assert!(
+                !temp_dir.path().join("manifest.snapshot.json").exists(),
+                "a rejected generation must not install metadata locally"
+            );
+        }
+    }
+}
+
+#[test]
+fn should_reject_checksums_valid_but_malformed_committed_manifest_in_every_recovery_policy() {
+    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+        // Arrange: the pointer and blob checksum agree, but the manifest body
+        // is not decodable recovery metadata.
+        let temp_dir = tempfile::tempdir().expect("create recovery directory");
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+        let lease = provider_metadata_test_lease(backend);
+        publish_test_metadata_bodies(
+            &cloud,
+            &lease,
+            42,
+            current_test_format_marker(),
+            b"not a manifest".to_vec(),
+        );
+
+        // Act
+        let result = Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), policy);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::Corruption(_) | MidgeError::RecoveryFailed(_))
+        ));
+        assert!(!temp_dir.path().join("manifest.snapshot.json").exists());
+    }
+}
+
+#[test]
 fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let cloud = crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-        "midge".to_string(),
-    );
+    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
     let legacy = crate::metadata::Manifest {
         last_persisted_sequence: 42,
         ..Default::default()
@@ -1275,7 +1498,8 @@ fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
     .expect("upload legacy mirror");
 
     // Act
-    let result = Engine::hydrate_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict);
+    let result =
+        Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict);
 
     // Assert
     assert!(matches!(
@@ -1283,6 +1507,24 @@ fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
         Err(crate::common::MidgeError::RecoveryFailed(_))
     ));
     assert!(!temp_dir.path().join("manifest.snapshot.json").exists());
+}
+
+#[test]
+fn should_reject_reused_local_metadata_cache_without_committed_cloud_generation() {
+    // Arrange: an uncommitted pointer is only valid for an empty database.
+    let temp_dir = tempfile::tempdir().expect("create cache directory");
+    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+        .expect("write stale local format marker");
+    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    let lease = provider_metadata_test_lease(backend);
+
+    // Act
+    let result =
+        Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
 }
 
 struct ListOmittingCloudBackend {
@@ -1967,7 +2209,7 @@ fn should_report_error_when_lease_release_keeps_failing() {
     let started = std::time::Instant::now();
 
     // Act
-    let result = super::LeaseState::release_fencing_parts(None, Some(engine_lease), None);
+    let result = super::LeaseState::release_fencing_parts(None, Some(engine_lease), None, None);
 
     // Assert
     assert!(
@@ -2089,7 +2331,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create a file where the SST directory should be");
 
         // Act
-        super::startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
             &mut state,
             cloud_root.path(),
         )
@@ -2141,7 +2383,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create indeterminate SST metadata path");
 
         // Act
-        super::startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
             &mut state,
             cloud_root.path(),
         )
@@ -2157,6 +2399,52 @@ mod salvage_removes_definitively_lost_ssts {
             .files
             .iter()
             .any(|file| file.name == indeterminate_name));
+    }
+
+    /// A cloud whose HEAD requests are refused, so object existence is unknown.
+    struct HeadRefusingCloudBackend {
+        inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    }
+
+    impl crate::storage::cloud::CloudBackend for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            let _ = callback.send(crate::storage::cloud::CloudEvent::Head {
+                key: key.to_string(),
+                result: crate::storage::cloud::CloudOutcome::Err(
+                    crate::storage::cloud::CloudError::Unauthorized("injected HEAD refusal".into()),
+                ),
+            });
+        }
+    }
+
+    #[test]
+    fn should_keep_the_manifest_entry_when_the_cloud_head_request_fails() {
+        // Arrange: the object's existence cannot be established, so nothing is
+        // known about it and the durable manifest must keep listing it.
+        let (_temp, mut state, sst_name) = salvage_state_with_persisted_sst(12, 128);
+        let cloud = crate::storage::cloud::CloudStorage::new(
+            Arc::new(HeadRefusingCloudBackend {
+                inner: Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            }),
+            "midge".to_string(),
+        );
+
+        // Act
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("salvage tolerates an unverifiable authoritative SST");
+
+        // Assert
+        assert!(
+            persisted_names(&state).contains(&sst_name),
+            "an indeterminate HEAD failure must not erase the durable manifest entry"
+        );
+        assert!(state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.name == sst_name));
     }
 
     #[test]

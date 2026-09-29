@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "verification_scope": "local_path",
+  "status": "error",
+  "error_kind": "usage",
+  "message": "usage: midge verify [--json] <db-path>"
+}

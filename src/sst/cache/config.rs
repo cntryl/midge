@@ -3,7 +3,9 @@ use super::CachePolicyType;
 /// Eviction policy for the block cache used by SST reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BlockCachePolicy {
-    /// Least-recently-used eviction. This is the stable default.
+    /// Least-recently-used eviction. The cache records the first hit after an
+    /// admission and samples repeated hits, so recency is approximate.
+    /// This is the stable default.
     #[default]
     Lru,
     /// Window TinyLFU-style admission/eviction for frequency-biased workloads.

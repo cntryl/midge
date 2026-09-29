@@ -1,6 +1,6 @@
 # Midge operator runbook
 
-Midge 0.1.0 is an embedded, single-process Rust LSM engine. This is a local-first
+Midge 0.3.0 is an embedded, single-process Rust LSM engine. This is a local-first
 operator checklist for evaluation and controlled deployments; it is not a
 production endorsement.
 
@@ -37,6 +37,20 @@ step.
 If a database is intentionally disposable, stop all users, preserve a copy if
 needed, and recreate it from the application's source of truth. That is a data
 replacement procedure, not recovery.
+
+## Storage verification
+
+Use `midge verify --json <db-path>` for a read-only check of a local-mode
+database directory. The command cannot access provider credentials or verify
+remote cloud objects. For provider-backed storage, run the open-engine
+`StorageVerifier::verify_storage(timeout)` with the configured engine and
+interpret `authoritative: false` as a limit on the coverage of that pass. The
+versioned report and exit-code meanings are documented in the
+[storage verification guide](../user-guides/verification.md).
+
+Verification does not repair a database. Preserve the full directory and WAL
+before investigating an error, and run pre-upgrade and post-upgrade checks on a
+separate copy before changing production traffic.
 
 ## Lease loss and fencing
 

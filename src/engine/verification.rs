@@ -46,7 +46,11 @@ impl StorageVerifier {
         )
     }
 
-    /// Verify a storage directory without opening an engine runtime.
+    /// Verify a local-mode storage directory without opening an engine runtime.
+    ///
+    /// This path-only check does not load provider configuration or inspect
+    /// remote cloud objects. Use [`Self::verify_storage`] for verification that
+    /// must use the currently open engine's configured storage mode.
     ///
     /// # Errors
     ///
@@ -197,6 +201,18 @@ fn verify_manifest_sst(
             name.as_str()
         ))
     })?;
+    let mut expected = file_meta.expected_sst();
+    if !file_meta.key_bounds_complete {
+        // Older manifests may carry advisory bounds that reads do not trust.
+        expected.smallest_key = None;
+        expected.largest_key = None;
+    }
+    crate::sst::identity::verify_summary_against(
+        &stats.summary,
+        expected,
+        crate::sst::identity::ProofPolicy::Required,
+    )
+    .map_err(|mismatch| MidgeError::Corruption(mismatch.to_string()))?;
     Ok((stats.size_bytes, stats.data_blocks))
 }
 

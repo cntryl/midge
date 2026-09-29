@@ -47,6 +47,10 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
+    ///
+    /// Applies wall-clock TTL expiry. Production reads pass their own clock
+    /// through `get_state_at_with_time`; coverage proofs pass none.
+    #[cfg(test)]
     fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState>;
 
     /// Scan a key range returning presence state for each key

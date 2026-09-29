@@ -308,13 +308,23 @@ fn mirror_control_metadata(
     let Some(cloud) = &task.cloud_metadata_storage else {
         return Ok(());
     };
+    let leader_store = task.leader_store.as_deref().ok_or_else(|| {
+        MidgeError::Fenced("cloud compaction metadata mirror has no leader store".into())
+    })?;
     crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-        cloud,
-        task.fs.as_ref(),
-        &task.metadata_publication_lock,
-        cloud.callback_timeout(),
-        task.metadata_sequence,
-        deadline,
+        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+            cloud,
+            fs: task.fs.as_ref(),
+            publication_lock: &task.metadata_publication_lock,
+            lock_wait_budget: cloud.callback_timeout(),
+            local_manifest_sequence: task.metadata_sequence,
+            deadline,
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: leader_store,
+                holder_id: task.leader_holder_id.as_deref().unwrap_or_default(),
+                writer_epoch: task.token.writer_epoch,
+            },
+        },
         |deadline| validate_task_lease(task, deadline),
     )
 }

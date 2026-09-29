@@ -569,7 +569,8 @@ impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key.ends_with("metadata/intent_log.json")
+        if key.contains("metadata/generations/")
+            && key.ends_with("/intent_log.json")
             && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 2
         {
             let key = key.to_string();
@@ -598,6 +599,7 @@ impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
 
 struct ObserveIntentBeforeRemoteSstBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    metadata_prefix: String,
     remote_sst_path: PathBuf,
     saw_compaction_intent: Arc<AtomicBool>,
     remote_existed_at_intent_publish: Arc<AtomicBool>,
@@ -613,22 +615,56 @@ impl crate::storage::cloud::CloudBackend for ObserveIntentBeforeRemoteSstBackend
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key.ends_with("metadata/intent_log.json")
-            && data
-                .windows(b"CompactionPublish".len())
-                .any(|window| window == b"CompactionPublish")
-            && !self.saw_compaction_intent.swap(true, Ordering::SeqCst)
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.inner.submit_put(key, data.clone(), headers, tx);
+        let event = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("observe metadata provider put");
+        if key.ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            && matches!(
+                &event,
+                crate::storage::cloud::CloudEvent::Put {
+                    result: crate::storage::cloud::CloudOutcome::Ok(()),
+                    ..
+                }
+            )
         {
-            self.remote_existed_at_intent_publish
-                .store(self.remote_sst_path.exists(), Ordering::SeqCst);
+            let document = String::from_utf8(data).expect("lease document UTF-8");
+            let generation = document
+                .lines()
+                .find_map(|line| line.strip_prefix("metadata: "))
+                .and_then(|json| {
+                    serde_json::from_str::<Option<crate::lease::CloudMetadataGeneration>>(json)
+                        .expect("parse committed lease metadata")
+                });
+            if let Some(intent) = generation.and_then(|generation| {
+                generation
+                    .objects
+                    .into_iter()
+                    .find(|object| object.file_name == crate::metadata::files::INTENT_LOG)
+            }) {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.inner.submit_get(
+                    &format!("{}/{}", self.metadata_prefix, intent.object_key),
+                    tx,
+                );
+                if let Ok(crate::storage::cloud::CloudEvent::Get {
+                    result: crate::storage::cloud::CloudOutcome::Ok(intent_bytes),
+                    ..
+                }) = rx.recv_timeout(Duration::from_secs(1))
+                {
+                    if intent_bytes
+                        .windows(b"CompactionPublish".len())
+                        .any(|window| window == b"CompactionPublish")
+                        && !self.saw_compaction_intent.swap(true, Ordering::SeqCst)
+                    {
+                        self.remote_existed_at_intent_publish
+                            .store(self.remote_sst_path.exists(), Ordering::SeqCst);
+                    }
+                }
+            }
         }
-        crate::storage::cloud::CloudBackend::submit_put(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
+        let _ = callback.send(event);
     }
 
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
@@ -1758,6 +1794,33 @@ fn put_cloud_metadata_for_test(
     }
 }
 
+fn attach_provider_metadata_lease(
+    el: &mut EventLoop,
+    cloud: Arc<crate::storage::cloud::CloudStorage>,
+    prefix: &str,
+) -> Arc<crate::lease::CloudStorageLease> {
+    use crate::lease::PrimaryLease as _;
+
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .expect("persist local manifest before cloud metadata publication");
+    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+        crate::lease::CloudLeaseConfig {
+            bucket: "test".to_string(),
+            prefix: prefix.to_string(),
+        },
+        el.state.db_path.clone(),
+        Arc::clone(&cloud),
+    ));
+    Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire provider-backed metadata lease");
+    el.fencing.writer_epoch = lease.epoch();
+    el.fencing.leader_holder_id = Some(lease.holder_id());
+    el.fencing.leader_store = lease.get_leader_store();
+    el.cloud_coordinator.cloud_metadata_storage = Some(cloud);
+    lease
+}
+
 fn get_cloud_metadata_for_test(
     cloud: &crate::storage::cloud::CloudStorage,
     file_name: &str,
@@ -1772,6 +1835,46 @@ fn get_cloud_metadata_for_test(
         }) => data,
         other => panic!("metadata get for '{key}' failed: {other:?}"),
     }
+}
+
+fn get_committed_cloud_metadata_for_test(
+    cloud: &crate::storage::cloud::CloudStorage,
+    lease: &crate::lease::CloudStorageLease,
+    file_name: &str,
+) -> Vec<u8> {
+    use crate::lease::PrimaryLease as _;
+
+    let leader_store = lease.get_leader_store().expect("provider leader store");
+    let generation = match leader_store
+        .read_committed_metadata(Duration::from_secs(1))
+        .expect("read committed metadata pointer")
+    {
+        crate::lease::CloudMetadataHead::Committed(generation) => generation,
+        head => panic!("expected committed metadata generation, got {head:?}"),
+    };
+    let object = generation
+        .objects
+        .iter()
+        .find(|object| object.file_name == file_name)
+        .unwrap_or_else(|| panic!("committed generation omits '{file_name}'"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_get(&object.object_key, tx);
+    let bytes = match rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(crate::storage::cloud::CloudEvent::Get {
+            result: crate::storage::cloud::CloudOutcome::Ok(bytes),
+            ..
+        }) => bytes,
+        other => panic!(
+            "committed metadata get for '{}' failed: {other:?}",
+            object.object_key
+        ),
+    };
+    assert_eq!(
+        u64::try_from(bytes.len()).expect("metadata length"),
+        object.len
+    );
+    assert_eq!(crc32c::crc32c(&bytes), object.crc32c);
+    bytes
 }
 
 fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, db_path: &Path) {
@@ -1825,20 +1928,13 @@ impl ProviderTimeoutMetadataBackend {
 }
 
 impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        let _ = callback.send(crate::storage::cloud::CloudEvent::GetWithMetadata {
-            key: key.to_string(),
-            result: crate::storage::cloud::CloudOutcome::Err(
-                crate::storage::cloud::CloudError::Timeout(
-                    "request timed out after 30 ms".to_string(),
-                ),
-            ),
-        });
-    }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if !key.contains("/metadata/generations/") {
+            self.inner.submit_get(key, callback);
+            return;
+        }
         let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
             key: key.to_string(),
             result: crate::storage::cloud::CloudOutcome::Err(
@@ -1977,41 +2073,79 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
     }
 }
 
-struct AdvanceManifestBeforeHeadBackend {
+struct AdvanceCommittedPointerBeforeCasBackend {
     inner: crate::storage::cloud::MockCloudBackend,
-    advanced_manifest: Vec<u8>,
+    advanced_generation: Mutex<Option<crate::lease::CloudMetadataGeneration>>,
     advanced: AtomicBool,
 }
 
-impl AdvanceManifestBeforeHeadBackend {
-    fn new(advanced_manifest: Vec<u8>) -> Self {
+impl AdvanceCommittedPointerBeforeCasBackend {
+    fn new() -> Self {
         Self {
             inner: crate::storage::cloud::MockCloudBackend::new(),
-            advanced_manifest,
+            advanced_generation: Mutex::new(None),
             advanced: AtomicBool::new(false),
         }
     }
+
+    fn advance_before_next_pointer_commit(
+        &self,
+        generation: crate::lease::CloudMetadataGeneration,
+    ) {
+        *self
+            .advanced_generation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(generation);
+    }
 }
 
-impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+impl crate::storage::cloud::CloudBackend for AdvanceCommittedPointerBeforeCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        if key.ends_with("metadata/manifest.snapshot.json")
-            && !self.advanced.swap(true, Ordering::SeqCst)
-        {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let is_pointer_cas = key
+            .ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            && headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
+        let competing_generation = if is_pointer_cas {
+            self.advanced_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        } else {
+            None
+        };
+        if let Some(generation) = competing_generation {
+            let candidate = String::from_utf8(data.clone()).expect("UTF-8 lease document");
+            let metadata_line = candidate
+                .lines()
+                .find(|line| line.starts_with("metadata: "))
+                .expect("V2 lease metadata field");
+            let replacement = format!(
+                "metadata: {}",
+                serde_json::to_string(&Some(generation)).expect("serialize advanced pointer")
+            );
+            let advanced = candidate.replacen(metadata_line, &replacement, 1);
             let (tx, rx) = std::sync::mpsc::channel();
             self.inner
-                .submit_put(key, self.advanced_manifest.clone(), vec![], tx);
+                .submit_put(key, advanced.into_bytes(), headers.clone(), tx);
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(crate::storage::cloud::CloudEvent::Put {
                     result: crate::storage::cloud::CloudOutcome::Ok(()),
                     ..
                 }) => {}
-                other => panic!("advance remote manifest before HEAD failed: {other:?}"),
+                other => panic!("advance committed pointer before CAS failed: {other:?}"),
             }
+            self.advanced.store(true, Ordering::SeqCst);
         }
-        self.inner.submit_head(key, callback);
+        self.inner.submit_put(key, data, headers, callback);
     }
 }
 
@@ -2273,16 +2407,17 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
 #[test]
 fn should_preserve_provider_timeout_from_manifest_metadata_mirror() -> crate::common::MidgeResult<()>
 {
-    // Arrange: provider executors report their own request deadline through a
-    // typed transport error before the outer runtime deadline expires.
+    // Arrange: lease acquisition succeeds, then the provider reports a typed
+    // timeout while reading back an immutable control-metadata body.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.cloud_coordinator.cloud_metadata_storage =
-        Some(Arc::new(crate::storage::cloud::CloudStorage::new(
-            Arc::new(ProviderTimeoutMetadataBackend::new()),
-            "metadata-provider-timeout".to_string(),
-        )));
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::new(ProviderTimeoutMetadataBackend::new()),
+        "metadata-provider-timeout".to_string(),
+    ));
+    let _lease =
+        attach_provider_metadata_lease(&mut el, metadata_storage, "metadata-provider-timeout");
     let request_id = 9_602;
     let response_rx = el.router.register(request_id, "ManifestPersist");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -2326,6 +2461,46 @@ impl crate::lease::LeaderStore for NewerHolderLeaderStore {
             acquired_at: "test".to_string(),
         }))
     }
+}
+
+#[test]
+fn should_fence_existing_cloud_column_family_create_after_lease_takeover(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the local handle already exists, so create takes its idempotent
+    // path without entering the remote DDL registry CAS.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let edit = crate::runtime::ddl::create_edit(&el.state, "already-created")?;
+    crate::runtime::ddl::apply_local_edit(&mut el.state, &edit)?;
+    el.cloud_coordinator.cloud_metadata_storage =
+        Some(Arc::new(crate::storage::cloud::CloudStorage::with_mock()));
+    el.cloud_coordinator.provider_ddl_fencing = true;
+    el.fencing.writer_epoch = 1;
+    el.fencing.leader_store = Some(Arc::new(NewerHolderLeaderStore));
+    el.fencing.leader_holder_id = Some("old-writer".to_string());
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let request_id = 9_606;
+    let response = el.router.register(request_id, "ManifestCreateColumnFamily");
+
+    // Act
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id,
+            name: "already-created".to_string(),
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(_),
+            ..
+        })
+    ));
+    Ok(())
 }
 
 #[test]
@@ -2433,6 +2608,8 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
 
 #[test]
 fn should_not_rewrite_unchanged_cloud_metadata_when_mirroring() -> crate::common::MidgeResult<()> {
+    use crate::lease::PrimaryLease as _;
+
     // Arrange
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -2444,6 +2621,20 @@ fn should_not_rewrite_unchanged_cloud_metadata_when_mirroring() -> crate::common
         metadata_backend.clone(),
         "metadata-idempotence".to_string(),
     ));
+    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+        crate::lease::CloudLeaseConfig {
+            bucket: "test".to_string(),
+            prefix: "metadata-idempotence".to_string(),
+        },
+        el.state.db_path.clone(),
+        Arc::clone(&metadata_storage),
+    ));
+    let _lease_guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire cloud metadata lease");
+    el.fencing.writer_epoch = lease.epoch();
+    el.fencing.leader_holder_id = Some(lease.holder_id());
+    el.fencing.leader_store = lease.get_leader_store();
     el.cloud_coordinator.cloud_metadata_storage = Some(metadata_storage);
     el.mirror_metadata_to_authoritative_cloud()?;
     metadata_backend.clear_history();
@@ -2463,7 +2654,9 @@ fn should_not_rewrite_unchanged_cloud_metadata_when_mirroring() -> crate::common
 #[test]
 fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange
+    use crate::lease::PrimaryLease as _;
+
+    // Arrange: a committed sequence-30 generation is the preflight base.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
@@ -2475,39 +2668,70 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
         last_persisted_sequence: 31,
         ..Default::default()
     };
-    let metadata_backend = Arc::new(AdvanceManifestBeforeHeadBackend::new(
-        serde_json::to_vec_pretty(&advanced_manifest).expect("serialize advanced manifest"),
-    ));
+    let metadata_backend = Arc::new(AdvanceCommittedPointerBeforeCasBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
-        metadata_backend,
+        Arc::clone(&metadata_backend) as Arc<dyn crate::storage::cloud::CloudBackend>,
         "metadata-race".to_string(),
     ));
-    let initial_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 30,
-        ..Default::default()
-    };
-    put_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-        serde_json::to_vec_pretty(&initial_manifest).expect("serialize initial manifest"),
-    );
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+    let lease =
+        attach_provider_metadata_lease(&mut el, Arc::clone(&metadata_storage), "metadata-race");
+    el.mirror_metadata_to_authoritative_cloud()?;
 
-    let error = el
-        .mirror_metadata_to_authoritative_cloud()
-        .expect_err("manifest advancing after preflight must reject stale metadata mirror");
+    let leader_store = lease.get_leader_store().expect("provider leader store");
+    let mut advanced_generation = match leader_store
+        .read_committed_metadata(Duration::from_secs(1))
+        .expect("read baseline pointer")
+    {
+        crate::lease::CloudMetadataHead::Committed(generation) => generation,
+        head => panic!("expected baseline committed generation, got {head:?}"),
+    };
+    let advanced_bytes =
+        serde_json::to_vec_pretty(&advanced_manifest).expect("serialize advanced manifest");
+    let advanced_object = advanced_generation
+        .objects
+        .iter_mut()
+        .find(|object| object.file_name == crate::metadata::files::MANIFEST_SNAPSHOT)
+        .expect("baseline generation has a manifest snapshot");
+    advanced_object.object_key = format!(
+        "metadata/generations/{}/{}",
+        uuid::Uuid::new_v4(),
+        crate::metadata::files::MANIFEST_SNAPSHOT
+    );
+    advanced_object.len = u64::try_from(advanced_bytes.len()).expect("advanced manifest length");
+    advanced_object.crc32c = crc32c::crc32c(&advanced_bytes);
+    let (put_tx, put_rx) = std::sync::mpsc::channel();
+    metadata_storage.submit_put(&advanced_object.object_key, advanced_bytes, vec![], put_tx);
+    assert!(matches!(
+        put_rx.recv_timeout(Duration::from_secs(1)),
+        Ok(crate::storage::cloud::CloudEvent::Put {
+            result: crate::storage::cloud::CloudOutcome::Ok(()),
+            ..
+        })
+    ));
+    advanced_generation.manifest_sequence = 31;
+
+    // A local sequence-30 edit requires another pointer commit. The backend
+    // installs the newer complete generation after preflight, just before CAS.
+    el.state.manifest.test_mut().next_sst_seqs.insert(0, 100);
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+    metadata_backend.advance_before_next_pointer_commit(advanced_generation);
 
     // Act
+    let error = el
+        .mirror_metadata_to_authoritative_cloud()
+        .expect_err("new committed pointer must reject the stale metadata mirror");
+
     // Assert
     assert!(
-        error.to_string().contains("ahead") || error.to_string().contains("stale"),
+        matches!(error, crate::common::MidgeError::Fenced(_)),
         "unexpected metadata mirror race error: {error}"
     );
-    let retained: crate::metadata::Manifest = serde_json::from_slice(&get_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-    ))
-    .expect("parse retained race manifest");
+    assert!(metadata_backend.advanced.load(Ordering::SeqCst));
+    let retained: crate::metadata::Manifest = serde_json::from_slice(
+        &get_committed_cloud_metadata_for_test(&metadata_storage, &lease, "manifest.snapshot.json"),
+    )
+    .expect("parse retained committed race manifest");
     assert_eq!(
         retained.last_persisted_sequence, 31,
         "metadata mirror must not overwrite a manifest that advanced after preflight"
@@ -2900,11 +3124,11 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    el.cloud_coordinator.cloud_metadata_storage =
-        Some(Arc::new(crate::storage::cloud::CloudStorage::new(
-            metadata_backend,
-            "gc-publication-retry".to_string(),
-        )));
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend,
+        "gc-publication-retry".to_string(),
+    ));
+    let _lease = attach_provider_metadata_lease(&mut el, metadata_storage, "gc-publication-retry");
     let sst_name = "reclaimed-after-metadata-retry.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"retry", b"value", 65);
     cloud_persistence(
@@ -2949,11 +3173,12 @@ fn should_retry_manifest_reclamation_under_continuous_request_load(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.cloud_coordinator.cloud_metadata_storage =
-        Some(Arc::new(crate::storage::cloud::CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-            "gc-publication-busy-retry".to_string(),
-        )));
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "gc-publication-busy-retry".to_string(),
+    ));
+    let _lease =
+        attach_provider_metadata_lease(&mut el, metadata_storage, "gc-publication-busy-retry");
     el.gc_actor
         .queue_manifest_reclamation(["busy-retry-reclamation.sst".to_string()]);
     let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
@@ -3383,7 +3608,8 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
         metadata_backend.clone(),
         "metadata-test".to_string(),
     ));
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+    let lease =
+        attach_provider_metadata_lease(&mut el, Arc::clone(&metadata_storage), "metadata-test");
 
     el.state
         .append_intent(crate::runtime::IntentLogEntry::FlushPublish {
@@ -3400,25 +3626,30 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
     // Assert
     let local_intent =
         std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
-    let remote_intent = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
+    let remote_intent =
+        get_committed_cloud_metadata_for_test(&metadata_storage, &lease, "intent_log.json");
     assert_eq!(
         remote_intent, local_intent,
         "cloud intent metadata must reflect the committed local intent clear before WAL prune"
     );
     let metadata_uploads = metadata_backend.get_uploads();
+    let immutable_uploads: Vec<_> = metadata_uploads
+        .iter()
+        .filter(|(key, _)| key.contains("metadata/generations/"))
+        .collect();
     let expected_metadata_uploads = crate::metadata::files::CLOUD_MIRRORED
         .iter()
         .filter(|file_name| el.state.db_path.join(file_name).exists())
         .count();
     assert_eq!(
-            metadata_uploads.len(),
+            immutable_uploads.len(),
             expected_metadata_uploads,
             "flush publication should use the existing metadata mirror, not perform a second full mirror: {metadata_uploads:?}"
         );
     assert_eq!(
-        metadata_uploads
+        immutable_uploads
             .iter()
-            .filter(|(key, _)| key.ends_with("metadata/intent_log.json"))
+            .filter(|(key, _)| key.ends_with("/intent_log.json"))
             .count(),
         1,
         "intent metadata should be uploaded once as part of the existing mirror"
@@ -3448,13 +3679,16 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     let remote_existed_at_intent_publish = Arc::new(AtomicBool::new(false));
     let metadata_backend = Arc::new(ObserveIntentBeforeRemoteSstBackend {
         inner: Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        metadata_prefix: "separate-control".to_string(),
         remote_sst_path: remote_sst_path_for_test(&el, &output_sst),
         saw_compaction_intent: Arc::clone(&saw_compaction_intent),
         remote_existed_at_intent_publish: Arc::clone(&remote_existed_at_intent_publish),
     });
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::new(
-        crate::storage::cloud::CloudStorage::new(metadata_backend, "separate-control".to_string()),
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend.clone(),
+        "separate-control".to_string(),
     ));
+    let _lease = attach_provider_metadata_lease(&mut el, metadata_storage, "separate-control");
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4141;
@@ -3481,7 +3715,11 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
             .expect("compaction completion response"),
         RuntimeResponse::Ok { .. }
     ));
-    assert!(saw_compaction_intent.load(Ordering::SeqCst));
+    assert!(
+        saw_compaction_intent.load(Ordering::SeqCst),
+        "metadata uploads: {:?}",
+        metadata_backend.inner.get_uploads()
+    );
     assert!(
         !remote_existed_at_intent_publish.load(Ordering::SeqCst),
         "control-cloud cleanup intent must be authoritative before SST upload"
@@ -3509,7 +3747,8 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
         "metadata-test".to_string(),
     ));
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+    let lease =
+        attach_provider_metadata_lease(&mut el, Arc::clone(&metadata_storage), "metadata-test");
 
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
@@ -3539,7 +3778,8 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     ));
     let local_intent =
         std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
-    let remote_intent = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
+    let remote_intent =
+        get_committed_cloud_metadata_for_test(&metadata_storage, &lease, "intent_log.json");
     assert_eq!(
         remote_intent, local_intent,
         "cloud intent metadata must reflect the cleared compaction publication intent"
@@ -3574,7 +3814,8 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
         failing_backend,
         "metadata-test".to_string(),
     ));
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+    let _lease =
+        attach_provider_metadata_lease(&mut el, Arc::clone(&metadata_storage), "metadata-test");
 
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
@@ -8790,10 +9031,16 @@ fn should_defer_backpressure_release_until_verification_barrier_ends(
 /// live channel exactly as it would against an unresponsive provider.
 #[derive(Default)]
 struct SilentBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+    armed: AtomicBool,
     retained: parking_lot::Mutex<Vec<crate::storage::cloud::CloudCallback>>,
 }
 
 impl SilentBackend {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
     fn retain(&self, callback: crate::storage::cloud::CloudCallback) {
         self.retained.lock().push(callback);
     }
@@ -8802,47 +9049,75 @@ impl SilentBackend {
 impl crate::storage::cloud::CloudBackend for SilentBackend {
     fn submit_put(
         &self,
-        _key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        self.retain(callback);
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_put(key, data, headers, callback);
+        }
     }
 
-    fn submit_get(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.retain(callback);
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_get(key, callback);
+        }
     }
 
-    fn submit_get_with_metadata(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.retain(callback);
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_get_with_metadata(key, callback);
+        }
     }
 
     fn submit_get_range(
         &self,
-        _key: &str,
-        _start: u64,
-        _end: Option<u64>,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        self.retain(callback);
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_get_range(key, start, end, callback);
+        }
     }
 
-    fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.retain(callback);
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_head(key, callback);
+        }
     }
 
     fn submit_delete(
         &self,
-        _key: &str,
-        _headers: Vec<(String, String)>,
+        key: &str,
+        headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        self.retain(callback);
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_delete(key, headers, callback);
+        }
     }
 
-    fn submit_list(&self, _prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.retain(callback);
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_list(prefix, callback);
+        }
     }
 }
 
@@ -8858,15 +9133,14 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.runtime_response_timeout = Duration::from_millis(200);
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::new(
-        crate::storage::cloud::CloudStorage::new_with_timeout(
-            Arc::new(SilentBackend::default()),
-            "silent-metadata".to_string(),
-            Duration::from_mins(2),
-        ),
+    let backend = Arc::new(SilentBackend::default());
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new_with_timeout(
+        Arc::clone(&backend) as Arc<dyn crate::storage::cloud::CloudBackend>,
+        "silent-metadata".to_string(),
+        Duration::from_mins(2),
     ));
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    let _lease = attach_provider_metadata_lease(&mut el, metadata_storage, "silent-metadata");
+    backend.arm();
 
     // Act
     let started = std::time::Instant::now();

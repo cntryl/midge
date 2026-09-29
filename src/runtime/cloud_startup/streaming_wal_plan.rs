@@ -31,15 +31,43 @@ struct ReplaySource {
     path: FsPath,
 }
 
-pub(super) struct StreamingCloudWalRecovery {
-    pub(super) fs: Arc<dyn Fs>,
-    pub(super) plan: CloudWalRecoveryPlan,
-    pub(super) next_segment_id: u64,
+pub(crate) struct StreamingCloudWalRecovery {
+    pub(crate) fs: Arc<dyn Fs>,
+    pub(crate) plan: CloudWalRecoveryPlan,
+    pub(crate) next_segment_id: u64,
 }
 
 impl StreamingCloudWalRecovery {
-    pub(super) fn build(
+    pub(crate) fn build(
         db_path: &Path,
+        remote: &Arc<dyn StorageBackend>,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        policy: RecoveryPolicy,
+        timeout: Duration,
+        read_window: usize,
+        limits: StreamingReplayLimits,
+    ) -> MidgeResult<Self> {
+        let local: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
+        Self::build_with_local_fs(
+            db_path,
+            &local,
+            remote,
+            catalog,
+            policy,
+            timeout,
+            read_window,
+            limits,
+        )
+    }
+
+    /// `build` over an explicit filesystem rooted at `db_path`. Every local
+    /// WAL mutation (rename, removal, retained copy, truncation) goes through
+    /// `local`, so fault injection reaches the destructive salvage steps.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_with_local_fs(
+        db_path: &Path,
+        local: &Arc<dyn Fs>,
         remote: &Arc<dyn StorageBackend>,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
         policy: RecoveryPolicy,
@@ -49,8 +77,6 @@ impl StreamingCloudWalRecovery {
     ) -> MidgeResult<Self> {
         let next_remote_id = next_segment_id(catalog.segments.keys().copied().max())?;
         let mut replay_fs = StreamingWalFs::new(read_window)?;
-        let local: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
         let mut plan = CloudWalRecoveryPlan {
             remote_segments: BTreeMap::new(),
             local_segments: BTreeMap::new(),
@@ -65,7 +91,7 @@ impl StreamingCloudWalRecovery {
         for (segment_id, publication) in &catalog.segments {
             validate_publication_identity(*segment_id, publication, catalog.fencing_epoch)?;
             let result = remote_source(
-                Arc::clone(&local),
+                Arc::clone(local),
                 Arc::clone(remote),
                 publication,
                 timeout,
@@ -93,7 +119,7 @@ impl StreamingCloudWalRecovery {
             skipped: skipped_local,
         } = merge_local_sources(
             db_path,
-            &local,
+            local,
             &mut plan,
             &mut sources,
             policy,
@@ -335,7 +361,7 @@ fn remote_source(
     Ok(ReplaySource { fs, path })
 }
 
-fn local_path(path: &Path) -> MidgeResult<FsPath> {
+pub(crate) fn local_path(path: &Path) -> MidgeResult<FsPath> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -424,29 +450,28 @@ fn canonicalize_aliases(
     read_window: usize,
 ) -> MidgeResult<()> {
     let mut changed = false;
+    let canonical_path = local_path(canonical)?;
     if selected != canonical {
-        if canonical.try_exists()? {
-            CloudStartupRecovery::quarantine_local_wal_alias(canonical)?;
+        if fs.exists(&canonical_path).map_err(FsError::into_midge)? {
+            CloudStartupRecovery::quarantine_local_wal_alias(fs, &canonical_path)?;
         }
         // Rename within one WAL directory preserves the verified bytes without
         // requiring a second complete local copy or changing the inode.
-        std::fs::rename(selected, canonical)?;
+        fs.rename_atomic(&local_path(selected)?, &canonical_path)
+            .map_err(FsError::into_midge)?;
         changed = true;
     }
     for alias in aliases {
-        if alias == canonical || !alias.try_exists()? {
+        let alias_path = local_path(alias)?;
+        if alias == canonical || !fs.exists(&alias_path).map_err(FsError::into_midge)? {
             continue;
         }
-        let equal = wal_sources_equal(
-            (fs, &local_path(canonical)?),
-            (fs, &local_path(alias)?),
-            read_window,
-        )
-        .unwrap_or(false);
+        let equal = wal_sources_equal((fs, &canonical_path), (fs, &alias_path), read_window)
+            .unwrap_or(false);
         if equal {
-            std::fs::remove_file(alias)?;
+            fs.remove_file(&alias_path).map_err(FsError::into_midge)?;
         } else {
-            CloudStartupRecovery::quarantine_local_wal_alias(alias)?;
+            CloudStartupRecovery::quarantine_local_wal_alias(fs, &alias_path)?;
         }
         changed = true;
     }
@@ -516,13 +541,25 @@ fn active_local_source(
         if salvaged {
             // Salvage drops acknowledged records past the corruption; keep the
             // original bytes before cutting the only copy.
-            CloudStartupRecovery::retain_local_wal_copy(active)?;
+            CloudStartupRecovery::retain_local_wal_copy(fs.as_ref(), &path)?;
             fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)
                 .map_err(FsError::into_midge)?;
         }
-        let file = std::fs::OpenOptions::new().write(true).open(active)?;
-        file.set_len(prefix.valid_bytes as u64)?;
-        file.sync_all()?;
+        let mut file = fs
+            .open(
+                &path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
+        file.truncate(prefix.valid_bytes as u64)
+            .map_err(FsError::into_midge)?;
+        file.sync(crate::io::Durability::Durable)
+            .map_err(FsError::into_midge)?;
     }
     plan.active_wal = Some(crate::runtime::RecoveredCloudActiveWal {
         max_sequence: prefix.max_sequence,
@@ -537,8 +574,9 @@ fn active_local_source(
 }
 
 fn quarantine_active(fs: &dyn Fs, active: &Path) -> MidgeResult<()> {
-    if active.try_exists()? {
-        CloudStartupRecovery::quarantine_local_wal_alias(active)?;
+    let path = local_path(active)?;
+    if fs.exists(&path).map_err(FsError::into_midge)? {
+        CloudStartupRecovery::quarantine_local_wal_alias(fs, &path)?;
         fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)
             .map_err(FsError::into_midge)?;
     }

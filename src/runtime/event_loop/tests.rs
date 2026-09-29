@@ -258,6 +258,8 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
 #[test]
 fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
 ) -> crate::common::MidgeResult<()> {
+    use crate::lease::PrimaryLease as _;
+
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = RuntimeState::try_new(
@@ -269,6 +271,17 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
+    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+        crate::lease::CloudLeaseConfig {
+            bucket: "test".to_string(),
+            prefix: String::new(),
+        },
+        directory.path().to_path_buf(),
+        Arc::clone(&cloud),
+    ));
+    let _lease_guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire cloud metadata lease");
     let local = Arc::new(crate::storage::filesystem::FileSystem::new(
         directory.path().join("hybrid_local"),
     )?);
@@ -280,6 +293,9 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     let config = crate::runtime::RuntimeConfig {
         hybrid_storage: Some(hybrid),
         cloud_metadata_storage: Some(Arc::clone(&cloud)),
+        writer_epoch: lease.epoch(),
+        leader_store: lease.get_leader_store(),
+        leader_holder_id: Some(lease.holder_id()),
         ..crate::runtime::RuntimeConfig::default()
     };
     let mut event_loop = EventLoop::new(
@@ -1017,7 +1033,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
                     crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
                 );
             }
-            _ => event_loop.compaction_publication_degraded = true,
+            _ => event_loop.compaction_fence.degrade(),
         }
         // Act
         let result =

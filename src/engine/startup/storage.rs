@@ -7,7 +7,8 @@ use super::{
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
 use crate::io::FsError;
-use crate::runtime::hybrid_persistence::CloudPersistence;
+use crate::runtime::ddl::DdlLeaseAuthority;
+use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -16,6 +17,70 @@ struct CloudClassStores {
     wal: Arc<crate::storage::cloud::CloudStorage>,
     sst: Arc<crate::storage::cloud::CloudStorage>,
     metadata: Arc<crate::storage::cloud::CloudStorage>,
+}
+
+fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority> {
+    Ok(DdlLeaseAuthority {
+        store: lease.leader_store.clone().ok_or_else(|| {
+            MidgeError::Internal("cloud metadata startup requires a leader store".into())
+        })?,
+        holder_id: lease.lease.holder_id(),
+        writer_epoch: lease.writer_epoch,
+    })
+}
+
+fn fence_provider_ddl(
+    storage: &crate::storage::HybridStorage,
+    lease: &StartupLease,
+    timeout: std::time::Duration,
+) -> MidgeResult<()> {
+    let authority = provider_ddl_authority(lease)?;
+    crate::runtime::ddl::fence_remote_registry_on_startup(
+        storage,
+        &authority,
+        &crate::common::OperationDeadline::from_budget(timeout),
+    )?;
+    lease.ensure_healthy("after cloud DDL registry fencing")
+}
+
+fn reconcile_cloud_ddl(materialized: &mut RuntimeStorageMaterialization) -> MidgeResult<()> {
+    let authority = if materialized.cloud_metadata_storage_for_mirror.is_some() {
+        let config = &materialized.runtime_config;
+        Some(DdlLeaseAuthority {
+            store: config.leader_store.clone().ok_or_else(|| {
+                MidgeError::Internal("cloud DDL recovery requires a leader store".into())
+            })?,
+            holder_id: config.leader_holder_id.clone().ok_or_else(|| {
+                MidgeError::Internal("cloud DDL recovery requires a lease holder".into())
+            })?,
+            writer_epoch: config.writer_epoch,
+        })
+    } else {
+        None
+    };
+    crate::runtime::ddl::reconcile_startup(
+        &mut materialized.state,
+        materialized.runtime_config.hybrid_storage.as_ref(),
+        authority.as_ref(),
+    )
+}
+
+fn require_empty_local_cache_for_cloud_bootstrap(db_path: &Path) -> MidgeResult<()> {
+    let mut directories = vec![db_path.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                directories.push(entry.path());
+            } else {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "local cache '{}' contains state without a committed cloud metadata generation",
+                    entry.path().display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl StartupStoragePath {
@@ -52,10 +117,11 @@ impl StartupStoragePath {
         }
     }
 
-    pub(super) fn prepare(&self) {
+    pub(super) fn prepare(&self) -> MidgeResult<()> {
         if !self.memory_mode {
-            let _ = std::fs::create_dir_all(&self.db_path);
+            crate::io::durable_dir::create_path_durably(&self.db_path)?;
         }
+        Ok(())
     }
 }
 
@@ -212,6 +278,112 @@ impl Drop for StartupLease {
 }
 
 impl RuntimeStorageMaterialization {
+    /// Publish the empty provider generation from isolated scratch before
+    /// creating any local cache metadata. A failed upload or lease CAS then
+    /// leaves the cache reusable, while a committed CAS hydrates on retry.
+    pub(super) fn bootstrap_provider_metadata_if_uncommitted(
+        metadata_storage: &crate::storage::cloud::CloudStorage,
+        sst_storage: &crate::storage::cloud::CloudStorage,
+        hybrid_storage: &crate::storage::HybridStorage,
+        authority: &DdlLeaseAuthority,
+        wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        db_path: &Path,
+        timeout: std::time::Duration,
+    ) -> MidgeResult<()> {
+        let leader_store = authority.store.as_ref();
+        let head = leader_store
+            .read_committed_metadata(timeout)
+            .map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to read cloud metadata authority before bootstrap: {error}"
+                ))
+            })?;
+        match head {
+            crate::lease::CloudMetadataHead::MissingLease => {
+                return Err(MidgeError::RecoveryFailed(
+                    "cloud metadata lease disappeared before bootstrap".into(),
+                ));
+            }
+            crate::lease::CloudMetadataHead::Committed(_) => {
+                return CloudStartupRecovery::hydrate_cloud_metadata(
+                    metadata_storage,
+                    leader_store,
+                    db_path,
+                    RecoveryPolicy::Strict,
+                );
+            }
+            crate::lease::CloudMetadataHead::Uncommitted => {}
+        }
+
+        // The uncommitted lease is not proof that a copied local cache or a
+        // remote WAL/DDL history belongs to an empty database. Preserve them
+        // and fail closed rather than publishing a default manifest over data.
+        CloudStartupRecovery::hydrate_cloud_metadata(
+            metadata_storage,
+            leader_store,
+            db_path,
+            RecoveryPolicy::Strict,
+        )?;
+        require_empty_local_cache_for_cloud_bootstrap(db_path)?;
+        if !wal_catalog.segments.is_empty() || wal_catalog.sequence_floor != 0 {
+            return Err(MidgeError::RecoveryFailed(
+                "cannot bootstrap empty cloud metadata over existing WAL state".into(),
+            ));
+        }
+        let deadline = crate::common::OperationDeadline::from_budget(timeout.saturating_mul(16));
+        crate::runtime::ddl::require_empty_registry_for_metadata_bootstrap(
+            hybrid_storage,
+            authority,
+            &deadline,
+        )?;
+        if !crate::storage::cloud::BlockingCloud::new(sst_storage, &deadline)
+            .list(crate::cloud_layout::CloudObjectLayout::SST_PREFIX)?
+            .is_empty()
+        {
+            return Err(MidgeError::RecoveryFailed(
+                "cannot bootstrap empty cloud metadata over existing SST objects".into(),
+            ));
+        }
+
+        // Scratch files are never local cache authority. In-memory staging
+        // also keeps a failed or interrupted first open retryable regardless
+        // of TMPDIR or parent-directory permissions.
+        let staging_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        crate::io::staging::stage_bytes(
+            &staging_fs,
+            &crate::io::FsPath::new("FORMAT.tmp"),
+            &crate::io::FsPath::new(crate::metadata::files::FORMAT),
+            &crate::metadata::format::current_format_marker_bytes(),
+            MidgeError::RecoveryFailed,
+        )?;
+        crate::metadata::store::ManifestStore::new(Arc::clone(&staging_fs))
+            .save_snapshot(&crate::metadata::Manifest::default())?;
+        let publication_lock = crate::runtime::MetadataPublicationLock::default();
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud: metadata_storage,
+                fs: staging_fs.as_ref(),
+                publication_lock: &publication_lock,
+                lock_wait_budget: timeout,
+                local_manifest_sequence: 0,
+                deadline: &deadline,
+                authority: CloudMetadataMirrorAuthority {
+                    store: leader_store,
+                    holder_id: &authority.holder_id,
+                    writer_epoch: authority.writer_epoch,
+                },
+            },
+            |deadline| authority.validate(deadline),
+        )?;
+
+        CloudStartupRecovery::hydrate_cloud_metadata(
+            metadata_storage,
+            leader_store,
+            db_path,
+            RecoveryPolicy::Strict,
+        )
+    }
+
     fn build_cloud_class_stores(
         opts: &OpenOptions,
         topology: &crate::config::CloudStorageTopology,
@@ -241,6 +413,7 @@ impl RuntimeStorageMaterialization {
                 opts.storage_io_timeout(),
             )?
         };
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal)?;
         Ok(CloudClassStores { wal, sst, metadata })
     }
 
@@ -306,7 +479,7 @@ impl RuntimeStorageMaterialization {
             crate::storage::filesystem::FileSystem::new(cloud.cloud_root.clone())?,
         );
         let streaming = super::timing::measure("wal_plan", || {
-            super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+            crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
                 &storage_path.db_path,
                 &wal_backend,
                 &wal_catalog,
@@ -413,6 +586,20 @@ impl RuntimeStorageMaterialization {
         Ok((hybrid_storage, rx))
     }
 
+    fn build_provider_sst_read_fs(
+        opts: &OpenOptions,
+        storage_path: &StartupStoragePath,
+        sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
+    ) -> MidgeResult<Arc<crate::storage::remote_sst::RemoteSstFs>> {
+        let local_fs =
+            Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?);
+        Ok(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            local_fs,
+            sst_storage.clone(),
+            opts.storage_io_timeout(),
+        )))
+    }
+
     fn materialize_cloud(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -425,7 +612,6 @@ impl RuntimeStorageMaterialization {
         let sst_storage = stores.sst;
         let metadata_storage = stores.metadata;
 
-        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal_storage)?;
         let (hybrid_storage, rx) = Self::build_hybrid_storage(
             opts,
             storage_path,
@@ -433,23 +619,25 @@ impl RuntimeStorageMaterialization {
             &sst_storage,
             &metadata_storage,
         )?;
-        let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?),
-            sst_storage.clone(),
-            opts.storage_io_timeout(),
-        ));
+        fence_provider_ddl(&hybrid_storage, startup_lease, opts.storage_io_timeout())?;
+        let sst_read_fs = Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage)?;
         let wal_catalog = CloudPersistence::new(Arc::clone(&hybrid_storage))
             .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
         startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
-        CloudStartupRecovery::hydrate_cloud_metadata(
+        let authority = provider_ddl_authority(startup_lease)?;
+        Self::bootstrap_provider_metadata_if_uncommitted(
             &metadata_storage,
+            &sst_storage,
+            &hybrid_storage,
+            &authority,
+            &wal_catalog,
             &storage_path.db_path,
-            opts.recovery_policy(),
+            opts.storage_io_timeout(),
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
         let streaming = super::timing::measure("wal_plan", || {
-            super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+            crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
                 &storage_path.db_path,
                 &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
                 &wal_catalog,
@@ -487,6 +675,7 @@ impl RuntimeStorageMaterialization {
             sst_read_fs: Some(sst_read_fs),
             hybrid_storage_events: Some(rx),
             cloud_metadata_storage: Some(metadata_storage.clone()),
+            provider_ddl_fencing: true,
             recovered_cloud_wal_segments: recovery_plan.remote_max_sequences(),
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
             recovered_local_wal_segments: recovery_plan.local_max_sequences(),
@@ -650,6 +839,42 @@ impl RuntimeRecoveryMaterialization {
         Ok(total)
     }
 
+    fn prepare_storage_for_wal_replay(
+        materialized: &mut RuntimeStorageMaterialization,
+        db_path: &Path,
+    ) -> MidgeResult<()> {
+        materialized.state.cleanup_storage_residue();
+        Self::evict_resident_manifest_ssts(materialized)?;
+        if !materialized.state.salvaged_local_ssts.is_empty() {
+            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+                let fs: Arc<dyn crate::io::Fs> = Arc::new(
+                    crate::storage::remote_sst::RemoteSstFs::new(
+                        Arc::clone(&materialized.state.fs),
+                        storage.remote_sst_backend(),
+                        storage.storage_io_timeout(),
+                    )
+                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
+                );
+                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
+                materialized.state.recovery_sst_fs = Some(fs);
+            }
+        }
+        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+            storage.reconcile_local_disk_usage(
+                Self::local_directory_bytes(&materialized.state.sst_dir)?.saturating_add(
+                    Self::local_directory_bytes(&db_path.join("hybrid_local/sst"))?,
+                ),
+                Self::local_directory_bytes(&materialized.state.wal_dir)?.saturating_add(
+                    Self::local_directory_bytes(&db_path.join("hybrid_local/wal"))?,
+                ),
+            );
+            storage.reconcile_startup_scratch_residue(
+                materialized.state.retained_startup_scratch_bytes()?,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(super) fn replay_and_repair(
         mut materialized: RuntimeStorageMaterialization,
         db_path: &Path,
@@ -686,10 +911,7 @@ impl RuntimeRecoveryMaterialization {
             )?;
         }
 
-        crate::runtime::ddl::reconcile_startup(
-            &mut materialized.state,
-            materialized.runtime_config.hybrid_storage.as_ref(),
-        )?;
+        reconcile_cloud_ddl(&mut materialized)?;
 
         materialized.state.replay_intent_log()?;
         if let Some(root) = materialized.cloud_root.as_deref() {
@@ -702,10 +924,26 @@ impl RuntimeRecoveryMaterialization {
             )?;
         }
         if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {
+            let config = &materialized.runtime_config;
             CloudStartupRecovery::mirror_cloud_metadata(
                 metadata_storage,
                 db_path,
                 recovery_policy,
+                CloudMetadataMirrorAuthority {
+                    store: config.leader_store.as_deref().ok_or_else(|| {
+                        MidgeError::Internal(
+                            "cloud metadata publication requires a leader store".into(),
+                        )
+                    })?,
+                    holder_id: config.leader_holder_id.as_deref().ok_or_else(|| {
+                        MidgeError::Internal(
+                            "cloud metadata publication requires a lease holder".into(),
+                        )
+                    })?,
+                    writer_epoch: config.writer_epoch,
+                },
+                &config.metadata_publication_lock,
+                |_| super::streaming_recovery::validate_lease(config),
             )?;
         }
 
@@ -717,35 +955,7 @@ impl RuntimeRecoveryMaterialization {
                 .reset_cloud_durable_sequence_for_recovery();
         }
 
-        materialized.state.cleanup_storage_residue();
-        Self::evict_resident_manifest_ssts(&mut materialized)?;
-        if !materialized.state.salvaged_local_ssts.is_empty() {
-            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-                let fs: Arc<dyn crate::io::Fs> = Arc::new(
-                    crate::storage::remote_sst::RemoteSstFs::new(
-                        Arc::clone(&materialized.state.fs),
-                        storage.remote_sst_backend(),
-                        storage.storage_io_timeout(),
-                    )
-                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
-                );
-                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
-                materialized.state.recovery_sst_fs = Some(fs);
-            }
-        }
-        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-            storage.reconcile_local_disk_usage(
-                Self::local_directory_bytes(&materialized.state.sst_dir)?.saturating_add(
-                    Self::local_directory_bytes(&db_path.join("hybrid_local/sst"))?,
-                ),
-                Self::local_directory_bytes(&materialized.state.wal_dir)?.saturating_add(
-                    Self::local_directory_bytes(&db_path.join("hybrid_local/wal"))?,
-                ),
-            );
-            storage.reconcile_startup_scratch_residue(
-                materialized.state.retained_startup_scratch_bytes()?,
-            )?;
-        }
+        Self::prepare_storage_for_wal_replay(&mut materialized, db_path)?;
         if let Some(replay) = materialized.streaming_wal.take() {
             super::timing::measure("wal_replay", || replay.replay(&mut materialized))?;
         }

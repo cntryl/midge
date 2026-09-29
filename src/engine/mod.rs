@@ -16,6 +16,8 @@
 
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
+use crate::lease::PrimaryLease;
+#[cfg(test)]
 use crate::runtime::RuntimeState;
 use crate::runtime::{next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse};
 #[cfg(test)]
@@ -122,7 +124,7 @@ impl Drop for Engine {
 }
 
 #[cfg(test)]
-type CloudSstRecoveryProof = startup::CloudSstRecoveryProof;
+type CloudSstRecoveryProof = crate::runtime::cloud_startup::CloudSstRecoveryProof;
 
 impl Engine {
     #[cfg(test)]
@@ -130,7 +132,7 @@ impl Engine {
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
     ) -> MidgeResult<Vec<u8>> {
-        startup::cloud_io::BlockingCloudIo::new(cloud).get(key)
+        crate::runtime::cloud_startup::cloud_io::BlockingCloudIo::new(cloud).get(key)
     }
 
     #[cfg(test)]
@@ -139,25 +141,49 @@ impl Engine {
         key: &str,
         data: Vec<u8>,
     ) -> MidgeResult<()> {
-        startup::cloud_io::BlockingCloudIo::new(cloud).put(key, data)
+        crate::runtime::cloud_startup::cloud_io::BlockingCloudIo::new(cloud).put(key, data)
     }
 
     #[cfg(test)]
     fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
+        lease: &crate::lease::CloudStorageLease,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
-        startup::CloudStartupRecovery::hydrate_cloud_metadata(cloud, db_path, recovery_policy)
+        crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
+            cloud,
+            lease
+                .get_leader_store()
+                .expect("provider-backed test lease has a leader store")
+                .as_ref(),
+            db_path,
+            recovery_policy,
+        )
     }
 
     #[cfg(test)]
     fn mirror_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
+        lease: &crate::lease::CloudStorageLease,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
-        startup::CloudStartupRecovery::mirror_cloud_metadata(cloud, db_path, recovery_policy)
+        let store = lease
+            .get_leader_store()
+            .expect("provider-backed test lease has a leader store");
+        crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata(
+            cloud,
+            db_path,
+            recovery_policy,
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: store.as_ref(),
+                holder_id: &lease.holder_id(),
+                writer_epoch: lease.epoch(),
+            },
+            &crate::runtime::MetadataPublicationLock::default(),
+            |_| Ok(()),
+        )
     }
 
     #[cfg(test)]
@@ -165,7 +191,7 @@ impl Engine {
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
-        startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(state, cloud)
+        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(state, cloud)
     }
 
     #[cfg(test)]
@@ -174,7 +200,7 @@ impl Engine {
         cloud: &crate::storage::cloud::CloudStorage,
         sst_proofs: impl IntoIterator<Item = CloudSstRecoveryProof>,
     ) -> MidgeResult<()> {
-        startup::CloudStartupRecovery::ensure_named_sst_cache_from_cloud_storage(
+        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_named_sst_cache_from_cloud_storage(
             state, cloud, sst_proofs,
         )
     }
@@ -183,7 +209,7 @@ impl Engine {
     fn cloud_recovery_sst_proofs_for_intent_replay(
         state: &RuntimeState,
     ) -> Vec<CloudSstRecoveryProof> {
-        startup::CloudStartupRecovery::cloud_recovery_sst_proofs_for_intent_replay(state)
+        crate::runtime::cloud_startup::CloudStartupRecovery::cloud_recovery_sst_proofs_for_intent_replay(state)
     }
 
     /// Open a database with explicit environment selection.

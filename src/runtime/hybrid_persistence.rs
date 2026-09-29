@@ -18,8 +18,10 @@ use std::sync::Arc;
 
 mod catalog;
 mod metadata_snapshot;
-pub(crate) use metadata_snapshot::conditional_metadata_mirror_put;
-pub(crate) use metadata_snapshot::{mirror_control_metadata_within, CloudMetadataPruneSnapshot};
+pub(crate) use metadata_snapshot::{
+    mirror_control_metadata_within, CloudMetadataMirrorAuthority, CloudMetadataMirrorContext,
+    CloudMetadataPruneSnapshot,
+};
 mod streaming_prune;
 use crate::storage::hybrid::backend::ControlObject;
 use catalog::{commit_catalog_within, load_and_repair_catalog_within, AdmittedCatalog};
@@ -53,6 +55,35 @@ pub(crate) struct CloudMetadataPruneProof {
 pub(crate) struct CloudMetadataPruneGuard {
     objects: Vec<GuardedObjectProof>,
     memory: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    authority: Option<CloudMetadataAuthorityProof>,
+}
+
+#[derive(Clone)]
+struct CloudMetadataAuthorityProof {
+    store: Arc<dyn crate::lease::LeaderStore>,
+    holder_id: String,
+    writer_epoch: u64,
+    generation: crate::lease::CloudMetadataGeneration,
+}
+
+impl CloudMetadataAuthorityProof {
+    fn verify_current(&self, deadline: &crate::common::OperationDeadline) -> MidgeResult<()> {
+        self.store
+            .validate_epoch_with_timeout(&self.holder_id, self.writer_epoch, deadline.remaining())
+            .map_err(|error| error.into_validation_error("cloud WAL prune lease check"))?;
+        match self
+            .store
+            .read_committed_metadata(deadline.remaining())
+            .map_err(|error| error.into_validation_error("cloud WAL prune metadata pointer"))?
+        {
+            crate::lease::CloudMetadataHead::Committed(current) if current == self.generation => {
+                Ok(())
+            }
+            _ => Err(MidgeError::Busy(
+                "cloud metadata pointer changed during WAL cleanup proof".into(),
+            )),
+        }
+    }
 }
 
 impl CloudMetadataPruneGuard {
@@ -73,6 +104,7 @@ impl CloudMetadataPruneGuard {
         Self {
             objects,
             memory: None,
+            authority: None,
         }
     }
 }
@@ -179,8 +211,12 @@ struct ValidatedWalPruneCandidate {
     validated: ValidatedWalObject,
 }
 
+/// The exact-coverage rule: whether the SST versions observed for a WAL
+/// record's key prove that record durable. Every coverage decision (cloud and
+/// local WAL pruning, local recovery and cloud startup replay) folds its
+/// observations through this one type, so the rule cannot drift between them.
 #[derive(Clone, Default)]
-struct ExactCoverageState {
+pub(crate) struct ExactCoverageState {
     state: Option<crate::types::KeyState>,
     ambiguous: bool,
     /// SST range tombstones at or above a range-delete record's sequence,
@@ -702,6 +738,10 @@ impl CloudPersistence {
             return Ok(sorted_cloud_wal_prune_results(results));
         }
 
+        let metadata_authority = guard
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.authority.clone());
         if let Some(metadata) = guard.metadata {
             dependencies.extend(metadata.objects);
         }
@@ -711,6 +751,10 @@ impl CloudPersistence {
         // authority. Dependencies are revalidated before the catalog CAS;
         // post-CAS cleanup needs only the target's conditional identity.
         crate::failpoints::fail_point!("midge::cloud::after_wal_prune_dependency_validation");
+
+        if let Some(authority) = metadata_authority {
+            authority.verify_current(deadline)?;
+        }
 
         // Publication authority is retired before physical deletion. A crash or
         // delete failure after this point can leak an ignored object but cannot
@@ -815,20 +859,98 @@ fn exact_state_sequence(state: &crate::types::KeyState) -> Option<u64> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ExactCoverageRecordRef<'a> {
+    op: crate::wal::types::WalOpKind,
+    key: &'a [u8],
+    value: Option<&'a [u8]>,
+    expiration: Option<u64>,
+    range_end: Option<&'a [u8]>,
+    seq: u64,
+}
+
+impl<'a> From<&'a DataCoverageRecord> for ExactCoverageRecordRef<'a> {
+    fn from(record: &'a DataCoverageRecord) -> Self {
+        Self {
+            op: record.op,
+            key: &record.key,
+            value: record.value.as_deref(),
+            expiration: record.expiration,
+            range_end: record.range_end.as_deref(),
+            seq: record.seq,
+        }
+    }
+}
+
+impl<'a> From<&'a crate::wal::WalRecord> for ExactCoverageRecordRef<'a> {
+    fn from(record: &'a crate::wal::WalRecord) -> Self {
+        Self {
+            op: record.op,
+            key: record.key.as_ref(),
+            value: record.value.as_deref(),
+            expiration: record.expiration,
+            range_end: None,
+            seq: record.seq,
+        }
+    }
+}
+
+#[cfg(test)]
+mod exact_coverage_record_ref_tests {
+    use super::ExactCoverageRecordRef;
+    use bytes::Bytes;
+
+    #[test]
+    fn should_borrow_wal_payload_when_building_exact_coverage_view() {
+        // Arrange
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from(vec![7; 1024 * 1024])),
+            9,
+            1,
+        );
+
+        // Act
+        let borrowed = ExactCoverageRecordRef::from(&record);
+
+        // Assert
+        assert_eq!(borrowed.key.as_ptr(), record.key.as_ptr());
+        let value = record.value.as_ref().expect("WAL put payload");
+        let borrowed_value = borrowed.value.expect("borrowed payload");
+        assert_eq!(borrowed_value.len(), value.len());
+        assert_eq!(borrowed_value.as_ptr(), value.as_ptr());
+    }
+}
+
 impl ExactCoverageState {
-    fn observe(&mut self, state: crate::types::KeyState) {
+    /// Whether observing `state` would make it the newest observed version.
+    pub(crate) fn supersedes(&self, state: &crate::types::KeyState) -> bool {
+        exact_state_sequence(state).is_some_and(|sequence| {
+            self.state
+                .as_ref()
+                .and_then(exact_state_sequence)
+                .is_none_or(|current| sequence > current)
+        })
+    }
+
+    /// Fold one raw, clock-free SST state for the record's key into the
+    /// proof. Returns whether `state` became the newest observed version, so
+    /// a caller that budgets the retained value knows when to charge it.
+    pub(crate) fn observe(&mut self, state: crate::types::KeyState) -> bool {
         let Some(sequence) = exact_state_sequence(&state) else {
-            return;
+            return false;
         };
         let Some(current) = self.state.as_ref() else {
             self.state = Some(state);
-            return;
+            return true;
         };
         let current_sequence = exact_state_sequence(current).unwrap_or_default();
         match sequence.cmp(&current_sequence) {
             std::cmp::Ordering::Greater => {
                 self.state = Some(state);
                 self.ambiguous = false;
+                true
             }
             std::cmp::Ordering::Equal
                 if crate::types::resolve_same_sequence(
@@ -838,8 +960,9 @@ impl ExactCoverageState {
                 .is_err() =>
             {
                 self.ambiguous = true;
+                false
             }
-            std::cmp::Ordering::Equal | std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal | std::cmp::Ordering::Less => false,
         }
     }
 
@@ -884,7 +1007,16 @@ impl ExactCoverageState {
         covered_to >= end
     }
 
-    fn exactly_covers(&self, record: &DataCoverageRecord) -> bool {
+    pub(crate) fn exactly_covers(&self, record: &DataCoverageRecord) -> bool {
+        self.exactly_covers_ref(record.into())
+    }
+
+    /// Check a point WAL record without allocating a second key or value.
+    pub(crate) fn exactly_covers_wal_point(&self, record: &crate::wal::WalRecord) -> bool {
+        self.exactly_covers_ref(record.into())
+    }
+
+    fn exactly_covers_ref(&self, record: ExactCoverageRecordRef<'_>) -> bool {
         use crate::types::KeyState;
         use crate::wal::types::WalOpRole;
 
@@ -894,8 +1026,7 @@ impl ExactCoverageState {
         if matches!(record.op.role(), WalOpRole::RangeDelete) {
             return record
                 .range_end
-                .as_deref()
-                .is_some_and(|end| self.range_covered(&record.key, end));
+                .is_some_and(|end| self.range_covered(record.key, end));
         }
         match self.state.as_ref() {
             Some(KeyState::Value(value, sequence, expiration, op_type)) => {
@@ -911,7 +1042,7 @@ impl ExactCoverageState {
                             },
                             crate::types::VersionContent {
                                 is_tombstone: false,
-                                value: record.value.as_deref(),
+                                value: record.value,
                                 expiration: record.expiration,
                             },
                         )
@@ -929,7 +1060,7 @@ impl ExactCoverageState {
                             },
                             crate::types::VersionContent {
                                 is_tombstone: true,
-                                value: record.value.as_deref(),
+                                value: record.value,
                                 expiration: record.expiration,
                             },
                         )
@@ -1057,7 +1188,13 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         let reader = readers
             .entry(file.name.clone())
             .or_insert_with(|| self.open_verified(file));
-        reader.as_ref()?.get_state(key).ok()
+        // Coverage compares persisted identity, so read the raw state with no
+        // TTL clock: wall-clock expiry would turn an expired but present exact
+        // version into a tombstone and hide it from the proof.
+        reader
+            .as_ref()?
+            .get_state_at_with_time(key, u64::MAX, 0)
+            .ok()
     }
 
     /// A reader over `file`, or `None` when it cannot be shown to be the SST
@@ -1149,16 +1286,8 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         if !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
             return false;
         }
-        let coverage = DataCoverageRecord {
-            cf_id: record.cf_id,
-            op: record.op,
-            key: record.key.to_vec(),
-            value: record.value.as_ref().map(|value| value.to_vec()),
-            expiration: record.expiration,
-            range_end: None,
-            seq: record.seq,
-        };
-        self.value_write_gap(&coverage).is_none()
+        self.value_write_gap(&point_coverage_record(record))
+            .is_none()
     }
 }
 
@@ -1209,15 +1338,54 @@ pub(crate) fn wal_data_records_covered_by_manifest(
     })
 }
 
-fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {
-    if file.cf_id != record.cf_id {
+/// The coverage view of a point WAL record (a put, insert or delete).
+pub(crate) fn point_coverage_record(record: &crate::wal::WalRecord) -> DataCoverageRecord {
+    DataCoverageRecord {
+        cf_id: record.cf_id,
+        op: record.op,
+        key: record.key.to_vec(),
+        value: record.value.as_ref().map(|value| value.to_vec()),
+        expiration: record.expiration,
+        range_end: None,
+        seq: record.seq,
+    }
+}
+
+/// Whether `file` is a candidate to hold `record`: same column family, with
+/// complete sequence and key bounds that contain the record.
+pub(crate) fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {
+    file_covers_record_fields(
+        file,
+        record.cf_id,
+        record.seq,
+        &record.key,
+        record.range_end.as_deref(),
+    )
+}
+
+/// Candidate check for replay's borrowed point WAL record.
+pub(crate) fn file_covers_wal_point_record(
+    file: &FileMeta,
+    record: &crate::wal::WalRecord,
+) -> bool {
+    file_covers_record_fields(file, record.cf_id, record.seq, record.key.as_ref(), None)
+}
+
+fn file_covers_record_fields(
+    file: &FileMeta,
+    cf_id: u32,
+    seq: u64,
+    key: &[u8],
+    range_end: Option<&[u8]>,
+) -> bool {
+    if file.cf_id != cf_id {
         return false;
     }
 
     let (Some(smallest_seq), Some(largest_seq)) = (file.smallest_seq, file.largest_seq) else {
         return false;
     };
-    if record.seq < smallest_seq || record.seq > largest_seq {
+    if seq < smallest_seq || seq > largest_seq {
         return false;
     }
 
@@ -1226,12 +1394,10 @@ fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {
     else {
         return false;
     };
-    if let Some(range_end) = record.range_end.as_ref() {
-        smallest_key.as_slice() <= record.key.as_slice()
-            && range_end.as_slice() <= largest_key.as_slice()
+    if let Some(range_end) = range_end {
+        smallest_key.as_slice() <= key && range_end <= largest_key.as_slice()
     } else {
-        smallest_key.as_slice() <= record.key.as_slice()
-            && record.key.as_slice() <= largest_key.as_slice()
+        smallest_key.as_slice() <= key && key <= largest_key.as_slice()
     }
 }
 
@@ -1248,6 +1414,142 @@ fn verify_sst_summary_matches_manifest(
         crate::sst::identity::ProofPolicy::Legacy,
     )
     .map_err(|mismatch| format!("cloud SST '{sst_name}': {mismatch}"))
+}
+
+#[cfg(test)]
+mod metadata_authority_tests {
+    use super::CloudMetadataAuthorityProof;
+    use crate::lease::{
+        CloudLeaseConfig, CloudMetadataGeneration, CloudMetadataObject, CloudStorageLease,
+        PrimaryLease,
+    };
+    use crate::storage::cloud::CloudStorage;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn generation(sequence: u64) -> CloudMetadataGeneration {
+        let id = uuid::Uuid::new_v4();
+        CloudMetadataGeneration {
+            manifest_sequence: sequence,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| CloudMetadataObject {
+                file_name: file_name.to_string(),
+                object_key: format!("metadata/generations/{id}/{file_name}"),
+                len: 1,
+                crc32c: 0,
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn should_reject_wal_prune_authority_when_committed_pointer_changes() {
+        // Arrange
+        let cache = tempfile::tempdir().expect("lease cache directory");
+        let cloud = Arc::new(CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            cache.path().to_path_buf(),
+            cloud,
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let store = lease.get_leader_store().expect("provider leader store");
+        let holder_id = lease.holder_id();
+        let epoch = lease.epoch();
+        let first = generation(1);
+        store
+            .publish_committed_metadata(
+                &holder_id,
+                epoch,
+                None,
+                first.clone(),
+                Duration::from_secs(5),
+            )
+            .expect("commit first pointer");
+        let proof = CloudMetadataAuthorityProof {
+            store: Arc::clone(&store),
+            holder_id: holder_id.clone(),
+            writer_epoch: epoch,
+            generation: first.clone(),
+        };
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        proof
+            .verify_current(&deadline)
+            .expect("first pointer is current");
+        let second = generation(2);
+
+        // Act
+        store
+            .publish_committed_metadata(
+                &holder_id,
+                epoch,
+                Some(&first),
+                second,
+                Duration::from_secs(5),
+            )
+            .expect("commit successor pointer");
+        let result = proof.verify_current(&deadline);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Busy(_))),
+            "WAL cleanup must reject a superseded metadata pointer: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_wal_prune_authority_after_lease_release() {
+        // Arrange
+        let cache = tempfile::tempdir().expect("lease cache directory");
+        let cloud = Arc::new(CloudStorage::with_mock());
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            CloudLeaseConfig {
+                bucket: "test".to_string(),
+                prefix: String::new(),
+            },
+            cache.path().to_path_buf(),
+            cloud,
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let store = lease.get_leader_store().expect("provider leader store");
+        let holder_id = lease.holder_id();
+        let epoch = lease.epoch();
+        let committed = generation(1);
+        store
+            .publish_committed_metadata(
+                &holder_id,
+                epoch,
+                None,
+                committed.clone(),
+                Duration::from_secs(5),
+            )
+            .expect("commit pointer");
+        let proof = CloudMetadataAuthorityProof {
+            store,
+            holder_id,
+            writer_epoch: epoch,
+            generation: committed,
+        };
+        lease.release().expect("release lease");
+
+        // Act
+        let result = proof.verify_current(&crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ));
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Fenced(_))),
+            "WAL cleanup must reject a released lease before catalog retirement: {result:?}"
+        );
+    }
 }
 
 #[cfg(test)]

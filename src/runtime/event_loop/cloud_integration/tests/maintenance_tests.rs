@@ -175,7 +175,7 @@ fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn
     CompactionCoordinator::compact_all(&mut el, request_id);
 
     // Act
-    el.compaction_publication_degraded = true;
+    el.compaction_fence.degrade();
     complete_flush(&mut el);
 
     // Assert
