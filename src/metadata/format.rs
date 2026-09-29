@@ -12,6 +12,10 @@ const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
 const FORMAT_PREFIX: &str = "midge-format-version=";
 
+pub(crate) fn current_format_marker_bytes() -> Vec<u8> {
+    format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n").into_bytes()
+}
+
 pub fn format_marker_path(db_path: &Path) -> PathBuf {
     db_path.join(FORMAT_FILE)
 }
@@ -48,7 +52,7 @@ fn publish_current_marker(db_path: &Path) -> MidgeResult<()> {
         &fs,
         &FsPath::new(FORMAT_FILE_TEMP),
         &FsPath::new(FORMAT_FILE),
-        format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n").as_bytes(),
+        &current_format_marker_bytes(),
         || {
             crate::failpoints::fail_point!("midge::format::before_publish", |_| Err(FsError::Io(
                 "failpoint: FORMAT publication failed".to_string()
