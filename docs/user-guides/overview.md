@@ -1,6 +1,6 @@
 # Overview
 
-Midge is an embedded, single-process Rust LSM key-value engine. Version `0.2.0`
+Midge is an embedded, single-process Rust LSM key-value engine. Version `0.3.0`
 requires Rust `1.97` or newer. It is a supported pre-1.0 engine whose API,
 persisted formats, and operational contract continue to evolve.
 
