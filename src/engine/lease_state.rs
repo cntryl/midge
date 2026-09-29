@@ -50,11 +50,12 @@ fn spawn_thread(name: &str, task: ReaperTask) -> std::io::Result<JoinHandle<()>>
         .spawn(task)
 }
 
-pub(super) type FencingResources = (
-    Option<Mutex<crate::lease::LeaseHeartbeat>>,
-    Option<Arc<dyn crate::lease::PrimaryLease>>,
-    Option<crate::lease::LeaseGuard>,
-);
+pub(super) struct FencingResources {
+    heartbeat: Option<Mutex<crate::lease::LeaseHeartbeat>>,
+    lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
+    guard: Option<crate::lease::LeaseGuard>,
+    storage: Option<Arc<crate::storage::HybridStorage>>,
+}
 
 pub(super) enum PendingFencingCleanup {
     Known {
@@ -71,6 +72,7 @@ pub(super) struct LeaseState {
     pub(super) lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
     pub(super) guard: Option<crate::lease::LeaseGuard>,
     pub(super) heartbeat: Option<Mutex<crate::lease::LeaseHeartbeat>>,
+    pub(super) storage: Option<Arc<crate::storage::HybridStorage>>,
     pub(super) pending_cleanup: Option<PendingFencingCleanup>,
 }
 
@@ -79,34 +81,50 @@ impl LeaseState {
         lease: Arc<dyn crate::lease::PrimaryLease>,
         guard: crate::lease::LeaseGuard,
         heartbeat: crate::lease::LeaseHeartbeat,
+        storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> Self {
         Self {
             lease: Some(lease),
             guard: Some(guard),
             heartbeat: Some(Mutex::new(heartbeat)),
+            storage,
             pending_cleanup: None,
         }
     }
 
     pub(super) fn has_resources(&self) -> bool {
-        self.heartbeat.is_some() || self.lease.is_some() || self.guard.is_some()
+        self.heartbeat.is_some()
+            || self.lease.is_some()
+            || self.guard.is_some()
+            || self.storage.is_some()
     }
 
     pub(super) fn take_resources(&mut self) -> FencingResources {
-        (self.heartbeat.take(), self.lease.take(), self.guard.take())
+        FencingResources {
+            heartbeat: self.heartbeat.take(),
+            lease: self.lease.take(),
+            guard: self.guard.take(),
+            storage: self.storage.take(),
+        }
     }
 
     pub(super) fn restore_resources(&mut self, resources: FencingResources) {
-        self.heartbeat = resources.0;
-        self.lease = resources.1;
-        self.guard = resources.2;
+        self.heartbeat = resources.heartbeat;
+        self.lease = resources.lease;
+        self.guard = resources.guard;
+        self.storage = resources.storage;
     }
 
     pub(super) fn release_fencing_parts(
         lease_heartbeat: Option<Mutex<crate::lease::LeaseHeartbeat>>,
         lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
         lease_guard: Option<crate::lease::LeaseGuard>,
+        storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<()> {
+        if let Some(storage) = storage {
+            storage.shutdown_background_workers();
+            storage.shutdown_wal_upload_worker();
+        }
         if let Some(heartbeat_mutex) = lease_heartbeat {
             let mut heartbeat = heartbeat_mutex
                 .lock()
@@ -162,8 +180,15 @@ impl LeaseState {
         match spawn_retained(
             "midge-fencing-reaper",
             resources,
-            move |(heartbeat, lease, guard)| {
-                let _ = completion_tx.send(Self::release_fencing_parts(heartbeat, lease, guard));
+            move |FencingResources {
+                      heartbeat,
+                      lease,
+                      guard,
+                      storage,
+                  }| {
+                let _ = completion_tx.send(Self::release_fencing_parts(
+                    heartbeat, lease, guard, storage,
+                ));
                 tracing::debug!("Engine fencing reaper cleanup complete");
             },
             spawner,
@@ -199,10 +224,18 @@ impl LeaseState {
         match spawn_retained(
             "midge-runtime-fencing-reaper",
             (runtime, resources),
-            move |(runtime, (heartbeat, lease, guard))| {
+            move |(
+                runtime,
+                FencingResources {
+                    heartbeat,
+                    lease,
+                    guard,
+                    storage,
+                },
+            )| {
                 let terminal_result = runtime_handle.shutdown(Duration::MAX);
                 drop(runtime);
-                let released = Self::release_fencing_parts(heartbeat, lease, guard);
+                let released = Self::release_fencing_parts(heartbeat, lease, guard, storage);
                 let _ = completion_tx.send(terminal_result.and(released));
                 tracing::debug!("Engine runtime and fencing reaper cleanup complete");
             },
@@ -229,18 +262,38 @@ impl LeaseState {
     pub(super) fn detach_reaper(&mut self, runtime: Option<Runtime>) {
         let resources = self.take_resources();
         if runtime.is_none()
-            && resources.0.is_none()
-            && resources.1.is_none()
-            && resources.2.is_none()
+            && resources.heartbeat.is_none()
+            && resources.lease.is_none()
+            && resources.guard.is_none()
+            && resources.storage.is_none()
         {
             return;
         }
-        if let Err((error, (runtime, (heartbeat, lease, guard)))) = spawn_retained(
+        if let Err((
+            error,
+            (
+                runtime,
+                FencingResources {
+                    heartbeat,
+                    lease,
+                    guard,
+                    storage,
+                },
+            ),
+        )) = spawn_retained(
             "midge-engine-reaper",
             (runtime, resources),
-            move |(runtime, (heartbeat, lease, guard))| {
+            move |(
+                runtime,
+                FencingResources {
+                    heartbeat,
+                    lease,
+                    guard,
+                    storage,
+                },
+            )| {
                 drop(runtime);
-                if let Err(error) = Self::release_fencing_parts(heartbeat, lease, guard) {
+                if let Err(error) = Self::release_fencing_parts(heartbeat, lease, guard, storage) {
                     tracing::debug!(%error, "Engine reaper finished without releasing the lease");
                 }
                 tracing::debug!("Engine reaper cleanup complete");
@@ -249,7 +302,7 @@ impl LeaseState {
         ) {
             tracing::error!(%error, "failed to spawn engine cleanup reaper");
             drop(runtime);
-            let _ = Self::release_fencing_parts(heartbeat, lease, guard);
+            let _ = Self::release_fencing_parts(heartbeat, lease, guard, storage);
         }
     }
     pub(super) fn wait_for_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
@@ -319,7 +372,7 @@ impl LeaseState {
 
 #[cfg(test)]
 mod tests {
-    use super::LeaseState;
+    use super::{FencingResources, LeaseState};
     use crate::lease::PrimaryLease;
     use std::sync::Arc;
 
@@ -358,16 +411,17 @@ mod tests {
         // Arrange
         let lease: Arc<dyn PrimaryLease> = Arc::new(TestLease);
         let heartbeat = crate::lease::LeaseHeartbeat::new(Arc::clone(&lease));
-        let mut state = LeaseState::new(lease, crate::lease::LeaseGuard::token(), heartbeat);
+        let mut state = LeaseState::new(lease, crate::lease::LeaseGuard::token(), heartbeat, None);
 
         // Act
         let resources = state.take_resources();
 
         // Assert
         assert!(!state.has_resources());
-        assert!(resources.0.is_some());
-        assert!(resources.1.is_some());
-        assert!(resources.2.is_some());
+        assert!(resources.heartbeat.is_some());
+        assert!(resources.lease.is_some());
+        assert!(resources.guard.is_some());
+        assert!(resources.storage.is_none());
     }
 
     #[test]
@@ -375,7 +429,7 @@ mod tests {
         // Arrange
         let lease: Arc<dyn PrimaryLease> = Arc::new(TestLease);
         let heartbeat = crate::lease::LeaseHeartbeat::new(Arc::clone(&lease));
-        let mut state = LeaseState::new(lease, crate::lease::LeaseGuard::token(), heartbeat);
+        let mut state = LeaseState::new(lease, crate::lease::LeaseGuard::token(), heartbeat, None);
 
         // Act
         let result = state.schedule_cleanup_with_spawner(Ok(()), |_, _| {
@@ -386,8 +440,13 @@ mod tests {
         assert!(result.is_err());
         assert!(state.has_resources());
         assert!(state.pending_cleanup.is_none());
-        let (heartbeat, lease, guard) = state.take_resources();
-        LeaseState::release_fencing_parts(heartbeat, lease, guard)
+        let FencingResources {
+            heartbeat,
+            lease,
+            guard,
+            storage,
+        } = state.take_resources();
+        LeaseState::release_fencing_parts(heartbeat, lease, guard, storage)
             .expect("restored lease can be released");
     }
 }

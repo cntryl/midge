@@ -1085,6 +1085,43 @@ fn should_release_lease_when_held() {
 }
 
 #[test]
+fn should_retry_simulated_lease_release_after_coordination_lock_collision() {
+    // Arrange
+    let cache_path = temp_cache_path();
+    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
+    let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+    let epoch = lease.epoch();
+    let lock_path = cache_path.join(".midge_leader.lock");
+    std::fs::write(&lock_path, b"competing lease mutation")
+        .expect("hold coordination lock during release");
+
+    // Act
+    let blocked_release = lease.release();
+    assert_eq!(lease.epoch(), 0);
+    assert!(lease.validity.remaining(epoch).is_err());
+    assert!(matches!(
+        Arc::clone(&lease).try_acquire(),
+        Err(LeaseError::AlreadyAcquired(_))
+    ));
+    std::fs::remove_file(&lock_path).expect("release coordination lock");
+    let retried_release = lease.release();
+
+    // Assert
+    assert!(
+        matches!(blocked_release, Err(LeaseError::AcquisitionFailed(_))),
+        "coordination collision must be retryable: {blocked_release:?}"
+    );
+    retried_release.expect("retry must release the persisted lease");
+    assert!(!lease_file_exists(&cache_path));
+    let successor = Arc::new(CloudStorageLease::new(test_config(), cache_path));
+    let _successor_guard = successor
+        .clone()
+        .try_acquire()
+        .expect("successor acquires immediately after retry");
+    successor.release().expect("release successor lease");
+}
+
+#[test]
 fn should_allow_removing_missing_simulated_lease() {
     // Arrange
     let cache_path = temp_cache_path();
@@ -2715,7 +2752,7 @@ fn should_deactivate_local_validity_when_provider_release_fails() {
     let lease = Arc::new(CloudStorageLease::new_provider_backed(
         test_config(),
         temp_cache_path(),
-        cloud,
+        Arc::clone(&cloud),
     ));
     let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
     let epoch = lease.epoch();
@@ -2728,6 +2765,45 @@ fn should_deactivate_local_validity_when_provider_release_fails() {
     assert!(matches!(failed, Err(LeaseError::IoError(_))), "{failed:?}");
     assert_eq!(lease.epoch(), 0);
     assert!(lease.validity.remaining(epoch).is_err());
+    lease.release().expect("retry provider lease release");
+    let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
+    assert!(persisted
+        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .expect("released lease expiry"));
+}
+
+#[test]
+fn should_release_provider_lease_after_terminal_renewal_failure() {
+    // Arrange
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    let lease = Arc::new(
+        CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        ),
+    );
+    let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+    let epoch = lease.epoch();
+
+    // Act: the short test TTL cannot meet the provider renewal write margin.
+    let failed_renewal = lease.renew();
+    let released = lease.release();
+
+    // Assert
+    assert!(
+        matches!(failed_renewal, Err(LeaseError::RenewalFailed(_))),
+        "short TTL must fail renewal: {failed_renewal:?}"
+    );
+    assert_eq!(lease.epoch(), 0);
+    assert!(lease.validity.remaining(epoch).is_err());
+    released.expect("release must conditionally expire the old lease");
+    let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
+    assert!(persisted
+        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .expect("released lease expiry"));
 }
 
 #[test]

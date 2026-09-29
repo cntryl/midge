@@ -410,7 +410,7 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
+    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard, None)?;
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -2209,7 +2209,7 @@ fn should_report_error_when_lease_release_keeps_failing() {
     let started = std::time::Instant::now();
 
     // Act
-    let result = super::LeaseState::release_fencing_parts(None, Some(engine_lease), None);
+    let result = super::LeaseState::release_fencing_parts(None, Some(engine_lease), None, None);
 
     // Assert
     assert!(
