@@ -926,7 +926,7 @@ fn should_initialize_compaction_state() {
     let compaction = CompactionState::default();
 
     // Assert
-    assert!(compaction.compacting_ssts.is_empty());
+    assert_eq!(compaction.compacting_ssts.len(), 0);
 }
 
 // =========== CloudState Tests ===========
@@ -940,7 +940,7 @@ fn should_initialize_cloud_state() {
     let cloud = CloudState::default();
 
     // Assert
-    assert!(cloud.pending_uploads.is_empty());
+    assert_eq!(cloud.pending_uploads.len(), 0);
     assert_eq!(cloud.last_cloud_checkpoint_seq, 0);
 }
 

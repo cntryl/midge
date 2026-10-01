@@ -1065,8 +1065,8 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(MidgeError::Corruption(_))));
-        assert!(fixture.sst_backend.get_uploads().is_empty());
-        assert!(fixture.control_backend.get_uploads().is_empty());
+        assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
+        assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         assert_eq!(
             std::fs::read(fixture.task.sst_dir.join(&fixture.task.sst_name))?,
             bytes
@@ -1089,8 +1089,8 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
         assert!(fixture.task.sst_dir.join(&fixture.task.sst_name).exists());
-        assert!(fixture.sst_backend.get_uploads().is_empty());
-        assert!(fixture.control_backend.get_uploads().is_empty());
+        assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
+        assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         assert_eq!(budget.used(), 0);
         Ok(())
     }
@@ -1332,7 +1332,7 @@ mod tests {
 
         // Assert
         assert!(matches!(error, MidgeError::Fenced(_)));
-        assert!(fixture.sst_backend.get_uploads().is_empty());
+        assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert!(!fixture.directory.path().join("db/intent_log.json").exists());
         Ok(())
     }
@@ -1392,7 +1392,7 @@ mod tests {
         assert!(crate::runtime::IntentPersistence::load(&db_path)
             .map_err(MidgeError::Internal)?
             .is_empty());
-        assert!(fixture.control_backend.get_uploads().is_empty());
+        assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         Ok(())
     }
 
@@ -1412,7 +1412,7 @@ mod tests {
             .map_err(MidgeError::Internal)?
             .files
             .is_empty());
-        assert!(fixture.control_backend.get_uploads().is_empty());
+        assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         Ok(())
     }
 

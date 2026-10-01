@@ -487,7 +487,7 @@ mod streaming_scan_hardening {
         let rows = read.scan(&query)?.try_collect()?;
 
         // Assert
-        assert!(rows.is_empty());
+        assert_eq!(rows, [] as [(bytes::Bytes, bytes::Bytes); 0]);
         drop(read);
         engine.shutdown(Duration::from_secs(2))?;
         Ok(())
@@ -1451,7 +1451,10 @@ mod compression_compatibility {
         let second_ssts = sorted_sst_files(second.path());
 
         // Assert
-        assert!(!first_ssts.is_empty());
+        assert_ne!(
+            first_ssts,
+            [] as [(std::path::PathBuf, std::vec::Vec<u8>); 0]
+        );
         assert_eq!(first_ssts, second_ssts);
     }
 }

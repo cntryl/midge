@@ -461,7 +461,7 @@ mod tests {
         let conditions = conditional_range_preconditions(&(0..100), &object);
 
         // Assert
-        assert!(!conditions.expect("a valid range is accepted").is_empty());
+        assert_ne!(conditions.expect("a valid range is accepted").len(), 0);
     }
 
     #[test]

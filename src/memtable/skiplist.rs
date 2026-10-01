@@ -1696,7 +1696,7 @@ mod tests {
         let results = sl.range(Some(b"z"), Some(b"zz"));
 
         // Assert
-        assert!(results.is_empty());
+        assert_eq!(results.len(), 0);
     }
 
     // ========================================================================
@@ -1774,7 +1774,7 @@ mod tests {
         let keys = sl.get_all_keys();
 
         // Assert
-        assert!(keys.is_empty());
+        assert_eq!(keys.len(), 0);
     }
 
     #[test]

@@ -1859,7 +1859,7 @@ mod engine_iterators {
             let results = scan_between(&tx, b"k00", b"k99");
 
             // Assert
-            assert!(results.is_empty());
+            assert_eq!(results, [] as [(std::vec::Vec<u8>, std::vec::Vec<u8>); 0]);
         });
     }
 
@@ -1914,7 +1914,7 @@ mod engine_iterators {
             let results = scan_between(&tx, b"k99", b"k99");
 
             // Assert
-            assert!(results.is_empty());
+            assert_eq!(results, [] as [(std::vec::Vec<u8>, std::vec::Vec<u8>); 0]);
         });
     }
 
@@ -1979,7 +1979,7 @@ mod engine_iterators {
             let results = scan_between(&read, b"k01", b"k01");
 
             // Assert
-            assert!(results.is_empty());
+            assert_eq!(results, [] as [(std::vec::Vec<u8>, std::vec::Vec<u8>); 0]);
         });
     }
 

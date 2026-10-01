@@ -754,7 +754,7 @@ mod tests {
 
         // Assert
         let pairs = result;
-        assert!(pairs.is_empty());
+        assert_eq!(pairs.len(), 0);
     }
 
     #[test]
@@ -863,7 +863,7 @@ mod tests {
         // Assert
         assert!(result.is_ok());
         let bytes = result.unwrap();
-        assert!(!bytes.is_empty());
+        assert_ne!(bytes.len(), 0);
     }
 
     #[test]
@@ -893,7 +893,7 @@ mod tests {
         let result = boxed.finish_bytes().unwrap();
 
         // Assert - Should have accumulated data
-        assert!(!result.is_empty());
+        assert_ne!(result.len(), 0);
     }
 
     // =========== Trait Polymorphism Edge Cases ===========
@@ -908,7 +908,7 @@ mod tests {
         let result = reader.scan_range(Some(b"key1"), Some(b"key1"));
 
         // Assert
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
     }
 
     #[test]
@@ -922,7 +922,7 @@ mod tests {
         let result = reader.scan_range(Some(b"z"), Some(b"a"));
 
         // Assert
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
     }
 
     #[test]

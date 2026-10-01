@@ -429,7 +429,7 @@ fn should_release_final_block_reservations_before_reserving_finalization_workspa
     let bytes = writer.finish_bytes()?;
 
     // Assert
-    assert!(!bytes.is_empty());
+    assert_ne!(bytes.len(), 0);
     assert_eq!(budget.used(), 0);
     assert!(budget.peak() <= budget.limit());
     Ok(())
@@ -830,7 +830,7 @@ fn should_accept_writable_op_types_when_adding_sst_entries() -> MidgeResult<()> 
     writer.add_with_meta(b"c", None, 1, EntryType::Delete, None)?;
 
     // Assert
-    assert!(!writer.finish_bytes()?.is_empty());
+    assert_ne!(writer.finish_bytes()?.len(), 0);
     Ok(())
 }
 

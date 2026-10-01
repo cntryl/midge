@@ -634,7 +634,7 @@ fn should_replay_every_segment_when_valid_local_copy_fills_cloud_hole() -> Midge
             .len(),
         3
     );
-    assert!(recovered.plan.unreplayed_segments.is_empty());
+    assert_eq!(recovered.plan.unreplayed_segments.len(), 0);
     assert_eq!(recovered.plan.max_unreplayed_sequence, 0);
     Ok(())
 }
@@ -688,7 +688,7 @@ fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog(
             .len(),
         2
     );
-    assert!(recovered.plan.unreplayed_segments.is_empty());
+    assert_eq!(recovered.plan.unreplayed_segments.len(), 0);
     assert!(leaked.exists(), "the leftover stays where it was");
     Ok(())
 }

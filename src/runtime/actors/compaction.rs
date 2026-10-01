@@ -770,7 +770,7 @@ impl CompactionActor {
             .retain(|name| !inputs.contains(name));
         if state
             .active_compactions
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
                 |active| active.checked_sub(1),
@@ -1573,7 +1573,7 @@ mod tests {
 
         // Assert
         assert!(!actor.compaction_running);
-        assert!(actor.active_input_ssts.is_empty());
+        assert_eq!(actor.active_input_ssts.len(), 0);
         assert!(leftover_token.is_none());
         assert!(state
             .compaction
@@ -1976,7 +1976,7 @@ mod tests {
             "shutdown must join the worker"
         );
         assert_eq!(state.active_compactions.load(Ordering::SeqCst), 0);
-        assert!(state.compaction.compacting_ssts.is_empty());
+        assert_eq!(state.compaction.compacting_ssts.len(), 0);
         assert_eq!(
             std::fs::read(&input_path).expect("read retained input"),
             input_bytes,

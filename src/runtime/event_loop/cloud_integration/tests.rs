@@ -8753,8 +8753,8 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
         "{result:?}"
     );
     assert!(!invoked.load(Ordering::SeqCst));
-    assert!(provider.get_downloads().is_empty());
-    assert!(provider.get_range_downloads().is_empty());
+    assert_eq!(provider.get_downloads().len(), 0);
+    assert_eq!(provider.get_range_downloads().len(), 0);
     assert_eq!(budget.used(), 0);
     Ok(())
 }
@@ -8816,10 +8816,12 @@ fn should_complete_cloud_waiter_when_only_completion_adapter_headroom_is_missing
 
     // Assert
     assert!(!local_wal.exists());
-    assert!(el
-        .durability
-        .cloud_durability_request_ids_at(segment_id)
-        .is_empty());
+    assert_eq!(
+        el.durability
+            .cloud_durability_request_ids_at(segment_id)
+            .len(),
+        0
+    );
     Ok(())
 }
 
@@ -8894,10 +8896,12 @@ fn assert_cloud_waiter_survives_admission_pressure(
         max_sequence,
     });
     assert!(!local_wal.exists());
-    assert!(el
-        .durability
-        .cloud_durability_request_ids_at(segment_id)
-        .is_empty());
+    assert_eq!(
+        el.durability
+            .cloud_durability_request_ids_at(segment_id)
+            .len(),
+        0
+    );
     Ok(())
 }
 

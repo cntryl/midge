@@ -1279,9 +1279,7 @@ mod tests {
             0,
         ));
         assert_eq!(duplicate_snapshot.get(b"key", u64::MAX)?, None);
-        assert!(duplicate_snapshot
-            .range_scan(b"", b"", u64::MAX)?
-            .is_empty());
+        assert_eq!(duplicate_snapshot.range_scan(b"", b"", u64::MAX)?.len(), 0);
         assert!(duplicate_snapshot
             .state_scan(None, None, false, u64::MAX)
             .next()
@@ -1363,7 +1361,7 @@ mod tests {
 
         // Assert
         assert_eq!(result?, None);
-        assert!(snapshot.range_scan(b"", b"", u64::MAX)?.is_empty());
+        assert_eq!(snapshot.range_scan(b"", b"", u64::MAX)?.len(), 0);
         assert!(snapshot
             .state_scan(None, None, false, u64::MAX)
             .next()
