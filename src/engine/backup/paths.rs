@@ -4,11 +4,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub(super) fn resolve(path: &Path) -> MidgeResult<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    let absolute = absolute(path)?;
     let mut resolved = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -35,6 +31,29 @@ pub(super) fn resolve(path: &Path) -> MidgeResult<PathBuf> {
         }
     }
     Ok(resolved)
+}
+
+fn absolute(path: &Path) -> MidgeResult<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) {
+                return Err(MidgeError::InvalidArgument(
+                    "unsupported relative Windows path prefix".into(),
+                ));
+            }
+            // C:child is relative to that drive's current directory. Resolve
+            // only the drive anchor, preserving symlinks and parent components
+            // in the remaining path for component-wise resolution below.
+            let anchor = std::path::absolute(Path::new(prefix.as_os_str()))?;
+            return Ok(anchor.join(components.as_path()));
+        }
+    }
+    Ok(std::env::current_dir()?.join(path))
 }
 
 pub(super) fn disjoint(left: &Path, right: &Path) -> MidgeResult<()> {

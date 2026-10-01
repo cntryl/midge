@@ -36,7 +36,8 @@ fn should_reject_backup_overlap_before_mutation() {
         .unwrap();
     tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
     tx.commit(WriteOptions::sync()).unwrap();
-    engine.flush_cf(&cf).unwrap();
+    // Keep the tiny transaction resident: flush completion precedes WAL retirement,
+    // which would make a whole-directory comparison race background maintenance.
     let before = inventory(&source);
 
     // Act
@@ -249,4 +250,37 @@ fn should_reject_relative_cloud_simulated_overlap_and_allow_siblings() {
             .unwrap(),
     )
     .unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn should_reject_drive_relative_overlap_before_creating_parent() {
+    // Arrange
+    let cwd = std::env::current_dir().unwrap();
+    let directory = tempfile::tempdir_in(cwd.join("target")).unwrap();
+    let source = directory.path().join("source");
+    let mut engine = open(&source);
+    let relative = source.strip_prefix(&cwd).unwrap().join("new-parent/backup");
+    let drive = match cwd.components().next().unwrap() {
+        std::path::Component::Prefix(prefix) => match prefix.kind() {
+            std::path::Prefix::Disk(drive) | std::path::Prefix::VerbatimDisk(drive) => {
+                char::from(drive)
+            }
+            _ => panic!("test requires a disk path"),
+        },
+        _ => panic!("test requires a Windows drive"),
+    };
+    let before = inventory(&source);
+
+    // Act
+    let result = engine.backup_to(
+        format!("{drive}:{}", relative.display()),
+        Duration::from_secs(10),
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    assert!(!source.join("new-parent").exists());
+    assert_eq!(before, inventory(&source));
+    engine.shutdown(Duration::from_secs(10)).unwrap();
 }
