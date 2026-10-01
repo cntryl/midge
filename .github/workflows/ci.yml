@@ -160,9 +160,10 @@ jobs:
           cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
 
       - name: Test backup path isolation and publication
+        shell: bash
         run: |
+          set -euo pipefail
           cargo test --test backup_paths --all-features
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test backup_publish_races --all-features -- --test-threads=1
 
       - name: Test named backup and empty-compaction aborts
