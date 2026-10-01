@@ -5,6 +5,7 @@ use cntryl_midge::{
     Transaction, TransactionMode, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -45,6 +46,7 @@ pub enum FailureKind {
     Scan,
     FinalState,
     Harness,
+    SpillCoverage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -356,7 +358,7 @@ pub fn execute(
     {
         return Err(fail(
             step,
-            FailureKind::Harness,
+            FailureKind::SpillCoverage,
             "spilled fixture never produced a spill file".into(),
             &counters,
         ));
@@ -373,7 +375,11 @@ fn minimize(
     failure: &Failure,
 ) -> (History, Failure, usize, bool) {
     minimize_with(history, failure, |candidate| {
-        execute(candidate, fixture, false)
+        execute(
+            candidate,
+            fixture,
+            failure.kind == FailureKind::SpillCoverage,
+        )
     })
 }
 
@@ -460,15 +466,33 @@ struct Counterexample<'a> {
     failpoint_ordinal: Option<usize>,
     original: &'a History,
     original_failure: &'a Failure,
+    original_require_spill: bool,
     minimized: History,
     minimized_failure: Failure,
+    minimized_require_spill: bool,
     minimization_replays: usize,
     minimization_complete: bool,
 }
 
 fn write_json(path: &Path, value: &impl Serialize) {
-    let bytes = serde_json::to_vec_pretty(value).expect("serialize discovery artifact");
-    std::fs::write(path, bytes).expect("persist discovery artifact");
+    publish_json(path, value, || Ok(())).expect("persist discovery artifact");
+}
+
+fn publish_json(
+    path: &Path,
+    value: &impl Serialize,
+    before_publish: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let parent = path.parent().expect("artifact path has parent");
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(&bytes)?;
+    staged.as_file().sync_all()?;
+    before_publish()?;
+    staged.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 /// Replaying uses concrete actions, never regenerated random inputs. The other
@@ -478,11 +502,16 @@ pub fn replay(path: &Path) {
     struct SavedCounterexample {
         fixture: Fixture,
         minimized: History,
+        minimized_require_spill: bool,
     }
     let bytes = std::fs::read(path).expect("read counterexample artifact");
     let saved: SavedCounterexample =
         serde_json::from_slice(&bytes).expect("decode counterexample artifact");
-    if let Err(failure) = execute(&saved.minimized, saved.fixture, false) {
+    if let Err(failure) = execute(
+        &saved.minimized,
+        saved.fixture,
+        saved.minimized_require_spill,
+    ) {
         panic!("replayed mismatch in {}: {failure:?}", path.display());
     }
 }
@@ -533,8 +562,10 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
                         failpoint_ordinal: None,
                         original: history,
                         original_failure: &failure,
+                        original_require_spill: true,
                         minimized: history.clone(),
                         minimized_failure: failure.clone(),
+                        minimized_require_spill: true,
                         minimization_replays: 0,
                         minimization_complete: false,
                     };
@@ -549,6 +580,7 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
                         minimize(history, *fixture, &failure);
                     artifact.minimized = minimized;
                     artifact.minimized_failure = minimized_failure;
+                    artifact.minimized_require_spill = failure.kind == FailureKind::SpillCoverage;
                     artifact.minimization_replays = minimization_replays;
                     artifact.minimization_complete = minimization_complete;
                     write_json(&path, &artifact);
@@ -639,5 +671,65 @@ mod tests {
         assert_eq!(minimal.actions.len(), 2);
         assert!(matches!(&minimal.actions[0], Action::Begin(0)));
         assert!(matches!(&minimal.actions[1], Action::Read(0, key) if key == b"keep"));
+    }
+
+    #[test]
+    fn should_retain_spill_coverage_requirement_when_replaying_counterexample() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let history = History {
+            ordinal: 0,
+            template: super::super::histories::Template::OrdinalIntents,
+            actions: vec![Action::Begin(0), Action::Rollback(0)],
+        };
+        let fixture = Fixture {
+            backend: Backend::Local,
+            read_path: ReadPath::Spilled,
+        };
+        let failure = execute(&history, fixture, true).unwrap_err();
+        assert_eq!(
+            failure.detail,
+            "spilled fixture never produced a spill file"
+        );
+        let (minimized, reduced_failure, _, _) = minimize(&history, fixture, &failure);
+        assert_eq!(reduced_failure.kind, FailureKind::SpillCoverage);
+        let artifact = directory.path().join("failure.json");
+        write_json(
+            &artifact,
+            &serde_json::json!({
+                "fixture": fixture,
+                "minimized": minimized,
+                "minimized_require_spill": true,
+            }),
+        );
+
+        // Act
+        let result = std::panic::catch_unwind(|| replay(&artifact));
+
+        // Assert
+        assert!(
+            result.is_err(),
+            "unchanged fixture must reproduce spill coverage failure"
+        );
+    }
+
+    #[test]
+    fn should_preserve_original_artifact_when_replacement_is_interrupted() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("failure.json");
+        let original = serde_json::json!({"history": "original"});
+        write_json(&artifact, &original);
+        let original_bytes = std::fs::read(&artifact).unwrap();
+        let replacement = serde_json::json!({"history": "minimized"});
+
+        // Act
+        let result = publish_json(&artifact, &replacement, || {
+            Err(std::io::ErrorKind::Interrupted.into())
+        });
+
+        // Assert
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(std::fs::read(&artifact).unwrap(), original_bytes);
     }
 }

@@ -30,7 +30,10 @@ directly before direction and limit, without engine normalization helpers.
 
 Histories hold at most two transactions, four maintenance operations, and two
 restarts. The spilled fixture uses an 8 KiB transaction pool and verifies that the
-bootstrap actually creates spill files; the resident fixture uses 2 MiB. Both use
+bootstrap actually creates spill files. OrdinalIntents and BoundedScan also add
+12 KiB of padding inside their mixed-intent transaction before range/point writes,
+so those targeted histories cross the spill threshold themselves. The resident
+fixture uses 2 MiB. Both use
 64 MiB engine memory, 64 KiB memtables, and explicit compaction. Local commits
 request sync durability; CloudSimulated commits request CloudStrict durability.
 
@@ -55,10 +58,14 @@ produces an original and structurally minimized concrete history, observations,
 failure class, backend, durability, counters, and failpoint ordinal (null for
 logical histories).
 
-The original counterexample is saved before minimization. Shrinking removes legal
+The original counterexample is saved before minimization. Artifact replacement
+stages and syncs a sibling temporary file before atomic publication, retaining the
+prior readable artifact if staging or pre-publication fails. Shrinking removes legal
 chunks and preserves the failure class and, for API errors, operation and error
 variant. It performs at most 128 replays per mismatch and records whether that
-budget ended minimization. A minimized mismatch is an investigation lead; matching
+budget ended minimization. Spill-coverage failures keep their required spill check
+through shrinking and replay; other minimized histories may omit the spill bootstrap.
+Artifacts record both execution requirements. A minimized mismatch is an investigation lead; matching
 classes alone do not establish that two failures have the same root cause.
 
 ```sh

@@ -93,6 +93,7 @@ fn scan(id: u8, reverse: bool) -> Action {
 fn bounded_scan_actions(template: Template) -> Vec<Action> {
     let mut actions = vec![Action::Begin(0)];
     if matches!(template, Template::BoundedScan) {
+        actions.extend(spill_padding(0));
         actions.extend([
             Action::Write(
                 0,
@@ -139,6 +140,12 @@ fn bounded_scan_actions(template: Template) -> Vec<Action> {
     actions
 }
 
+fn spill_padding(id: u8) -> impl Iterator<Item = Action> {
+    // Force the mixed-intent transaction itself to cross the 8 KiB pool,
+    // rather than relying on the earlier pure-put bootstrap's spill proof.
+    (0_u8..12).map(move |ordinal| put(id, format!("padding/{ordinal:02}").into_bytes(), ordinal))
+}
+
 fn prefix(template: Template) -> Vec<Action> {
     let mut actions = vec![Action::Begin(0)];
     for (byte, key) in (0_u8..).zip(palette()) {
@@ -169,32 +176,36 @@ fn prefix(template: Template) -> Vec<Action> {
             }
             actions.extend([scan(1, false), scan(1, true), Action::Rollback(1)]);
         }
-        Template::OrdinalIntents => actions.extend([
-            Action::Begin(0),
-            Action::Begin(1),
-            put(1, b"other".to_vec(), 94),
-            Action::Commit(1),
-            Action::Write(
-                0,
-                Intent::DeleteRange {
-                    start: vec![],
-                    end: vec![255],
-                },
-            ),
-            put(0, b"a".to_vec(), 95),
-            Action::Write(0, Intent::Delete { key: b"b".to_vec() }),
-            Action::Write(
-                0,
-                Intent::DeleteRange {
-                    start: b"a".to_vec(),
-                    end: b"a".to_vec(),
-                },
-            ),
-            Action::Read(0, b"a".to_vec()),
-            scan(0, false),
-            scan(0, true),
-            Action::Commit(0),
-        ]),
+        Template::OrdinalIntents => {
+            actions.push(Action::Begin(0));
+            actions.extend(spill_padding(0));
+            actions.extend([
+                Action::Begin(1),
+                put(1, b"other".to_vec(), 94),
+                Action::Commit(1),
+                Action::Write(
+                    0,
+                    Intent::DeleteRange {
+                        start: vec![],
+                        end: vec![255],
+                    },
+                ),
+                put(0, b"a".to_vec(), 95),
+                Action::Write(0, Intent::Delete { key: b"b".to_vec() }),
+                Action::Write(
+                    0,
+                    Intent::DeleteRange {
+                        start: b"a".to_vec(),
+                        end: b"a".to_vec(),
+                    },
+                ),
+                Action::Read(0, b"a".to_vec()),
+                Action::Read(0, b"padding/00".to_vec()),
+                scan(0, false),
+                scan(0, true),
+                Action::Commit(0),
+            ]);
+        }
         Template::BoundedScan | Template::BinaryBoundaries => {
             actions.extend(bounded_scan_actions(template));
         }
