@@ -1,12 +1,18 @@
 //! Logical discovery driver. Crash prefixes, races, retries, TTL and conflict
 //! policy probes require separate drivers; this target claims none of them.
 
+mod common;
+
 #[path = "discovery/driver.rs"]
 mod driver;
 #[path = "discovery/histories.rs"]
 mod histories;
 #[path = "discovery/model.rs"]
 mod model;
+
+#[cfg(feature = "failpoints")]
+#[path = "discovery/physical.rs"]
+mod physical;
 
 #[test]
 fn should_match_transaction_oracle_when_replaying_histories() {
@@ -61,6 +67,23 @@ fn should_match_transaction_oracle_when_replaying_histories() {
                     read_path: driver::ReadPath::Spilled,
                 },
             ],
+        ),
+        #[cfg(feature = "sqrzl-tests")]
+        "sqrzl" => (
+            16,
+            64,
+            [
+                driver::Backend::SqrzlS3,
+                driver::Backend::SqrzlAzure,
+                driver::Backend::SqrzlGcsXml,
+                driver::Backend::SqrzlGcsJson,
+            ]
+            .into_iter()
+            .flat_map(|backend| {
+                [driver::ReadPath::Resident, driver::ReadPath::Spilled]
+                    .map(|read_path| driver::Fixture { backend, read_path })
+            })
+            .collect(),
         ),
         _ => panic!("unknown discovery profile: {profile}"),
     };

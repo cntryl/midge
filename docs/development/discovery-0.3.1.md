@@ -27,6 +27,7 @@ directly before direction and limit, without engine normalization helpers.
 | Default smoke | 1 | 64 | Local resident |
 | `pr` | 32 | 64 | Local resident and spilled |
 | `discovery` / `release` | 256 | 256 | Local and CloudSimulated, resident and spilled |
+| `sqrzl` (`sqrzl-tests` feature) | 16 | 64 | S3, Azure, GCS XML and JSON, resident and spilled |
 
 Histories hold at most two transactions, four maintenance operations, and two
 restarts. The spilled fixture uses an 8 KiB transaction pool and verifies that the
@@ -119,3 +120,39 @@ probe, Jev challenge, and confirmed/deepened/discarded outcome. Jev judgments do
 not substitute for implementation and test evidence. Deduplicate confirmed P1/P2
 findings against open issues before adding them to milestone 0.3.1. Publish the
 completed findings report and coverage map before beginning repairs.
+
+## Named process-abort driver
+
+With the `failpoints` feature, `MIDGE_PHYSICAL_DISCOVERY=1` runs eight serial
+fixed tuples: restore object-copy interruption and three empty-compaction
+publication boundaries, each on Local and CloudSimulated. The corpus is persisted
+before execution. Each child must leave the existing synced named-trigger sentinel
+and exit by process abort; a fallback panic cannot satisfy the probe. Restore
+then retries the same artifact. Compaction requires a durable remove-only intent
+and validates the empty state through two reopens. Only the private aborted
+fixture's expired owner lease is adjusted to permit immediate takeover.
+
+```sh
+MIDGE_PHYSICAL_DISCOVERY=1 cargo test --test discovery_model --features failpoints \
+  physical::should_execute_named_abort_histories -- --nocapture --test-threads=1
+MIDGE_DISCOVERY_PROFILE=sqrzl cargo test --test discovery_model --features sqrzl-tests \
+  -- --test-threads=1
+```
+
+The physical campaign requires a clean committed revision and records the seed,
+concrete tuple, revision, backend, durability, failpoint ordinal, failure message,
+and actual validated abort/reopen/scan counters. Planned reopen counts are
+separate from completed counters. Every failed tuple fails the campaign; known
+defects are retained as counterexamples rather than accepted outcomes. Native
+Sqrzl execution is part of the hosted Cloud qualification workflow.
+
+## Completed logical evidence
+
+The full logical campaign on `0e0a6f7c6b1bbe2316402b18b0c6af251fd11e7e`
+passed all 1,024 fixture histories (256 per fixture) with no ignored tests.
+The generated corpus contains 29,345 actions, repeated across four fixtures,
+for 117,380 scheduled actions. It used the fixed seed above and a clean revision.
+The local evidence directory is
+`target/discovery-031/full-0e0a6f7c/0e24860e-f333-44fe-a112-9359805c1b3d`.
+This establishes the seven logical templates; the remaining physical, race,
+retry and focused-property evidence is still required for discovery exit.

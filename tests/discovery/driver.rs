@@ -14,6 +14,32 @@ use std::time::Duration;
 pub enum Backend {
     Local,
     CloudSimulated,
+    #[cfg(feature = "sqrzl-tests")]
+    SqrzlS3,
+    #[cfg(feature = "sqrzl-tests")]
+    SqrzlAzure,
+    #[cfg(feature = "sqrzl-tests")]
+    SqrzlGcsXml,
+    #[cfg(feature = "sqrzl-tests")]
+    SqrzlGcsJson,
+}
+
+impl Backend {
+    fn write_options(self) -> WriteOptions {
+        if matches!(self, Self::Local) {
+            WriteOptions::sync()
+        } else {
+            WriteOptions::cloud_strict()
+        }
+    }
+
+    fn durability(self) -> &'static str {
+        if matches!(self, Self::Local) {
+            "sync"
+        } else {
+            "cloud_strict"
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -68,10 +94,31 @@ struct Driver {
     cf: ColumnFamilyHandle,
 }
 
-fn options(root: &Path, fixture: Fixture) -> MidgeResult<OpenOptions> {
+pub(super) fn options(root: &Path, fixture: Fixture) -> MidgeResult<OpenOptions> {
     let builder = match fixture.backend {
         Backend::Local => OpenOptions::local(root),
         Backend::CloudSimulated => OpenOptions::cloud_simulated(root, "discovery", "model/"),
+        #[cfg(feature = "sqrzl-tests")]
+        backend @ (Backend::SqrzlS3
+        | Backend::SqrzlAzure
+        | Backend::SqrzlGcsXml
+        | Backend::SqrzlGcsJson) => {
+            use cntryl_midge::{CloudProviderConfig, CloudStorageLocation};
+            let provider = match backend {
+                Backend::SqrzlS3 => CloudProviderConfig::sqrzl_s3("midge-031-model-s3"),
+                Backend::SqrzlAzure => CloudProviderConfig::sqrzl_azure("midge-031-model-azure"),
+                Backend::SqrzlGcsXml => CloudProviderConfig::sqrzl_gcs("midge-031-model-gcs-xml"),
+                Backend::SqrzlGcsJson => {
+                    CloudProviderConfig::sqrzl_gcs_json("midge-031-model-gcs-json")
+                }
+                Backend::Local | Backend::CloudSimulated => unreachable!("native provider fixture"),
+            };
+            crate::common::prepare_sqrzl_namespace(&provider).map_err(MidgeError::Internal)?;
+            OpenOptions::cloud(
+                root,
+                CloudStorageLocation::new(provider, format!("model/{}/", uuid::Uuid::new_v4())),
+            )
+        }
     };
     builder
         .memory_budget(MemoryBudget::Bytes(64 * 1024 * 1024))
@@ -189,10 +236,7 @@ impl Driver {
                 let tx = self.transactions[usize::from(*id)]
                     .take()
                     .expect("legal active slot");
-                tx.commit(match fixture.backend {
-                    Backend::Local => WriteOptions::sync(),
-                    Backend::CloudSimulated => WriteOptions::cloud_strict(),
-                })?;
+                tx.commit(fixture.backend.write_options())?;
             }
             Action::Rollback(id) => self.transactions[usize::from(*id)]
                 .take()
@@ -520,7 +564,7 @@ pub fn replay(path: &Path) {
 
 pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
     let revision = revision();
-    if matches!(profile, "discovery" | "release") {
+    if matches!(profile, "discovery" | "release" | "sqrzl") {
         assert!(
             !revision.dirty,
             "full discovery/release evidence requires a clean committed revision"
@@ -557,10 +601,7 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
                         revision: &revision,
                         seed: SEED,
                         fixture: *fixture,
-                        durability: match fixture.backend {
-                            Backend::Local => "sync",
-                            Backend::CloudSimulated => "cloud_strict",
-                        },
+                        durability: fixture.backend.durability(),
                         failpoint_ordinal: None,
                         original: history,
                         original_failure: &failure,

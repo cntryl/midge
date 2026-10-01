@@ -16,13 +16,21 @@ println!("captured through sequence {}", inventory.durability_frontier);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The destination must be new. A completed artifact contains `backup.json` and
+The destination must be new and outside the source database tree. Existing
+symlink aliases and relative paths are resolved before this check. Publication
+atomically refuses an existing destination, including one created during capture.
+A completed artifact contains `backup.json` and
 an `objects/` tree. The inventory records the backup format, database format,
 capture frontier, engine version, storage kind, and each object's size and
 CRC32C. Copy the complete directory as one unit and retain it until the backup
 is no longer needed.
 
-Restore accepts only a new target and a matching storage kind. It validates
+Restore accepts only a new target outside the artifact tree and a matching
+storage kind. Each attempt uses its own staging directory. If the process aborts
+before publication, retry the same artifact; abandoned or foreign stages do not
+block the retry and are retained. Ordinary failures clean up only their own stage.
+The final publication atomically refuses replacement of an existing target.
+It validates
 the inventory, all object paths and checksums, and strict database storage
 state in a staging directory before publishing that directory. Open the
 restored database normally afterward; startup obtains a new writer lease and

@@ -10,6 +10,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+mod paths;
+
 const BACKUP_VERSION: u32 = 1;
 const BACKUP_MANIFEST: &str = "backup.json";
 
@@ -70,7 +72,8 @@ impl Engine {
     ///
     /// Returns an error when capture is unsupported, the barrier cannot be
     /// acquired, durable files cannot be pinned or copied, or the artifact
-    /// cannot be atomically published.
+    /// cannot be atomically published. The destination must be disjoint from
+    /// the source database; publication never replaces an existing target.
     pub fn backup_to(
         &self,
         destination: impl AsRef<Path>,
@@ -97,18 +100,11 @@ impl Engine {
             ));
         }
 
-        let destination = destination.as_ref();
-        if destination.exists() {
-            return Err(MidgeError::InvalidArgument(format!(
-                "backup destination '{}' already exists",
-                destination.display()
-            )));
-        }
-        let parent = destination
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
+        let source = fs::canonicalize(&self.db_path)?;
+        let destination = paths::prepare_target(&source, destination.as_ref())?;
+        let parent = destination.parent().ok_or_else(|| {
+            MidgeError::InvalidArgument("backup destination requires a parent".into())
+        })?;
 
         let mut barrier =
             VerificationBarrierGuard::acquire_for_backup(&self.runtime_handle, timeout)?;
@@ -117,9 +113,8 @@ impl Engine {
                 "backup capture barrier reports an unhealthy engine".to_string(),
             ));
         }
-        let database_format_version =
-            crate::metadata::format::validate_format_marker(&self.db_path)?;
-        let pinned = pin_durable_files(&self.db_path, self.simulated_cloud_mode, parent)?;
+        let database_format_version = crate::metadata::format::validate_format_marker(&source)?;
+        let pinned = pin_durable_files(&source, self.simulated_cloud_mode, parent)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
                 "primary lease became unhealthy during backup capture".to_string(),
@@ -130,11 +125,14 @@ impl Engine {
         barrier.release()?;
 
         let backup_id = uuid::Uuid::new_v4().to_string();
-        let staging = parent.join(format!(".midge-backup-{backup_id}.tmp"));
-        fs::create_dir(&staging)?;
+        let stage = tempfile::Builder::new()
+            .prefix(".midge-backup-")
+            .suffix(".tmp")
+            .tempdir_in(parent)?;
+        let staging = stage.path();
         let result = materialize_backup(
             pinned,
-            &staging,
+            staging,
             backup_id,
             captured_at,
             durability_frontier,
@@ -146,11 +144,11 @@ impl Engine {
             },
         )
         .and_then(|manifest| {
-            validate_backup(&staging)?;
+            validate_backup(staging)?;
             // Offline verification may create provider lock files. Keep those
             // out of the published, checksummed artifact.
             let verification = tempfile::tempdir_in(parent)?;
-            copy_verified_objects(&staging, verification.path(), &manifest)?;
+            copy_verified_objects(staging, verification.path(), &manifest)?;
             if self.simulated_cloud_mode {
                 crate::engine::verification::StorageVerifier::verify_simulated_cloud_path(
                     verification.path(),
@@ -160,15 +158,10 @@ impl Engine {
             }
             Ok(manifest)
         });
-        let manifest = match result {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(error);
-            }
-        };
-        sync_directory(&staging)?;
-        fs::rename(&staging, destination)?;
+        let manifest = result?;
+        sync_directory(staging)?;
+        crate::failpoints::fail_point!("midge::backup::before_backup_publish");
+        paths::publish(staging, &destination)?;
         sync_directory(parent)?;
         Ok(manifest)
     }
@@ -182,13 +175,15 @@ impl Engine {
     ///
     /// Returns an error when the inventory or any object is invalid, the
     /// target is not clean, the storage kind is unsupported, or strict storage
-    /// verification fails.
+    /// verification fails. The target must be disjoint from the artifact.
+    /// Each attempt owns a unique stage, so interrupted attempts may be retried
+    /// without deleting residue left by another attempt.
     pub fn restore_backup(
         artifact: impl AsRef<Path>,
         options: OpenOptions,
     ) -> MidgeResult<BackupManifest> {
-        let artifact = artifact.as_ref();
-        let manifest = validate_backup(artifact)?;
+        let artifact = fs::canonicalize(artifact.as_ref())?;
+        let manifest = validate_backup(&artifact)?;
         let storage = options.storage().clone();
         drop(options);
         let (target, kind) = match storage {
@@ -213,36 +208,26 @@ impl Engine {
                 manifest.storage_kind, kind
             )));
         }
-        if target.exists() {
-            return Err(MidgeError::InvalidArgument(format!(
-                "restore target '{}' must not exist",
-                target.display()
-            )));
-        }
-        let parent = target
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let staging = parent.join(format!(".midge-restore-{}.tmp", manifest.backup_id));
-        if staging.exists() {
-            return Err(MidgeError::InvalidArgument(format!(
-                "restore staging path '{}' already exists",
-                staging.display()
-            )));
-        }
-        fs::create_dir(&staging)?;
-        let restore_result = copy_verified_objects(artifact, &staging, &manifest).and_then(|()| {
+        let target = paths::prepare_target(&artifact, &target)?;
+        let parent = target.parent().ok_or_else(|| {
+            MidgeError::InvalidArgument("restore target requires a parent".into())
+        })?;
+        let stage = tempfile::Builder::new()
+            .prefix(".midge-restore-")
+            .suffix(".tmp")
+            .tempdir_in(parent)?;
+        let staging = stage.path();
+        let restore_result = copy_verified_objects(&artifact, staging, &manifest).and_then(|()| {
             let verification = match kind {
-                BackupStorageKind::Local => crate::engine::StorageVerifier::verify_path(&staging),
+                BackupStorageKind::Local => crate::engine::StorageVerifier::verify_path(staging),
                 BackupStorageKind::CloudSimulated => {
                     crate::engine::verification::StorageVerifier::verify_simulated_cloud_path(
-                        &staging,
+                        staging,
                     )
                 }
             }?;
             let _ = verification;
-            let restored_format = crate::metadata::format::validate_format_marker(&staging)?;
+            let restored_format = crate::metadata::format::validate_format_marker(staging)?;
             if restored_format != manifest.database_format_version {
                 return Err(MidgeError::Corruption(format!(
                     "backup inventory format {} does not match restored database format {}",
@@ -251,19 +236,10 @@ impl Engine {
             }
             Ok(())
         });
-        if let Err(error) = restore_result {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
+        restore_result?;
 
-        if target.exists() {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(MidgeError::InvalidArgument(format!(
-                "restore target '{}' must not exist",
-                target.display()
-            )));
-        }
-        fs::rename(&staging, &target)?;
+        crate::failpoints::fail_point!("midge::backup::before_restore_publish");
+        paths::publish(staging, &target)?;
         sync_directory(parent)?;
         Ok(manifest)
     }

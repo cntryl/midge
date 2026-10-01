@@ -76,6 +76,11 @@ jobs:
             fi
           done
 
+      - name: Test named backup and empty-compaction aborts
+        env:
+          MIDGE_PHYSICAL_DISCOVERY: "1"
+        run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
+
       - name: Retain discovery corpus and counterexamples
         if: always()
         uses: actions/upload-artifact@v7
@@ -154,6 +159,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
 
+      - name: Test backup path isolation and publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --test backup_paths --all-features
+          cargo test --test backup_publish_races --all-features -- --test-threads=1
+
+      - name: Test named backup and empty-compaction aborts
+        env:
+          MIDGE_PHYSICAL_DISCOVERY: "1"
+        run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
+
       - name: Test workspace
         if: matrix.os == 'macos-latest'
         run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
@@ -161,6 +178,14 @@ jobs:
       - name: Fault injection suite (serial; failpoints are process-global)
         if: matrix.os == 'macos-latest'
         run: cargo test --test fault_injection --all-features -- --test-threads=1
+
+      - name: Retain platform discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: discovery-model-${{ matrix.os }}-${{ github.sha }}
+          path: target/discovery-031
+          if-no-files-found: ignore
 
   tier3_lifecycle_bench:
     name: Tier 3 lifecycle (${{ matrix.os }})
