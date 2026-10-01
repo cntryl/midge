@@ -117,7 +117,7 @@ fn should_preserve_foreign_stage_when_retrying_restore() {
 
 #[cfg(unix)]
 #[test]
-fn should_reject_symlink_alias_and_dangling_link_before_mutation() {
+fn should_reject_link_aliases_before_mutation() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
@@ -209,7 +209,7 @@ fn should_reject_windows_case_alias_before_mutation() {
 }
 
 #[test]
-fn should_reject_relative_cloud_simulated_overlap_and_allow_siblings() {
+fn should_enforce_path_isolation_when_using_relative_cloud_simulated_paths() {
     // Arrange
     let cwd = std::env::current_dir().unwrap();
     let directory = tempfile::tempdir_in(cwd.join("target")).unwrap();
