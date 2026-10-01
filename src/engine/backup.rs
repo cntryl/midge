@@ -72,7 +72,8 @@ impl Engine {
     ///
     /// Returns an error when capture is unsupported, the barrier cannot be
     /// acquired, durable files cannot be pinned or copied, or the artifact
-    /// cannot be atomically published.
+    /// cannot be atomically published. The destination must be disjoint from
+    /// the source database; publication never replaces an existing target.
     pub fn backup_to(
         &self,
         destination: impl AsRef<Path>,
@@ -174,7 +175,9 @@ impl Engine {
     ///
     /// Returns an error when the inventory or any object is invalid, the
     /// target is not clean, the storage kind is unsupported, or strict storage
-    /// verification fails.
+    /// verification fails. The target must be disjoint from the artifact.
+    /// Each attempt owns a unique stage, so interrupted attempts may be retried
+    /// without deleting residue left by another attempt.
     pub fn restore_backup(
         artifact: impl AsRef<Path>,
         options: OpenOptions,
@@ -683,7 +686,7 @@ mod tests {
         let source = directory.path().join("source");
         let staging = directory.path().join("staging");
         fs::create_dir(&source).expect("source directory");
-        fs::create_dir(staging).expect("staging directory");
+        fs::create_dir(&staging).expect("staging directory");
         let journal = source.join("manifest.journal");
         let captured = b"durable manifest edit";
         fs::write(&journal, captured).expect("seed journal");
@@ -698,7 +701,7 @@ mod tests {
             .expect("truncate live journal");
         let result = materialize_backup(
             pinned,
-            staging,
+            &staging,
             uuid::Uuid::new_v4().to_string(),
             chrono::Utc::now().to_rfc3339(),
             0,

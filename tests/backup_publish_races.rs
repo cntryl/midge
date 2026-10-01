@@ -33,6 +33,7 @@ fn should_preserve_target_created_immediately_before_publication() {
                 .join(format!("foreign-{restore}-{symlink}"));
             std::fs::create_dir(&foreign).unwrap();
             std::fs::write(foreign.join("retain"), b"foreign").unwrap();
+            #[cfg(unix)]
             let owned_foreign = foreign.clone();
             let fired = Arc::new(AtomicBool::new(false));
             let callback_fired = fired.clone();

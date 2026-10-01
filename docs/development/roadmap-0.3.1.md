@@ -8,7 +8,7 @@ Ship all eight confirmed fixes #662–#669, every additional confirmed P1/P2 def
 
 Completion requires a qualified `main` revision, immutable `v0.3.1` tag, published crates.io artifact, successful registry consumer test, GitHub release, and closed milestone. Preserve public Rust signatures, error variants, CLI JSON schema, and persisted formats. Document the approved transaction tradeoff: reserving read-index scratch space upfront reduces maximum spill capacity near the disk limit.
 
-Land this roadmap and the Jev guidance in `AGENTS.md` through a documentation PR targeting `develop` before adding discovery scaffolding. Complete expanded discovery and publish its consolidated findings and coverage map before implementing repairs. Evidence below describes the original review; it does not claim the expanded campaign or any repair is complete.
+Land this roadmap and the Jev guidance in `AGENTS.md` through a documentation PR targeting `develop` before adding discovery scaffolding. The full logical discovery campaign passed on `0e0a6f7c` (1,024 fixture histories, 117,380 actions). Subsequent user direction prioritizes repairing confirmed bugs immediately; the backup/restore batch addresses #664/#665 while remaining physical discovery continues. The complete coverage map and consolidated findings remain release qualification requirements. Evidence below describes the original review unless explicitly updated.
 
 | Order | Work item | Priority | Labels | Release role |
 | ---: | --- | --- | --- | --- |
@@ -299,3 +299,18 @@ Use registry `=0.3.0` and the packaged candidate for clean Local/provider-backed
 Promote `develop` to `main` by merge commit after current-head Ubuntu, Windows, macOS, cloud, compatibility, Docker, and managed CodeQL pass. Qualify the actual merged `main`: wait for automatic CI, then dispatch cloud, fuzz, and lifecycle-enabled CI without ref-scoped cancellation; record each tested SHA.
 
 Verify peeled `v0.3.1`, qualified SHA, and current `main` match. Explicitly dispatch Publish on the tag; tag creation does not publish. Download `cntryl-midge@0.3.1` and run a clean consumer pinned to `=0.3.1` using public APIs and registry dependencies. Publish release notes with evidence, compatibility limits, and risks. Close the milestone only after the roadmap records final issues/PRs, qualified revision, publication proof, coverage report, and #670's outcome.
+
+
+## Backup/restore repair evidence (in progress)
+
+The current batch repairs #664 and #665 together. Four public API regressions
+failed before runtime changes: direct backup overlap, restore overlap, symlink
+alias overlap, and deterministic foreign-stage blockage. Actual restore-process
+abort/retry failed on both Local and CloudSimulated. The candidate uses uniquely
+created attempt-owned stages, canonical path isolation, and native atomic
+publication without replacement. Directory/symlink creation at publication and
+same-target concurrent restore are covered. All eight named abort tuples passed
+on candidate `3b267126` on macOS. Independent review found two test-only evidence
+issues, tracked by #674: the Local crash fixture edited the wrong lease file,
+and the restore oracle did not compare keys. Both now have regressions.
+Hosted exact-head and post-merge qualification remain pending.
