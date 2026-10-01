@@ -284,3 +284,28 @@ fn should_reject_drive_relative_overlap_before_creating_parent() {
     assert_eq!(before, inventory(&source));
     engine.shutdown(Duration::from_secs(10)).unwrap();
 }
+
+#[test]
+fn should_reject_parent_traversal_through_missing_or_regular_ancestor() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let mut engine = open(&directory.path().join("source"));
+    std::fs::write(directory.path().join("regular-file"), b"retain").unwrap();
+    let before = inventory(directory.path());
+
+    // Act
+    for ancestor in ["missing", "regular-file"] {
+        let result = engine.backup_to(
+            directory.path().join(ancestor).join("..").join("backup"),
+            Duration::from_secs(10),
+        );
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::InvalidArgument(_))),
+            "{result:?}"
+        );
+        assert_eq!(before, inventory(directory.path()));
+    }
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+}

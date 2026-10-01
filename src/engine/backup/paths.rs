@@ -6,11 +6,24 @@ use std::path::{Component, Path, PathBuf};
 pub(super) fn resolve(path: &Path) -> MidgeResult<PathBuf> {
     let absolute = absolute(path)?;
     let mut resolved = PathBuf::new();
-    for component in absolute.components() {
+    let mut components = absolute.components().peekable();
+    let mut missing_ancestor = false;
+    while let Some(component) = components.next() {
         match component {
-            Component::Prefix(_) | Component::RootDir => resolved.push(component.as_os_str()),
+            Component::Prefix(_) => resolved.push(component.as_os_str()),
+            Component::RootDir => {
+                resolved.push(component.as_os_str());
+                // Canonicalize the root too: Windows drive/UNC and verbatim
+                // prefixes otherwise compare unequal when all children are new.
+                resolved = fs::canonicalize(&resolved)?;
+            }
             Component::CurDir => {}
             Component::ParentDir => {
+                if missing_ancestor {
+                    return Err(MidgeError::InvalidArgument(
+                        "parent traversal through a missing ancestor cannot be resolved".into(),
+                    ));
+                }
                 resolved.pop();
             }
             Component::Normal(name) => {
@@ -23,8 +36,16 @@ pub(super) fn resolve(path: &Path) -> MidgeResult<PathBuf> {
                                 resolved.display()
                             ))
                         })?;
+                        if components.peek().is_some() && !fs::metadata(&resolved)?.is_dir() {
+                            return Err(MidgeError::InvalidArgument(format!(
+                                "path ancestor '{}' is not a directory",
+                                resolved.display()
+                            )));
+                        }
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing_ancestor = true;
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -178,6 +199,23 @@ fn publish_native(_stage: &Path, _target: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn should_canonicalize_drive_root_before_resolving_missing_children() {
+        // Arrange
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.ancestors().last().unwrap();
+        let canonical = fs::canonicalize(root).unwrap();
+        let child = root.join(format!("midge-path-probe-{}", uuid::Uuid::new_v4()));
+
+        // Act
+        let resolved = resolve(&child).unwrap();
+
+        // Assert
+        assert!(resolved.starts_with(&canonical));
+        assert!(!child.exists());
+    }
 
     #[test]
     fn should_preserve_existing_target_when_publishing_stage() {
