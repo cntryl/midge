@@ -84,6 +84,11 @@ jobs:
           path: target/discovery-031
           if-no-files-found: ignore
 
+      - name: Test named backup and empty-compaction aborts
+        env:
+          MIDGE_PHYSICAL_DISCOVERY: "1"
+        run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
+
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
 
@@ -153,6 +158,17 @@ jobs:
           cargo test --lib engine::backup::tests --all-features
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
+
+      - name: Test backup path isolation and publication
+        run: |
+          cargo test --test backup_paths --all-features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --test backup_publish_races --all-features -- --test-threads=1
+
+      - name: Test named backup and empty-compaction aborts
+        env:
+          MIDGE_PHYSICAL_DISCOVERY: "1"
+        run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
 
       - name: Test workspace
         if: matrix.os == 'macos-latest'

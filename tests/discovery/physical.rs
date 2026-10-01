@@ -65,6 +65,34 @@ struct Counters {
     validated_scans: usize,
 }
 
+fn assert_seed_rows(rows: &[(bytes::Bytes, bytes::Bytes)]) {
+    assert_eq!(rows.len(), 16);
+    for (index, (key, value)) in rows.iter().enumerate() {
+        assert_eq!(key.as_ref(), format!("key-{index:02}").as_bytes());
+        assert_eq!(value.as_ref(), [42; 1024]);
+    }
+}
+
+#[test]
+fn should_reject_substituted_key_when_validating_restore() {
+    // Arrange
+    let mut rows: Vec<_> = (0..16)
+        .map(|index| {
+            (
+                bytes::Bytes::from(format!("key-{index:02}")),
+                bytes::Bytes::from(vec![42; 1024]),
+            )
+        })
+        .collect();
+    rows[0].0 = bytes::Bytes::from_static(b"foreign");
+
+    // Act
+    let result = std::panic::catch_unwind(|| assert_seed_rows(&rows));
+
+    // Assert
+    assert!(result.is_err());
+}
+
 fn assert_restored(case: &CrashCase, counters: &mut Counters) {
     let artifact = case.root.join("backup");
     let target = case.root.join("restored");
@@ -80,8 +108,7 @@ fn assert_restored(case: &CrashCase, counters: &mut Counters) {
     {
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         let rows = tx.scan(&Query::new()).unwrap().try_collect().unwrap();
-        assert_eq!(rows.len(), 16);
-        assert!(rows.iter().all(|(_, value)| value.as_ref() == [42; 1024]));
+        assert_seed_rows(&rows);
     }
     counters.validated_scans += 1;
     engine.shutdown(Duration::from_secs(10)).unwrap();
@@ -104,6 +131,25 @@ fn assert_remove_only_intent(path: &Path) {
 }
 
 fn expire_aborted_local_owner(path: &Path) {
+    let local = path.join(".midge_leader");
+    if local.exists() {
+        let text = std::fs::read_to_string(&local).unwrap();
+        let body = text
+            .lines()
+            .filter(|line| !line.starts_with("checksum: "))
+            .map(|line| {
+                if line.starts_with("acquired_at: ") {
+                    "acquired_at: 1970-01-01T00:00:00Z"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let checksum = crc32c::crc32c(body.as_bytes());
+        std::fs::write(local, format!("{body}checksum: {checksum}\n")).unwrap();
+    }
     let lease = path.join("midge_primary_lease.json");
     if lease.exists() {
         let text = std::fs::read_to_string(&lease).unwrap();
@@ -234,7 +280,7 @@ fn should_execute_named_abort_histories_when_physical_discovery_is_requested() {
     for case in cases {
         let mut counters = Counters::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_case(&case, &mut counters)
+            run_case(&case, &mut counters);
         }));
         let failure = result.as_ref().err().map(|payload| {
             payload
