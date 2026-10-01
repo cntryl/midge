@@ -374,12 +374,13 @@ fn minimize(
     fixture: Fixture,
     failure: &Failure,
 ) -> (History, Failure, usize, bool) {
+    if failure.kind == FailureKind::SpillCoverage {
+        // Coverage depends on the full inducing workload. Removing its writes
+        // can manufacture missing spill even after the engine is repaired.
+        return (history.clone(), failure.clone(), 0, false);
+    }
     minimize_with(history, failure, |candidate| {
-        execute(
-            candidate,
-            fixture,
-            failure.kind == FailureKind::SpillCoverage,
-        )
+        execute(candidate, fixture, false)
     })
 }
 
@@ -472,6 +473,7 @@ struct Counterexample<'a> {
     minimized_require_spill: bool,
     minimization_replays: usize,
     minimization_complete: bool,
+    minimization_strategy: &'static str,
 }
 
 fn write_json(path: &Path, value: &impl Serialize) {
@@ -568,6 +570,11 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
                         minimized_require_spill: true,
                         minimization_replays: 0,
                         minimization_complete: false,
+                        minimization_strategy: if failure.kind == FailureKind::SpillCoverage {
+                            "retain_fixture_workload"
+                        } else {
+                            "legal_chunk_deletion"
+                        },
                     };
                     let path = root.join(format!(
                         "failure-{}-{:?}-{:?}.json",
@@ -731,5 +738,42 @@ mod tests {
         // Assert
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
         assert_eq!(std::fs::read(&artifact).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn should_preserve_spill_workload_when_minimizing_fixture_failure() {
+        // Arrange
+        let history = super::super::histories::generate(1, 64).remove(0);
+        let fixture = Fixture {
+            backend: Backend::Local,
+            read_path: ReadPath::Spilled,
+        };
+        // Simulate saved prior coverage failure after correct spilling has
+        // been restored. Removing the inducing writes must not recreate it.
+        let prior_failure = fail(
+            history.actions.len(),
+            FailureKind::SpillCoverage,
+            "spilled fixture never produced a spill file".into(),
+            &Counters::default(),
+        );
+
+        // Act
+        let (minimized, _, replays, complete) = minimize(&history, fixture, &prior_failure);
+        let repaired = execute(&minimized, fixture, true);
+
+        // Assert
+        assert!(
+            repaired.is_ok(),
+            "shrinking must not manufacture missing spill: {repaired:?}"
+        );
+        assert_eq!(
+            serde_json::to_vec(&minimized).unwrap(),
+            serde_json::to_vec(&history).unwrap()
+        );
+        assert_eq!(replays, 0);
+        assert!(
+            !complete,
+            "fixture coverage failures retain original workload"
+        );
     }
 }

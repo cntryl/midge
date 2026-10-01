@@ -187,7 +187,7 @@ Land this roadmap and the Jev guidance in `AGENTS.md` through a documentation PR
 
 ## Delivery sequence
 
-Work one issue, branch, and PR at a time. Complete its red regression, implementation, exact-head review, and merge before starting the next implementation.
+Work one repair branch and PR at a time, grouping up to ten confirmed related issues per PR as requested on 2026-10-01. Demonstrate each issue's red regression, then complete the batch's implementation, exact-head review, merge, and merged-revision verification before starting the next batch.
 
 1. **Authority:** synchronous lease-validity admission.
 2. **Recovery:** epoch-regressed salvage hole/floor planning.
@@ -288,7 +288,7 @@ Accept only with at least 90% lower snapshot bytes in fixed-cardinality probes a
 
 ## Review and release evidence
 
-For every repair, demonstrate the focused failure on unchanged base in an isolated build target; run focused, adjacent, and already-fixed corpus tests after repair. Ask Jev to challenge contract, reproduction, impact, root cause, and related patterns. Obtain two fresh independent reviews covering correctness/test validity and adversarial failure/lifetime/budget behavior. Turn material findings into regressions and repeat review after consequential changes. Require exact-head hosted checks, resolved threads, and relevant Windows/macOS regressions; include omitted decisive Windows tests in CI. Squash into `develop` and verify the actual merged revision before the next repair.
+For every repair batch, demonstrate each focused failure on unchanged base in an isolated build target; run focused, adjacent, and already-fixed corpus tests after repair. Ask Jev to challenge contract, reproduction, impact, root cause, and related patterns. Obtain two fresh independent reviews covering correctness/test validity and adversarial failure/lifetime/budget behavior. Turn material findings into regressions and repeat review after consequential changes. Require exact-head hosted checks, resolved threads, and relevant Windows/macOS regressions; include omitted decisive Windows tests in CI. Squash into `develop` and verify the actual merged revision before the next batch.
 
 Before promotion, independently review authority/recovery/GC, snapshot retention, transaction accounting, contention classification, and checkpoint/cache interactions. Prepare Cargo metadata/lockfile, changelog, current examples, migration/rollback guidance, support matrix, and known risks while retaining historical evidence.
 

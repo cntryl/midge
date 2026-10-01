@@ -63,8 +63,11 @@ stages and syncs a sibling temporary file before atomic publication, retaining t
 prior readable artifact if staging or pre-publication fails. Shrinking removes legal
 chunks and preserves the failure class and, for API errors, operation and error
 variant. It performs at most 128 replays per mismatch and records whether that
-budget ended minimization. Spill-coverage failures keep their required spill check
-through shrinking and replay; other minimized histories may omit the spill bootstrap.
+budget ended minimization. Spill-coverage failures retain the original inducing
+workload, skip shrinking, and keep their required spill check in replay. Their
+strategy is `retain_fixture_workload`, with zero minimization replays and completion
+false. Removing their writes would manufacture failure on a correctly spilling
+engine. Logical mismatches use `legal_chunk_deletion` and may omit the spill bootstrap.
 Artifacts record both execution requirements. A minimized mismatch is an investigation lead; matching
 classes alone do not establish that two failures have the same root cause.
 
