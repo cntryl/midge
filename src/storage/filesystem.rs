@@ -266,7 +266,7 @@ fn next_object_modified_time(replaced: Option<std::time::SystemTime>) -> std::ti
         nanos(time).saturating_add(OBJECT_MODIFIED_STEP_NANOS)
     }));
     let mut stamped = floor;
-    let _ = LAST_OBJECT_MODIFIED_NANOS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |last| {
+    let _ = LAST_OBJECT_MODIFIED_NANOS.try_update(Ordering::AcqRel, Ordering::Acquire, |last| {
         stamped = floor.max(last.saturating_add(OBJECT_MODIFIED_STEP_NANOS));
         Some(stamped)
     });

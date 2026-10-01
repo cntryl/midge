@@ -11,7 +11,7 @@ trait AtomicU64SaturatingAdd {
 
 impl AtomicU64SaturatingAdd for AtomicU64 {
     fn saturating_add(&self, value: u64, ordering: Ordering) {
-        let _ = self.fetch_update(ordering, ordering, |current| {
+        let _ = self.try_update(ordering, ordering, |current| {
             Some(current.saturating_add(value))
         });
     }

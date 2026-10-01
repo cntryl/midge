@@ -770,7 +770,7 @@ impl CompactionActor {
             .retain(|name| !inputs.contains(name));
         if state
             .active_compactions
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
                 |active| active.checked_sub(1),

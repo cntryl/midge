@@ -82,7 +82,7 @@ impl SkipListMemtable {
     }
 
     fn add_encoded_size_bound(&self, bytes: usize) {
-        let _ = self.encoded_size_bound.fetch_update(
+        let _ = self.encoded_size_bound.try_update(
             std::sync::atomic::Ordering::Release,
             std::sync::atomic::Ordering::Relaxed,
             |current| Some(current.saturating_add(bytes)),

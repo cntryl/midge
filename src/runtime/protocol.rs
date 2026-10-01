@@ -19,7 +19,7 @@ pub(crate) fn next_request_id() -> MidgeResult<u64> {
 
 pub(super) fn allocate_request_id(counter: &AtomicU64) -> MidgeResult<u64> {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             if current == 0 {
                 None
             } else {
