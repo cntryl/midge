@@ -59,6 +59,13 @@ jobs:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
 
+      - name: Fixed-seed logical histories through supported providers
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+          MIDGE_DISCOVERY_PROFILE: sqrzl
+          MIDGE_DISCOVERY_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}/model
+        run: cargo test --test discovery_model --features sqrzl-tests -- --test-threads=1
+
       - name: Preserve cloud qualification evidence
         if: always()
         uses: actions/upload-artifact@v7
