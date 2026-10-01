@@ -82,7 +82,7 @@ mod engine_gc {
 
             // Assert
             let remaining_names = local_sst_names(&db_path);
-            assert!(!remaining_names.is_empty());
+            assert_ne!(remaining_names, [] as [std::string::String; 0]);
             let retained_input_count = input_names
                 .iter()
                 .filter(|input_name| db_path.join("sst").join(input_name).exists())

@@ -882,7 +882,7 @@ mod tests {
             StorageEvent::WriteComplete { result, .. } => {
                 assert!(result.is_ok());
                 let content = std::fs::read(temp_dir.path().join("empty.txt")).unwrap();
-                assert!(content.is_empty());
+                assert_eq!(content.len(), 0);
             }
             _ => panic!("Expected WriteComplete"),
         }
@@ -1243,7 +1243,7 @@ mod tests {
 
         // Assert
         match event {
-            Ok((content, _metadata)) => assert!(content.is_empty()),
+            Ok((content, _metadata)) => assert_eq!(content.len(), 0),
             Err(e) => panic!("Read failed: {e}"),
         }
     }

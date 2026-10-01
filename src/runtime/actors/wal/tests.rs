@@ -767,12 +767,15 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.frontiers.local_durable(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
     assert!(matches!(later, Err(MidgeError::RecoveryFailed(_))));
     assert_eq!(state.sequence, sequence_after_failure);
     Ok(())
@@ -1117,12 +1120,15 @@ fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() ->
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
     assert_eq!(wal_actor.append_calls(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
     Ok(())
 }
 
@@ -1211,12 +1217,15 @@ fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> Mi
     // Assert
     assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
     assert_eq!(wal_actor.append_calls(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("first column family remains")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("first column family remains")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
     Ok(())
 }
 
@@ -1286,12 +1295,15 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
     assert!(matches!(result, Err(MidgeError::NoSpace(_))));
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(wal_actor.sync_calls(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
 
     fail::remove("midge::wal::inject_no_space_on_sync");
     scenario.teardown();
@@ -1727,12 +1739,15 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
         assert!(state.persistence_anomaly_detected());
         assert_eq!(state.wal.pending_writes, 0);
         assert_eq!(state.wal.frontiers.local_durable(), 0);
-        assert!(state
-            .get_cf(0)
-            .expect("default column family")
-            .memtable
-            .iter_all()
-            .is_empty());
+        assert_eq!(
+            state
+                .get_cf(0)
+                .expect("default column family")
+                .memtable
+                .iter_all()
+                .len(),
+            0
+        );
         let later = prepare_put_transaction(
             &mut actor,
             &mut state,

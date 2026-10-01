@@ -333,7 +333,7 @@ mod tests {
         create_dir_all_durably(&root, &root.join("wal")).expect("second create");
 
         // Assert
-        assert!(take_synced_dirs().is_empty());
+        assert_eq!(take_synced_dirs().len(), 0);
     }
 
     #[test]

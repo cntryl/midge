@@ -730,7 +730,7 @@ mod transaction_basic {
             );
 
             // Assert
-            assert!(rows.is_empty());
+            assert_eq!(rows, [] as [(bytes::Bytes, bytes::Bytes); 0]);
         });
     }
 

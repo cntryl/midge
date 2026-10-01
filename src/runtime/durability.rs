@@ -473,7 +473,7 @@ mod tests {
             .expect("drain contiguous acknowledgements");
 
         // Assert
-        assert!(blocked.is_empty());
+        assert_eq!(blocked.len(), 0);
         assert_eq!(ready, vec![(1, 10), (2, 20)]);
     }
 
