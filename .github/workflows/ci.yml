@@ -69,8 +69,20 @@ jobs:
             if [[ "$target" == "fault_injection" ]]; then
               continue
             fi
-            cargo test --test "$target" --all-features -- --test-threads=1
+            if [[ "$target" == "discovery_model" ]]; then
+              MIDGE_DISCOVERY_PROFILE=pr cargo test --test "$target" --all-features -- --test-threads=1
+            else
+              cargo test --test "$target" --all-features -- --test-threads=1
+            fi
           done
+
+      - name: Retain discovery corpus and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: discovery-model-${{ github.sha }}
+          path: target/discovery-031
+          if-no-files-found: ignore
 
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
