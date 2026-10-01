@@ -65,7 +65,7 @@ fn should_preserve_target_created_immediately_before_publication() {
             assert!(fired.load(Ordering::SeqCst));
             assert!(
                 matches!(result, Err(MidgeError::InvalidArgument(_))),
-                "{result:?}"
+                "unexpected backup/restore outcome"
             );
             assert_eq!(std::fs::read(foreign.join("retain")).unwrap(), b"foreign");
             if !symlink {

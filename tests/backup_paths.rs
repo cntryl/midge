@@ -46,7 +46,7 @@ fn should_reject_backup_overlap_before_mutation() {
     // Assert
     assert!(
         matches!(result, Err(MidgeError::InvalidArgument(_))),
-        "{result:?}"
+        "unexpected backup/restore outcome"
     );
     assert_eq!(before, inventory(&source));
     assert!(engine
@@ -78,7 +78,7 @@ fn should_reject_restore_overlap_without_changing_artifact() {
     // Assert
     assert!(
         matches!(result, Err(MidgeError::InvalidArgument(_))),
-        "{result:?}"
+        "unexpected backup/restore outcome"
     );
     assert_eq!(before, inventory(&artifact));
 }
@@ -108,7 +108,7 @@ fn should_preserve_foreign_stage_when_retrying_restore() {
     );
 
     // Assert
-    assert!(result.is_ok(), "{result:?}");
+    assert!(result.is_ok(), "unexpected backup/restore outcome");
     assert_eq!(
         std::fs::read(foreign.join("owned-by-someone-else")).unwrap(),
         b"retain"
@@ -303,7 +303,7 @@ fn should_reject_parent_traversal_through_missing_or_regular_ancestor() {
         // Assert
         assert!(
             matches!(result, Err(MidgeError::InvalidArgument(_))),
-            "{result:?}"
+            "unexpected backup/restore outcome"
         );
         assert_eq!(before, inventory(directory.path()));
     }
