@@ -592,7 +592,7 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
     let revision = revision();
     if matches!(profile, "discovery" | "release" | "sqrzl") {
         assert!(
-            !revision.dirty,
+            !revision.dirty && revision.source == "git",
             "full discovery/release evidence requires a clean committed revision"
         );
     }
@@ -741,6 +741,35 @@ mod tests {
         assert_eq!(recorded["dirty"], false);
         assert_eq!(recorded["source"], "archive");
         assert!(attempt.join("successes.json").exists());
+    }
+
+    #[test]
+    fn should_reject_caller_asserted_archive_provenance_for_full_release_campaigns() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+
+        // Act
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "should_match_transaction_oracle_when_replaying_histories",
+                "--nocapture",
+            ])
+            .current_dir(directory.path())
+            .env("MIDGE_DISCOVERY_PROFILE", "release")
+            .env(
+                "MIDGE_DISCOVERY_SOURCE_REVISION",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .env("MIDGE_DISCOVERY_SOURCE_DIRTY", "false")
+            .output()
+            .unwrap();
+
+        // Assert: caller metadata is enough for smoke, not committed-source proof.
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("requires a clean committed revision")
+        );
     }
 
     #[test]

@@ -243,5 +243,6 @@ its actual HEAD through build arguments. `.git` remains outside the image.
 
 Unversioned archives default to `unversioned-archive` and dirty/unqualified.
 They may run ordinary smoke histories; discovery/release/provider campaigns
-continue to require a clean committed revision. A clean assertion without an
+continue to require a clean committed Git checkout, even when an archive
+asserts a SHA and clean state. A clean assertion without an
 explicit SHA is rejected. No logical test is skipped to accommodate archives.
