@@ -2,6 +2,11 @@ name: Cloud Integration
 
 on:
   workflow_dispatch:
+    inputs:
+      release_recovery_cost:
+        description: Run the 128 MiB cold-recovery release measurement
+        type: boolean
+        default: false
   schedule:
     - cron: "47 2 * * *"
   pull_request:
@@ -18,7 +23,7 @@ jobs:
   sqrzl:
     name: Sqrzl provider and engine
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: 0
       MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
@@ -65,6 +70,18 @@ jobs:
           MIDGE_DISCOVERY_PROFILE: sqrzl
           MIDGE_DISCOVERY_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}/model
         run: cargo test --test discovery_model --features sqrzl-tests -- --test-threads=1
+
+      - name: Measure release cold-recovery cost
+        if: github.event_name == 'workflow_dispatch' && inputs.release_recovery_cost
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+          MIDGE_QUALIFICATION_LOCAL_BYTES: 33554432
+          MIDGE_QUALIFICATION_WAL_BYTES: 134217728
+          MIDGE_QUALIFICATION_MEMORY_BYTES: 67108864
+          MIDGE_QUALIFICATION_VALUE_BYTES: 8192
+          MIDGE_QUALIFICATION_TIMEOUT_SECONDS: 900
+          MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}/recovery-cost
+        run: cargo test --release --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints operational::should_recover_cloud_backlog_after_complete_local_disk_loss -- --ignored --exact --nocapture
 
       - name: Preserve cloud qualification evidence
         if: always()

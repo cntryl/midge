@@ -325,3 +325,32 @@ Hosted exact-head and post-merge qualification remain pending.
   prefix/floor ordering. Existing public signatures, error variants, and persisted
   formats remain unchanged. Expanded discovery and full release qualification
   remain gates before promotion and publication.
+
+## 0.3.1 release preparation (2026-10-02)
+
+All twelve milestone issues are closed. Repairs merged through PRs #675
+(backup/restore), #676 (authority and salvage), #679 (spill-fixture validity),
+#681 (transaction and tombstone reads), #682 (replay locality), and #683
+(CloudAck contention). PR #684 measured #670; checkpoint policy was explicitly
+not promoted. Its APFS measurement confirmed quadratic cumulative bytes and
+approximately flat 27–29 ms per-flush latency over 64–2,048 live SSTs. It did
+not model production flush rate, steady-state compaction, or a deployment SLO.
+
+Development revision `d87da154357c2706c1b177417fefbea7bc6a8c58` passed
+[CI](https://github.com/cntryl/midge/actions/runs/37026305792) and managed
+CodeQL. These development checks do not establish release completion.
+
+The merged performance implementations differ from the original acceptance
+contracts: #681 retains matching-run point probes and does not implement the
+specified eight-source sorted spill view or upfront auxiliary scratch admission;
+#682 retains four readers with four decoded blocks each, caps retained blocks
+at one quarter of the recovery budget, and clears readers/proofs at checkpoints.
+The changelog records these limits. The final release scope decision and native
+cold-recovery measurements remain pending; neither issue closure nor this
+version bump waives qualification requirements.
+
+Release preparation adds an explicit `release_recovery_cost` Cloud Integration
+workflow input for the documented 128 MiB WAL profile, with durable artifact
+upload. Normal provider qualification remains enabled for every dispatch.
+Qualification, promotion, tagging, publication, consumer validation, and
+milestone closure remain pending until their evidence is recorded.

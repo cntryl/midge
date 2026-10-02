@@ -85,6 +85,21 @@ its `0.2.0` binary. Never let an old writer open the new prefix. Writes made
 after cutover are absent from the preserved copy and require a separate
 application-level reconciliation path.
 
+## 0.3.0 to 0.3.1
+
+Version `0.3.1` preserves public Rust signatures and error variants, CLI JSON
+schema version 1, FORMAT 4, SST V4, and cloud lease, DDL, and WAL catalog formats.
+No offline export/import is required for a `0.3.0` database. Stop writes,
+complete shutdown, and preserve a verified copy of the database directory and
+relevant cloud prefix. Test Local and provider-backed recovery on a separate
+copy before switching traffic.
+
+Rollback is supported with constraints: restore the preserved pre-upgrade copy
+and use `0.3.0`. Do not treat a salvage-mutated database as a qualified rollback
+fixture. Writes made after that copy was taken need separate reconciliation.
+These format statements do not remove the authority and recovery defects fixed
+in `0.3.1`; returning to `0.3.0` also returns to its known defects.
+
 ## FORMAT 3 and SST V4
 
 FORMAT 3 is a breaking local-storage transition. It requires checksummed SST
