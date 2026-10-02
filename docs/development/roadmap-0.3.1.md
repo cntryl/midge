@@ -4,7 +4,7 @@ This roadmap records a repository-wide correctness and performance review of Mid
 
 ## Release decision
 
-Ship all eight confirmed fixes #662–#669, every additional confirmed P1/P2 defect found during expanded discovery, and #670's checkpoint optimization if its measurement gate qualifies. The [0.3.1 GitHub milestone](https://github.com/cntryl/midge/milestone/1) currently contains three P1 defects, five P2 items, and one P3 qualification item. All eight fixes are required release scope.
+Ship all eight confirmed fixes #662–#669, every additional confirmed P1/P2 defect found during expanded discovery, and #670's checkpoint optimization if its measurement gate qualifies. The [0.3.1 GitHub milestone](https://github.com/cntryl/midge/milestone/1) initially contained three P1 defects, five P2 items, and one P3 qualification item. All eight fixes are required release scope.
 
 Completion requires a qualified `main` revision, immutable `v0.3.1` tag, published crates.io artifact, successful registry consumer test, GitHub release, and closed milestone. Preserve public Rust signatures, error variants, CLI JSON schema, and persisted formats. Document the approved transaction tradeoff: reserving read-index scratch space upfront reduces maximum spill capacity near the disk limit.
 
@@ -430,3 +430,73 @@ input is committed as a replay fixture; eight unsanitized replays took under a
 second each. A sanitizer replay precedes the next four-target campaign. Neither
 an input-specific production defect nor sanitizer qualification success is
 claimed until that replay/campaign completes.
+
+## Final release qualification (2026-10-02)
+
+This section supersedes the historical pending statements above. The approved
+scope ships the merged transaction/read-cache designs; it does not claim the
+original stronger bounded-source or cross-checkpoint-cache design. #670 remains
+measured and deferred. All required fixes #662–#669 and qualification repairs
+#686, #688 and #690 are closed. The consolidated coverage interpretation is in
+[discovery-0.3.1.md](discovery-0.3.1.md#final-qualification-coverage-interpretation).
+
+Promotion [#687](https://github.com/cntryl/midge/pull/687) merged main
+`227cea4a377dfd4e113bc7aa48aca22e442e63d6`; its tree
+`3745764fe76c3ddad176ae05828a14a822e0ac9d` matches qualified develop `6aaa0c9f`.
+The immutable annotated `v0.3.1` tag peels to that main commit.
+
+| Exact-main qualification | Passed run |
+| --- | --- |
+| Linux/macOS/Windows CI | [37040320734](https://github.com/cntryl/midge/actions/runs/37040320734) |
+| MSRV/no-default and isolated features | [37040320748](https://github.com/cntryl/midge/actions/runs/37040320748) |
+| Complete Docker all-feature suite | [37040320755](https://github.com/cntryl/midge/actions/runs/37040320755) |
+| Native provider and release-mode recovery cost | [37040321159](https://github.com/cntryl/midge/actions/runs/37040321159) |
+| Retained input replay and four sanitized fuzz targets | [37040324103](https://github.com/cntryl/midge/actions/runs/37040324103) |
+| All-OS lifecycle benchmarks plus repeated CI | [37041401665](https://github.com/cntryl/midge/actions/runs/37041401665) |
+
+Managed CodeQL passed the identical qualified source tree before promotion in
+[37039099316](https://github.com/cntryl/midge/actions/runs/37039099316).
+`cargo package --locked` on actual main passed. Full clean-Git release discovery
+at `f0e01c96` passed all eighteen tests, 1,024 fixture histories / 117,380 actions,
+eight actual process aborts and fourteen reopens/scans. Its production and
+discovery-driver code match final main; the only later source change is the
+qualified takeover-test timing repair. Logical artifact:
+`798ed253-eb3d-49bd-aeb5-4d164a724c42`; physical artifact:
+`c69c7d3c-4786-4021-baec-f028f8343501`.
+
+Final native-provider artifact `153c964e-b29e-41d7-94e5-ffaa2750f4b8` records
+134,219,148 WAL bytes and all 16,212 source records verified after interrupted
+recovery, repeated cache loss, mixed writes and compaction. The final cold-open
+phase used 4,258 HTTP ranges / 905,371,044 consumed response bytes, 1.902 seconds
+of coverage work and 4.183 seconds to open. Against the recorded historical
+33,536 ranges / 2,553,475,173 bytes, reductions are 87.3% / 64.5%; timing remains
+informational across hosts. The final whole-campaign verification includes
+additional read requests and is not substituted for the cold-open phase.
+Tracked local-file peak was 2,172,547 bytes under the 32 MiB local budget;
+whole-process RSS peaked at 94,896,128 bytes and is not a 64 MiB process-cap claim.
+Reader/block accounting tests separately enforce recovery-pool limits.
+
+The Windows one-second lease test failed twice in promotion run 37035723691.
+Repair #691 uses matching 30-second holder TTLs, waits actual predecessor expiry,
+and retains takeover, stale-write rejection and successor restart assertions.
+The focused Local/CloudSimulated test and hosted Linux/macOS/Windows passed.
+No production TTL, expiry assertion or gate was disabled. Docker archive smoke
+records explicit caller-provided provenance; full discovery still rejects
+archives and requires a clean Git checkout. Sanitized fuzz passed without
+relaxing RSS/time limits, including the preserved eighteen-byte intent input.
+
+[Publish run 37042539032](https://github.com/cntryl/midge/actions/runs/37042539032)
+passed its full release gate and trusted crates.io publication. A fresh external
+consumer depends only on registry `cntryl-midge = "=0.3.1"`; its lockfile records
+source `registry+https://github.com/rust-lang/crates.io-index` and checksum
+`727af8f9a206a494b872b3b7a690af6d2084448a981a9e9b5afb58af446111e9`.
+Write, flush, bounded shutdown, reopen, read and scan passed on Local,
+CloudSimulated and native Sqrzl S3. No path or Git patch was used. Earlier clean
+0.3.0/candidate upgrade/downgrade and backup/restore results remain scoped to
+clean fixtures and the constrained rollback guidance.
+
+The [GitHub release](https://github.com/cntryl/midge/releases/tag/v0.3.1) records
+migration, rollback, qualified scope and known limits. The 0.3.1 milestone closes
+after this completion record merges. Main/tag remain at the qualified release
+commit; this final evidence update is documentation on develop.
+
