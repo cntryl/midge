@@ -718,7 +718,7 @@ mod tests {
     ) -> CloudPersistence {
         let successor = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
             Arc::new(crate::storage::filesystem::FileSystem::new(root.join("successor")).unwrap()),
-            Arc::clone(&remote),
+            Arc::clone(remote),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
         let successor_validity = Arc::new(crate::lease::LeaseValidity::new());
