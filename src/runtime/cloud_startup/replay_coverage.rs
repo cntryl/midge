@@ -9,10 +9,16 @@ use std::sync::Arc;
 pub(crate) struct ReplayCoverage {
     manifest: crate::metadata::Manifest,
     fs: Arc<dyn Fs>,
-    // Keep immutable identities and at most one budgeted reader. Release the
-    // reader before verifying/opening a different file or building a checkpoint.
+    // Keep immutable identities plus a small LRU of budgeted readers.
+    // Invariants: at most `MAX_READERS` readers, each retaining at most
+    // `MAX_BLOCKS_PER_READER` decoded blocks and `block_cap_per_reader` bytes,
+    // every byte charged to `read_budget`. All readers and proofs are dropped
+    // before a checkpoint, so no reader outlives the manifest snapshot it was
+    // verified against, and eviction under budget pressure only ever turns a
+    // proof into a replay.
     verified: RefCell<HashMap<String, VerifiedProof>>,
-    reader: RefCell<Option<CachedReader>>,
+    readers: RefCell<Vec<CachedReader>>,
+    block_cap_per_reader: usize,
     read_budget: crate::common::resource_budget::ResourceBudget,
     probes: Cell<u64>,
     reader_opens: Cell<u64>,
@@ -21,7 +27,16 @@ pub(crate) struct ReplayCoverage {
     block_hits: Cell<u64>,
     block_misses: Cell<u64>,
     block_peak: Cell<usize>,
+    reader_hits: Cell<u64>,
+    reader_evictions: Cell<u64>,
+    manifest_scanned: Cell<u64>,
+    manifest_candidates: Cell<u64>,
 }
+
+/// Readers retained for alternating-SST replay locality.
+const MAX_READERS: usize = 4;
+/// Decoded blocks retained per reader.
+const MAX_BLOCKS_PER_READER: usize = 4;
 
 struct VerifiedProof {
     fs: Option<Arc<dyn Fs>>,
@@ -91,7 +106,10 @@ impl ReplayCoverage {
             manifest,
             fs,
             verified: RefCell::new(HashMap::new()),
-            reader: RefCell::new(None),
+            readers: RefCell::new(Vec::new()),
+            // Retained decoded blocks may use at most a quarter of the budget
+            // in total, leaving room for indexes, proofs and verification.
+            block_cap_per_reader: memory_bytes / 4 / MAX_READERS,
             read_budget: crate::common::resource_budget::ResourceBudget::new(memory_bytes),
             probes: Cell::new(0),
             reader_opens: Cell::new(0),
@@ -100,6 +118,10 @@ impl ReplayCoverage {
             block_hits: Cell::new(0),
             block_misses: Cell::new(0),
             block_peak: Cell::new(0),
+            reader_hits: Cell::new(0),
+            reader_evictions: Cell::new(0),
+            manifest_scanned: Cell::new(0),
+            manifest_candidates: Cell::new(0),
         }
     }
 
@@ -127,12 +149,17 @@ impl ReplayCoverage {
         let mut retained_value = None;
         // Drop the proof's copied bytes before their reservation on every exit.
         let mut proof = ExactCoverageState::default();
-        for file in self
-            .manifest
-            .files
-            .iter()
-            .filter(|file| file_covers_wal_point_record(file, record))
-        {
+        self.manifest_scanned.set(
+            self.manifest_scanned
+                .get()
+                .saturating_add(self.manifest.files.len() as u64),
+        );
+        for file in &self.manifest.files {
+            if !file_covers_wal_point_record(file, record) {
+                continue;
+            }
+            self.manifest_candidates
+                .set(self.manifest_candidates.get().saturating_add(1));
             let Some(observed) = self.file_state(file, record.key.as_ref()) else {
                 return false;
             };
@@ -148,13 +175,37 @@ impl ReplayCoverage {
         file: &crate::metadata::FileMeta,
         key: &[u8],
     ) -> Option<crate::types::KeyState> {
-        let mut cached = self.reader.borrow_mut();
-        if let Some(cached) = cached.as_ref().filter(|cached| cached.name == file.name) {
-            return cached.reader.get_state_at_with_time(key, u64::MAX, 0).ok();
+        let observed = self.try_file_state(file, key);
+        if observed.is_none() && !self.readers.borrow().is_empty() {
+            // Retained locality is only an optimization. If a probe failed
+            // (possibly for budget), drop every retained reader and retry once
+            // from the single-reader footprint before conceding to replay.
+            self.release_cached_all();
+            return self.try_file_state(file, key);
         }
-        // The old reader's reservations must be released before even the
-        // next full-object verification buffer is allocated.
-        self.release_cached(&mut cached);
+        observed
+    }
+
+    fn try_file_state(
+        &self,
+        file: &crate::metadata::FileMeta,
+        key: &[u8],
+    ) -> Option<crate::types::KeyState> {
+        let mut readers = self.readers.borrow_mut();
+        if let Some(position) = readers.iter().position(|cached| cached.name == file.name) {
+            let cached = readers.remove(position);
+            self.reader_hits
+                .set(self.reader_hits.get().saturating_add(1));
+            let result = cached.reader.get_state_at_with_time(key, u64::MAX, 0).ok();
+            readers.push(cached);
+            return result;
+        }
+        while readers.len() >= MAX_READERS {
+            let evicted = readers.remove(0);
+            self.record_reader(&evicted);
+            self.reader_evictions
+                .set(self.reader_evictions.get().saturating_add(1));
+        }
         let path = FsPath::new(crate::cloud_layout::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
         if !verified.contains_key(&file.name) {
@@ -201,33 +252,58 @@ impl ReplayCoverage {
         let budget = self.read_budget.clone();
         self.reader_opens
             .set(self.reader_opens.get().saturating_add(1));
-        let reader =
-            crate::sst::fs::SstFileIo::open_for_recovery(&path.0, Arc::clone(fs), budget).ok()?;
+        let reader = crate::sst::fs::SstFileIo::open_for_recovery(
+            &path.0,
+            Arc::clone(fs),
+            budget,
+            MAX_BLOCKS_PER_READER,
+            self.block_cap_per_reader,
+        )
+        .ok()?;
         // Recovery compares persisted expiration metadata. A forward wall-clock
         // jump must not turn an unrelated expired value into tombstone proof.
         // Expiration zero remains conservatively replayed at equal sequence.
         let result = reader.get_state_at_with_time(key, u64::MAX, 0).ok();
-        *cached = Some(CachedReader {
+        readers.push(CachedReader {
             name: file.name.clone(),
             reader,
         });
         result
     }
 
+    #[cfg(test)]
+    fn block_stats(&self) -> (u64, u64, usize) {
+        let mut totals = (
+            self.block_hits.get(),
+            self.block_misses.get(),
+            self.block_peak.get(),
+        );
+        for cached in self.readers.borrow().iter() {
+            let (hits, misses, peak) = cached.reader.recovery_block_stats();
+            totals = (totals.0 + hits, totals.1 + misses, totals.2.max(peak));
+        }
+        totals
+    }
+
     pub(crate) fn release_reader(&self) {
-        self.release_cached(&mut self.reader.borrow_mut());
+        self.release_cached_all();
         *self.verified.borrow_mut() = HashMap::new();
     }
 
-    fn release_cached(&self, cached: &mut Option<CachedReader>) {
-        if let Some(cached) = cached.take() {
-            let (hits, misses, peak) = cached.reader.recovery_block_stats();
-            self.block_hits
-                .set(self.block_hits.get().saturating_add(hits));
-            self.block_misses
-                .set(self.block_misses.get().saturating_add(misses));
-            self.block_peak.set(self.block_peak.get().max(peak));
+    fn release_cached_all(&self) {
+        let drained: Vec<_> = self.readers.borrow_mut().drain(..).collect();
+        for cached in drained {
+            self.record_reader(&cached);
         }
+    }
+
+    fn record_reader(&self, cached: &CachedReader) {
+        let (hits, misses, peak) = cached.reader.recovery_block_stats();
+        self.block_hits
+            .set(self.block_hits.get().saturating_add(hits));
+        self.block_misses
+            .set(self.block_misses.get().saturating_add(misses));
+        self.block_peak.set(self.block_peak.get().max(peak));
     }
 }
 
@@ -237,6 +313,9 @@ impl Drop for ReplayCoverage {
         tracing::info!(target: "midge::recovery", phase = "coverage",
             probes = self.probes.get(), reader_opens = self.reader_opens.get(),
             verified_sst_bytes = self.verified_bytes.get(), elapsed_ns = self.elapsed_ns.get(),
+            reader_hits = self.reader_hits.get(), reader_evictions = self.reader_evictions.get(),
+            manifest_files_scanned = self.manifest_scanned.get(),
+            manifest_candidates = self.manifest_candidates.get(),
             block_hits = self.block_hits.get(), block_misses = self.block_misses.get(),
             retained_block_bytes_peak = self.block_peak.get() as u64,
             "recovery coverage work completed");
@@ -350,7 +429,10 @@ mod tests {
         // Assert
         assert_eq!(coverage.read_budget.used(), 0);
         assert!(coverage.read_budget.peak() <= budget);
-        assert_eq!(coverage.reader_opens.get(), 20);
+        assert!(
+            coverage.reader_opens.get() > 2,
+            "budget pressure must evict retained readers rather than exceed the budget"
+        );
     }
 
     #[test]
@@ -409,6 +491,145 @@ mod tests {
         );
         assert!(retained <= 8 * 1024);
         assert_eq!(coverage.read_budget.used(), 0);
+    }
+
+    #[test]
+    fn should_retain_locality_when_probes_alternate_between_ssts() {
+        // Arrange
+        let (_dir, mut coverage) = multi_block_fixture(2, &[b"a", b"z"]);
+        let counter = Arc::new(RangeCounter::default());
+        coverage.fs = coverage
+            .fs
+            .with_read_observer(counter.clone())
+            .expect("observed reads");
+        let records = [put_key(b"a", 7), put_key(b"z", 7)];
+        for record in &records {
+            assert!(coverage.contains(record));
+        }
+        let warm = counter.0.load(std::sync::atomic::Ordering::Relaxed);
+        let warm_misses = coverage.block_stats().1;
+
+        // Act
+        for _ in 0..50 {
+            for record in &records {
+                assert!(coverage.contains(record));
+            }
+        }
+        let ranges = counter.0.load(std::sync::atomic::Ordering::Relaxed) - warm;
+        let (hits, misses, _) = coverage.block_stats();
+
+        // Assert
+        assert_eq!(coverage.reader_opens.get(), 2, "one open per SST");
+        assert_eq!(ranges, 0, "alternation must not reissue range reads");
+        assert_eq!(misses, warm_misses, "every block stays resident");
+        assert!(hits >= 200, "block hits must be counted: {hits}");
+        assert!(coverage.read_budget.peak() <= coverage.read_budget.limit());
+    }
+
+    #[test]
+    fn should_report_manifest_candidate_work_when_records_probe_manifest() {
+        // Arrange
+        let (_dir, coverage) = multi_block_fixture(3, &[b"a"]);
+
+        // Act
+        let covered = coverage.contains(&put_key(b"a", 7));
+
+        // Assert
+        assert!(covered);
+        assert_eq!(coverage.manifest_scanned.get(), 3);
+        assert_eq!(coverage.manifest_candidates.get(), 3);
+    }
+
+    #[test]
+    fn should_stay_within_budget_when_retained_readers_exceed_recovery_memory() {
+        // Arrange
+        let (_dir, mut coverage) = multi_block_fixture(4, &[b"a", b"z"]);
+        let (_one_dir, one) = multi_block_fixture(1, &[b"a", b"z"]);
+        assert!(one.contains(&put_key(b"a", 7)));
+        let budget = one.read_budget.peak()
+            + 12 * 1024
+            + coverage
+                .manifest
+                .files
+                .iter()
+                .map(|f| proof_metadata_bytes(&f.name))
+                .sum::<usize>();
+        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(budget);
+
+        // Act
+        let covered = [b"a", b"z", b"a", b"z"]
+            .iter()
+            .all(|key| coverage.contains(&put_key(*key, 7)));
+        let peak = coverage.read_budget.peak();
+        coverage.release_reader();
+
+        // Assert
+        assert!(covered, "eviction must keep exact coverage provable");
+        assert!(peak <= budget);
+        assert!(
+            coverage.reader_opens.get() > 4,
+            "the budget must be tight enough to force eviction"
+        );
+        assert_eq!(coverage.read_budget.used(), 0);
+    }
+
+    fn put_key(key: &'static [u8], sequence: u64) -> WalRecord {
+        WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(key),
+            Some(Bytes::from(vec![7u8; 4096])),
+            sequence,
+            1,
+        )
+    }
+
+    /// `files` identical SSTs, each with one 4 KiB value per key at sequence 7
+    /// and a block size small enough that every key lands in its own block.
+    fn multi_block_fixture(files: usize, keys: &[&[u8]]) -> (tempfile::TempDir, ReplayCoverage) {
+        let dir = tempfile::tempdir().expect("coverage directory");
+        let fs = Arc::new(crate::io::RealFs::new(dir.path()).expect("local filesystem"));
+        let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
+        let mut manifest = crate::metadata::Manifest::default();
+        std::fs::create_dir_all(dir.path().join("cloud/sst")).expect("remote SST directory");
+        for index in 0..files {
+            let mut writer = factory.create().expect("SST writer");
+            for key in keys {
+                writer
+                    .add_with_meta(
+                        key,
+                        Some(&[7u8; 4096]),
+                        7,
+                        crate::types::EntryType::Put,
+                        None,
+                    )
+                    .expect("SST entry");
+            }
+            let bytes = writer.finish_bytes().expect("SST bytes");
+            let name = crate::cloud_layout::file_name(0, 0, index as u64 + 1);
+            std::fs::write(dir.path().join("cloud/sst").join(&name), &bytes).expect("remote SST");
+            manifest.files.push(crate::metadata::FileMeta {
+                name,
+                cf_id: 0,
+                level: 0,
+                size_bytes: bytes.len() as u64,
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                smallest_key: keys.first().map(|k| k.to_vec()),
+                largest_key: keys.last().map(|k| k.to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(7),
+                ..Default::default()
+            });
+        }
+        let cloud = Arc::new(
+            crate::storage::filesystem::FileSystem::new(dir.path().join("cloud"))
+                .expect("cloud filesystem"),
+        );
+        let remote = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            fs,
+            cloud,
+            std::time::Duration::from_secs(5),
+        ));
+        (dir, ReplayCoverage::new(manifest, remote, 512 * 1024))
     }
 
     type PersistedEntry<'a> = (Option<&'a [u8]>, u64, Option<u64>);
