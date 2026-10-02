@@ -205,3 +205,14 @@ persistence and manifest publication, and before clearing compaction intents.
 Compaction expiry before GC retains inputs and its intent; expiry after a valid
 GC retains the durable intent for recovery. None of these tests claim that a
 lease check can cancel an I/O call that has already entered the provider.
+
+Further call-site qualification exercises the real compaction completion handler,
+including its failure cleanup, and the paired cloud-flush/rotation transition.
+The corresponding pre-guard regressions reproduce unwanted input deletion and
+an unsettled-transition assertion. Both now fence without additional mutation.
+Salvage has an authority callback through floor publication, each quarantine
+rename after path preparation, directory sync, and catalog retirement. Expiry
+after floor publication or after one rename preserves a successor's active WAL
+and the complete raised floor. Failpoint tests acquire the repository's
+isolation guard before the fail crate's scenario lock; the expiry corpus also
+runs with eight test threads to check the required lock ordering.

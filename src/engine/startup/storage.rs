@@ -247,6 +247,11 @@ impl StartupLease {
     }
 
     pub(super) fn ensure_healthy(&self, phase: &str) -> MidgeResult<()> {
+        if let Some(validity) = &self.lease_validity {
+            validity.remaining(self.writer_epoch).map_err(|error| {
+                error.into_validation_error(&format!("startup monotonic lease validity {phase}"))
+            })?;
+        }
         if self
             .lease_healthy
             .load(std::sync::atomic::Ordering::Acquire)
@@ -490,11 +495,12 @@ impl RuntimeStorageMaterialization {
             )
         })?;
         let recovery_plan = streaming.plan;
-        recovery_plan.commit_set_aside(
+        recovery_plan.commit_set_aside_with_authority(
             &CloudPersistence::new(Arc::clone(&cloud.hybrid_storage)),
             startup_lease.writer_epoch,
             &wal_catalog,
             &storage_path.db_path,
+            &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
         )?;
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
@@ -649,11 +655,12 @@ impl RuntimeStorageMaterialization {
             )
         })?;
         let recovery_plan = streaming.plan;
-        recovery_plan.commit_set_aside(
+        recovery_plan.commit_set_aside_with_authority(
             &CloudPersistence::new(Arc::clone(&hybrid_storage)),
             startup_lease.writer_epoch,
             &wal_catalog,
             &storage_path.db_path,
+            &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
         )?;
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),

@@ -1392,6 +1392,8 @@ mod tests {
         expire_on_validation: bool,
     ) -> crate::common::MidgeResult<()> {
         #[cfg(feature = "failpoints")]
+        let _guard = crate::failpoints::test_failpoint_guard();
+        #[cfg(feature = "failpoints")]
         let _scenario = fail::FailScenario::setup();
         // Arrange
         let directory = tempfile::tempdir()?;

@@ -633,6 +633,7 @@ fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> 
 fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeResult<()> {
     for before_gc in [true, false] {
         // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
@@ -688,11 +689,30 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
             "midge::compaction::after_input_sst_gc"
         };
         fail::cfg_callback(boundary, move || validity.expire_for_test()).unwrap();
+        let owner = CompactionCoordinator::publication_owner(&pending.token);
+        assert!(event_loop.publication_gate.try_acquire(owner.clone()));
+        let completion = CompactionPublishCompletion {
+            token: pending.token.clone(),
+            phase: CompactionPublishPhase::ManifestPublished,
+            result: Ok(()),
+        };
+        event_loop
+            .compaction_publication
+            .install(&event_loop.publication_gate, owner, pending)?;
+        let response = event_loop.router.register(1, "Compact");
         // Act
-        let result =
-            CompactionCoordinator::begin_intent_clear_publication(&mut event_loop, &pending);
+        CompactionCoordinator::handle_publication_completion(&mut event_loop, completion);
+        let result = response
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         // Assert
-        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert!(matches!(
+            result,
+            RuntimeResponse::Error {
+                error: MidgeError::Internal(ref message),
+                ..
+            } if message.contains("Fenced")
+        ));
         assert_eq!(std::fs::read(&intent_path)?, before);
         assert_eq!(input_path.exists(), before_gc);
         if before_gc {

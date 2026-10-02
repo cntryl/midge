@@ -200,3 +200,64 @@ fn prepare_case(
         .env(CHILD_ENV, case_path);
     Ok((fixture, catalog_path, command))
 }
+
+#[test]
+fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floor(
+) -> MidgeResult<()> {
+    for after_rename in [false, true] {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let _scenario = fail::FailScenario::setup();
+        let (fixture, catalog_path, _command) = prepare_case("unused", 1)?;
+        let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(9, std::time::Instant::now() + Duration::from_secs(60))
+            .unwrap();
+        let check = Arc::clone(&validity);
+        let active = fixture.directory.path().join("local/wal/wal.log");
+        let successor = framed_wal(5, 10, b"successor");
+        let changed_active = active.clone();
+        let changed_bytes = successor.clone();
+        let boundary = if after_rename {
+            "midge::recovery::after_salvage_quarantine_rename"
+        } else {
+            "midge::recovery::after_salvage_floor_before_quarantine"
+        };
+        fail::cfg_callback(boundary, move || {
+            validity.expire_for_test();
+            std::fs::write(&changed_active, &changed_bytes).unwrap();
+        })
+        .unwrap();
+        // Act
+        let result = recovered.plan.commit_set_aside_with_authority(
+            &persistence(&fixture)?,
+            9,
+            &fixture.catalog,
+            &fixture.directory.path().join("local"),
+            &|| {
+                check
+                    .remaining(9)
+                    .map(|_| ())
+                    .map_err(|error| error.into_validation_error("salvage writer validity"))
+            },
+        );
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert_eq!(std::fs::read(&active)?, successor);
+        let catalog = WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
+        assert_eq!(catalog.sequence_floor, 4);
+        assert_eq!(catalog.segments.len(), 3);
+        let renamed = std::fs::read_dir(active.parent().unwrap())?
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("salvage-retained")
+            })
+            .count();
+        assert_eq!(renamed, usize::from(after_rename));
+    }
+    Ok(())
+}

@@ -2669,6 +2669,7 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
 #[test]
 fn should_preserve_active_wal_when_validity_expires_before_rotation_rename() -> MidgeResult<()> {
     // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
@@ -2704,5 +2705,42 @@ fn should_preserve_active_wal_when_validity_expires_before_rotation_rename() -> 
         .join(crate::wal::segment_file_name(1))
         .exists());
     drop(scenario);
+    Ok(())
+}
+
+#[test]
+fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(1, Instant::now() + Duration::from_secs(60))
+        .unwrap();
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let ticket = seal_ticket_for_test(&actor, &state);
+    actor.flush_for_cloud_upload(&mut state, &ticket)?;
+    let active = temp.path().join("wal/wal.log");
+    let before = std::fs::read(&active)?;
+    validity.expire_for_test();
+    // Act
+    let result = actor.rotate(&mut state, &ticket);
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    assert!(actor.is_open() || actor.is_fenced());
+    assert_eq!(std::fs::read(&active)?, before);
+    assert!(!temp
+        .path()
+        .join("wal")
+        .join(crate::wal::segment_file_name(1))
+        .exists());
     Ok(())
 }

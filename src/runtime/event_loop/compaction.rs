@@ -1091,7 +1091,7 @@ impl CompactionCoordinator {
                 output_count = output_ssts.len(),
                 "retaining both compaction generations until cloud publication recovers"
             );
-        } else {
+        } else if event_loop.check_lease_health().is_ok() {
             // The local manifest batch is the durable authority. With no
             // remote authority to reconcile, its removed inputs are safe to
             // submit for local GC even if a later phase/checkpoint write
@@ -1099,6 +1099,9 @@ impl CompactionCoordinator {
             event_loop
                 .gc_actor
                 .delete_ssts(&mut event_loop.state, input_ssts, None);
+        } else {
+            event_loop.state.mark_persistence_anomaly();
+            tracing::warn!("retaining compaction inputs after writer authority loss");
         }
     }
 

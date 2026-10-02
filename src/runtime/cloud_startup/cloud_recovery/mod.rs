@@ -493,7 +493,16 @@ impl CloudStartupRecovery {
         fs: &dyn crate::io::Fs,
         path: &crate::io::FsPath,
     ) -> MidgeResult<()> {
+        Self::quarantine_local_wal_alias_with_authority(fs, path, &|| Ok(()))
+    }
+
+    pub(crate) fn quarantine_local_wal_alias_with_authority(
+        fs: &dyn crate::io::Fs,
+        path: &crate::io::FsPath,
+        validate: &dyn Fn() -> MidgeResult<()>,
+    ) -> MidgeResult<()> {
         let retained_path = Self::unused_retained_path(fs, path)?;
+        validate()?;
         fs.rename_atomic(path, &retained_path).map_err(|error| {
             MidgeError::RecoveryFailed(format!(
                 "failed to quarantine local WAL alias '{}' as '{}': {error}",

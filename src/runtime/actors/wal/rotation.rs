@@ -51,7 +51,7 @@ impl WalActor {
         state: &mut RuntimeState,
         ticket: &WalSealTicket,
     ) -> MidgeResult<WalRotationReceipt> {
-        self.ensure_lease_validity()?;
+        self.ensure_transition_authority(state)?;
         let old_segment = state.wal.current_segment_id;
         let next_segment = old_segment.checked_add(1).ok_or_else(|| {
             MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
@@ -268,7 +268,11 @@ impl WalActor {
 
     fn ensure_transition_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         if let Err(error) = self.ensure_lease_validity() {
-            self.fence_transition(state, error.to_string());
+            self.fence_with_cause(
+                state,
+                error.to_string(),
+                matches!(error, MidgeError::Fenced(_)),
+            );
             return Err(error);
         }
         Ok(())
