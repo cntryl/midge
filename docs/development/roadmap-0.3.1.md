@@ -499,4 +499,3 @@ The [GitHub release](https://github.com/cntryl/midge/releases/tag/v0.3.1) record
 migration, rollback, qualified scope and known limits. The 0.3.1 milestone closes
 after this completion record merges. Main/tag remain at the qualified release
 commit; this final evidence update is documentation on develop.
-
