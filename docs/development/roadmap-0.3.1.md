@@ -345,12 +345,31 @@ contracts: #681 retains matching-run point probes and does not implement the
 specified eight-source sorted spill view or upfront auxiliary scratch admission;
 #682 retains four readers with four decoded blocks each, caps retained blocks
 at one quarter of the recovery budget, and clears readers/proofs at checkpoints.
-The changelog records these limits. The final release scope decision and native
-cold-recovery measurements remain pending; neither issue closure nor this
-version bump waives qualification requirements.
+The changelog records these limits. On 2026-10-02 the user approved qualifying and shipping these merged designs
+instead of requiring the original bounded-source and cross-checkpoint cache
+contracts. Those original design prescriptions are superseded for 0.3.1;
+correctness, configured-budget, and native qualification checks still apply.
+Native cold-recovery measurements remain pending; neither issue closure nor
+this version bump establishes qualification completion.
 
 Release preparation adds an explicit `release_recovery_cost` Cloud Integration
 workflow input for the documented 128 MiB WAL profile, with durable artifact
 upload. Normal provider qualification remains enabled for every dispatch.
 Qualification, promotion, tagging, publication, consumer validation, and
 milestone closure remain pending until their evidence is recorded.
+
+### Fuzz qualification follow-up #686
+
+Development fuzz run [37028361947](https://github.com/cntryl/midge/actions/runs/37028361947)
+failed at the default 2 GiB RSS cap while processing tiny WAL inputs. The log
+preserves the four-byte input `04 00 06 00`; the original workflow did not upload
+failure artifacts. Independently, the common fuzz helper was confirmed to race
+asynchronous Engine drop: all 64 immediate Strict opens returned `LeaseHeld`
+after seeding, preventing malformed-input recovery coverage.
+
+Two `tests/fuzz_harness.rs` regressions failed on unchanged helpers, then passed
+with explicit bounded shutdown after every successful open. Startup errors
+remain accepted input outcomes. Sanitizer settings and RSS limits are unchanged.
+Fuzz corpus and crash artifacts are now uploaded even on failure. The subsequent
+four-target sanitized rerun is required before treating the RSS failure as
+resolved; this evidence establishes the harness defect, not a WAL corruption bug.
