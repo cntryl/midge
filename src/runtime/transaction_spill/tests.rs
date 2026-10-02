@@ -476,9 +476,7 @@ fn should_bound_live_file_handles_when_scanning_spilled_runs() -> MidgeResult<()
     reset_sparse_index_decodes();
 
     // Act
-    let keys = writes
-        .key_scan(None, None, true)?
-        .collect::<MidgeResult<Vec<_>>>()?;
+    let keys = resolved_scan(&writes, None, None, true)?;
     let peak = peak_run_files();
 
     // Assert
@@ -558,6 +556,247 @@ fn should_look_up_spilled_key_when_pool_cannot_charge_sparse_index() -> MidgeRes
         sparse_index_decodes(),
         0,
         "a rejected reservation must fall back before decoding the sparse index"
+    );
+    Ok(())
+}
+
+/// Drives the intent scan the way a transaction scan does and returns each
+/// distinct intent key with its resolved newest intent.
+fn resolved_scan(
+    writes: &TransactionWriteSet,
+    start: Option<&[u8]>,
+    end: Option<&[u8]>,
+    reverse: bool,
+) -> MidgeResult<Vec<(Bytes, Option<IntentLookup>)>> {
+    let mut scan = writes.key_scan(start, end, reverse)?;
+    let mut rows = Vec::new();
+    while let Some(entry) = scan.next_entry(writes) {
+        let entry = entry?;
+        let lookup = scan.resolve(writes, &entry.key, entry.point)?;
+        rows.push((entry.key, lookup));
+    }
+    Ok(rows)
+}
+
+/// Resolves every intent key through the scan path and returns the lookup
+/// work it took.
+fn scan_lookup_work(writes: &TransactionWriteSet) -> MidgeResult<u64> {
+    let before = writes.lookup_work();
+    resolved_scan(writes, None, None, false)?;
+    Ok(writes.lookup_work() - before)
+}
+
+fn write_keys(
+    pool_bytes: usize,
+    dir: &Path,
+    count: u32,
+) -> MidgeResult<(TransactionWriteSet, Arc<TransactionMemoryPool>)> {
+    let pool = Arc::new(TransactionMemoryPool::new(pool_bytes));
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir, false, 1);
+    for index in 0..count {
+        // Interleave key order so runs overlap in key space.
+        let scrambled = index.wrapping_mul(7919) % count;
+        writes.push(put(format!("key-{scrambled:06}").as_bytes(), b"value"))?;
+    }
+    Ok((writes, pool))
+}
+
+#[test]
+fn should_not_quadruple_resident_lookup_work_when_operation_count_doubles() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let (small, _small_pool) = write_keys(usize::MAX / 2, dir.path(), 500)?;
+    let (large, _large_pool) = write_keys(usize::MAX / 2, dir.path(), 1000)?;
+    assert!(!small.has_spills() && !large.has_spills());
+
+    // Act
+    let small_work = scan_lookup_work(&small)?;
+    let large_work = scan_lookup_work(&large)?;
+
+    // Assert: linear growth doubles the work (log factors stay under 2.4x);
+    // quadratic growth quadruples it.
+    assert!(
+        large_work * 5 < small_work * 12,
+        "work grew from {small_work} to {large_work}"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_quadruple_spilled_lookup_work_when_operation_count_doubles() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let (small, _small_pool) = write_keys(8 * 1024, dir.path(), 400)?;
+    let large_dir = tempfile::tempdir()?;
+    let (large, _large_pool) = write_keys(8 * 1024, large_dir.path(), 800)?;
+    assert!(small.has_spills() && large.has_spills());
+
+    // Act
+    let small_work = scan_lookup_work(&small)?;
+    let large_work = scan_lookup_work(&large)?;
+
+    // Assert
+    assert!(
+        large_work * 5 < small_work * 12,
+        "work grew from {small_work} to {large_work}"
+    );
+    Ok(())
+}
+
+fn delete(key: &[u8]) -> TransactionOp {
+    TransactionOp::Delete {
+        cf_id: 0,
+        key: Bytes::copy_from_slice(key),
+    }
+}
+
+fn model_key(n: u64) -> Vec<u8> {
+    format!("k{n:02}").into_bytes()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum LookupView {
+    Untouched,
+    Deleted,
+    Present(Vec<u8>),
+}
+
+fn lookup_view(lookup: Option<IntentLookup>) -> LookupView {
+    match lookup {
+        None => LookupView::Untouched,
+        Some(IntentLookup::Deleted) => LookupView::Deleted,
+        Some(IntentLookup::Present(value)) => LookupView::Present(value.to_vec()),
+    }
+}
+
+#[test]
+fn should_match_model_when_point_and_scan_lookups_follow_mixed_ops_in_every_residency(
+) -> MidgeResult<()> {
+    let mut state = 0x1234_5678_u64;
+    let mut next = move |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) % bound
+    };
+    // Resident only, mixed resident and spilled, and one run per operation.
+    for pool_bytes in [usize::MAX / 2, 3 * 1024, 0] {
+        for round in 0..3 {
+            // Arrange
+            let dir = tempfile::tempdir()?;
+            let pool = Arc::new(TransactionMemoryPool::new(pool_bytes));
+            let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 1);
+            let mut model: std::collections::BTreeMap<Vec<u8>, LookupView> =
+                std::collections::BTreeMap::new();
+            for op_index in 0..50_u64 {
+                match next(4) {
+                    0 | 1 => {
+                        let key = model_key(next(40));
+                        let value = format!("v{round}-{op_index}").into_bytes();
+                        writes.push(put(&key, &value))?;
+                        model.insert(key, LookupView::Present(value));
+                    }
+                    2 => {
+                        let key = model_key(next(40));
+                        writes.push(delete(&key))?;
+                        model.insert(key, LookupView::Deleted);
+                    }
+                    _ => {
+                        let (a, b) = (next(40), next(40));
+                        let (low, high) = (a.min(b), a.max(b));
+                        writes.push(delete_range(&model_key(low), &model_key(high + 1)))?;
+                        for n in low..=high {
+                            model.insert(model_key(n), LookupView::Deleted);
+                        }
+                    }
+                }
+            }
+            if pool_bytes != usize::MAX / 2 {
+                assert!(writes.has_spills(), "pool {pool_bytes} did not spill");
+            }
+
+            // Act / Assert: point lookups.
+            for n in 0..42 {
+                let key = model_key(n);
+                assert_eq!(
+                    lookup_view(writes.latest_for_key(&key)?),
+                    model.get(&key).cloned().unwrap_or(LookupView::Untouched),
+                    "pool {pool_bytes} round {round} get {n}"
+                );
+            }
+
+            // Act / Assert: scans walk every key, including keys only a
+            // snapshot would hold, in each direction and with bounds.
+            for (start, end) in [(None, None), (Some(model_key(10)), Some(model_key(30)))] {
+                for reverse in [false, true] {
+                    let mut stream: Vec<Vec<u8>> = (0..42)
+                        .map(model_key)
+                        .filter(|key| {
+                            start.as_ref().is_none_or(|start| key >= start)
+                                && end.as_ref().is_none_or(|end| key < end)
+                        })
+                        .collect();
+                    if reverse {
+                        stream.reverse();
+                    }
+                    let mut scan = writes.key_scan(start.as_deref(), end.as_deref(), reverse)?;
+                    let mut head = scan.next_entry(&writes).transpose()?;
+                    for key in stream {
+                        let point = if head.as_ref().is_some_and(|entry| entry.key == key) {
+                            let entry = head.take().expect("matched head");
+                            head = scan.next_entry(&writes).transpose()?;
+                            entry.point
+                        } else {
+                            None
+                        };
+                        let resolved = lookup_view(scan.resolve(&writes, &key, point)?);
+                        assert_eq!(
+                            resolved,
+                            model.get(&key).cloned().unwrap_or(LookupView::Untouched),
+                            "pool {pool_bytes} round {round} reverse {reverse} scan {key:?}"
+                        );
+                    }
+                    assert!(head.is_none(), "scan produced keys outside the stream");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn should_not_quadruple_range_delete_lookup_work_when_spilled_operation_count_doubles(
+) -> MidgeResult<()> {
+    // Arrange: puts interleaved with narrow range deletes, so most spill runs
+    // hold a range index that a naive scan would stab once per key.
+    let build = |count: u32, dir: &Path| -> MidgeResult<TransactionWriteSet> {
+        let pool = Arc::new(TransactionMemoryPool::new(8 * 1024));
+        let mut writes = TransactionWriteSet::new(pool, dir, false, 1);
+        for index in 0..count {
+            let scrambled = index.wrapping_mul(7919) % count;
+            writes.push(put(format!("key-{scrambled:06}").as_bytes(), b"value"))?;
+            if index % 5 == 0 {
+                let start = format!("key-{scrambled:06}x");
+                let end = format!("key-{scrambled:06}y");
+                writes.push(delete_range(start.as_bytes(), end.as_bytes()))?;
+            }
+        }
+        Ok(writes)
+    };
+    let small_dir = tempfile::tempdir()?;
+    let large_dir = tempfile::tempdir()?;
+    let small = build(400, small_dir.path())?;
+    let large = build(800, large_dir.path())?;
+    assert!(small.runs.iter().any(|run| run.range_count != 0));
+
+    // Act
+    let small_work = scan_lookup_work(&small)?;
+    let large_work = scan_lookup_work(&large)?;
+
+    // Assert
+    assert!(
+        large_work * 5 < small_work * 12,
+        "work grew from {small_work} to {large_work}"
     );
     Ok(())
 }
