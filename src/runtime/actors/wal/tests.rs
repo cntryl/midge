@@ -2664,3 +2664,45 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
     assert_eq!(std::fs::metadata(temp.path().join("wal/wal.log"))?.len(), 0);
     Ok(())
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_preserve_active_wal_when_validity_expires_before_rotation_rename() -> MidgeResult<()> {
+    // Arrange
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(1, Instant::now() + Duration::from_secs(60))
+        .unwrap();
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let ticket = seal_ticket_for_test(&actor, &state);
+    let expire = Arc::clone(&validity);
+    fail::cfg_callback("midge::wal::inject_fail_before_rename", move || {
+        expire.expire_for_test();
+    })
+    .unwrap();
+    let active = temp.path().join("wal/wal.log");
+    let before = std::fs::read(&active)?;
+    // Act
+    let result = actor.rotate(&mut state, &ticket);
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    assert_eq!(std::fs::read(&active)?, before);
+    assert!(!temp
+        .path()
+        .join("wal")
+        .join(crate::wal::segment_file_name(1))
+        .exists());
+    drop(scenario);
+    Ok(())
+}

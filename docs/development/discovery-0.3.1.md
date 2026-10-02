@@ -194,3 +194,14 @@ must leave WAL bytes unchanged and retain operation-specific admission proof.
 Rotation and physical fsync have separate regressions. Provider-error
 classification remains unchanged. These checks extend the existing issue's
 expired-source contract rather than introducing a separate finding.
+
+The second independent review identified related rollback, rotation, completion
+and startup continuations. Focused pre-guard regressions fail for expiry inside
+a partial WAL write, before rotation rename, during flush provider validation,
+during startup validation, and before compaction input GC. The repair rechecks
+authority before rollback truncate and sync (retaining disk admission without
+a durable unchanged proof), after rotation preparation/shutdown, between intent
+persistence and manifest publication, and before clearing compaction intents.
+Compaction expiry before GC retains inputs and its intent; expiry after a valid
+GC retains the durable intent for recovery. None of these tests claim that a
+lease check can cancel an I/O call that has already entered the provider.

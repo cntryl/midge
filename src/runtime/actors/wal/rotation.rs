@@ -51,6 +51,7 @@ impl WalActor {
         state: &mut RuntimeState,
         ticket: &WalSealTicket,
     ) -> MidgeResult<WalRotationReceipt> {
+        self.ensure_lease_validity()?;
         let old_segment = state.wal.current_segment_id;
         let next_segment = old_segment.checked_add(1).ok_or_else(|| {
             MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
@@ -146,7 +147,12 @@ impl WalActor {
             return Err(error);
         }
 
+        if let Err(error) = self.ensure_lease_validity() {
+            self.finish_io_transition()?;
+            return Err(error);
+        }
         drop(self.take_transition_writer());
+        self.ensure_transition_authority(state)?;
         let sealed_file_created = match fs.rename_atomic(&old_path, &new_path) {
             Ok(()) => true,
             Err(FsError::NotFound(_)) if self.can_ignore_missing_active_segment() => {
@@ -192,6 +198,7 @@ impl WalActor {
                 self.fence_transition(state, error.to_string());
                 return Err(error);
             }
+            self.ensure_transition_authority(state)?;
             if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
                 let error = FsError::into_midge(error);
                 self.fence_transition(state, format!("sealed WAL directory sync failed: {error}"));
@@ -230,6 +237,7 @@ impl WalActor {
                     self.fence_transition(state, error.to_string());
                     return Err(error);
                 }
+                self.ensure_transition_authority(state)?;
                 if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
                     let error = FsError::into_midge(error);
                     self.fence_transition(
@@ -252,6 +260,14 @@ impl WalActor {
         }
 
         if let Err(error) = WalTransitionBoundary::AfterReplacementDirectorySync.check() {
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn ensure_transition_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        if let Err(error) = self.ensure_lease_validity() {
             self.fence_transition(state, error.to_string());
             return Err(error);
         }
