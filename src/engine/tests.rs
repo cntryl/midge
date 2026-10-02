@@ -2537,8 +2537,9 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
                 .lease_clock_skew_tolerance(Duration::ZERO)
                 .build()
         };
-        // Only the deliberately expired predecessor needs a short lease.
-        // Seed/publication I/O must not depend on a one-second CI schedule.
+        // All holders use the same TTL: filesystem takeover judges freshness
+        // with the acquiring holder's TTL. Stop the predecessor and wait for
+        // real expiry without putting healthy I/O on a one-second deadline.
         let options = build_options(Duration::from_secs(30))?;
         eprintln!("takeover cloud={cloud}: seed under healthy lease");
         let mut seeder = Engine::open(options.clone())?;
@@ -2553,8 +2554,8 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
         seed.commit(durability)?;
         seeder.flush_cf(&cf)?;
         seeder.shutdown(Duration::from_secs(5))?;
-        eprintln!("takeover cloud={cloud}: prepare short-lived predecessor");
-        let predecessor = Engine::open(build_options(Duration::from_secs(1))?)?;
+        eprintln!("takeover cloud={cloud}: prepare predecessor for real expiry");
+        let predecessor = Engine::open(options.clone())?;
         let mut before_gc = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         before_gc.put(b"stale-before".to_vec(), b"invalid".to_vec(), None)?;
         let mut after_gc = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
