@@ -80,16 +80,68 @@ fn range_keys(op: &TransactionOp) -> Option<(&Bytes, &Bytes)> {
     }
 }
 
+/// Which end of a range an order table sorts by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RangeOrder {
+    Start,
+    End,
+}
+
+impl RangeOrder {
+    /// Table slot offset, in tables of `node_count` entries, after the
+    /// node-offset table.
+    fn table_index(self) -> usize {
+        match self {
+            Self::Start => 1,
+            Self::End => 2,
+        }
+    }
+}
+
+/// Node indices sorted by start (or end) key, so scans can stream ranges in
+/// activation order without holding them in memory.
+fn range_order(nodes: &[RangeNodeMeta], ops: &[OrdinalOp], order: RangeOrder) -> Vec<u64> {
+    let mut indices = (0..nodes.len()).collect::<Vec<_>>();
+    let key = |index: usize| {
+        let ordinal_op = &ops[nodes[index].op_index];
+        let (start, end) = range_keys(&ordinal_op.op).expect("range node holds a range");
+        (
+            if order == RangeOrder::Start {
+                start
+            } else {
+                end
+            },
+            ordinal_op.ordinal,
+        )
+    };
+    indices.sort_unstable_by(|left, right| key(*left).cmp(&key(*right)));
+    indices.into_iter().map(|index| index as u64).collect()
+}
+
+fn write_order_table(file: &mut File, order: &[u64]) -> MidgeResult<()> {
+    for node_index in order {
+        let bytes = node_index.to_le_bytes();
+        file.write_all(&bytes)?;
+        file.write_all(&crc32c::crc32c(&bytes).to_le_bytes())?;
+    }
+    Ok(())
+}
+
+/// Bytes between the header and the node frames: the node-offset table plus
+/// the start and end order tables.
+fn range_tables_len(node_count: usize) -> Option<usize> {
+    node_count
+        .checked_mul(RANGE_TABLE_ENTRY_LEN)?
+        .checked_mul(3)
+}
+
 pub(super) fn write_range_index_file(path: &Path, ops: &[OrdinalOp]) -> MidgeResult<()> {
     let nodes = build_range_nodes(ops)?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(&[0; RANGE_HEADER_LEN])?;
-    let table_bytes = nodes
-        .len()
-        .checked_mul(RANGE_TABLE_ENTRY_LEN)
-        .ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction range index table overflow".to_string())
-        })?;
+    let table_bytes = range_tables_len(nodes.len()).ok_or_else(|| {
+        MidgeError::ResourceLimit("transaction range index table overflow".to_string())
+    })?;
     write_zeroes(&mut file, table_bytes)?;
     let node_section_offset = file.stream_position()?;
     let mut node_offsets = Vec::with_capacity(nodes.len());
@@ -99,11 +151,9 @@ pub(super) fn write_range_index_file(path: &Path, ops: &[OrdinalOp]) -> MidgeRes
     }
     let end = file.stream_position()?;
     file.seek(SeekFrom::Start(RANGE_HEADER_LEN as u64))?;
-    for offset in node_offsets {
-        let bytes = offset.to_le_bytes();
-        file.write_all(&bytes)?;
-        file.write_all(&crc32c::crc32c(&bytes).to_le_bytes())?;
-    }
+    write_order_table(&mut file, &node_offsets)?;
+    write_order_table(&mut file, &range_order(&nodes, ops, RangeOrder::Start))?;
+    write_order_table(&mut file, &range_order(&nodes, ops, RangeOrder::End))?;
     let header = encode_range_header(nodes.len(), node_section_offset)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header)?;
@@ -206,13 +256,9 @@ pub(super) fn read_range_header(file: &mut RunFile) -> MidgeResult<RangeHeader> 
     let node_count = u64_to_usize(read_u64_at(&header, 12)?)?;
     let node_section_offset = read_u64_at(&header, 20)?;
     let expected_offset = RANGE_HEADER_LEN
-        .checked_add(
-            node_count
-                .checked_mul(RANGE_TABLE_ENTRY_LEN)
-                .ok_or_else(|| {
-                    MidgeError::Corruption("transaction range table length overflow".to_string())
-                })?,
-        )
+        .checked_add(range_tables_len(node_count).ok_or_else(|| {
+            MidgeError::Corruption("transaction range table length overflow".to_string())
+        })?)
         .ok_or_else(|| {
             MidgeError::Corruption("transaction range node offset overflow".to_string())
         })?;
@@ -387,9 +433,80 @@ fn lookup_range_subtree(
     Ok(())
 }
 
+/// One range delete read back from a run.
+pub(super) struct RangeEntry {
+    pub(super) start: Bytes,
+    pub(super) end: Bytes,
+    pub(super) ordinal: u64,
+}
+
+impl RangeHeader {
+    pub(super) fn node_count(&self) -> usize {
+        self.node_count
+    }
+}
+
+/// Node index at `position` of the start- or end-sorted order table.
+fn read_order_entry(
+    file: &mut RunFile,
+    header: &RangeHeader,
+    order: RangeOrder,
+    position: usize,
+) -> MidgeResult<u64> {
+    if position >= header.node_count {
+        return Err(MidgeError::Corruption(format!(
+            "transaction range order position {position} is out of bounds"
+        )));
+    }
+    let slot = order
+        .table_index()
+        .checked_mul(header.node_count)
+        .and_then(|slot| slot.checked_add(position))
+        .and_then(|slot| slot.checked_mul(RANGE_TABLE_ENTRY_LEN))
+        .and_then(|offset| offset.checked_add(RANGE_HEADER_LEN))
+        .ok_or_else(|| {
+            MidgeError::Corruption("transaction range order offset overflow".to_string())
+        })?;
+    file.seek_to(usize_to_u64(slot)?)?;
+    let mut entry = [0_u8; RANGE_TABLE_ENTRY_LEN];
+    file.read_exact(&mut entry)?;
+    if crc32c::crc32c(&entry[..8]) != read_u32_at(&entry, 8)? {
+        return Err(MidgeError::Corruption(
+            "transaction range order checksum mismatch".to_string(),
+        ));
+    }
+    read_u64_at(&entry, 0)
+}
+
+/// The range at `position` in `order`.
+pub(super) fn read_ordered_range(
+    file: &mut RunFile,
+    header: &RangeHeader,
+    order: RangeOrder,
+    position: usize,
+) -> MidgeResult<RangeEntry> {
+    let node_index = read_order_entry(file, header, order, position)?;
+    let node = read_range_node(file, header, node_index)?;
+    Ok(RangeEntry {
+        start: node.start_key,
+        end: node.end_key,
+        ordinal: node.ordinal,
+    })
+}
+
 pub(super) fn validate_range_index(path: &Path) -> MidgeResult<()> {
     let mut file = RunFile::open(path)?;
     let header = read_range_header(&mut file)?;
+    for position in 0..header.node_count {
+        for order in [RangeOrder::Start, RangeOrder::End] {
+            let node_index = read_order_entry(&mut file, &header, order, position)?;
+            if u64_to_usize(node_index)? >= header.node_count {
+                return Err(MidgeError::Corruption(
+                    "transaction range order entry is out of bounds".to_string(),
+                ));
+            }
+        }
+    }
     for index in 0..header.node_count {
         let node = read_range_node(&mut file, &header, usize_to_u64(index)?)?;
         for child in [node.left, node.right] {

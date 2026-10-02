@@ -9,18 +9,19 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 mod format;
 mod range;
+mod resident_index;
 mod scan;
 
 #[cfg(test)]
 use format::u64_to_usize;
 use format::{
-    for_each_run_ordinal, lookup_run_key, remove_run, write_run_with_reader_cache, RunHeader,
-    RunReader,
+    for_each_run_ordinal, lookup_run_key, lookup_run_points, remove_run,
+    write_run_with_reader_cache, RunHeader, RunReader,
 };
 #[cfg(test)]
 use format::{
@@ -29,24 +30,27 @@ use format::{
 };
 #[cfg(test)]
 use range::read_range_header;
-pub(crate) use scan::IntentKeyScan;
+use resident_index::ResidentIndex;
 #[cfg(test)]
 use scan::RunKeyCursor;
+pub(crate) use scan::{IntentEntry, IntentKeyScan};
 const RUN_MAGIC: &[u8; 8] = b"MDGTXN01";
 const RUN_VERSION: u32 = 2;
 const RUN_HEADER_LEN: usize = 48;
 const SPARSE_INDEX_STRIDE: usize = 16;
 const MAX_FRAME_BYTES: usize = crate::wal::frame::WAL_MAX_RECORD_LEN;
 const RANGE_MAGIC: &[u8; 8] = b"MDGRNG01";
-const RANGE_VERSION: u32 = 1;
+const RANGE_VERSION: u32 = 2;
 const RANGE_HEADER_LEN: usize = 32;
 const RANGE_TABLE_ENTRY_LEN: usize = 12;
 const NO_RANGE_CHILD: u64 = u64::MAX;
 /// Each cached reader owns one data handle and one range-index handle.
 const MAX_CACHED_SPILL_READERS: usize = 8;
-// Covers resident Vec capacity plus temporary ordinal, sparse-key, and range
-// interval-tree metadata built while freezing a run. Key/value bytes and the
-// enum allocation itself are charged separately below.
+// Covers resident Vec capacity, the latest-intent index entries (one point
+// entry, or at most two painted range intervals, per operation), plus
+// temporary ordinal, sparse-key, and range interval-tree metadata built while
+// freezing a run. Key/value bytes and the enum allocation itself are charged
+// separately below.
 const INTENT_ACCOUNTING_OVERHEAD: usize = 256;
 // Upper bound on intents buffered outside the pool once the pool is fully held
 // by other transactions. Without it every such write became its own run, which
@@ -159,12 +163,28 @@ struct SpillRun {
     path: PathBuf,
     range_path: PathBuf,
     record_count: usize,
+    /// Smallest and largest primary key in the run; point probes outside the
+    /// bounds cannot hit and skip the run.
+    key_bounds: Option<(Bytes, Bytes)>,
+    range_count: usize,
     pool: Arc<TransactionMemoryPool>,
     reader_cache: Arc<SpillReaderCache>,
     _disk_charge: Option<Arc<SpillDiskCharge>>,
 }
 
 impl SpillRun {
+    /// Whether a point intent for `key` can be in this run.
+    fn holds_point_key(&self, key: &[u8]) -> bool {
+        self.key_bounds
+            .as_ref()
+            .is_some_and(|(smallest, largest)| key >= smallest.as_ref() && key <= largest.as_ref())
+    }
+
+    /// Whether a lookup for `key` can find any intent in this run.
+    fn may_hold(&self, key: &[u8]) -> bool {
+        self.range_count != 0 || self.holds_point_key(key)
+    }
+
     fn with_reader<T>(
         &self,
         action: impl FnOnce(&mut RunReader) -> MidgeResult<T>,
@@ -225,7 +245,7 @@ impl Drop for SpillDiskCharge {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum IntentLookup {
     Present(Bytes),
     Deleted,
@@ -239,10 +259,12 @@ pub(crate) struct TransactionWriteSet {
     spill_dir: Option<PathBuf>,
     txn_id: u64,
     resident: Vec<OrdinalOp>,
+    resident_index: ResidentIndex,
     resident_bytes: usize,
     runs: Vec<SpillRun>,
     next_ordinal: u64,
     disk_budget: Option<SpillDiskBudget>,
+    lookup_work: AtomicU64,
 }
 
 impl TransactionWriteSet {
@@ -259,10 +281,12 @@ impl TransactionWriteSet {
             spill_dir: (!memory_mode).then(|| db_path.join("txn")),
             txn_id,
             resident: Vec::new(),
+            resident_index: ResidentIndex::default(),
             resident_bytes: 0,
             runs: Vec::new(),
             next_ordinal: 0,
             disk_budget: None,
+            lookup_work: AtomicU64::new(0),
         }
     }
 
@@ -345,6 +369,7 @@ impl TransactionWriteSet {
 
     fn admit_resident(&mut self, ordinal_op: OrdinalOp, bytes: usize) {
         self.resident_bytes = self.resident_bytes.saturating_add(bytes);
+        self.resident_index.record(&ordinal_op);
         self.resident.push(ordinal_op);
         self.next_ordinal = self.next_ordinal.saturating_add(1);
     }
@@ -364,20 +389,35 @@ impl TransactionWriteSet {
         )?;
         self.runs.push(run);
         self.resident.clear();
+        self.resident_index.clear();
         self.pool.release(self.resident_bytes);
         self.resident_bytes = 0;
         Ok(())
     }
 
+    /// Newest intent for `key`: a resident index probe plus one probe per spill
+    /// run whose key bounds or range index can hold it.
     pub(crate) fn latest_for_key(&self, key: &[u8]) -> MidgeResult<Option<IntentLookup>> {
-        let mut latest = None;
-        for ordinal_op in &self.resident {
-            consider_lookup(ordinal_op, key, &mut latest);
-        }
+        self.record_work(1);
+        let mut latest = self.resident_index.latest(key);
         for run in &self.runs {
-            lookup_run_key(run, key, u64::MAX, &mut latest)?;
+            if run.may_hold(key) {
+                self.record_work(1);
+                lookup_run_key(run, key, u64::MAX, &mut latest)?;
+            }
         }
         Ok(latest.map(|(_, lookup)| lookup))
+    }
+
+    fn record_work(&self, units: u64) {
+        self.lookup_work.fetch_add(units, Ordering::Relaxed);
+    }
+
+    /// Deterministic count of resident entries examined plus spill runs probed
+    /// by point and scan lookups.
+    #[cfg(test)]
+    fn lookup_work(&self) -> u64 {
+        self.lookup_work.load(Ordering::Relaxed)
     }
 
     pub(crate) fn key_scan(
@@ -391,6 +431,7 @@ impl TransactionWriteSet {
 
     pub(crate) fn take_in_memory_ops(&mut self) -> Vec<TransactionOp> {
         debug_assert!(self.runs.is_empty());
+        self.resident_index.clear();
         self.resident.sort_unstable_by_key(|entry| entry.ordinal);
         let ops = std::mem::take(&mut self.resident)
             .into_iter()
@@ -403,6 +444,7 @@ impl TransactionWriteSet {
     }
 
     pub(crate) fn take_source(&mut self) -> TransactionOpSource {
+        self.resident_index.clear();
         let source = TransactionOpSource {
             runs: std::mem::take(&mut self.runs),
             resident: std::mem::take(&mut self.resident),
@@ -418,6 +460,7 @@ impl TransactionWriteSet {
         self.pool.release(self.resident_bytes);
         self.resident_bytes = 0;
         self.resident.clear();
+        self.resident_index.clear();
         for run in self.runs.drain(..) {
             run.close_reader();
             remove_run(&run.path);
