@@ -2482,3 +2482,264 @@ fn should_sync_database_root_when_creating_wal_and_sst_directories() {
         "{synced:?}"
     );
 }
+
+/// Counts bytes written and durable syncs, split into the manifest journal and
+/// everything else under the state directory (checkpoint staging files).
+#[derive(Default)]
+struct FlushIoCounters {
+    journal_bytes: std::sync::atomic::AtomicU64,
+    checkpoint_bytes: std::sync::atomic::AtomicU64,
+    durable_syncs: std::sync::atomic::AtomicU64,
+}
+
+struct CountingFs {
+    inner: crate::io::RealFs,
+    counters: Arc<FlushIoCounters>,
+}
+
+struct CountingFile {
+    inner: Box<dyn crate::io::File>,
+    journal: bool,
+    counters: Arc<FlushIoCounters>,
+}
+
+impl CountingFile {
+    fn record(&self, len: usize) {
+        let bytes = if self.journal {
+            &self.counters.journal_bytes
+        } else {
+            &self.counters.checkpoint_bytes
+        };
+        bytes.fetch_add(len as u64, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl crate::io::File for CountingFile {
+    fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
+        self.inner.read_at(offset, len)
+    }
+
+    fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> crate::io::FsResult<()> {
+        self.record(data.len());
+        self.inner.write_at(offset, data)
+    }
+
+    fn truncate(&mut self, len: u64) -> crate::io::FsResult<()> {
+        self.inner.truncate(len)
+    }
+
+    fn append(&mut self, data: bytes::Bytes) -> crate::io::FsResult<u64> {
+        self.record(data.len());
+        self.inner.append(data)
+    }
+
+    fn len(&self) -> crate::io::FsResult<u64> {
+        self.inner.len()
+    }
+
+    fn sync(&mut self, durability: crate::io::Durability) -> crate::io::FsResult<()> {
+        if durability == crate::io::Durability::Durable {
+            self.counters
+                .durable_syncs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.sync(durability)
+    }
+}
+
+impl CountingFs {
+    fn wrap(&self, path: &crate::io::FsPath, file: Box<dyn crate::io::File>) -> CountingFile {
+        CountingFile {
+            inner: file,
+            journal: path.0.contains("journal"),
+            counters: Arc::clone(&self.counters),
+        }
+    }
+}
+
+impl crate::io::Fs for CountingFs {
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        let file = self.inner.open_persistent_handle(path, options)?;
+        Ok(Box::new(self.wrap(path, file)))
+    }
+
+    fn open_persistent_handle(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        let file = self.inner.open_persistent_handle(path, options)?;
+        Ok(Box::new(self.wrap(path, file)))
+    }
+
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+/// Publishes `flushes` distinct SSTs through the real flush-publication path
+/// and returns (journal bytes, checkpoint bytes, durable syncs, final
+/// checkpoint size in bytes).
+fn measure_flush_publication_io(flushes: u64) -> (u64, u64, u64, u64) {
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let mut state = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("open state");
+    let counters = Arc::new(FlushIoCounters::default());
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(CountingFs {
+        inner: crate::io::RealFs::new(temp_dir.path()).expect("counting filesystem"),
+        counters: Arc::clone(&counters),
+    });
+    state.fs = Arc::clone(&fs);
+    state.manifest_store = Arc::new(crate::metadata::store::ManifestStore::new(fs));
+
+    for n in 1..=flushes {
+        let file_meta = crate::runtime::FileMeta {
+            name: format!("000000_00_{n:020}.sst"),
+            level: 0,
+            size_bytes: 4096,
+            content_crc32c: Some(7),
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+            key_bounds_complete: false,
+        };
+        state
+            .commit_flush_publication(0, n, &file_meta, n + 1, true)
+            .expect("publish flush");
+    }
+
+    let load = std::sync::atomic::Ordering::SeqCst;
+    let final_checkpoint = std::fs::metadata(
+        temp_dir
+            .path()
+            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+    )
+    .expect("final checkpoint exists")
+    .len();
+    (
+        counters.journal_bytes.load(load),
+        counters.checkpoint_bytes.load(load),
+        counters.durable_syncs.load(load),
+        final_checkpoint,
+    )
+}
+
+/// Characterizes #670: every flush rewrites the full manifest, so cumulative
+/// checkpoint bytes grow quadratically with live SST cardinality while the
+/// journal stays linear. Update the bounds when checkpoint cadence is bounded.
+#[test]
+fn should_grow_checkpoint_bytes_quadratically_when_every_flush_rewrites_the_manifest() {
+    // Arrange
+    let small = 64;
+    let large = 128;
+
+    // Act
+    let (small_journal, small_checkpoint, _, _) = measure_flush_publication_io(small);
+    let (large_journal, large_checkpoint, _, large_final) = measure_flush_publication_io(large);
+
+    // Assert
+    assert!(
+        (18 * small_journal..=23 * small_journal).contains(&(10 * large_journal)),
+        "journal bytes must stay linear in flush count: {small_journal} -> {large_journal}"
+    );
+    assert!(
+        (34 * small_checkpoint..=46 * small_checkpoint).contains(&(10 * large_checkpoint)),
+        "doubling flushes must roughly quadruple checkpoint bytes: {small_checkpoint} -> {large_checkpoint}"
+    );
+    assert!(
+        large_checkpoint > large_final * large / 2,
+        "cumulative checkpoint bytes must dwarf the final snapshot: {large_checkpoint} vs {large_final}"
+    );
+}
+
+/// Measurement harness for #670, run on demand:
+/// `cargo test --release --lib -- --ignored --nocapture should_report_flush_publication_scaling`
+#[test]
+#[allow(clippy::cast_precision_loss)]
+#[ignore = "measurement report; run explicitly in release mode"]
+fn should_report_flush_publication_scaling_when_cardinality_grows() {
+    // Arrange
+    let cardinalities = [64_u64, 128, 256, 512, 1024, 2048];
+    let mut rows = Vec::new();
+
+    // Act
+    for flushes in cardinalities {
+        let started = std::time::Instant::now();
+        let (journal, checkpoint, syncs, final_size) = measure_flush_publication_io(flushes);
+        rows.push((
+            flushes,
+            journal,
+            checkpoint,
+            syncs,
+            final_size,
+            started.elapsed(),
+        ));
+    }
+
+    // Assert
+    eprintln!("flushes journal_B checkpoint_B final_B amplification syncs/flush us/flush");
+    for (flushes, journal, checkpoint, syncs, final_size, elapsed) in &rows {
+        eprintln!(
+            "{flushes:>7} {journal:>9} {checkpoint:>12} {final_size:>7} {:>13.1} {:>11.1} {:>8.0}",
+            *checkpoint as f64 / *final_size as f64,
+            *syncs as f64 / *flushes as f64,
+            elapsed.as_micros() as f64 / *flushes as f64,
+        );
+    }
+    assert!(
+        rows.iter().all(|row| row.2 > 0),
+        "counters must observe checkpoint writes"
+    );
+}
