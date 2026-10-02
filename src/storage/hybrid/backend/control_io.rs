@@ -27,6 +27,21 @@ impl ControlObject {
     }
 }
 
+/// Internal provenance preserves authority rejection through provider error context.
+#[derive(Debug)]
+pub(crate) enum ControlWriteFailure {
+    Authority(MidgeError),
+    Operation(MidgeError),
+}
+
+impl ControlWriteFailure {
+    pub(crate) fn into_error(self) -> MidgeError {
+        match self {
+            Self::Authority(error) | Self::Operation(error) => error,
+        }
+    }
+}
+
 impl HybridStorage {
     pub(crate) fn read_control_object(
         &self,
@@ -105,6 +120,7 @@ impl HybridStorage {
         }))
     }
 
+    #[cfg(test)]
     pub(crate) fn write_control_object(
         &self,
         key: &str,
@@ -113,70 +129,95 @@ impl HybridStorage {
         budget: &ResourceBudget,
         deadline: &OperationDeadline,
     ) -> MidgeResult<ControlObject> {
-        let precondition = match expected {
-            Some(metadata) => {
-                crate::storage::conditional_object_identity(
-                    &metadata.etag,
-                    metadata.generation.as_deref(),
-                )
-                .ok_or_else(|| {
-                    MidgeError::Corruption("control CAS has no pinned identity".into())
-                })?;
-                crate::storage::StoragePrecondition::IfMatch(metadata.clone())
+        self.write_control_object_with_authority(key, expected, bytes, budget, deadline, &|| Ok(()))
+            .map_err(ControlWriteFailure::into_error)
+    }
+
+    pub(crate) fn write_control_object_with_authority(
+        &self,
+        key: &str,
+        expected: Option<&StorageObjectMetadata>,
+        bytes: &[u8],
+        budget: &ResourceBudget,
+        deadline: &OperationDeadline,
+        validate: &dyn Fn() -> MidgeResult<()>,
+    ) -> Result<ControlObject, ControlWriteFailure> {
+        let (memory, timeout, tx, rx, request, body) = (|| -> MidgeResult<_> {
+            let precondition = match expected {
+                Some(metadata) => {
+                    crate::storage::conditional_object_identity(
+                        &metadata.etag,
+                        metadata.generation.as_deref(),
+                    )
+                    .ok_or_else(|| {
+                        MidgeError::Corruption("control CAS has no pinned identity".into())
+                    })?;
+                    crate::storage::StoragePrecondition::IfMatch(metadata.clone())
+                }
+                None => crate::storage::StoragePrecondition::IfAbsent,
+            };
+            let memory = Arc::new(budget.reserve(
+                bytes.len().saturating_mul(4),
+                "control upload provider workspace",
+            )?);
+            let timeout =
+                Self::deadline_timeout(key, "control CAS", self.callback_timeout, deadline)?;
+            let (tx, rx) = mpsc::channel();
+            let request =
+                crate::storage::StorageRequest::new(key, *deadline, self.callback_timeout)
+                    .with_precondition(precondition)
+                    .with_reservation(Arc::clone(&memory));
+            let body = bytes.to_vec();
+            crate::failpoints::fail_point!("midge::control::after_prepare_before_write");
+            Ok((memory, timeout, tx, rx, request, body))
+        })()
+        .map_err(ControlWriteFailure::Operation)?;
+        validate().map_err(ControlWriteFailure::Authority)?;
+        self.check_write_authority()
+            .map_err(ControlWriteFailure::Authority)?;
+        (|| -> MidgeResult<ControlObject> {
+            self.cloud_backend_for_key(key)
+                .submit_write_request(request, body, tx);
+            match rx.recv_timeout(timeout) {
+                Ok(StorageEvent::WriteComplete {
+                    result: StorageOutcome::Ok(()),
+                    ..
+                }) => {}
+                Ok(StorageEvent::WriteComplete {
+                    result: StorageOutcome::Err(error),
+                    ..
+                }) if Self::storage_error_indicates_precondition_failure(&error) => {
+                    return Err(MidgeError::Busy(error.to_string()))
+                }
+                Ok(StorageEvent::WriteComplete {
+                    result: StorageOutcome::Err(error),
+                    ..
+                }) if Self::storage_error_indicates_timeout(&error) => {
+                    return Err(MidgeError::Timeout(error.to_string()))
+                }
+                Ok(StorageEvent::WriteComplete {
+                    result: StorageOutcome::Err(error),
+                    ..
+                }) => return Err(control_error_with_reservation(&error, &memory)),
+                Ok(event) => {
+                    return Err(MidgeError::Internal(format!(
+                        "control CAS failed: {event:?}"
+                    )))
+                }
+                Err(error) => return Err(MidgeError::Timeout(format!("control CAS: {error}"))),
             }
-            None => crate::storage::StoragePrecondition::IfAbsent,
-        };
-        let memory = Arc::new(budget.reserve(
-            bytes.len().saturating_mul(4),
-            "control upload provider workspace",
-        )?);
-        let timeout = Self::deadline_timeout(key, "control CAS", self.callback_timeout, deadline)?;
-        let (tx, rx) = mpsc::channel();
-        self.cloud_backend_for_key(key).submit_write_request(
-            crate::storage::StorageRequest::new(key, *deadline, self.callback_timeout)
-                .with_precondition(precondition)
-                .with_reservation(Arc::clone(&memory)),
-            bytes.to_vec(),
-            tx,
-        );
-        match rx.recv_timeout(timeout) {
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Ok(()),
-                ..
-            }) => {}
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) if Self::storage_error_indicates_precondition_failure(&error) => {
-                return Err(MidgeError::Busy(error.to_string()))
+            drop(memory);
+            let proof = self
+                .read_control_object(key, budget, deadline)?
+                .ok_or_else(|| MidgeError::Corruption("control CAS readback is missing".into()))?;
+            if proof.bytes() != bytes {
+                return Err(MidgeError::Corruption(
+                    "control CAS readback differs".into(),
+                ));
             }
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) if Self::storage_error_indicates_timeout(&error) => {
-                return Err(MidgeError::Timeout(error.to_string()))
-            }
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) => return Err(control_error_with_reservation(&error, &memory)),
-            Ok(event) => {
-                return Err(MidgeError::Internal(format!(
-                    "control CAS failed: {event:?}"
-                )))
-            }
-            Err(error) => return Err(MidgeError::Timeout(format!("control CAS: {error}"))),
-        }
-        drop(memory);
-        let proof = self
-            .read_control_object(key, budget, deadline)?
-            .ok_or_else(|| MidgeError::Corruption("control CAS readback is missing".into()))?;
-        if proof.bytes() != bytes {
-            return Err(MidgeError::Corruption(
-                "control CAS readback differs".into(),
-            ));
-        }
-        Ok(proof)
+            Ok(proof)
+        })()
+        .map_err(ControlWriteFailure::Operation)
     }
 }
 
@@ -365,6 +406,53 @@ mod ownership_tests {
         // Assert
         assert!(matches!(result, Err(MidgeError::Timeout(_))));
         assert!(retained >= bytes.len());
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_release_prepared_upload_when_validity_expires_before_submission() {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let _scenario = fail::FailScenario::setup();
+        let directory = tempfile::tempdir().unwrap();
+        let provider = Arc::new(PendingUpload::default());
+        let storage = HybridStorage::with_policy(
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
+            Arc::new(CloudStorage::new(provider.clone(), String::new())),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(7, std::time::Instant::now() + Duration::from_secs(60))
+            .unwrap();
+        let source = Arc::clone(&validity);
+        storage
+            .configure_write_authority(Arc::new(move || {
+                source
+                    .remaining(7)
+                    .map(|_| ())
+                    .map_err(|error| MidgeError::Fenced(error.to_string()))
+            }))
+            .unwrap();
+        fail::cfg_callback("midge::control::after_prepare_before_write", move || {
+            validity.expire_for_test();
+        })
+        .unwrap();
+        let budget = ResourceBudget::new(1024 * 1024);
+
+        // Act
+        let result = storage.write_control_object(
+            "metadata/catalog",
+            None,
+            &[7; 4096],
+            &budget,
+            &OperationDeadline::from_budget(Duration::from_millis(200)),
+        );
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+        assert!(provider.pending.lock().is_none());
         assert_eq!(budget.used(), 0);
     }
 

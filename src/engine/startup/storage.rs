@@ -34,6 +34,7 @@ fn fence_provider_ddl(
     lease: &StartupLease,
     timeout: std::time::Duration,
 ) -> MidgeResult<()> {
+    lease.install_storage_write_authority(storage)?;
     let authority = provider_ddl_authority(lease)?;
     crate::runtime::ddl::fence_remote_registry_on_startup(
         storage,
@@ -244,6 +245,39 @@ impl StartupLease {
 
         self.lease_heartbeat = Some(lease_heartbeat);
         Ok(())
+    }
+
+    fn prepare_wal_catalog(
+        &self,
+        storage: &Arc<crate::storage::HybridStorage>,
+    ) -> MidgeResult<crate::runtime::hybrid_persistence::AdmittedCatalog> {
+        let catalog = CloudPersistence::new(Arc::clone(storage))
+            .fence_cloud_wal_catalog(self.writer_epoch)?;
+        self.ensure_healthy("after cloud WAL catalog fencing")?;
+        Ok(catalog)
+    }
+
+    fn install_storage_write_authority(
+        &self,
+        storage: &crate::storage::HybridStorage,
+    ) -> MidgeResult<()> {
+        let validity = self.lease_validity.clone();
+        let healthy = Arc::clone(&self.lease_healthy);
+        let epoch = self.writer_epoch;
+        storage.configure_write_authority(Arc::new(move || {
+            if let Some(validity) = &validity {
+                validity.remaining(epoch).map_err(|error| {
+                    error.into_validation_error("storage mutation monotonic lease validity")
+                })?;
+            }
+            if healthy.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(MidgeError::Fenced(
+                    "storage mutation lost writer authority".into(),
+                ))
+            }
+        }))
     }
 
     pub(super) fn ensure_healthy(&self, phase: &str) -> MidgeResult<()> {
@@ -475,9 +509,8 @@ impl RuntimeStorageMaterialization {
         cloud
             .hybrid_storage
             .configure_maintenance_memory(opts.compaction_memory_pool_size());
-        let wal_catalog = CloudPersistence::new(Arc::clone(&cloud.hybrid_storage))
-            .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
-        startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
+        startup_lease.install_storage_write_authority(&cloud.hybrid_storage)?;
+        let wal_catalog = startup_lease.prepare_wal_catalog(&cloud.hybrid_storage)?;
 
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
         let wal_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
@@ -628,9 +661,7 @@ impl RuntimeStorageMaterialization {
         )?;
         fence_provider_ddl(&hybrid_storage, startup_lease, opts.storage_io_timeout())?;
         let sst_read_fs = Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage)?;
-        let wal_catalog = CloudPersistence::new(Arc::clone(&hybrid_storage))
-            .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
-        startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
+        let wal_catalog = startup_lease.prepare_wal_catalog(&hybrid_storage)?;
 
         let authority = provider_ddl_authority(startup_lease)?;
         Self::bootstrap_provider_metadata_if_uncommitted(
@@ -983,5 +1014,61 @@ impl RuntimeRecoveryMaterialization {
             recovered_sequence,
             recovered_cf_metas,
         })
+    }
+}
+
+#[cfg(all(test, feature = "failpoints"))]
+mod authority_tests {
+    use super::*;
+
+    #[test]
+    fn should_preserve_registry_when_startup_validity_expires_before_ddl_cas() {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let _scenario = fail::FailScenario::setup();
+        let directory = tempfile::tempdir().unwrap();
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "startup-ddl-expiry".into(),
+        ));
+        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+            crate::lease::CloudLeaseConfig {
+                bucket: "startup-ddl-expiry".into(),
+                prefix: "test/".into(),
+            },
+            directory.path().join("lease"),
+            Arc::clone(&cloud),
+        ));
+        let validity = lease.lease_validity();
+        let lease_object: Arc<dyn crate::lease::PrimaryLease> = lease;
+        let startup =
+            StartupLease::acquire_for_test(lease_object, Some(Arc::clone(&validity))).unwrap();
+        let storage = crate::storage::HybridStorage::with_policy(
+            Arc::new(
+                crate::storage::filesystem::FileSystem::new(directory.path().join("local"))
+                    .unwrap(),
+            ),
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        let registry_key = crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY;
+        assert!(storage
+            .remote_object_proof_optional(registry_key)
+            .unwrap()
+            .is_none());
+        fail::cfg_callback("midge::ddl::before_remote_cas", move || {
+            validity.expire_for_test();
+        })
+        .unwrap();
+
+        // Act
+        let result = fence_provider_ddl(&storage, &startup, std::time::Duration::from_secs(5));
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+        assert!(storage
+            .remote_object_proof_optional(registry_key)
+            .unwrap()
+            .is_none());
     }
 }

@@ -115,7 +115,11 @@ impl CloudWalRecoveryPlan {
     ) -> crate::common::MidgeResult<()> {
         validate()?;
         if self.max_unreplayed_sequence > catalog.sequence_floor {
-            persistence.raise_wal_sequence_floor(writer_epoch, self.max_unreplayed_sequence)?;
+            persistence.raise_wal_sequence_floor_with_authority(
+                writer_epoch,
+                self.max_unreplayed_sequence,
+                validate,
+            )?;
         }
         crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
         validate()?;
@@ -123,7 +127,11 @@ impl CloudWalRecoveryPlan {
         crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
         validate()?;
         if !self.unreplayed_segments.is_empty() {
-            persistence.retire_unreplayed_wal_segments(writer_epoch, &self.unreplayed_segments)?;
+            persistence.retire_unreplayed_wal_segments_with_authority(
+                writer_epoch,
+                &self.unreplayed_segments,
+                validate,
+            )?;
         }
         validate()
     }

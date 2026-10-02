@@ -229,7 +229,7 @@ mod takeover_tests {
             crate::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
                 directory.path(),
                 false,
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_secs(2),
                 std::time::Duration::ZERO,
             )
             .unwrap(),
@@ -253,7 +253,7 @@ mod takeover_tests {
             crate::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
                 directory.path(),
                 false,
-                std::time::Duration::from_millis(100),
+                std::time::Duration::from_secs(2),
                 std::time::Duration::ZERO,
             )
             .unwrap(),
