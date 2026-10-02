@@ -715,17 +715,25 @@ fn should_match_model_when_point_and_scan_lookups_follow_mixed_ops_in_every_resi
                 assert!(writes.has_spills(), "pool {pool_bytes} did not spill");
             }
 
-            // Act / Assert: point lookups.
+            // Act
+            let mut point_views = Vec::new();
             for n in 0..42 {
-                let key = model_key(n);
+                point_views.push(lookup_view(writes.latest_for_key(&model_key(n))?));
+            }
+
+            // Assert: point lookups match the model.
+            for (n, view) in point_views.into_iter().enumerate() {
                 assert_eq!(
-                    lookup_view(writes.latest_for_key(&key)?),
-                    model.get(&key).cloned().unwrap_or(LookupView::Untouched),
+                    view,
+                    model
+                        .get(&model_key(n as u64))
+                        .cloned()
+                        .unwrap_or(LookupView::Untouched),
                     "pool {pool_bytes} round {round} get {n}"
                 );
             }
 
-            // Act / Assert: scans walk every key, including keys only a
+            // Assert: scans walk every key, including keys only a
             // snapshot would hold, in each direction and with bounds.
             for (start, end) in [(None, None), (Some(model_key(10)), Some(model_key(30)))] {
                 for reverse in [false, true] {

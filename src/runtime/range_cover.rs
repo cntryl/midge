@@ -228,11 +228,14 @@ mod tests {
                     keys.reverse();
                 }
 
-                // Act / Assert
-                for k in keys {
+                // Act
+                let actual: Vec<_> = keys.iter().map(|k| sweep.max_cover_seq(&key(*k))).collect();
+
+                // Assert
+                for (k, actual) in keys.iter().zip(actual) {
                     assert_eq!(
-                        sweep.max_cover_seq(&key(k)),
-                        oracle(&ranges, &key(k)),
+                        actual,
+                        oracle(&ranges, &key(*k)),
                         "seed {seed} reverse {reverse} key {k}"
                     );
                 }
