@@ -2527,7 +2527,7 @@ fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeRe
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let validity = Arc::new(crate::lease::LeaseValidity::new());
-        validity.activate(1, Instant::now() + Duration::from_secs(60))?;
+        validity.activate(1, Instant::now() + Duration::from_mins(1))?;
         actor.set_lease_validity(Some(Arc::clone(&validity)));
         let first = prepare_put_transaction(&mut actor, &mut state, 1, b"first", b"value", policy)?;
         let second =
@@ -2638,7 +2638,7 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
     )?;
     let validity = Arc::new(crate::lease::LeaseValidity::new());
     validity
-        .activate(1, Instant::now() + Duration::from_secs(60))
+        .activate(1, Instant::now() + Duration::from_mins(1))
         .unwrap();
     actor.set_lease_validity(Some(Arc::clone(&validity)));
     let ticket = seal_ticket_for_test(&actor, &state);
@@ -2723,7 +2723,7 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
     )?;
     let validity = Arc::new(crate::lease::LeaseValidity::new());
     validity
-        .activate(1, Instant::now() + Duration::from_secs(60))
+        .activate(1, Instant::now() + Duration::from_mins(1))
         .unwrap();
     actor.set_lease_validity(Some(Arc::clone(&validity)));
     let ticket = seal_ticket_for_test(&actor, &state);

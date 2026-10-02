@@ -378,7 +378,7 @@ mod tests {
             validity
                 .activate(
                     7,
-                    std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    std::time::Instant::now() + std::time::Duration::from_mins(1),
                 )
                 .unwrap();
             let provider = Arc::new(ExpiringCatalogRead {
@@ -725,7 +725,7 @@ mod tests {
         successor_validity
             .activate(
                 8,
-                std::time::Instant::now() + std::time::Duration::from_secs(60),
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
             )
             .unwrap();
         successor

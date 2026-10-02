@@ -364,7 +364,7 @@ mod tests {
         validity
             .activate(
                 7,
-                std::time::Instant::now() + std::time::Duration::from_secs(60),
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
             )
             .unwrap();
         let task = CompactionPublishTask {

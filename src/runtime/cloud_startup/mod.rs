@@ -88,7 +88,7 @@ impl CloudWalRecoveryPlan {
     ///    segments, so only the persisted floor remembers their sequences.
     /// 3. Retire the cataloged segments. Retiring before step 2 would let the
     ///    next open replay local copies past the hole.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "failpoints"))]
     pub(crate) fn commit_set_aside(
         &self,
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,

@@ -921,7 +921,7 @@ fn should_reject_startup_publication_when_validity_expires_without_watchdog() {
     validity
         .activate(
             1,
-            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
         )
         .unwrap();
     let config = crate::runtime::RuntimeConfig {

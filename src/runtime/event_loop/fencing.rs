@@ -120,7 +120,7 @@ mod tests {
         // Arrange
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(1, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let (mut fence, _) = fence(|| LeaseError::IoError("unused".into()));
         fence.lease_validity = Some(Arc::clone(&validity));
@@ -196,7 +196,7 @@ mod validity_tests {
         validity
             .activate(
                 1,
-                std::time::Instant::now() + std::time::Duration::from_secs(60),
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
             )
             .unwrap();
         validity.expire_for_test();

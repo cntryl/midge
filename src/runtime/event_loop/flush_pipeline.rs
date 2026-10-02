@@ -1411,7 +1411,7 @@ mod tests {
         validity
             .activate(
                 epoch,
-                std::time::Instant::now() + std::time::Duration::from_secs(60),
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
             )
             .unwrap();
         event_loop.fencing.lease_validity = Some(Arc::clone(&validity));

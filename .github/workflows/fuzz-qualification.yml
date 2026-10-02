@@ -39,6 +39,9 @@ jobs:
       - name: Build every fuzz target
         run: cargo fuzz build
 
+      - name: Replay preserved intent timeout under sanitizers
+        run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_18.bin -- -runs=32 -timeout=10
+
       - name: Smoke WAL frame recovery
         run: cargo fuzz run wal_frame_recovery -- -max_total_time=30 -timeout=10
 
