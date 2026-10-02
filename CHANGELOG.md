@@ -9,6 +9,44 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-02
+
+### Fixed
+
+- Reject expired writer authority synchronously and recheck it after blocking
+  preparation before subsequent WAL, metadata, catalog, DDL, and cleanup work.
+- Treat epoch-regressed cloud WAL as a salvage replay hole; persist the complete
+  unreplayed sequence floor before quarantining sources or retiring catalog entries.
+- Make interrupted restore attempts retryable using unique attempt-owned stages,
+  and reject overlapping database, backup artifact, and restore paths before mutation.
+- Carry CloudAck memory-contention provenance with its failed reservation so
+  concurrent catalog work cannot erase retry classification.
+
+### Changed
+
+- Index resident transaction intents, merge spilled point sources with a heap,
+  and sweep range tombstones during forward and reverse scans.
+- Retain bounded SST reader and decoded-block locality during cloud WAL coverage
+  probes. Proof failures continue to fall back conservatively to WAL replay.
+
+### Upgrade and rollback
+
+- Public Rust signatures, error variants, CLI JSON schema version 1, database
+  FORMAT 4, SST V4, and cloud control formats are unchanged from `0.3.0`.
+  Stop writes, complete shutdown, preserve a verified copy, and test recovery
+  on a separate copy before upgrading. See the [migration guide](docs/operations/migration-guide.md).
+- Rollback is supported with constraints: use the preserved pre-upgrade database
+  and `0.3.0`. Salvage-mutated databases are excluded from rollback claims;
+  writes after the preserved copy require separate reconciliation.
+
+### Known risks
+
+- Midge remains pre-1.0 and single-process. Spilled point reads still probe
+  matching spill runs; recovery reader caches are cleared at checkpoints.
+  Qualify application-specific memory, transaction, and cloud workloads.
+- Full-manifest checkpoints still amplify cumulative bytes as SST cardinality
+  grows. #670 was measured and deferred; no checkpoint policy change ships.
+
 ## [0.3.0] - 2026-09-29
 
 ### Added

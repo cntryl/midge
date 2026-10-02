@@ -565,7 +565,7 @@ mod tests {
             // Arrange
             let validity = Arc::new(crate::lease::LeaseValidity::new());
             validity
-                .activate(1, Instant::now() + Duration::from_secs(60))
+                .activate(1, Instant::now() + Duration::from_mins(1))
                 .unwrap();
             let check = Arc::clone(&validity);
             let runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
@@ -762,7 +762,7 @@ mod tests {
         runner.config.fs = fs.clone();
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(1, Instant::now() + std::time::Duration::from_secs(60))
+            .activate(1, Instant::now() + std::time::Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
         *runner.config.write_authority.write() = Some(Arc::new(move || {

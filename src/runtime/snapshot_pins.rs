@@ -389,6 +389,50 @@ mod tests {
     }
 
     #[test]
+    fn should_defer_gc_during_capture_then_observe_the_registered_pin() {
+        // Arrange: hold the real acquisition guard across a scheduled GC turn.
+        for sequence in 1..=256 {
+            let registry = SnapshotPinRegistry::default();
+            let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+            let (register_tx, register_rx) = std::sync::mpsc::channel();
+
+            // Act
+            std::thread::scope(|scope| {
+                let reader_registry = &registry;
+                let reader = scope.spawn(move || {
+                    let acquisition = reader_registry.begin_acquisition(sequence);
+                    captured_tx.send(()).unwrap();
+                    register_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    assert!(reader_registry.register_while_acquired(
+                        7,
+                        sequence,
+                        Arc::new(HashSet::from(["held.sst".to_string()])),
+                    ));
+                    drop(acquisition);
+                });
+                captured_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+                // Assert: GC cannot sample an empty pin set in the capture gap.
+                assert!(registry
+                    .try_pinned_sst_names(Duration::from_mins(1))
+                    .is_none());
+                assert_eq!(registry.oldest_sequence(), Some(sequence));
+                register_tx.send(()).unwrap();
+                reader.join().unwrap();
+            });
+            let pinned = registry
+                .try_pinned_sst_names(Duration::from_mins(1))
+                .unwrap();
+            assert!(pinned.contains("held.sst"));
+            assert!(registry.unregister(7));
+            assert!(registry
+                .try_pinned_sst_names(Duration::from_mins(1))
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
     fn should_reject_duplicate_snapshot_pin_ids() {
         // Arrange
         let registry = SnapshotPinRegistry::default();

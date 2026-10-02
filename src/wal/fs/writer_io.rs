@@ -875,7 +875,7 @@ mod tests {
         let fs = Arc::new(SyncCountingFs::default());
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(1, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
         let writer = FsWalWriterIo::new_with_authority(
@@ -910,7 +910,7 @@ mod tests {
         });
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(1, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
         let writer = Arc::new(FsWalWriterIo::new_with_authority(

@@ -1368,7 +1368,7 @@ mod tests {
         let mut fixture = publication_fixture(usize::MAX)?;
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(7, Instant::now() + std::time::Duration::from_secs(60))
+            .activate(7, Instant::now() + std::time::Duration::from_mins(1))
             .unwrap();
         fixture.task.lease_validity = Some(Arc::clone(&validity));
         validity.expire_for_test();
@@ -1388,7 +1388,7 @@ mod tests {
         let mut fixture = publication_fixture(usize::MAX)?;
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(7, Instant::now() + std::time::Duration::from_secs(60))
+            .activate(7, Instant::now() + std::time::Duration::from_mins(1))
             .unwrap();
         fixture.task.lease_validity = Some(Arc::clone(&validity));
         let delta = FlushActor::publish(&fixture.task)?;

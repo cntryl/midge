@@ -325,3 +325,108 @@ Hosted exact-head and post-merge qualification remain pending.
   prefix/floor ordering. Existing public signatures, error variants, and persisted
   formats remain unchanged. Expanded discovery and full release qualification
   remain gates before promotion and publication.
+
+## 0.3.1 release preparation (2026-10-02)
+
+All twelve milestone issues are closed. Repairs merged through PRs #675
+(backup/restore), #676 (authority and salvage), #679 (spill-fixture validity),
+#681 (transaction and tombstone reads), #682 (replay locality), and #683
+(CloudAck contention). PR #684 measured #670; checkpoint policy was explicitly
+not promoted. Its APFS measurement confirmed quadratic cumulative bytes and
+approximately flat 27–29 ms per-flush latency over 64–2,048 live SSTs. It did
+not model production flush rate, steady-state compaction, or a deployment SLO.
+
+Development revision `d87da154357c2706c1b177417fefbea7bc6a8c58` passed
+[CI](https://github.com/cntryl/midge/actions/runs/37026305792) and managed
+CodeQL. These development checks do not establish release completion.
+
+The merged performance implementations differ from the original acceptance
+contracts: #681 retains matching-run point probes and does not implement the
+specified eight-source sorted spill view or upfront auxiliary scratch admission;
+#682 retains four readers with four decoded blocks each, caps retained blocks
+at one quarter of the recovery budget, and clears readers/proofs at checkpoints.
+The changelog records these limits. On 2026-10-02 the user approved qualifying and shipping these merged designs
+instead of requiring the original bounded-source and cross-checkpoint cache
+contracts. Those original design prescriptions are superseded for 0.3.1;
+correctness, configured-budget, and native qualification checks still apply.
+Native cold-recovery measurements remain pending; neither issue closure nor
+this version bump establishes qualification completion.
+
+Release preparation adds an explicit `release_recovery_cost` Cloud Integration
+workflow input for the documented 128 MiB WAL profile, with durable artifact
+upload. Normal provider qualification remains enabled for every dispatch.
+Qualification, promotion, tagging, publication, consumer validation, and
+milestone closure remain pending until their evidence is recorded.
+
+### Fuzz qualification follow-up #686
+
+Development fuzz run [37028361947](https://github.com/cntryl/midge/actions/runs/37028361947)
+failed at the default 2 GiB RSS cap while processing tiny WAL inputs. The log
+preserves the four-byte input `04 00 06 00`; the original workflow did not upload
+failure artifacts. Independently, the common fuzz helper was confirmed to race
+asynchronous Engine drop: all 64 immediate Strict opens returned `LeaseHeld`
+after seeding, preventing malformed-input recovery coverage.
+
+Two `tests/fuzz_harness.rs` regressions failed on unchanged helpers, then passed
+with explicit bounded shutdown after every successful open. Startup errors
+remain accepted input outcomes. Sanitizer settings and RSS limits are unchanged.
+Fuzz corpus and crash artifacts are now uploaded even on failure. The subsequent
+four-target sanitized rerun is required before treating the RSS failure as
+resolved; this evidence establishes the harness defect, not a WAL corruption bug.
+
+### Candidate qualification evidence
+
+- Full logical release profile at `d87da154` passed 1,024 fixture histories and
+  117,380 actions across Local/CloudSimulated resident/spilled fixtures. The eight
+  named process aborts passed with fourteen validated reopens and scans. Artifacts:
+  logical `de01d92c-7140-48b4-a8a3-f8c136609286`, physical
+  `c881dfbb-39ed-463a-8ab8-b24cf31da84b`, under the local
+  `/tmp/midge-031-release-discovery-d87da154` evidence directory.
+- Default `cargo test --locked` with `PROPTEST_CASES=256` passed on the candidate;
+  ignored native-provider and fault-injection targets are selected separately
+  by hosted qualification. Two fuzz lifecycle regressions were demonstrated red
+  before their repair and green afterward. A 256-schedule capture/pin/GC
+  regression now checks the real acquisition guard against concurrent GC
+  sampling before and after pin registration.
+- Clean consumer lockfiles prove registry `=0.3.0` and the packaged `0.3.1`
+  candidate. Upgrade/downgrade read/write/scan fixtures passed on Local,
+  CloudSimulated, and native Sqrzl S3; provider recovery also passed after complete
+  cache loss with both binaries. Local/CloudSimulated backups restored in both
+  version directions. These are clean fixtures; salvage mutation is excluded.
+- Native cloud [run 37028796716](https://github.com/cntryl/midge/actions/runs/37028796716)
+  passed provider contracts, engine qualification, 128 provider histories,
+  and the documented release-mode 134,219,148-byte WAL campaign. All 16,212
+  source records were verified after interrupted recovery, repeated cache loss,
+  the mixed workload, and compaction.
+
+| Release cold-open observation | Historical reader-reuse campaign | 0.3.1 candidate |
+| --- | ---: | ---: |
+| HTTP ranges | 33,536 | 4,252 |
+| Consumed range-response bytes | 2,553,475,173 | 902,222,301 |
+| Coverage time | 16.107 s | 2.035 s |
+| Cold open | 18.216 s | 4.400 s |
+| Coverage probes | 32,618 | 35,402 |
+| Verified SST bytes | 133,981,593 | 140,855,958 |
+
+Observed reductions are 87.3% in ranges and 64.7% in response bytes, exceeding
+50% targets. Coverage time is 87.4% lower than the historical observation;
+this is not a controlled same-host latency comparison or production SLO.
+The source WAL and configured 32 MiB local/64 MiB engine profile match;
+maintenance produces different SST/probe counts. Candidate open-process RSS
+was 82,231,296 bytes, and final whole-campaign RSS reached 98,308,096 bytes.
+RSS includes allocations outside configured engine pools and is not a claim
+that the process fits within 64 MiB. Tracked local files stayed below 32 MiB;
+reader/block budget tests enforce the configured recovery pool separately.
+Artifact: `bd4986f4-4bc5-45fc-b570-da5ab14a4ba8`, revision `9457f200`.
+
+MSRV/no-default qualification exposed mechanical test-only blockers: sixteen
+one-minute `Duration` spellings and a failpoint-only helper compiled without
+`failpoints`. Equivalent spellings and precise feature gating repair these;
+no production path changes. Actual Rust 1.97 pedantic no-default Clippy passed.
+
+The first repaired fuzz rerun passed WAL and manifest targets without the prior
+RSS failure, then timed out in intent recovery. The preserved eighteen-byte
+input is committed as a replay fixture; eight unsanitized replays took under a
+second each. A sanitizer replay precedes the next four-target campaign. Neither
+an input-specific production defect nor sanitizer qualification success is
+claimed until that replay/campaign completes.
