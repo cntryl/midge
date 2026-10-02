@@ -477,17 +477,16 @@ fn minimize_with(
 struct Revision {
     head: String,
     dirty: bool,
+    source: &'static str,
 }
 
 fn revision() -> Revision {
-    let sha = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("read revision");
-    assert!(
-        sha.status.success(),
-        "discovery requires repository revision metadata"
-    );
+    let Ok(sha) = Command::new("git").args(["rev-parse", "HEAD"]).output() else {
+        return archive_revision();
+    };
+    if !sha.status.success() {
+        return archive_revision();
+    }
     let status = Command::new("git")
         .args(["status", "--porcelain"])
         .output()
@@ -499,6 +498,33 @@ fn revision() -> Revision {
             .trim()
             .to_string(),
         dirty: !status.stdout.is_empty(),
+        source: "git",
+    }
+}
+
+fn archive_revision() -> Revision {
+    let supplied = std::env::var("MIDGE_DISCOVERY_SOURCE_REVISION")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if let Some(head) = &supplied {
+        assert!(
+            head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "source archive revision must be a full hexadecimal Git SHA"
+        );
+    }
+    let dirty = match std::env::var("MIDGE_DISCOVERY_SOURCE_DIRTY").as_deref() {
+        Ok("false") => false,
+        Ok("true") | Err(_) => true,
+        Ok(_) => panic!("source archive dirty state must be true or false"),
+    };
+    assert!(
+        supplied.is_some() || dirty,
+        "an unversioned archive cannot be clean"
+    );
+    Revision {
+        head: supplied.unwrap_or_else(|| "unversioned-archive".to_string()),
+        dirty,
+        source: "archive",
     }
 }
 
@@ -566,7 +592,7 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
     let revision = revision();
     if matches!(profile, "discovery" | "release" | "sqrzl") {
         assert!(
-            !revision.dirty,
+            !revision.dirty && revision.source == "git",
             "full discovery/release evidence requires a clean committed revision"
         );
     }
@@ -656,6 +682,137 @@ pub fn campaign(profile: &str, histories: &[History], fixtures: &[Fixture]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_archive_smoke(directory: &Path, profile: &str) -> std::process::Output {
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "should_match_transaction_oracle_when_replaying_histories",
+                "--nocapture",
+            ])
+            .current_dir(directory)
+            .env("MIDGE_DISCOVERY_PROFILE", profile)
+            .env("MIDGE_DISCOVERY_ARTIFACT_DIR", directory.join("evidence"))
+            .env_remove("MIDGE_DISCOVERY_SOURCE_REVISION")
+            .env_remove("MIDGE_DISCOVERY_SOURCE_DIRTY")
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn should_record_explicit_source_provenance_when_running_archive_smoke() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let head = "0123456789abcdef0123456789abcdef01234567";
+
+        // Act
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "should_match_transaction_oracle_when_replaying_histories",
+                "--nocapture",
+            ])
+            .current_dir(directory.path())
+            .env("MIDGE_DISCOVERY_PROFILE", "smoke")
+            .env(
+                "MIDGE_DISCOVERY_ARTIFACT_DIR",
+                directory.path().join("evidence"),
+            )
+            .env("MIDGE_DISCOVERY_SOURCE_REVISION", head)
+            .env("MIDGE_DISCOVERY_SOURCE_DIRTY", "false")
+            .output()
+            .unwrap();
+
+        // Assert: the actual oracle history runs outside Git and records its input.
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let attempt = std::fs::read_dir(directory.path().join("evidence"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let recorded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(attempt.join("revision.json")).unwrap()).unwrap();
+        assert_eq!(recorded["head"], head);
+        assert_eq!(recorded["dirty"], false);
+        assert_eq!(recorded["source"], "archive");
+        assert!(attempt.join("successes.json").exists());
+    }
+
+    #[test]
+    fn should_reject_caller_asserted_archive_provenance_for_full_release_campaigns() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+
+        // Act
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "should_match_transaction_oracle_when_replaying_histories",
+                "--nocapture",
+            ])
+            .current_dir(directory.path())
+            .env("MIDGE_DISCOVERY_PROFILE", "release")
+            .env(
+                "MIDGE_DISCOVERY_SOURCE_REVISION",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .env("MIDGE_DISCOVERY_SOURCE_DIRTY", "false")
+            .output()
+            .unwrap();
+
+        // Assert: caller metadata is enough for smoke, not committed-source proof.
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("requires a clean committed revision")
+        );
+    }
+
+    #[test]
+    fn should_run_unversioned_archive_smoke_without_claiming_release_provenance() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+
+        // Act
+        let output = run_archive_smoke(directory.path(), "smoke");
+
+        // Assert
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let attempt = std::fs::read_dir(directory.path().join("evidence"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let recorded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(attempt.join("revision.json")).unwrap()).unwrap();
+        assert_eq!(recorded["head"], "unversioned-archive");
+        assert_eq!(recorded["dirty"], true);
+        assert_eq!(recorded["source"], "archive");
+    }
+
+    #[test]
+    fn should_reject_unversioned_archives_from_full_release_qualification() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+
+        // Act
+        let output = run_archive_smoke(directory.path(), "release");
+
+        // Assert
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("requires a clean committed revision")
+        );
+    }
 
     #[test]
     fn should_reject_illegal_shrink_before_opening_an_engine() {

@@ -13,7 +13,14 @@ WORKDIR /workspace
 # Verify the crate in a clean Debian container.
 COPY . .
 
+# .git stays outside the image. CI supplies the exact clean checkout provenance;
+# ordinary source archives remain unqualified when those inputs are omitted.
+ARG MIDGE_DISCOVERY_SOURCE_REVISION
+ARG MIDGE_DISCOVERY_SOURCE_DIRTY=true
+
 # Failpoints are process-global, so the all-features suite must run serially.
-RUN cargo test --workspace --all-features -- --test-threads=1
+RUN MIDGE_DISCOVERY_SOURCE_REVISION="${MIDGE_DISCOVERY_SOURCE_REVISION}" \
+    MIDGE_DISCOVERY_SOURCE_DIRTY="${MIDGE_DISCOVERY_SOURCE_DIRTY}" \
+    cargo test --workspace --all-features -- --test-threads=1
 
 CMD ["bash"]

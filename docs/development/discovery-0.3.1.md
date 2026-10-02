@@ -230,3 +230,19 @@ The hosted macOS conflict-test failure also exposed confirmed test-validity issu
 The actual prepared-prune retirement also returned success after an authority rejection because per-entry error contextualization hid `Fenced`; it now propagates that error unchanged. A pending predecessor delete could remove WAL republished with its unchanged remote identity by a successor. Physical conditional deletes now check the same authority after blocking proof preparation. The scheduled regression performs real successor upload, acknowledgment, and catalog publication, removes its local seal, then releases the predecessor proof; it requires zero DELETE submissions and successful Strict recovery from remote WAL.
 
 A final adjacent review reproduced runtime and startup DDL publication after validity expiry at the existing pre-CAS boundary: runtime creation returned success and startup published a registry before its later rejection. The phased CAS checks storage authority after request preparation and treats rejection before submission as definitely uncommitted. Provider startup installs its callback before DDL fencing. Regression assertions preserve registry bytes and local CF state, retain the no-commit classification, and leave a fresh startup registry absent. A rejected predecessor could then delete a successor’s replacement prepare from the shared cache; the focused schedule reproduced that deletion. All provider-backed prepare cleanup now checks shared authority immediately before removal, retaining mutable recovery metadata on authority loss. Definite CAS rejection keeps its original error classification, and the regression requires the exact successor prepare bytes to survive. Requests already entered at a provider remain potentially ambiguous.
+
+## Source-archive and Docker provenance
+
+Git checkouts record their actual HEAD and dirty state. When Git metadata is
+unavailable, source archives may supply `MIDGE_DISCOVERY_SOURCE_REVISION` (a
+full forty-character hexadecimal SHA) and `MIDGE_DISCOVERY_SOURCE_DIRTY`
+(`true` or `false`). Artifacts identify this source as `archive`; the supplied
+SHA is caller-provided provenance, not a Git verification performed inside
+the image. Docker Qualification checks that the checkout is clean and passes
+its actual HEAD through build arguments. `.git` remains outside the image.
+
+Unversioned archives default to `unversioned-archive` and dirty/unqualified.
+They may run ordinary smoke histories; discovery/release/provider campaigns
+continue to require a clean committed Git checkout, even when an archive
+asserts a SHA and clean state. A clean assertion without an
+explicit SHA is rejected. No logical test is skipped to accommodate archives.
