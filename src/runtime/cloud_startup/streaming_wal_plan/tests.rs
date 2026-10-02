@@ -1022,3 +1022,145 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
     );
     Ok(())
 }
+
+#[test]
+fn should_stop_replay_at_epoch_regressed_sealed_segment() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
+        fixture.publish(id, id, epoch, &framed_wal(id, epoch, b"value"))?;
+    }
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        recovered
+            .plan
+            .unreplayed_segments
+            .iter()
+            .map(|segment| segment.segment_id)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 3);
+    Ok(())
+}
+
+#[test]
+fn should_stage_stale_active_wal_until_sequence_floor_is_durable() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"one"))?;
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(2, 7, b"two"))?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 2);
+    assert!(
+        active.exists(),
+        "planning must preserve the only durable sequence evidence"
+    );
+    assert_eq!(recovered.plan.set_aside_local_paths, vec![active]);
+    assert!(recovered.plan.active_wal.is_none());
+    Ok(())
+}
+
+#[test]
+fn should_combine_quarantine_plans_when_sealed_and_active_epochs_regress() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
+        let bytes = framed_wal(id, epoch, b"value");
+        fixture.publish(id, id, epoch, &bytes)?;
+        fixture.local(&crate::wal::segment_file_name(id), &bytes)?;
+    }
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(4, 7, b"four"))?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 4);
+    let paths: BTreeSet<_> = recovered
+        .plan
+        .set_aside_local_paths
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(paths.len(), 3);
+    assert_eq!(recovered.plan.set_aside_local_paths.len(), paths.len());
+    assert!(paths.contains(&active));
+    assert!(paths.iter().all(|path| path.exists()));
+    Ok(())
+}
+
+#[test]
+fn should_preserve_wal_files_when_strict_recovery_rejects_epoch_regression() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    let mut inventory = Vec::new();
+    for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
+        let bytes = framed_wal(id, epoch, b"value");
+        fixture.publish(id, id, epoch, &bytes)?;
+        inventory.push((
+            fixture.local(&crate::wal::segment_file_name(id), &bytes)?,
+            bytes,
+        ));
+    }
+    // Act
+    let result = fixture.plan_only(RecoveryPolicy::Strict, limits());
+    // Assert
+    assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+    for (path, bytes) in inventory {
+        assert_eq!(std::fs::read(path)?, bytes);
+    }
+    Ok(())
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 256, rng_seed: proptest::test_runner::RngSeed::Fixed(0x4d49_4447_4530_3331), ..proptest::test_runner::Config::default() })]
+    #[test]
+    fn should_preserve_prefix_when_generated_epochs_regress(epochs in proptest::collection::vec(1_u64..=9, 1..12), active_epoch in 1_u64..=9) {
+        // Arrange
+        let mut fixture = Fixture::new().unwrap();
+        for (index, &epoch) in epochs.iter().enumerate() {
+            let id = u64::try_from(index).unwrap() + 1;
+            fixture.publish(id, id, epoch, &framed_wal(id, epoch, b"value")).unwrap();
+        }
+        let active_sequence = u64::try_from(epochs.len()).unwrap() + 1;
+        fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(active_sequence, active_epoch, b"active")).unwrap();
+        let first_hole = epochs.iter().enumerate().find(|(index, epoch)| epochs[..*index].iter().any(|earlier| earlier > *epoch)).map_or(epochs.len(), |(index, _)| index);
+        // Act
+        let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits()).unwrap();
+        // Assert
+        proptest::prop_assert_eq!(recovered.plan.remote_segments.keys().copied().collect::<Vec<_>>(), (1..=u64::try_from(first_hole).unwrap()).collect::<Vec<_>>());
+        let set_aside = first_hole < epochs.len() || active_epoch < *epochs.iter().max().unwrap();
+        proptest::prop_assert_eq!(recovered.plan.max_unreplayed_sequence, if set_aside { active_sequence } else { 0 });
+        proptest::prop_assert!(recovered.plan.set_aside_local_paths.iter().all(|path| path.exists()));
+    }
+}
+
+#[cfg(feature = "failpoints")]
+mod crashes;

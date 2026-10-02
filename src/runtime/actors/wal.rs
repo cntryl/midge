@@ -241,6 +241,7 @@ pub struct WalActor {
     /// Fencing epoch assigned when this writer acquired leadership.
     /// Stamped on every WAL record so stale writers can be detected.
     current_epoch: u64,
+    lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
 
     /// Optional leader store for epoch validation at sync boundaries.
     /// When set, each fsync checks that our epoch is still current.
@@ -626,6 +627,7 @@ impl WalActor {
             last_sync_instant: Instant::now(),
             storage_io_timeout,
             current_epoch: writer_epoch,
+            lease_validity: None,
             leader_store: None,
             leader_holder_id: String::new(),
             max_replayable_txn_bytes: None,
@@ -840,3 +842,21 @@ impl Default for WalActor {
 
 #[cfg(test)]
 mod tests;
+
+impl WalActor {
+    pub(crate) fn set_lease_validity(
+        &mut self,
+        validity: Option<Arc<crate::lease::LeaseValidity>>,
+    ) {
+        self.lease_validity = validity;
+    }
+
+    fn ensure_lease_validity(&self) -> MidgeResult<()> {
+        if let Some(validity) = &self.lease_validity {
+            validity.remaining(self.current_epoch).map_err(|error| {
+                error.into_validation_error("monotonic writer lease validity lost")
+            })?;
+        }
+        Ok(())
+    }
+}

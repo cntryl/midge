@@ -108,6 +108,7 @@ pub struct RuntimeConfig {
     /// Shared lease-health flag.  Set to `false` by the heartbeat thread when
     /// renewal fails.  The event loop checks this before accepting writes.
     pub lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     /// Leader store for epoch validation at WAL sync boundaries.
     /// Injected into the WAL actor so it can verify the epoch is still
     /// valid before flushing to durable storage.
@@ -153,6 +154,7 @@ impl Default for RuntimeConfig {
             background_compaction: true,
             writer_epoch: 0,
             lease_healthy: None,
+            lease_validity: None,
             leader_store: None,
             leader_holder_id: None,
             max_replayable_txn_bytes: None,

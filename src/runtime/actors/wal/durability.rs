@@ -116,6 +116,7 @@ impl WalActor {
     }
 
     fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+        self.ensure_lease_validity()?;
         self.ensure_filesystem_wal_available(state)?;
 
         // Epoch fencing check: verify our epoch is still current before making
@@ -137,6 +138,7 @@ impl WalActor {
             }
         }
 
+        self.ensure_lease_validity()?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
 
         if let Err(error) = WalTransitionBoundary::BeforeFsync.check() {

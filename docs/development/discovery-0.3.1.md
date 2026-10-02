@@ -94,7 +94,7 @@ qualification.
 | Family / template | Logical scaffold | Remaining physical or focused evidence |
 | --- | --- | --- |
 | Recovery: durable commits across restart | DurableRestart; clean sync restart | Actual abort prefixes and acknowledgment classification |
-| Recovery: epoch, hole, torn tail | None | Recovery-plan property and #663 combined quarantine/crash probes |
+| Recovery: epoch, hole, torn tail | 256 fixed-seed epoch/prefix properties; #663 sealed/active/combined regressions | Five actual floor/rename/retirement abort tuples; broader torn-tail campaign remains |
 | Recovery: predecessor after takeover and GC | None | #662 validity, takeover, GC, and reopen probes |
 | Snapshot: held snapshot versus later commits | HeldSnapshot, PinnedCompaction | Large public transaction plus maintenance and conflict-policy probes |
 | Snapshot: resident/spilled own writes | OrdinalIntents; both read fixtures | Scaling and read-source bounds for #667 |
@@ -108,7 +108,7 @@ qualification.
 | Concurrency: held iterator versus maintenance | None | Iterator held across explicit maintenance schedule |
 | Concurrency: capture/publication/GC | None | Named capture-to-pin race; sequential reads are insufficient |
 | Concurrency: CloudAck admission versus catalog | None | #666 sibling reservation and waiter completion schedule |
-| Failure: restore abort and retry | None | #664 actual process abort; foreign stages and target collisions |
+| Failure: restore abort and retry | #664/#665 merged in PR #675 | Eight physical tuples qualified on Linux/macOS/Windows; foreign stages and target collisions pass |
 | Failure: partial provider operations/cancellation | None | Supported provider adapter and cancellation probes |
 | Failure: permanent flush errors/retry/shutdown | None | Retry timing and bounded shutdown probes |
 | Boundary: binary keys and ranges | BinaryBoundaries; generator includes edges | Full backend campaign and encoder exclusion audit |
@@ -118,8 +118,8 @@ qualification.
 For every meaningful investigation, record contract, Jev prioritization, focused
 probe, Jev challenge, and confirmed/deepened/discarded outcome. Jev judgments do
 not substitute for implementation and test evidence. Deduplicate confirmed P1/P2
-findings against open issues before adding them to milestone 0.3.1. Publish the
-completed findings report and coverage map before beginning repairs.
+findings against open issues before adding them to milestone 0.3.1. The user directed confirmed repairs to proceed immediately after the full logical
+campaign. Complete the findings report and coverage map before release promotion.
 
 ## Named process-abort driver
 
@@ -156,3 +156,29 @@ The local evidence directory is
 `target/discovery-031/full-0e0a6f7c/0e24860e-f333-44fe-a112-9359805c1b3d`.
 This establishes the seven logical templates; the remaining physical, race,
 retry and focused-property evidence is still required for discovery exit.
+
+## Authority and salvage repair qualification
+
+PR #675 merged at `a06756579351c6e19484e33fc46d3a9a876806ec`; its
+actual merged tree matches the qualified candidate. Hosted CI and provider
+qualification passed, and downloaded artifacts prove eight named aborts with
+fourteen reopens/scans on each OS and 128 native provider history replays.
+Issues #664, #665, and harness-validity issue #674 are closed.
+
+The next repair batch covers #662/#663. Baseline probes demonstrate expired
+monotonic validity with cached health still true admitting an Engine commit,
+sealed epochs `8,7,9` replaying IDs `[1,3]`, and a stale active WAL losing its
+sequence floor. Candidate regressions cover resident/coalesced/spilled
+preparation boundaries, public Engine admission, strict nonmutation, and 256
+fixed-seed recovery-plan cases. Five actual abort tuples exercise durable floor
+publication, each of three quarantine renames, and pre-retirement interruption.
+Their test-only driver preserves tuple metadata and outcome counters under
+`target/discovery-031/salvage-*`; child SIGABRT and synced named sentinels prove
+the intended boundary. These are issue-specific regressions, separate from the
+twelve-scenario external-pattern budget.
+
+```sh
+cargo test --lib validity --all-features -- --test-threads=1
+cargo test --lib streaming_wal_plan::tests --all-features -- --test-threads=1
+cargo test --lib should_reject_predecessor --all-features -- --test-threads=1
+```

@@ -127,7 +127,14 @@ impl StreamingCloudWalRecovery {
             limits,
         )?;
         skipped.extend(skipped_local);
-        enforce_epoch_order(db_path, &mut plan, &mut sources, &mut active_source, policy)?;
+        enforce_epoch_order(
+            db_path,
+            &mut plan,
+            &mut sources,
+            &mut active_source,
+            policy,
+            &mut skipped,
+        )?;
         stop_at_first_hole(
             db_path,
             catalog,
@@ -589,6 +596,7 @@ fn enforce_epoch_order(
     sources: &mut BTreeMap<u64, ReplaySource>,
     active: &mut Option<ReplaySource>,
     policy: RecoveryPolicy,
+    skipped: &mut BTreeSet<u64>,
 ) -> MidgeResult<()> {
     let mut highest_epoch = 0;
     let mut stale = Vec::new();
@@ -615,6 +623,7 @@ fn enforce_epoch_order(
         }
     }
     for segment_id in stale {
+        skipped.insert(segment_id);
         sources.remove(&segment_id);
         plan.remote_segments.remove(&segment_id);
         plan.local_segments.remove(&segment_id);
@@ -630,14 +639,13 @@ fn enforce_epoch_order(
         }
         plan.opened_in_salvage_mode = true;
         tracing::warn!("skipping stale-epoch active WAL during salvage recovery");
-        if let Some(source) = active.as_ref() {
-            quarantine_active(
-                source.fs.as_ref(),
-                &db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME),
-            )?;
+        if let Some(wal) = plan.active_wal.take() {
+            plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(wal.max_sequence);
         }
-        plan.active_wal = None;
-        *active = None;
+        if active.take().is_some() {
+            plan.set_aside_local_paths
+                .push(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME));
+        }
     }
     Ok(())
 }
@@ -756,7 +764,9 @@ fn stop_at_first_hole(
     }
     // Renamed only after startup persists the floor that covers them; see
     // `CloudWalRecoveryPlan::set_aside_local_wal`.
-    plan.set_aside_local_paths = local_paths;
+    plan.set_aside_local_paths.extend(local_paths);
+    plan.set_aside_local_paths.sort();
+    plan.set_aside_local_paths.dedup();
     plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(max_sequence);
     Ok(())
 }

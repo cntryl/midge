@@ -531,6 +531,7 @@ impl RuntimeStorageMaterialization {
             background_compaction: opts.background_compaction_enabled(),
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
+            lease_validity: startup_lease.lease_validity.clone(),
             leader_store: startup_lease.leader_store.clone(),
             leader_holder_id: Some(startup_lease.lease.holder_id()),
             max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
@@ -691,6 +692,7 @@ impl RuntimeStorageMaterialization {
             background_compaction: opts.background_compaction_enabled(),
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
+            lease_validity: startup_lease.lease_validity.clone(),
             leader_store: startup_lease.leader_store.clone(),
             leader_holder_id: Some(startup_lease.lease.holder_id()),
             max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
@@ -737,6 +739,7 @@ impl RuntimeStorageMaterialization {
             background_compaction: opts.background_compaction_enabled(),
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
+            lease_validity: startup_lease.lease_validity.clone(),
             leader_store: startup_lease.leader_store.clone(),
             leader_holder_id: Some(startup_lease.lease.holder_id()),
             ..Default::default()

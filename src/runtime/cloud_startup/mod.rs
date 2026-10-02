@@ -98,7 +98,9 @@ impl CloudWalRecoveryPlan {
         if self.max_unreplayed_sequence > catalog.sequence_floor {
             persistence.raise_wal_sequence_floor(writer_epoch, self.max_unreplayed_sequence)?;
         }
+        crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
         self.set_aside_local_wal(db_path)?;
+        crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
         if !self.unreplayed_segments.is_empty() {
             persistence.retire_unreplayed_wal_segments(writer_epoch, &self.unreplayed_segments)?;
         }
@@ -117,6 +119,7 @@ impl CloudWalRecoveryPlan {
             if fs.exists(&path).map_err(FsError::into_midge)? {
                 CloudStartupRecovery::quarantine_local_wal_alias(&fs, &path)?;
                 renamed = true;
+                crate::failpoints::fail_point!("midge::recovery::after_salvage_quarantine_rename");
             }
         }
         if renamed {
