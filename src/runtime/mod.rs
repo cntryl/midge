@@ -19,6 +19,7 @@ pub mod frontiers;
 pub(crate) mod hybrid_persistence;
 pub mod intent_persistence;
 pub(crate) mod keyed_group_commit;
+pub(crate) mod range_cover;
 pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub(crate) mod retry_schedule;

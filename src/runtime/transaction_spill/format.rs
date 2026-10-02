@@ -170,6 +170,10 @@ pub(super) struct RunReader {
 }
 
 impl RunReader {
+    pub(super) fn range_header(&self) -> RangeHeader {
+        self.range_header
+    }
+
     pub(super) fn open(run: &SpillRun) -> MidgeResult<Self> {
         let mut data = RunFile::open(&run.path)?;
         let header = read_header(&mut data)?;
@@ -375,6 +379,16 @@ pub(super) fn write_run_with_reader_cache(
         path,
         range_path,
         record_count: ops.len(),
+        key_bounds: ops.first().zip(ops.last()).map(|(first, last)| {
+            (
+                op_primary_key_bytes(&first.op),
+                op_primary_key_bytes(&last.op),
+            )
+        }),
+        range_count: ops
+            .iter()
+            .filter(|entry| matches!(entry.op, TransactionOp::DeleteRange { .. }))
+            .count(),
         pool: Arc::clone(pool),
         reader_cache: Arc::clone(reader_cache),
         _disk_charge: disk_charge,
@@ -409,7 +423,7 @@ fn spill_size_bound(ops: &[OrdinalOp]) -> MidgeResult<u64> {
         {
             // Each tree node can inherit the largest endpoint from another
             // range. Charge that bound as well as its own keys and table slot.
-            fields[3..].copy_from_slice(&[56, start_key.len(), end_key.len(), largest_range_end]);
+            fields[3..].copy_from_slice(&[80, start_key.len(), end_key.len(), largest_range_end]);
         }
         for field in fields {
             bytes = bytes.checked_add(usize_to_u64(field)?).ok_or_else(|| {
@@ -693,12 +707,29 @@ pub(super) fn sparse_start_for_key(
     Ok(selected_offset)
 }
 
+/// Newest intent in `run` for `key` below `ordinal_ceiling`, point writes and
+/// range deletes alike.
 pub(super) fn lookup_run_key(
     run: &SpillRun,
     key: &[u8],
     ordinal_ceiling: u64,
     latest: &mut Option<(u64, IntentLookup)>,
 ) -> MidgeResult<()> {
+    lookup_run_points(run, key, ordinal_ceiling, latest)?;
+    lookup_run_ranges(run, key, ordinal_ceiling, latest)
+}
+
+/// Point writes only. Skips the run without opening it when `key` lies
+/// outside the run's key bounds.
+pub(super) fn lookup_run_points(
+    run: &SpillRun,
+    key: &[u8],
+    ordinal_ceiling: u64,
+    latest: &mut Option<(u64, IntentLookup)>,
+) -> MidgeResult<()> {
+    if !run.holds_point_key(key) {
+        return Ok(());
+    }
     run.with_reader(|reader| {
         let header = reader.header();
         let mut cursor = reader.sparse_start(Some(key))?;
@@ -724,7 +755,21 @@ pub(super) fn lookup_run_key(
                 std::cmp::Ordering::Greater => break,
             }
         }
+        Ok(())
+    })
+}
 
+/// Range deletes only. Skips runs that hold none without opening them.
+fn lookup_run_ranges(
+    run: &SpillRun,
+    key: &[u8],
+    ordinal_ceiling: u64,
+    latest: &mut Option<(u64, IntentLookup)>,
+) -> MidgeResult<()> {
+    if run.range_count == 0 {
+        return Ok(());
+    }
+    run.with_reader(|reader| {
         lookup_range_index(
             &mut reader.range,
             &reader.range_header,
