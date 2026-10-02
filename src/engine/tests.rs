@@ -2526,26 +2526,35 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
     // Arrange
     for cloud in [false, true] {
         let directory = tempfile::tempdir()?;
-        let builder = if cloud {
-            OpenOptions::cloud_simulated(directory.path(), "authority-test", "db")
-        } else {
-            OpenOptions::local(directory.path())
+        let build_options = |ttl| {
+            let builder = if cloud {
+                OpenOptions::cloud_simulated(directory.path(), "authority-test", "db")
+            } else {
+                OpenOptions::local(directory.path())
+            };
+            builder
+                .lease_ttl(ttl)
+                .lease_clock_skew_tolerance(Duration::ZERO)
+                .build()
         };
-        let options = builder
-            .lease_ttl(Duration::from_secs(1))
-            .lease_clock_skew_tolerance(Duration::ZERO)
-            .build()?;
-        let predecessor = Engine::open(options.clone())?;
-        let cf = predecessor.get_column_family("default").unwrap();
+        // Only the deliberately expired predecessor needs a short lease.
+        // Seed/publication I/O must not depend on a one-second CI schedule.
+        let options = build_options(Duration::from_secs(30))?;
+        eprintln!("takeover cloud={cloud}: seed under healthy lease");
+        let mut seeder = Engine::open(options.clone())?;
+        let cf = seeder.get_column_family("default").unwrap();
         let durability = if cloud {
             WriteOptions::cloud_strict()
         } else {
             WriteOptions::sync()
         };
-        let mut seed = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        let mut seed = seeder.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         seed.put(b"seed".to_vec(), b"original".to_vec(), None)?;
         seed.commit(durability)?;
-        predecessor.flush_cf(&cf)?;
+        seeder.flush_cf(&cf)?;
+        seeder.shutdown(Duration::from_secs(5))?;
+        eprintln!("takeover cloud={cloud}: prepare short-lived predecessor");
+        let predecessor = Engine::open(build_options(Duration::from_secs(1))?)?;
         let mut before_gc = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
         before_gc.put(b"stale-before".to_vec(), b"invalid".to_vec(), None)?;
         let mut after_gc = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
@@ -2565,14 +2574,17 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
         assert!(heartbeat.is_healthy());
         drop(heartbeat);
         // Act
+        eprintln!("takeover cloud={cloud}: open healthy successor after real expiry");
         let mut successor = Engine::open(options.clone())?;
         assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
         let first = before_gc.commit(WriteOptions::best_effort());
         let successor_cf = successor.get_column_family("default").unwrap();
         let mut update = successor.begin_tx(successor_cf.id(), TransactionMode::ReadWrite)?;
         update.put(b"seed".to_vec(), b"successor".to_vec(), None)?;
+        eprintln!("takeover cloud={cloud}: successor publication");
         update.commit(durability)?;
         successor.flush_cf(&successor_cf)?;
+        eprintln!("takeover cloud={cloud}: successor compaction");
         successor.compact_all()?;
         let second = after_gc.commit(if cloud {
             WriteOptions::cloud_async()
@@ -2580,6 +2592,7 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
             WriteOptions::best_effort()
         });
         successor.shutdown(Duration::from_secs(5))?;
+        eprintln!("takeover cloud={cloud}: reopen and assert durable state");
         let mut reopened = Engine::open(options)?;
         let read = reopened.begin_tx(successor_cf.id(), TransactionMode::ReadOnly)?;
         // Assert
