@@ -1,15 +1,25 @@
 //! Shared bounded-resource accounting used by internal streaming pipelines.
 
 use super::{MidgeError, MidgeResult};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Source of pool identities. A pool id is never reused within a process, so a
+/// failure cannot be attributed to a different pool after the original is
+/// dropped.
+static NEXT_POOL_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Marker appended to retryable admission failures. The cause travels inside
+/// the error itself, so it survives every string-level wrap or clone and can
+/// never be consumed or erased by an unrelated reservation.
+const CONTENTION_MARKER: &str = " [admission-contention pool=";
 
 #[derive(Debug)]
 struct ResourceBudgetInner {
+    id: u64,
     limit: usize,
     current: AtomicUsize,
     peak: AtomicUsize,
-    contention: std::sync::Mutex<Option<ResourceContention>>,
     /// Upward-only link to the enclosing pool. A child's admission also
     /// occupies every ancestor, so a sub-budget can cap one operation without
     /// escaping the total it was carved from. Never cyclic: a child is only
@@ -46,10 +56,10 @@ impl ResourceBudget {
     pub fn new(limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {
+                id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),
                 limit,
                 current: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
-                contention: std::sync::Mutex::new(None),
                 parent: None,
             }),
             report_contention: false,
@@ -69,10 +79,10 @@ impl ResourceBudget {
     pub(crate) fn child(&self, limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {
+                id: NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed),
                 limit,
                 current: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
-                contention: std::sync::Mutex::new(None),
                 parent: Some(self.clone()),
             }),
             report_contention: false,
@@ -81,9 +91,13 @@ impl ResourceBudget {
 
     /// Whether `ancestor` is this pool or encloses it.
     pub(crate) fn is_within(&self, ancestor: &Self) -> bool {
+        self.is_within_pool(ancestor.inner.id)
+    }
+
+    fn is_within_pool(&self, pool_id: u64) -> bool {
         let mut cursor = self.inner.as_ref();
         loop {
-            if std::ptr::eq(cursor, ancestor.inner.as_ref()) {
+            if cursor.id == pool_id {
                 return true;
             }
             let Some(parent) = &cursor.parent else {
@@ -105,12 +119,6 @@ impl ResourceBudget {
         bytes: usize,
         resource: &'static str,
     ) -> MidgeResult<ResourceReservation> {
-        if self.report_contention {
-            let slot = &self.inner.contention;
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
         let mut current = self.inner.current.load(Ordering::Acquire);
         loop {
             let Some(next) = current.checked_add(bytes) else {
@@ -124,15 +132,13 @@ impl ResourceBudget {
                     self.inner.limit
                 );
                 if bytes <= self.inner.limit && self.report_contention {
-                    let slot = &self.inner.contention;
-                    *slot
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(ResourceContention {
-                            budget: self.clone(),
-                            required_release: next - self.inner.limit,
-                            message: message.clone(),
-                        });
+                    // Provenance is part of this attempt's own error. There is
+                    // no shared slot for a sibling reservation to clear.
+                    return Err(MidgeError::ResourceLimit(format!(
+                        "{message}{CONTENTION_MARKER}{} release={}]",
+                        self.inner.id,
+                        next - self.inner.limit
+                    )));
                 }
                 return Err(MidgeError::ResourceLimit(message));
             }
@@ -148,9 +154,6 @@ impl ResourceBudget {
                         budget: self.clone(),
                         bytes,
                         parent: None,
-                        related_contention: self
-                            .report_contention
-                            .then(|| Box::new(std::sync::Mutex::new(None))),
                     };
                     // Charge the parent only after this level succeeded, so the
                     // level that rejects is the level named in the error. If the
@@ -176,18 +179,6 @@ impl ResourceBudget {
         self.inner.current.load(Ordering::Acquire)
     }
 
-    pub(crate) fn take_contention(&self, error: &MidgeError) -> Option<ResourceContention> {
-        let MidgeError::ResourceLimit(_) = error else {
-            return None;
-        };
-        let mut slot = self
-            .inner
-            .contention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        slot.take()
-    }
-
     #[cfg(test)]
     pub(crate) fn peak(&self) -> usize {
         self.inner.peak.load(Ordering::Acquire)
@@ -195,15 +186,35 @@ impl ResourceBudget {
 }
 
 /// An admission rejected by existing reservations in a specific shared pool.
-/// Created internally; oversized requests remain `MidgeError::ResourceLimit`.
+/// Decoded from the failed attempt's own error; oversized requests remain a
+/// plain `MidgeError::ResourceLimit`.
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceContention {
-    budget: ResourceBudget,
+    pool_id: u64,
     required_release: usize,
     message: String,
 }
 
 impl ResourceContention {
+    /// Recover the contention that produced `error`, if it was produced by a
+    /// contention-reporting budget. Pure: nothing is consumed, so the same
+    /// error can be inspected any number of times and no other attempt can
+    /// affect the answer.
+    pub(crate) fn from_error(error: &MidgeError) -> Option<Self> {
+        let MidgeError::ResourceLimit(message) = error else {
+            return None;
+        };
+        let start = message.rfind(CONTENTION_MARKER)?;
+        let tail = &message[start + CONTENTION_MARKER.len()..];
+        let (pool, tail) = tail.split_once(" release=")?;
+        let release = tail.strip_suffix(']')?;
+        Some(Self {
+            pool_id: pool.parse().ok()?,
+            required_release: release.parse().ok()?,
+            message: message.clone(),
+        })
+    }
+
     pub(crate) fn is_blocked_by(&self, budget: &ResourceBudget) -> bool {
         // Temporary allocations have unwound before the caller decides to retry.
         // The remaining reservations must cover the shortfall; otherwise the
@@ -213,7 +224,7 @@ impl ResourceContention {
         // draining a descendant decrements the contended level by exactly that
         // amount. A strict ancestor does not qualify — releasing work in some
         // sibling subtree leaves the contended level untouched.
-        budget.is_within(&self.budget) && budget.used() >= self.required_release
+        budget.is_within_pool(self.pool_id) && budget.used() >= self.required_release
     }
 
     #[cfg(test)]
@@ -237,8 +248,6 @@ pub struct ResourceReservation {
     // Matching charge held against the enclosing pool. Declared after `budget`
     // and `bytes` so this level is released before its parent.
     parent: Option<Box<ResourceReservation>>,
-    // Preserve typed child-admission failures across legacy string callbacks.
-    related_contention: Option<Box<std::sync::Mutex<Option<ResourceContention>>>>,
 }
 
 impl ResourceReservation {
@@ -251,35 +260,7 @@ impl ResourceReservation {
         bytes: usize,
         resource: &'static str,
     ) -> MidgeResult<Self> {
-        let result = self.budget.reserve(bytes, resource);
-        if let (Some(slot), Err(error)) = (&self.related_contention, &result) {
-            if let Some(contention) = self.budget.take_contention(error) {
-                *slot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(contention);
-            }
-        }
-        result
-    }
-
-    pub(crate) fn take_related_contention(&self) -> Option<ResourceContention> {
-        self.related_contention
-            .as_ref()?
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-
-    pub(crate) fn restore_related_contention(&self) {
-        let Some(contention) = self.take_related_contention() else {
-            return;
-        };
-        *self
-            .budget
-            .inner
-            .contention
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(contention);
+        self.budget.reserve(bytes, resource)
     }
 }
 
@@ -383,8 +364,7 @@ mod hierarchy_tests {
         let error = requester
             .reserve(1, "request")
             .expect_err("root must reject the request");
-        let contention = root
-            .take_contention(&error)
+        let contention = ResourceContention::from_error(&error)
             .expect("root admission failure must retain internal contention metadata");
 
         // Act
@@ -428,6 +408,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_keep_contention_when_sibling_reservation_succeeds_after_failure() {
+        // Arrange
+        let budget = ResourceBudget::new(10).with_contention_errors();
+        let _held = budget.reserve(7, "retained memory").unwrap();
+        let error = budget.reserve(4, "first request").unwrap_err();
+        let _sibling = budget.reserve(1, "sibling request").unwrap();
+
+        // Act
+        let contention = ResourceContention::from_error(&error);
+
+        // Assert
+        assert!(contention.is_some_and(|contention| contention.is_blocked_by(&budget)));
+    }
+
+    #[test]
+    fn should_attribute_each_error_to_its_own_attempt_when_failures_interleave() {
+        // Arrange
+        let first_pool = ResourceBudget::new(10).with_contention_errors();
+        let second_pool = ResourceBudget::new(10).with_contention_errors();
+        let _first_held = first_pool.reserve(9, "first holder").unwrap();
+        let _second_held = second_pool.reserve(9, "second holder").unwrap();
+        let first_error = first_pool.reserve(5, "first request").unwrap_err();
+        let second_error = second_pool.reserve(5, "second request").unwrap_err();
+
+        // Act
+        let first = ResourceContention::from_error(&first_error).unwrap();
+        let second = ResourceContention::from_error(&second_error).unwrap();
+
+        // Assert
+        assert!(first.is_blocked_by(&first_pool) && !first.is_blocked_by(&second_pool));
+        assert!(second.is_blocked_by(&second_pool) && !second.is_blocked_by(&first_pool));
+    }
+
+    #[test]
+    fn should_keep_contention_when_error_message_is_wrapped_with_context() {
+        // Arrange
+        let budget = ResourceBudget::new(10).with_contention_errors();
+        let _held = budget.reserve(7, "retained memory").unwrap();
+        let MidgeError::ResourceLimit(message) = budget.reserve(4, "request").unwrap_err() else {
+            panic!("expected resource limit");
+        };
+        let wrapped = MidgeError::ResourceLimit(format!("catalog readback: {message}"));
+
+        // Act
+        let contention = ResourceContention::from_error(&wrapped);
+
+        // Assert
+        assert!(contention.is_some_and(|contention| contention.is_blocked_by(&budget)));
+    }
+
+    #[test]
+    fn should_keep_contention_when_nested_parent_rejects_after_sibling_success() {
+        // Arrange
+        let root = ResourceBudget::new(100).with_contention_errors();
+        let requester = root.child(100);
+        let sibling = root.child(100);
+        let holder = root.child(100);
+        let _held = holder.reserve(95, "holder").unwrap();
+        let error = requester.reserve(10, "request").unwrap_err();
+        let _sibling_held = sibling.reserve(1, "sibling").unwrap();
+
+        // Act
+        let contention = ResourceContention::from_error(&error);
+
+        // Assert
+        let contention = contention.expect("parent rejection must carry contention");
+        assert!(contention.is_blocked_by(&holder));
+        assert!(contention.is_blocked_by(&root));
+    }
+
+    #[test]
+    fn should_not_report_contention_when_error_has_no_admission_marker() {
+        // Arrange
+        let error = MidgeError::ResourceLimit("identity space exhausted".into());
+
+        // Act
+        let contention = ResourceContention::from_error(&error);
+
+        // Assert
+        assert!(contention.is_none());
+    }
+
+    #[test]
     fn should_report_current_charge_until_the_last_shared_reservation_is_released() {
         // Arrange
         let budget = ResourceBudget::new(10);
@@ -467,7 +530,7 @@ mod tests {
         let budget = ResourceBudget::new(10).with_contention_errors();
         let _held = budget.reserve(7, "retained memory").unwrap();
         let error = budget.reserve(4, "request").unwrap_err();
-        let contention = budget.take_contention(&error).expect("expected contention");
+        let contention = ResourceContention::from_error(&error).expect("expected contention");
 
         // Act
         let contention = contention.with_context("catalog readback");
@@ -485,7 +548,7 @@ mod tests {
         let _external = budget.reserve(1, "other owner").unwrap();
         let temporary = budget.reserve(8, "own workspace").unwrap();
         let error = budget.reserve(4, "next workspace").unwrap_err();
-        let contention = budget.take_contention(&error).expect("expected contention");
+        let contention = ResourceContention::from_error(&error).expect("expected contention");
 
         // Act
         drop(temporary);

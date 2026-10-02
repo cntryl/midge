@@ -97,7 +97,7 @@ impl HybridStorage {
             let range = rx
                 .recv_timeout(timeout)
                 .map_err(|error| MidgeError::Timeout(format!("control range: {error}")))?
-                .map_err(|error| control_error_with_reservation(&error, &memory))?;
+                .map_err(|error| control_error(&error))?;
             if range.len() != end - start {
                 return Err(MidgeError::Corruption(
                     "control range has incorrect length".into(),
@@ -198,7 +198,7 @@ impl HybridStorage {
                 Ok(StorageEvent::WriteComplete {
                     result: StorageOutcome::Err(error),
                     ..
-                }) => return Err(control_error_with_reservation(&error, &memory)),
+                }) => return Err(control_error(&error)),
                 Ok(event) => {
                     return Err(MidgeError::Internal(format!(
                         "control CAS failed: {event:?}"
@@ -219,15 +219,6 @@ impl HybridStorage {
         })()
         .map_err(ControlWriteFailure::Operation)
     }
-}
-
-fn control_error_with_reservation(
-    error: &crate::storage::StorageError,
-    memory: &ResourceReservation,
-) -> MidgeError {
-    let classified = control_error(error);
-    memory.restore_related_contention();
-    classified
 }
 
 fn control_error(error: &crate::storage::StorageError) -> MidgeError {

@@ -157,12 +157,7 @@ impl EventLoop {
         error: &crate::common::MidgeError,
         deadline: &OperationDeadline,
     ) -> bool {
-        let contention = self
-            .cloud_coordinator
-            .hybrid_storage
-            .as_ref()
-            .and_then(|storage| storage.maintenance_memory())
-            .and_then(|budget| budget.take_contention(error));
+        let contention = crate::common::resource_budget::ResourceContention::from_error(error);
         if !deadline.is_expired()
             && contention.is_some_and(|contention| {
                 self.cloud_coordinator
@@ -715,5 +710,59 @@ mod tests {
         // Assert
         assert!(!deferred);
         assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
+    }
+
+    #[test]
+    fn should_defer_ack_when_sibling_reservation_succeeds_after_admission_failure() {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .unwrap();
+        let budget = el
+            .cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .maintenance_memory()
+            .unwrap()
+            .with_contention_errors();
+        let reserve_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let _held = loop {
+            match budget.reserve(budget.limit() - 64, "active maintenance") {
+                Ok(held) => break held,
+                Err(error) => {
+                    assert!(
+                        std::time::Instant::now() < reserve_deadline,
+                        "shared maintenance budget never drained: {error}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
+        let failed_catalog_error = budget
+            .reserve(128, "catalog readback")
+            .expect_err("catalog admission must fail while the pool is full");
+        let _sibling = budget
+            .reserve(1, "sibling catalog publication")
+            .expect("sibling catalog reservation fits");
+
+        // Act
+        let deferred = el.defer_cloud_ack_for_memory(
+            7,
+            9,
+            &failed_catalog_error,
+            &OperationDeadline::unbounded(),
+        );
+
+        // Assert
+        assert!(
+            deferred,
+            "a sibling success must not erase the failure's cause"
+        );
+        assert_eq!(
+            el.cloud_coordinator.cloud_wal.upload_backlog.get(&7),
+            Some(&9)
+        );
     }
 }
