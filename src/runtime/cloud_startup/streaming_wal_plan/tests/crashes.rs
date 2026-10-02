@@ -89,6 +89,9 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
     let revision = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()?;
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()?;
     std::fs::write(artifacts.join("run.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "revision": String::from_utf8_lossy(&revision.stdout).trim(), "dirty": !status.stdout.is_empty(),
         "seed": 0x4d49_4447_4530_3331_u64, "backend": "CloudSimulated", "durability": "durable_catalog",
