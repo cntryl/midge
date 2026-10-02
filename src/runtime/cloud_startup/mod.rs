@@ -98,6 +98,12 @@ impl CloudWalRecoveryPlan {
         if self.max_unreplayed_sequence > catalog.sequence_floor {
             persistence.raise_wal_sequence_floor(writer_epoch, self.max_unreplayed_sequence)?;
         }
+        // Crash boundary: the floor is durable but nothing is renamed yet.
+        crate::failpoints::fail_point!("midge::cloud::after_wal_salvage_floor_persist", |_| Err(
+            crate::common::MidgeError::Internal(
+                "failpoint: crash after WAL salvage floor persisted".to_string()
+            )
+        ));
         self.set_aside_local_wal(db_path)?;
         if !self.unreplayed_segments.is_empty() {
             persistence.retire_unreplayed_wal_segments(writer_epoch, &self.unreplayed_segments)?;

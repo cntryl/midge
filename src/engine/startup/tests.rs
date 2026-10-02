@@ -863,6 +863,68 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_keep_floor_and_wal_recoverable_when_set_aside_crashes_after_floor_persist(
+) -> MidgeResult<()> {
+    use crate::lease::PrimaryLease as _;
+
+    // Arrange: salvage planned to set aside an active WAL holding sequences
+    // up to 5, which the catalog floor does not yet cover.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
+        crate::storage::cloud::MockCloudBackend::new(),
+    ))?;
+    let wal_dir = fixture.local_cache.path().join("wal");
+    std::fs::create_dir_all(&wal_dir)?;
+    let active = wal_dir.join(crate::wal::ACTIVE_FILE_NAME);
+    std::fs::write(&active, b"stale active WAL bytes")?;
+    let plan = crate::runtime::cloud_startup::CloudWalRecoveryPlan {
+        remote_segments: std::collections::BTreeMap::new(),
+        local_segments: std::collections::BTreeMap::new(),
+        active_wal: None,
+        opened_in_salvage_mode: true,
+        unreplayed_segments: Vec::new(),
+        max_unreplayed_sequence: 5,
+        set_aside_local_paths: vec![active.clone()],
+    };
+    let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(
+        std::sync::Arc::clone(&fixture.hybrid),
+    );
+    let epoch = fixture.lease.epoch();
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::after_wal_salvage_floor_persist", "return")
+        .expect("configure crash boundary");
+
+    // Act: crash after the floor is persisted and before the rename.
+    let crashed = plan.commit_set_aside(
+        &persistence,
+        epoch,
+        &fixture.wal_catalog,
+        fixture.local_cache.path(),
+    );
+    fail::remove("midge::cloud::after_wal_salvage_floor_persist");
+    scenario.teardown();
+
+    // Assert: the floor is durable, the file is untouched, and a restart
+    // that finishes the set-aside keeps the floor and retains the bytes.
+    assert!(crashed.is_err());
+    assert!(active.exists());
+    let reopened = persistence.fence_cloud_wal_catalog(epoch)?;
+    assert_eq!(reopened.sequence_floor, 5);
+    plan.commit_set_aside(&persistence, epoch, &reopened, fixture.local_cache.path())?;
+    assert!(!active.exists());
+    assert_eq!(
+        std::fs::read(wal_dir.join("wal.log.salvage-retained"))?,
+        b"stale active WAL bytes"
+    );
+    assert_eq!(
+        persistence.fence_cloud_wal_catalog(epoch)?.sequence_floor,
+        5
+    );
+    Ok(())
+}
+
 #[test]
 fn should_reject_provider_bootstrap_when_split_sst_store_has_remote_objects() -> MidgeResult<()> {
     // Arrange: the control store has no metadata, but a separate SST class
