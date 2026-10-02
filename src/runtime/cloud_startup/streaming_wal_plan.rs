@@ -127,7 +127,14 @@ impl StreamingCloudWalRecovery {
             limits,
         )?;
         skipped.extend(skipped_local);
-        enforce_epoch_order(db_path, &mut plan, &mut sources, &mut active_source, policy)?;
+        enforce_epoch_order(
+            db_path,
+            &mut plan,
+            &mut sources,
+            &mut skipped,
+            &mut active_source,
+            policy,
+        )?;
         stop_at_first_hole(
             db_path,
             catalog,
@@ -583,10 +590,16 @@ fn quarantine_active(fs: &dyn Fs, active: &Path) -> MidgeResult<()> {
     Ok(())
 }
 
+/// Strict recovery rejects a writer-epoch regression. Salvage drops the
+/// regressed source, which loses history exactly like an invalid segment:
+/// a dropped sealed segment joins `skipped` so `stop_at_first_hole` sets
+/// every later source aside, and a dropped active WAL is set aside only after
+/// the floor covering its sequences is durable.
 fn enforce_epoch_order(
     db_path: &Path,
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
+    skipped: &mut BTreeSet<u64>,
     active: &mut Option<ReplaySource>,
     policy: RecoveryPolicy,
 ) -> MidgeResult<()> {
@@ -615,6 +628,7 @@ fn enforce_epoch_order(
         }
     }
     for segment_id in stale {
+        skipped.insert(segment_id);
         sources.remove(&segment_id);
         plan.remote_segments.remove(&segment_id);
         plan.local_segments.remove(&segment_id);
@@ -630,12 +644,13 @@ fn enforce_epoch_order(
         }
         plan.opened_in_salvage_mode = true;
         tracing::warn!("skipping stale-epoch active WAL during salvage recovery");
-        if let Some(source) = active.as_ref() {
-            quarantine_active(
-                source.fs.as_ref(),
-                &db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME),
-            )?;
+        // Its sequences are unreplayed, so the floor must cover them. The
+        // rename is staged behind that floor, never done here.
+        if let Some(wal) = plan.active_wal {
+            plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(wal.max_sequence);
         }
+        plan.set_aside_local_paths
+            .push(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME));
         plan.active_wal = None;
         *active = None;
     }
@@ -756,7 +771,7 @@ fn stop_at_first_hole(
     }
     // Renamed only after startup persists the floor that covers them; see
     // `CloudWalRecoveryPlan::set_aside_local_wal`.
-    plan.set_aside_local_paths = local_paths;
+    plan.set_aside_local_paths.extend(local_paths);
     plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(max_sequence);
     Ok(())
 }

@@ -694,6 +694,152 @@ fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog(
 }
 
 #[test]
+fn should_not_replay_later_segment_when_salvage_skips_epoch_regressed_sealed_segment(
+) -> MidgeResult<()> {
+    // Arrange: segment 2 regresses the writer epoch, so salvage drops it.
+    // Segment 3 is valid history, but replaying it without 2 would keep a
+    // later write while losing whatever 2 held (for example a delete).
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    fixture.publish(3, 3, 9, &framed_wal(3, 9, b"three"))?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert: only the prefix before the lost segment replays.
+    assert!(recovered.plan.opened_in_salvage_mode);
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(
+        recovered
+            .plan
+            .unreplayed_segments
+            .iter()
+            .map(|segment| segment.segment_id)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 3);
+    assert_eq!(
+        recovered
+            .fs
+            .list_dir(&FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn should_set_aside_local_segments_after_epoch_regressed_local_segment() -> MidgeResult<()> {
+    // Arrange: local-only segment 2 regresses the epoch; local segment 3 and
+    // the active WAL are valid but follow the lost history.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"one"))?;
+    let stale = fixture.local(
+        &crate::wal::segment_file_name(2),
+        &framed_wal(2, 7, b"stale"),
+    )?;
+    let later = fixture.local(
+        &crate::wal::segment_file_name(3),
+        &framed_wal(3, 9, b"later"),
+    )?;
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(4, 9, b"active"))?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert: nothing is renamed before the floor is persisted.
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(recovered.plan.active_wal.is_none());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 4);
+    assert_eq!(recovered.plan.set_aside_local_paths.len(), 3);
+    assert!(stale.exists() && later.exists() && active.exists());
+    Ok(())
+}
+
+#[test]
+fn should_lift_floor_and_defer_rename_when_active_wal_has_stale_epoch() -> MidgeResult<()> {
+    // Arrange: the active WAL regresses the epoch after sealed segment 1.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"one"))?;
+    let mut bytes = framed_wal(2, 7, b"stale active");
+    bytes.extend_from_slice(&framed_wal(3, 7, b"stale active two"));
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert: new writes may not reuse a sequence held by the stale file, and
+    // the file stays in place until startup persists that floor.
+    assert!(recovered.plan.opened_in_salvage_mode);
+    assert!(recovered.plan.active_wal.is_none());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 3);
+    assert_eq!(recovered.plan.set_aside_local_paths, vec![active.clone()]);
+    assert!(active.exists(), "rename must wait for the durable floor");
+    assert!(!active.with_file_name("wal.log.salvage-retained").exists());
+    Ok(())
+}
+
+#[test]
+fn should_recompute_same_set_aside_when_open_crashes_between_floor_and_rename() -> MidgeResult<()> {
+    // Arrange: first open plans the set-aside and persists its floor, then
+    // crashes before the rename (modelled by skipping `set_aside_local_wal`).
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"one"))?;
+    let active = fixture.local(
+        crate::wal::ACTIVE_FILE_NAME,
+        &framed_wal(2, 7, b"stale active"),
+    )?;
+    let first = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+    fixture.catalog.sequence_floor = first.plan.max_unreplayed_sequence;
+
+    // Act
+    let second = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+    second
+        .plan
+        .set_aside_local_wal(&fixture.directory.path().join("local"))?;
+
+    // Assert
+    assert_eq!(second.plan.max_unreplayed_sequence, 2);
+    assert!(second.plan.active_wal.is_none());
+    assert!(!active.exists());
+    assert!(active.with_file_name("wal.log.salvage-retained").exists());
+    let third = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+    assert_eq!(third.plan.max_unreplayed_sequence, 2);
+    Ok(())
+}
+
+#[test]
+fn should_keep_strict_failure_without_set_aside_when_epoch_regresses() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    fixture.publish(3, 3, 9, &framed_wal(3, 9, b"three"))?;
+
+    // Act
+    let result = fixture.plan_only(RecoveryPolicy::Strict, limits());
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    Ok(())
+}
+
+#[test]
 fn should_reject_strict_recovery_when_later_segment_has_lower_writer_epoch() -> MidgeResult<()> {
     // Arrange
     let mut fixture = Fixture::new()?;
