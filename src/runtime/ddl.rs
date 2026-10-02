@@ -359,9 +359,12 @@ fn write_local_prepare(state: &RuntimeState, prepare: &DdlPrepare) -> MidgeResul
     Ok(())
 }
 
-fn clear_local_prepare(state: &RuntimeState) -> MidgeResult<()> {
+fn clear_local_prepare(state: &RuntimeState, storage: Option<&HybridStorage>) -> MidgeResult<()> {
     if state.is_memory_mode() || !local_prepare_exists(state)? {
         return Ok(());
+    }
+    if let Some(storage) = storage {
+        storage.check_write_authority()?;
     }
     state
         .fs
@@ -675,7 +678,7 @@ fn reconcile_prepared_with_resolution(
                 "cloud DDL prepare exists without a cloud authority".to_string(),
             ));
         }
-        clear_local_prepare(state)?;
+        clear_local_prepare(state, None)?;
         return Ok(());
     };
     if let Some(authority) = authority {
@@ -690,7 +693,7 @@ fn reconcile_prepared_with_resolution(
         .is_some_and(|registry| registry.operation(&prepare.op_id).is_some())
     {
         apply_local_edit(state, &prepare.edit)?;
-        clear_local_prepare(state)?;
+        clear_local_prepare(state, Some(storage))?;
         return Ok(());
     }
     if local_edit_matches(state, &prepare.edit) {
@@ -705,7 +708,7 @@ fn reconcile_prepared_with_resolution(
         // The successor changed the registry object's identity before this
         // read. The old holder's delayed CAS can no longer land, and replaying
         // its uncommitted intent under the new holder would invent a DDL edit.
-        clear_local_prepare(state)?;
+        clear_local_prepare(state, Some(storage))?;
         return Ok(());
     }
     if prepare.remote_cas_ambiguous {
@@ -727,7 +730,7 @@ fn reconcile_prepared_with_resolution(
         };
         return Err(MidgeError::Fenced(message.to_string()));
     }
-    clear_local_prepare(state)?;
+    clear_local_prepare(state, Some(storage))?;
     Ok(())
 }
 
@@ -776,7 +779,7 @@ fn redrive_ambiguous_prepare_within(
                     }) =>
             {
                 apply_local_edit(state, &prepare.edit)?;
-                clear_local_prepare(state)
+                clear_local_prepare(state, Some(storage))
             }
             Ok(_) => {
                 state.mark_ddl_authority_ambiguous();
@@ -794,7 +797,7 @@ fn redrive_ambiguous_prepare_within(
     }
 
     apply_local_edit(state, &prepare.edit)?;
-    clear_local_prepare(state)
+    clear_local_prepare(state, Some(storage))
 }
 
 /// Reconcile the remote CF registry into a freshly recovered local state.
@@ -924,7 +927,13 @@ pub(crate) fn execute_within(
         let definitely_not_committed = remote_cas_definitely_not_committed(&failure);
         let error = failure.error;
         if definitely_not_committed {
-            clear_local_prepare(state)?;
+            if let Err(cleanup_error) = clear_local_prepare(state, Some(storage)) {
+                // A successor may own the prepare now. Retain it on authority
+                // loss and preserve the original CAS failure classification.
+                if !matches!(cleanup_error, MidgeError::Fenced(_)) {
+                    return Err(cleanup_error);
+                }
+            }
             return Err(error);
         }
         // A provider can lose the successful CAS response. Resolve that
@@ -971,7 +980,7 @@ pub(crate) fn execute_within(
         tracing::warn!(%error, "remote DDL committed; retaining prepare and applying authoritative visibility after local persistence failure");
         return Ok(());
     }
-    if let Err(error) = clear_local_prepare(state) {
+    if let Err(error) = clear_local_prepare(state, Some(storage)) {
         tracing::warn!(%error, "cloud DDL committed but prepare cleanup will be retried");
     }
     Ok(())
@@ -1034,6 +1043,155 @@ mod tests {
                 )),
             });
         }
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_preserve_registry_when_validity_expires_before_ddl_cas() {
+        use crate::lease::PrimaryLease as _;
+
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let _scenario = fail::FailScenario::setup();
+        let directory = tempfile::tempdir().unwrap();
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "ddl-expiry-test".into(),
+        ));
+        let provider = Arc::new(LoseFirstRegistryCasCallback {
+            inner: cloud.clone(),
+            armed: AtomicBool::new(false),
+            registry_writes: AtomicUsize::new(0),
+        });
+        let storage = Arc::new(HybridStorage::with_policy(
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
+            provider.clone(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        let lease = provider_test_lease(&cloud, directory.path());
+        let _lease_guard = Arc::clone(&lease).try_acquire().unwrap();
+        let authority = provider_test_authority(&lease);
+        let validity = lease.lease_validity();
+        let source = Arc::clone(&validity);
+        let epoch = authority.writer_epoch;
+        storage
+            .configure_write_authority(Arc::new(move || {
+                source
+                    .remaining(epoch)
+                    .map(|_| ())
+                    .map_err(|error| MidgeError::Fenced(error.to_string()))
+            }))
+            .unwrap();
+        let deadline = crate::common::OperationDeadline::unbounded();
+        fence_remote_registry_on_startup(&storage, &authority, &deadline).unwrap();
+        let (_, original) = read_remote_registry_within(&storage, &deadline).unwrap();
+        let writes = provider.registry_writes.load(Ordering::SeqCst);
+        let mut state = RuntimeState::new(directory.path().join("state"), false);
+        let edit = create_edit(&state, "expired-cf").unwrap();
+        fail::cfg_callback("midge::ddl::before_remote_cas", move || {
+            validity.expire_for_test();
+        })
+        .unwrap();
+
+        // Act
+        let result = execute_within(
+            &mut state,
+            Some(&storage),
+            &edit,
+            Some(&authority),
+            &deadline,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+        let rejected = storage
+            .compare_exchange_remote_object_phased(
+                REMOTE_DDL_REGISTRY_KEY,
+                None,
+                Vec::new(),
+                &deadline,
+            )
+            .unwrap_err();
+        assert!(matches!(rejected.error, MidgeError::Fenced(_)));
+        assert!(!rejected.may_have_committed);
+        assert_eq!(provider.registry_writes.load(Ordering::SeqCst), writes);
+        let (_, actual) = read_remote_registry_within(&storage, &deadline).unwrap();
+        assert_eq!(actual.unwrap().bytes(), original.unwrap().bytes());
+        assert!(state
+            .manifest
+            .get_column_family_by_name("expired-cf")
+            .is_none());
+        assert!(read_local_prepare(&state).unwrap().is_some());
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_preserve_successor_prepare_when_predecessor_ddl_cas_is_fenced() {
+        use crate::lease::PrimaryLease as _;
+
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let _scenario = fail::FailScenario::setup();
+        let directory = tempfile::tempdir().unwrap();
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "ddl-prepare-expiry".into(),
+        ));
+        let storage = Arc::new(HybridStorage::with_policy(
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
+            cloud.clone(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        let lease = provider_test_lease(&cloud, directory.path());
+        let _lease_guard = Arc::clone(&lease).try_acquire().unwrap();
+        let authority = provider_test_authority(&lease);
+        let validity = lease.lease_validity();
+        let source = Arc::clone(&validity);
+        let epoch = authority.writer_epoch;
+        storage
+            .configure_write_authority(Arc::new(move || {
+                source
+                    .remaining(epoch)
+                    .map(|_| ())
+                    .map_err(|error| MidgeError::Fenced(error.to_string()))
+            }))
+            .unwrap();
+        let deadline = crate::common::OperationDeadline::unbounded();
+        fence_remote_registry_on_startup(&storage, &authority, &deadline).unwrap();
+        let mut state = RuntimeState::new(directory.path().join("state"), false);
+        let edit = create_edit(&state, "old-cf").unwrap();
+        let successor = DdlPrepare {
+            op_id: "successor-operation".into(),
+            expected_remote_epoch: 0,
+            writer_epoch: Some(epoch + 1),
+            edit: create_edit(&state, "successor-cf").unwrap(),
+            remote_cas_ambiguous: true,
+        };
+        let bytes = serialize(&successor).unwrap();
+        let successor_bytes = bytes.clone();
+        let prepare_path = directory.path().join("state").join(LOCAL_DDL_PREPARE_FILE);
+        fail::cfg_callback("midge::ddl::before_remote_cas", move || {
+            validity.expire_for_test();
+            std::fs::write(&prepare_path, &successor_bytes).unwrap();
+        })
+        .unwrap();
+
+        // Act
+        let result = execute_within(
+            &mut state,
+            Some(&storage),
+            &edit,
+            Some(&authority),
+            &deadline,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+        let retained = read_local_prepare(&state)
+            .unwrap()
+            .expect("successor prepare retained");
+        assert_eq!(serialize(&retained).unwrap(), bytes);
+        assert!(state.manifest.get_column_family_by_name("old-cf").is_none());
     }
 
     fn provider_test_lease(

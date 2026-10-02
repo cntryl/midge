@@ -94,7 +94,7 @@ qualification.
 | Family / template | Logical scaffold | Remaining physical or focused evidence |
 | --- | --- | --- |
 | Recovery: durable commits across restart | DurableRestart; clean sync restart | Actual abort prefixes and acknowledgment classification |
-| Recovery: epoch, hole, torn tail | None | Recovery-plan property and #663 combined quarantine/crash probes |
+| Recovery: epoch, hole, torn tail | 256 fixed-seed epoch/prefix properties; #663 sealed/active/combined regressions | Five actual floor/rename/retirement abort tuples; broader torn-tail campaign remains |
 | Recovery: predecessor after takeover and GC | None | #662 validity, takeover, GC, and reopen probes |
 | Snapshot: held snapshot versus later commits | HeldSnapshot, PinnedCompaction | Large public transaction plus maintenance and conflict-policy probes |
 | Snapshot: resident/spilled own writes | OrdinalIntents; both read fixtures | Scaling and read-source bounds for #667 |
@@ -108,7 +108,7 @@ qualification.
 | Concurrency: held iterator versus maintenance | None | Iterator held across explicit maintenance schedule |
 | Concurrency: capture/publication/GC | None | Named capture-to-pin race; sequential reads are insufficient |
 | Concurrency: CloudAck admission versus catalog | None | #666 sibling reservation and waiter completion schedule |
-| Failure: restore abort and retry | None | #664 actual process abort; foreign stages and target collisions |
+| Failure: restore abort and retry | #664/#665 merged in PR #675 | Eight physical tuples qualified on Linux/macOS/Windows; foreign stages and target collisions pass |
 | Failure: partial provider operations/cancellation | None | Supported provider adapter and cancellation probes |
 | Failure: permanent flush errors/retry/shutdown | None | Retry timing and bounded shutdown probes |
 | Boundary: binary keys and ranges | BinaryBoundaries; generator includes edges | Full backend campaign and encoder exclusion audit |
@@ -118,8 +118,8 @@ qualification.
 For every meaningful investigation, record contract, Jev prioritization, focused
 probe, Jev challenge, and confirmed/deepened/discarded outcome. Jev judgments do
 not substitute for implementation and test evidence. Deduplicate confirmed P1/P2
-findings against open issues before adding them to milestone 0.3.1. Publish the
-completed findings report and coverage map before beginning repairs.
+findings against open issues before adding them to milestone 0.3.1. The user directed confirmed repairs to proceed immediately after the full logical
+campaign. Complete the findings report and coverage map before release promotion.
 
 ## Named process-abort driver
 
@@ -156,3 +156,77 @@ The local evidence directory is
 `target/discovery-031/full-0e0a6f7c/0e24860e-f333-44fe-a112-9359805c1b3d`.
 This establishes the seven logical templates; the remaining physical, race,
 retry and focused-property evidence is still required for discovery exit.
+
+## Authority and salvage repair qualification
+
+PR #675 merged at `a06756579351c6e19484e33fc46d3a9a876806ec`; its
+actual merged tree matches the qualified candidate. Hosted CI and provider
+qualification passed, and downloaded artifacts prove eight named aborts with
+fourteen reopens/scans on each OS and 128 native provider history replays.
+Issues #664, #665, and harness-validity issue #674 are closed.
+
+The next repair batch covers #662/#663. Baseline probes demonstrate expired
+monotonic validity with cached health still true admitting an Engine commit,
+sealed epochs `8,7,9` replaying IDs `[1,3]`, and a stale active WAL losing its
+sequence floor. Candidate regressions cover resident/coalesced/spilled
+preparation boundaries, public Engine admission, strict nonmutation, and 256
+fixed-seed recovery-plan cases. Five actual abort tuples exercise durable floor
+publication, each of three quarantine renames, and pre-retirement interruption.
+Their test-only driver preserves tuple metadata and outcome counters under
+`target/discovery-031/salvage-*`; child SIGABRT and synced named sentinels prove
+the intended boundary. These are issue-specific regressions, separate from the
+twelve-scenario external-pattern budget.
+
+```sh
+cargo test --lib validity --all-features -- --test-threads=1
+cargo test --lib streaming_wal_plan::tests --all-features -- --test-threads=1
+cargo test --lib should_reject_predecessor --all-features -- --test-threads=1
+```
+
+Independent failure review identified an additional #662 continuation: the
+physical WAL worker could resume a queued append after its handle preparation
+outlived validity. The pre-guard runner regression and real flush-publication
+regression both fail. The repair carries the same validity into queued WAL
+write/fsync, replacement writers, flush finalization and control mirroring, and
+compaction publication. A scheduled regression blocks persistent handle open,
+queues while authorized, expires validity, and releases the worker; rejection
+must leave WAL bytes unchanged and retain operation-specific admission proof.
+Rotation and physical fsync have separate regressions. Provider-error
+classification remains unchanged. These checks extend the existing issue's
+expired-source contract rather than introducing a separate finding.
+
+The second independent review identified related rollback, rotation, completion
+and startup continuations. Focused pre-guard regressions fail for expiry inside
+a partial WAL write, before rotation rename, during flush provider validation,
+during startup validation, and before compaction input GC. The repair rechecks
+authority before rollback truncate and sync (retaining disk admission without
+a durable unchanged proof), after rotation preparation/shutdown, between intent
+persistence and manifest publication, and before clearing compaction intents.
+Compaction expiry before GC retains inputs and its intent; expiry after a valid
+GC retains the durable intent for recovery. None of these tests claim that a
+lease check can cancel an I/O call that has already entered the provider.
+
+Further call-site qualification exercises the real compaction completion handler,
+including its failure cleanup, and the paired cloud-flush/rotation transition.
+The corresponding pre-guard regressions reproduce unwanted input deletion and
+an unsettled-transition assertion. Both now fence without additional mutation.
+Salvage has an authority callback through floor publication, each quarantine
+rename after path preparation, directory sync, and catalog retirement. Expiry
+after floor publication or after one rename preserves a successor's active WAL
+and the complete raised floor. Failpoint tests acquire the repository's
+isolation guard before the fail crate's scenario lock; the expiry corpus also
+runs with eight test threads to check the required lock ordering.
+
+### Catalog authority continuation qualification
+
+Ordinary independent review traced the same #662 authority loss through composite catalog reads and provider upload preparation. On the pre-repair implementation, a provider read expiring shared validity was followed by a mirror write; actual startup fencing returned success after expiry; and a prepared upload entered the provider and timed out. These are subsequent submissions, not cancellation of requests already entered.
+
+Both cloud startup paths now install one storage-owned authority callback before catalog fencing. Catalog loading/repair, primary publication, mirror preparation, ACK publication, and prune catalog retirement share it. Control uploads recheck after admission and buffer preparation immediately before provider submission. Internal typed provenance preserves an authority-origin `Fenced` through mirror contextualization while retaining operation/provider error handling. Public supported signatures, variants, and formats are preserved.
+
+The focused fixture uses valid framed WAL objects and exact catalog entries across twelve schedules: startup fencing, ACK publication, prune catalog read, nonempty prune retirement, salvage floor and retirement, missing/corrupt primary repair, mirror preparation after an authorized primary commit, and prepared primary/mirror/prune-retirement submission. It requires zero post-expiry writes and exact retained catalog bytes; a separate prepared-upload regression requires admission cleanup. Final full-unit, pedantic Clippy, platform, and independent review qualification remain pending for the final source.
+
+The hosted macOS conflict-test failure also exposed confirmed test-validity issue #678: the advertised spilled transaction creates zero spill files under its original 256 KiB transaction pool. This is tracked separately for the transaction batch; it is not a claim of a new production authority regression.
+
+The actual prepared-prune retirement also returned success after an authority rejection because per-entry error contextualization hid `Fenced`; it now propagates that error unchanged. A pending predecessor delete could remove WAL republished with its unchanged remote identity by a successor. Physical conditional deletes now check the same authority after blocking proof preparation. The scheduled regression performs real successor upload, acknowledgment, and catalog publication, removes its local seal, then releases the predecessor proof; it requires zero DELETE submissions and successful Strict recovery from remote WAL.
+
+A final adjacent review reproduced runtime and startup DDL publication after validity expiry at the existing pre-CAS boundary: runtime creation returned success and startup published a registry before its later rejection. The phased CAS checks storage authority after request preparation and treats rejection before submission as definitely uncommitted. Provider startup installs its callback before DDL fencing. Regression assertions preserve registry bytes and local CF state, retain the no-commit classification, and leave a fresh startup registry absent. A rejected predecessor could then delete a successor’s replacement prepare from the shared cache; the focused schedule reproduced that deletion. All provider-backed prepare cleanup now checks shared authority immediately before removal, retaining mutable recovery metadata on authority loss. Definite CAS rejection keeps its original error classification, and the regression requires the exact successor prepare bytes to survive. Requests already entered at a provider remain potentially ambiguous.

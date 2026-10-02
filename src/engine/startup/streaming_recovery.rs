@@ -240,6 +240,7 @@ fn checkpoint_family(
                 config.hybrid_storage.clone(),
                 config.cloud_metadata_storage.clone(),
             )),
+            lease_validity: config.lease_validity.clone(),
             lease_healthy: config.lease_healthy.clone(),
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
@@ -284,6 +285,7 @@ fn commit_and_mirror_checkpoint(
         delta.identity.sequence,
         &delta.file_meta,
     )?;
+    validate_monotonic_lease(config)?;
     state.commit_flush_publication(
         delta.identity.cf_id,
         delta.identity.sequence,
@@ -300,6 +302,7 @@ fn commit_and_mirror_checkpoint(
             config.cloud_metadata_storage.clone(),
         )),
         metadata_publication_lock: config.metadata_publication_lock.clone(),
+        lease_validity: config.lease_validity.clone(),
         lease_healthy: config.lease_healthy.clone(),
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
@@ -408,6 +411,7 @@ fn install_checkpoint_output(
 }
 
 pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {
+    validate_monotonic_lease(config)?;
     if config
         .lease_healthy
         .as_ref()
@@ -424,6 +428,15 @@ pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeRes
                 config.writer_epoch,
             )
             .map_err(|error| error.into_validation_error("cloud WAL recovery"))?;
+    }
+    validate_monotonic_lease(config)
+}
+
+fn validate_monotonic_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {
+    if let Some(validity) = &config.lease_validity {
+        validity.remaining(config.writer_epoch).map_err(|error| {
+            error.into_validation_error("cloud WAL recovery monotonic lease validity")
+        })?;
     }
     Ok(())
 }

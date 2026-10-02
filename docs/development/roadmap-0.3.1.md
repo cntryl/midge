@@ -314,3 +314,14 @@ on candidate `3b267126` on macOS. Independent review found two test-only evidenc
 issues, tracked by #674: the Local crash fixture edited the wrong lease file,
 and the restore oracle did not compare keys. Both now have regressions.
 Hosted exact-head and post-merge qualification remain pending.
+
+## Delivery updates
+
+- PR #675 merged into `develop` as `a0675657`, closing #664, #665, and #674.
+  Candidate and actual merged trees match. Hosted Linux, Windows, and macOS CI
+  passed; native provider run `36942486981` passed 128 fixed-seed history replays.
+  Focused checks and eight actual aborts also passed on the merged revision.
+- The next coherent P1 batch repairs #662 lease authority and #663 salvage
+  prefix/floor ordering. Existing public signatures, error variants, and persisted
+  formats remain unchanged. Expanded discovery and full release qualification
+  remain gates before promotion and publication.

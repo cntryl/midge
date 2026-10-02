@@ -88,6 +88,7 @@ impl CloudWalRecoveryPlan {
     ///    segments, so only the persisted floor remembers their sequences.
     /// 3. Retire the cataloged segments. Retiring before step 2 would let the
     ///    next open replay local copies past the hole.
+    #[cfg(test)]
     pub(crate) fn commit_set_aside(
         &self,
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
@@ -95,31 +96,74 @@ impl CloudWalRecoveryPlan {
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
         db_path: &std::path::Path,
     ) -> crate::common::MidgeResult<()> {
+        self.commit_set_aside_with_authority(
+            persistence,
+            writer_epoch,
+            catalog,
+            db_path,
+            &|| Ok(()),
+        )
+    }
+
+    pub(crate) fn commit_set_aside_with_authority(
+        &self,
+        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
+        writer_epoch: u64,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        db_path: &std::path::Path,
+        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
+    ) -> crate::common::MidgeResult<()> {
+        validate()?;
         if self.max_unreplayed_sequence > catalog.sequence_floor {
-            persistence.raise_wal_sequence_floor(writer_epoch, self.max_unreplayed_sequence)?;
+            persistence.raise_wal_sequence_floor_with_authority(
+                writer_epoch,
+                self.max_unreplayed_sequence,
+                validate,
+            )?;
         }
-        self.set_aside_local_wal(db_path)?;
+        crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
+        validate()?;
+        self.set_aside_local_wal_with_authority(db_path, validate)?;
+        crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
+        validate()?;
         if !self.unreplayed_segments.is_empty() {
-            persistence.retire_unreplayed_wal_segments(writer_epoch, &self.unreplayed_segments)?;
+            persistence.retire_unreplayed_wal_segments_with_authority(
+                writer_epoch,
+                &self.unreplayed_segments,
+                validate,
+            )?;
         }
-        Ok(())
+        validate()
     }
 
     /// Renames the local WAL files salvage stopped short of and syncs `wal/`.
+    #[cfg(test)]
     pub(crate) fn set_aside_local_wal(
         &self,
         db_path: &std::path::Path,
+    ) -> crate::common::MidgeResult<()> {
+        self.set_aside_local_wal_with_authority(db_path, &|| Ok(()))
+    }
+
+    pub(crate) fn set_aside_local_wal_with_authority(
+        &self,
+        db_path: &std::path::Path,
+        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
         let fs = crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?;
         let mut renamed = false;
         for path in &self.set_aside_local_paths {
             let path = streaming_wal_plan::local_path(path)?;
             if fs.exists(&path).map_err(FsError::into_midge)? {
-                CloudStartupRecovery::quarantine_local_wal_alias(&fs, &path)?;
+                CloudStartupRecovery::quarantine_local_wal_alias_with_authority(
+                    &fs, &path, validate,
+                )?;
                 renamed = true;
+                crate::failpoints::fail_point!("midge::recovery::after_salvage_quarantine_rename");
             }
         }
         if renamed {
+            validate()?;
             fs.sync_dir(
                 &crate::io::FsPath::new("wal"),
                 crate::io::Durability::Durable,

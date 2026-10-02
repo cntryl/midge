@@ -957,6 +957,7 @@ impl CompactionCoordinator {
             pending.token.cf_id,
             pending.token.target_level,
         )?;
+        event_loop.check_lease_health()?;
         event_loop.manifest_actor.compaction_complete(
             &mut event_loop.state,
             &pending.token.input_ssts,
@@ -968,12 +969,14 @@ impl CompactionCoordinator {
                 "failpoint: compaction failed after durable manifest batch".to_string()
             ))
         );
+        event_loop.check_lease_health()?;
         event_loop.state.transition_compaction_publication_intent(
             &pending.token.input_ssts,
             &pending.token.output_ssts,
             crate::runtime::PublicationPhase::ManifestPublished,
         )?;
         crate::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+        event_loop.check_lease_health()?;
         crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::ManifestPublished)
     }
@@ -983,9 +986,11 @@ impl CompactionCoordinator {
         pending: &PendingCompactionPublication,
     ) -> crate::common::MidgeResult<()> {
         crate::failpoints::fail_point!("slice6::after_manifest_persist_before_sst_gc");
+        event_loop.check_lease_health()?;
         event_loop.publish_snapshot();
         let output_sizes =
             Self::resident_output_sizes(&event_loop.state.sst_dir, &pending.token.output_ssts)?;
+        event_loop.check_lease_health()?;
         let reservation = event_loop.compaction_actor.finish_publication(
             &mut event_loop.state,
             &pending.token.input_ssts,
@@ -1000,20 +1005,14 @@ impl CompactionCoordinator {
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
             hybrid.compaction_completed_with_token(token, &output_sizes);
         }
-        if event_loop.check_lease_health().is_ok() {
-            event_loop.gc_actor.delete_ssts(
-                &mut event_loop.state,
-                &pending.token.input_ssts,
-                hybrid_storage,
-            );
-        } else {
-            event_loop.state.mark_persistence_anomaly();
-            tracing::error!(
-                retained_inputs = pending.token.input_ssts.len(),
-                "writer lease is unhealthy before compaction input GC; retaining inputs"
-            );
-        }
+        event_loop.check_lease_health()?;
+        event_loop.gc_actor.delete_ssts(
+            &mut event_loop.state,
+            &pending.token.input_ssts,
+            hybrid_storage,
+        );
         crate::failpoints::fail_point!("midge::compaction::after_input_sst_gc");
+        event_loop.check_lease_health()?;
         event_loop.state.clear_compaction_publication_intent(
             &pending.token.input_ssts,
             &pending.token.output_ssts,
@@ -1044,6 +1043,7 @@ impl CompactionCoordinator {
             hybrid_storage: event_loop.cloud_coordinator.hybrid_storage.clone(),
             cloud_metadata_storage: event_loop.cloud_coordinator.cloud_metadata_storage.clone(),
             metadata_publication_lock: event_loop.metadata_publication_lock.clone(),
+            lease_validity: event_loop.fencing.lease_validity.clone(),
             lease_healthy: event_loop.fencing.lease_healthy.clone(),
             leader_store: event_loop.fencing.leader_store.clone(),
             leader_holder_id: event_loop.fencing.leader_holder_id.clone(),
@@ -1091,7 +1091,7 @@ impl CompactionCoordinator {
                 output_count = output_ssts.len(),
                 "retaining both compaction generations until cloud publication recovers"
             );
-        } else {
+        } else if event_loop.check_lease_health().is_ok() {
             // The local manifest batch is the durable authority. With no
             // remote authority to reconcile, its removed inputs are safe to
             // submit for local GC even if a later phase/checkpoint write
@@ -1099,6 +1099,9 @@ impl CompactionCoordinator {
             event_loop
                 .gc_actor
                 .delete_ssts(&mut event_loop.state, input_ssts, None);
+        } else {
+            event_loop.state.mark_persistence_anomaly();
+            tracing::warn!("retaining compaction inputs after writer authority loss");
         }
     }
 

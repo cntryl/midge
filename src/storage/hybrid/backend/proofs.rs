@@ -499,12 +499,12 @@ impl HybridStorage {
         let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)
             .map_err(RemoteCasFailure::not_committed)?;
-        self.cloud_backend_for_key(key).submit_write_request(
-            crate::storage::StorageRequest::new(key, *deadline, self.callback_timeout)
-                .with_precondition(precondition),
-            data,
-            tx,
-        );
+        let request = crate::storage::StorageRequest::new(key, *deadline, self.callback_timeout)
+            .with_precondition(precondition);
+        let backend = self.cloud_backend_for_key(key);
+        self.check_write_authority()
+            .map_err(RemoteCasFailure::not_committed)?;
+        backend.submit_write_request(request, data, tx);
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
@@ -756,6 +756,7 @@ impl HybridStorage {
         let event_queue = Arc::clone(&self.event_queue);
         let external_event_tx = self.external_event_tx.clone();
         let callback_timeout = self.callback_timeout;
+        let write_authority = self.write_authority.get().cloned();
 
         let mut workers = self.prune_workers.lock();
         self.ensure_guarded_delete_capacity(&workers, request_count)?;
@@ -797,13 +798,18 @@ impl HybridStorage {
                         .map_err(|error| error.to_string())?;
 
                         let (tx, rx) = std::sync::mpsc::channel();
-                        cloud.submit_delete_request(
+                        let request =
                             crate::storage::StorageRequest::new(&target_key, deadline, timeout)
                                 .with_precondition(crate::storage::StoragePrecondition::IfMatch(
                                     delete_identity,
-                                )),
-                            tx,
-                        );
+                                ));
+                        // A successor can republish a retained local seal with
+                        // this same remote identity. Check the predecessor's
+                        // authority again after the blocking target proof.
+                        if let Some(validate) = &write_authority {
+                            validate().map_err(|error| error.to_string())?;
+                        }
+                        cloud.submit_delete_request(request, tx);
                         match rx.recv_timeout(timeout) {
                             Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
                                 StorageOutcome::Ok(()) => Ok(()),
@@ -885,12 +891,12 @@ impl HybridStorage {
         crate::failpoints::fail_point!("midge::cloud::before_compaction_orphan_delete");
 
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_delete_request(
-            crate::storage::StorageRequest::new(&target_key, *deadline, timeout).with_precondition(
-                crate::storage::StoragePrecondition::IfMatch(metadata.clone()),
-            ),
-            tx,
-        );
+        let request = crate::storage::StorageRequest::new(&target_key, *deadline, timeout)
+            .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+                metadata.clone(),
+            ));
+        self.check_write_authority()?;
+        cloud.submit_delete_request(request, tx);
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
                 StorageOutcome::Ok(()) => Ok(()),

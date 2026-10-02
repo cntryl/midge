@@ -9,6 +9,7 @@ use std::time::Duration;
 /// Allows using real and mock filesystem implementations for testing.
 pub struct FsWalFactoryIo {
     fs: Arc<dyn Fs>,
+    write_authority: Option<crate::wal::traits::WriteAuthority>,
     io_timeout: Duration,
     counters: crate::telemetry::CounterSink,
 }
@@ -18,6 +19,7 @@ impl FsWalFactoryIo {
     pub fn new(fs: Arc<dyn Fs>) -> Self {
         Self {
             fs,
+            write_authority: None,
             io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             counters: crate::telemetry::CounterSink::default(),
         }
@@ -37,17 +39,26 @@ impl FsWalFactoryIo {
         self
     }
 
+    pub(crate) fn with_write_authority(
+        mut self,
+        authority: Option<crate::wal::traits::WriteAuthority>,
+    ) -> Self {
+        self.write_authority = authority;
+        self
+    }
+
     /// Create a new WAL writer using the `io::Fs` backend
     ///
     /// # Errors
     ///
     /// Returns an error if the writer cannot be created.
     pub fn create_writer(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
-        let writer = super::FsWalWriterIo::new_with_counters(
+        let writer = super::FsWalWriterIo::new_with_authority(
             path_str,
             Arc::clone(&self.fs),
             self.io_timeout,
             self.counters.clone(),
+            self.write_authority.clone(),
         )?;
         Ok(Box::new(writer))
     }

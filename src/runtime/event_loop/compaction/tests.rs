@@ -627,3 +627,98 @@ fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> 
     );
     Ok(())
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeResult<()> {
+    for before_gc in [true, false] {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::new(crate::runtime::ResponseRouter::new()),
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let input = "input.sst".to_string();
+        let input_path = event_loop.state.sst_dir.join(&input);
+        std::fs::write(&input_path, b"retained predecessor input")?;
+        event_loop.state.record_compaction_publication_intent(
+            0,
+            vec![input.clone()],
+            Vec::new(),
+        )?;
+        event_loop.state.transition_compaction_publication_intent(
+            std::slice::from_ref(&input),
+            &[],
+            crate::runtime::PublicationPhase::ManifestPublished,
+        )?;
+        let intent_path = directory.path().join(crate::metadata::files::INTENT_LOG);
+        let before = std::fs::read(&intent_path)?;
+        let epoch = event_loop.fencing.writer_epoch;
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(
+                epoch,
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        event_loop.fencing.lease_validity = Some(Arc::clone(&validity));
+        let pending = PendingCompactionPublication {
+            token: CompactionPublicationToken {
+                request_id: 1,
+                writer_epoch: epoch,
+                cf_id: 0,
+                target_level: 1,
+                output_generation: 1,
+                input_ssts: vec![input],
+                output_ssts: Vec::new(),
+            },
+            outputs: Vec::new(),
+            added: Vec::new(),
+            superseded_outputs: Vec::new(),
+            expected_phase: CompactionPublishPhase::ManifestPublished,
+        };
+        let boundary = if before_gc {
+            "slice6::after_manifest_persist_before_sst_gc"
+        } else {
+            "midge::compaction::after_input_sst_gc"
+        };
+        fail::cfg_callback(boundary, move || validity.expire_for_test()).unwrap();
+        let owner = CompactionCoordinator::publication_owner(&pending.token);
+        assert!(event_loop.publication_gate.try_acquire(owner.clone()));
+        let completion = CompactionPublishCompletion {
+            token: pending.token.clone(),
+            phase: CompactionPublishPhase::ManifestPublished,
+            result: Ok(()),
+        };
+        event_loop
+            .compaction_publication
+            .install(&event_loop.publication_gate, owner, pending)?;
+        let response = event_loop.router.register(1, "Compact");
+        // Act
+        CompactionCoordinator::handle_publication_completion(&mut event_loop, completion);
+        let result = response
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        // Assert
+        assert!(matches!(
+            result,
+            RuntimeResponse::Error {
+                error: MidgeError::Internal(ref message),
+                ..
+            } if message.contains("Fenced")
+        ));
+        assert_eq!(std::fs::read(&intent_path)?, before);
+        assert_eq!(input_path.exists(), before_gc);
+        if before_gc {
+            assert_eq!(std::fs::read(&input_path)?, b"retained predecessor input");
+        }
+        drop(scenario);
+    }
+    Ok(())
+}

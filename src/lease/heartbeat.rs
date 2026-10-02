@@ -334,6 +334,11 @@ impl LeaseHeartbeat {
     }
 
     #[cfg(test)]
+    pub(crate) fn validity_for_test(&self) -> Option<Arc<super::traits::LeaseValidity>> {
+        self.validity.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn healthy_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.healthy)
     }

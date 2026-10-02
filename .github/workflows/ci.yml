@@ -171,6 +171,14 @@ jobs:
           MIDGE_PHYSICAL_DISCOVERY: "1"
         run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
 
+      - name: Test lease validity and salvage crash ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --lib validity --all-features -- --test-threads=1
+          cargo test --lib should_reject_predecessor --all-features -- --test-threads=1
+          cargo test --lib should_preserve_floor_when_salvage_aborts --all-features -- --test-threads=1
+
       - name: Test workspace
         if: matrix.os == 'macos-latest'
         run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration

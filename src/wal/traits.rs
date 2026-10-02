@@ -43,7 +43,12 @@ impl WalAppendError {
 /// such a helper has no epoch to stamp, and recovery exempts epoch 0 from
 /// stale-writer fencing, so its records could survive a failover and overwrite
 /// a newer writer's data on replay.
+pub(crate) type WriteAuthority = std::sync::Arc<dyn Fn() -> MidgeResult<()> + Send + Sync>;
+
 pub trait WalWriter: Send + Sync {
+    /// Install the authority check used immediately before background mutations.
+    fn set_write_authority(&self, _authority: Option<WriteAuthority>) {}
+
     /// Append a pre-encoded record to the log and return the position where
     /// the record was written.
     ///

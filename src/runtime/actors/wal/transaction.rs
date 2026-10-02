@@ -37,6 +37,7 @@ impl WalActor {
         state: &mut RuntimeState,
         params: TransactionAppendParams,
     ) -> MidgeResult<(u64, usize, bool)> {
+        self.ensure_lease_validity()?;
         if params.ops.is_empty() {
             // An assertion-only commit is validated here without ever
             // reaching sequence allocation, WAL append, or memtable apply —
@@ -87,6 +88,7 @@ impl WalActor {
         state: &mut RuntimeState,
         params: TransactionAppendParams,
     ) -> MidgeResult<PreparedTransactionAppend> {
+        self.ensure_lease_validity()?;
         let TransactionAppendParams {
             request_id,
             ops,
@@ -142,6 +144,11 @@ impl WalActor {
             }
         };
 
+        crate::failpoints::fail_point!("midge::wal::after_transaction_preparation");
+        if let Err(error) = self.ensure_lease_validity() {
+            state.sequence = sequence_plan.begin_seq - 1;
+            return Err(error);
+        }
         Ok(PreparedTransactionAppend {
             request_id,
             sequence_plan,
@@ -169,6 +176,7 @@ impl WalActor {
             .flat_map(|prepared| prepared.apply_ops.iter())
             .collect::<Vec<_>>();
         Self::preflight_prepared_transaction_ops(state, &apply_ops)?;
+        self.ensure_lease_validity()?;
 
         self.append_prepared_transaction_batches(state, &prepared_transactions)?;
         let strict_group = prepared_transactions
@@ -196,6 +204,7 @@ impl WalActor {
             if !strict_group {
                 self.apply_transaction_durability(state, effective_durability, last_sequence)?;
             }
+            self.ensure_lease_validity()?;
             Self::apply_prevalidated_transaction_ops(
                 state,
                 apply_ops,
@@ -489,6 +498,10 @@ impl WalActor {
         let admitted = self.admit_wal_records(&records)?;
         let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
 
+        if let Err(error) = self.ensure_lease_validity() {
+            self.settle_wal_append(admitted, previous_position);
+            return Err(error);
+        }
         if let Some(writer) = self.writer_mut() {
             let append_start = Instant::now();
             let append_result = writer.append_batch_accounted(&records);

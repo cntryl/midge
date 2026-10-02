@@ -148,6 +148,7 @@ pub(crate) struct FlushPublishTask {
     pub fs: Arc<dyn crate::io::Fs>,
     pub storage: Arc<dyn FlushStorage>,
     pub lease_healthy: Option<Arc<AtomicBool>>,
+    pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
 }
@@ -173,6 +174,7 @@ pub(crate) struct FlushMirrorTask {
     pub storage: Arc<dyn FlushStorage>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
+    pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
     pub manifest_sequence: u64,
@@ -565,6 +567,7 @@ fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
     validate_publication_lease(
         task.build.identity,
         task.lease_healthy.as_ref(),
+        task.lease_validity.as_ref(),
         task.leader_store.as_ref(),
         task.leader_holder_id.as_deref(),
     )
@@ -573,6 +576,7 @@ fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
 fn validate_publication_lease(
     identity: FlushIdentity,
     lease_healthy: Option<&Arc<AtomicBool>>,
+    lease_validity: Option<&Arc<crate::lease::LeaseValidity>>,
     leader_store: Option<&Arc<dyn crate::lease::LeaderStore>>,
     leader_holder_id: Option<&str>,
 ) -> MidgeResult<()> {
@@ -584,12 +588,26 @@ fn validate_publication_lease(
             )));
         }
     }
+    let validate = || validate_monotonic_lease(identity, lease_validity);
+    validate()?;
     if let Some(store) = leader_store {
         store
             .validate_epoch(leader_holder_id.unwrap_or_default(), identity.writer_epoch)
             .map_err(|error| {
                 error.into_validation_error(&format!("flush {} publish", identity.flush_id))
             })?;
+    }
+    validate()
+}
+
+fn validate_monotonic_lease(
+    identity: FlushIdentity,
+    validity: Option<&Arc<crate::lease::LeaseValidity>>,
+) -> MidgeResult<()> {
+    if let Some(validity) = validity {
+        validity.remaining(identity.writer_epoch).map_err(|error| {
+            error.into_validation_error(&format!("flush {} monotonic validity", identity.flush_id))
+        })?;
     }
     Ok(())
 }
@@ -599,6 +617,7 @@ fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
         validate_publication_lease(
             task.delta.identity,
             task.lease_healthy.as_ref(),
+            task.lease_validity.as_ref(),
             task.leader_store.as_ref(),
             task.leader_holder_id.as_deref(),
         )
@@ -635,21 +654,25 @@ fn finalize_staged_sst(
         .exists(&final_fs_path)
         .map_err(FsError::into_midge)?
     {
+        validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
         task.fs
             .create_dir_all(&crate::io::FsPath::new("sst"))
             .map_err(FsError::into_midge)?;
         let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
+        validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
         task.fs
             .rename_atomic(&staging_fs_path, &final_fs_path)
             .map_err(FsError::into_midge)?;
     }
     validate_final_sst(task, final_path, &task.build.file_meta, budget)?;
+    validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
     task.fs
         .sync_dir(
             &crate::io::FsPath::new("sst"),
             crate::io::Durability::Durable,
         )
         .map_err(FsError::into_midge)?;
+    validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
     cleanup_non_authoritative_staging(task);
     Ok(())
 }
@@ -924,6 +947,7 @@ mod tests {
                 Some(Arc::clone(&hybrid)),
                 Some(control_cloud),
             )),
+            lease_validity: None,
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             leader_store: Some(leader_store),
             leader_holder_id: Some("flush-test".to_string()),
@@ -946,6 +970,7 @@ mod tests {
             fs: Arc::clone(&fixture.task.fs),
             storage: Arc::clone(&fixture.task.storage),
             metadata_publication_lock: fixture.metadata_publication_lock.clone(),
+            lease_validity: fixture.task.lease_validity.clone(),
             lease_healthy: fixture.task.lease_healthy.clone(),
             leader_store: fixture.task.leader_store.clone(),
             leader_holder_id: fixture.task.leader_holder_id.clone(),
@@ -1334,6 +1359,46 @@ mod tests {
         assert!(matches!(error, MidgeError::Fenced(_)));
         assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert!(!fixture.directory.path().join("db/intent_log.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_flush_publication_when_validity_expires_without_watchdog() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = publication_fixture(usize::MAX)?;
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(7, Instant::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        fixture.task.lease_validity = Some(Arc::clone(&validity));
+        validity.expire_for_test();
+        // Act
+        let result = FlushActor::publish(&fixture.task);
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
+        assert!(fixture.task.build.staging_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_control_mirror_when_validity_expires_after_local_publication(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = publication_fixture(usize::MAX)?;
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(7, Instant::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        fixture.task.lease_validity = Some(Arc::clone(&validity));
+        let delta = FlushActor::publish(&fixture.task)?;
+        let task = mirror_task(&fixture, delta);
+        validity.expire_for_test();
+        // Act
+        let result = mirror_after_local_commit(&task);
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         Ok(())
     }
 

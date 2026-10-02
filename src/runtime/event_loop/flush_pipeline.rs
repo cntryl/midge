@@ -216,6 +216,7 @@ impl EventLoop {
                 self.cloud_coordinator.hybrid_storage.clone(),
                 self.cloud_coordinator.cloud_metadata_storage.clone(),
             )),
+            lease_validity: self.fencing.lease_validity.clone(),
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),
@@ -515,6 +516,8 @@ impl EventLoop {
             delta.identity.sequence,
             &delta.file_meta,
         )?;
+        crate::failpoints::fail_point!("midge::flush::after_publication_intent_before_manifest");
+        self.check_lease_health()?;
         self.state.commit_flush_publication(
             delta.identity.cf_id,
             delta.identity.sequence,
@@ -539,6 +542,7 @@ impl EventLoop {
                 self.cloud_coordinator.cloud_metadata_storage.clone(),
             )),
             metadata_publication_lock: self.metadata_publication_lock.clone(),
+            lease_validity: self.fencing.lease_validity.clone(),
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),
@@ -600,6 +604,7 @@ impl EventLoop {
                     ))
                 })?;
         }
+        self.check_lease_health()?;
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
             return Err(crate::common::MidgeError::Fenced(format!(
                 "flush {} is no longer owned by this runtime",
@@ -1344,8 +1349,133 @@ mod tests {
         }
     }
 
-    /// Answers the first `valid_reads` leader reads, then reports the lease
-    /// taken by another holder.
+    struct ValidityExpiringLeaderStore {
+        epoch: u64,
+        validity: Arc<crate::lease::LeaseValidity>,
+        expire_on_validation: bool,
+    }
+    impl crate::lease::LeaderStore for ValidityExpiringLeaderStore {
+        fn acquire_leadership(
+            &self,
+            _holder_id: &str,
+        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+            unreachable!("validation fixture")
+        }
+        fn read_current(
+            &self,
+        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            if self.expire_on_validation {
+                self.validity.expire_for_test();
+            }
+            Ok(Some(crate::lease::LeaderRecord {
+                epoch: self.epoch,
+                holder_id: "writer".into(),
+                acquired_at: "test".into(),
+            }))
+        }
+    }
+
+    #[test]
+    fn should_reject_flush_metadata_when_provider_validation_outlives_validity(
+    ) -> crate::common::MidgeResult<()> {
+        assert_rejected_flush_metadata(true)
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_reject_flush_metadata_when_intent_persistence_outlives_validity(
+    ) -> crate::common::MidgeResult<()> {
+        assert_rejected_flush_metadata(false)
+    }
+
+    fn assert_rejected_flush_metadata(
+        expire_on_validation: bool,
+    ) -> crate::common::MidgeResult<()> {
+        #[cfg(feature = "failpoints")]
+        let _guard = crate::failpoints::test_failpoint_guard();
+        #[cfg(feature = "failpoints")]
+        let _scenario = fail::FailScenario::setup();
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop.state.get_cf(0).unwrap().memtable.put_with_seq(
+            b"key".to_vec(),
+            b"value".to_vec(),
+            1,
+            None,
+        )?;
+        let flush_id = event_loop.freeze_active_memtable(0)?.unwrap();
+        let epoch = event_loop.fencing.writer_epoch;
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(
+                epoch,
+                std::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        event_loop.fencing.lease_validity = Some(Arc::clone(&validity));
+        event_loop.fencing.leader_store = Some(Arc::new(ValidityExpiringLeaderStore {
+            epoch,
+            validity: Arc::clone(&validity),
+            expire_on_validation,
+        }));
+        event_loop.fencing.leader_holder_id = Some("writer".into());
+        let delta = FlushPublicationDelta {
+            identity: FlushIdentity {
+                flush_id,
+                writer_epoch: epoch,
+                cf_id: 0,
+                sequence: 1,
+            },
+            file_meta: crate::runtime::FileMeta {
+                name: crate::cloud_layout::file_name(0, 0, 1),
+                level: 0,
+                size_bytes: 128,
+                content_crc32c: Some(1),
+                cf_id: 0,
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(1),
+                key_bounds_complete: true,
+            },
+            next_sst_seq: 2,
+        };
+        let metadata = || {
+            [
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+                crate::metadata::files::JOURNAL,
+                crate::metadata::files::INTENT_LOG,
+            ]
+            .map(|name| std::fs::read(directory.path().join(name)).ok())
+        };
+        let before = metadata();
+        #[cfg(feature = "failpoints")]
+        if !expire_on_validation {
+            fail::cfg_callback(
+                "midge::flush::after_publication_intent_before_manifest",
+                move || validity.expire_for_test(),
+            )
+            .unwrap();
+        }
+        // Act
+        let result = event_loop.commit_flush_metadata(&delta);
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+        if expire_on_validation {
+            assert_eq!(metadata(), before);
+        } else {
+            assert_eq!(&metadata()[..2], &before[..2]);
+            assert!(
+                metadata()[2].is_some(),
+                "accepted intent remains authoritative"
+            );
+        }
+        Ok(())
+    }
+
+    /// Answers the first `valid_reads` leader reads, then reports a successor.
     struct ExpiringLeaderStore {
         epoch: u64,
         valid_reads: std::sync::atomic::AtomicUsize,
