@@ -273,6 +273,7 @@ mod transaction_state;
 impl WalActor {
     #[cfg(test)]
     pub(crate) fn replace_writer_for_test(&mut self, writer: Box<dyn WalWriter>) {
+        writer.set_write_authority(self.write_authority());
         match &mut self.io {
             WalIoState::Open {
                 writer: current, ..
@@ -295,6 +296,7 @@ impl WalActor {
         fs: Arc<dyn Fs>,
         writer: Box<dyn WalWriter>,
     ) {
+        writer.set_write_authority(self.write_authority());
         self.io = WalIoState::Open { fs, writer };
     }
 
@@ -457,6 +459,7 @@ impl WalActor {
     }
 
     fn install_transition_writer(&mut self, writer: Box<dyn WalWriter>) -> MidgeResult<()> {
+        writer.set_write_authority(self.write_authority());
         match &mut self.io {
             WalIoState::Transitioning {
                 writer: current, ..
@@ -849,6 +852,19 @@ impl WalActor {
         validity: Option<Arc<crate::lease::LeaseValidity>>,
     ) {
         self.lease_validity = validity;
+        if let Some(writer) = self.writer() {
+            writer.set_write_authority(self.write_authority());
+        }
+    }
+
+    fn write_authority(&self) -> Option<crate::wal::traits::WriteAuthority> {
+        let validity = Arc::clone(self.lease_validity.as_ref()?);
+        let epoch = self.current_epoch;
+        Some(Arc::new(move || {
+            validity.remaining(epoch).map(|_| ()).map_err(|error| {
+                error.into_validation_error("monotonic writer lease validity lost")
+            })
+        }))
     }
 
     fn ensure_lease_validity(&self) -> MidgeResult<()> {

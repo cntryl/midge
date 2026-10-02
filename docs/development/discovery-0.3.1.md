@@ -182,3 +182,15 @@ cargo test --lib validity --all-features -- --test-threads=1
 cargo test --lib streaming_wal_plan::tests --all-features -- --test-threads=1
 cargo test --lib should_reject_predecessor --all-features -- --test-threads=1
 ```
+
+Independent failure review identified an additional #662 continuation: the
+physical WAL worker could resume a queued append after its handle preparation
+outlived validity. The pre-guard runner regression and real flush-publication
+regression both fail. The repair carries the same validity into queued WAL
+write/fsync, replacement writers, flush finalization and control mirroring, and
+compaction publication. A scheduled regression blocks persistent handle open,
+queues while authorized, expires validity, and releases the worker; rejection
+must leave WAL bytes unchanged and retain operation-specific admission proof.
+Rotation and physical fsync have separate regressions. Provider-error
+classification remains unchanged. These checks extend the existing issue's
+expired-source contract rather than introducing a separate finding.

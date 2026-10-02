@@ -2622,3 +2622,45 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
     scenario.teardown();
     Ok(())
 }
+
+#[test]
+fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(1, Instant::now() + Duration::from_secs(60))
+        .unwrap();
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let ticket = seal_ticket_for_test(&actor, &state);
+    actor.rotate(&mut state, &ticket)?;
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"key"),
+        Some(Bytes::from_static(b"value")),
+        1,
+        1,
+    );
+    // Act
+    validity.expire_for_test();
+    let result = actor.writer().unwrap().append_record_accounted(&record);
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::wal::traits::WalAppendError {
+            error: MidgeError::Fenced(_),
+            unchanged: true
+        })
+    ));
+    assert_eq!(std::fs::metadata(temp.path().join("wal/wal.log"))?.len(), 0);
+    Ok(())
+}

@@ -1044,6 +1044,7 @@ impl CompactionCoordinator {
             hybrid_storage: event_loop.cloud_coordinator.hybrid_storage.clone(),
             cloud_metadata_storage: event_loop.cloud_coordinator.cloud_metadata_storage.clone(),
             metadata_publication_lock: event_loop.metadata_publication_lock.clone(),
+            lease_validity: event_loop.fencing.lease_validity.clone(),
             lease_healthy: event_loop.fencing.lease_healthy.clone(),
             leader_store: event_loop.fencing.leader_store.clone(),
             leader_holder_id: event_loop.fencing.leader_holder_id.clone(),

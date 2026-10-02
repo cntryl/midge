@@ -105,6 +105,8 @@ pub(crate) const MAX_BUFFER_POOL_SIZE: usize = 64;
 
 /// Configuration struct to reduce constructor arguments
 pub struct WriterConfig {
+    pub(crate) write_authority:
+        Arc<parking_lot::RwLock<Option<crate::wal::traits::WriteAuthority>>>,
     pub fs: Arc<dyn Fs>,
     pub path: FsPath,
     pub queue: Arc<Mutex<Vec<QueuedWrite>>>,
@@ -266,6 +268,11 @@ impl WriterRunner {
                 unchanged: true,
             })?;
 
+        self.check_write_authority().map_err(|error| WriteFailure {
+            error,
+            unchanged: true,
+        })?;
+
         if let Some(file) = file_opt.as_mut() {
             let write_result =
                 if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
@@ -310,6 +317,14 @@ impl WriterRunner {
             error: crate::common::MidgeError::Internal("wal writer has no file handle".to_string()),
             unchanged: true,
         })
+    }
+
+    fn check_write_authority(&self) -> crate::common::MidgeResult<()> {
+        let authority = self.config.write_authority.read().clone();
+        if let Some(check) = authority {
+            check()?;
+        }
+        Ok(())
     }
 
     fn ensure_file_handle<'a>(
@@ -373,6 +388,10 @@ impl WriterRunner {
                     return Err(());
                 }
             }
+        }
+        if let Err(error) = self.check_write_authority() {
+            self.mark_sync_failure(error);
+            return Err(());
         }
         if let Some(file) = file_opt.as_mut() {
             let sync_start = Instant::now();
@@ -630,6 +649,7 @@ mod tests {
         let fs: Arc<dyn Fs> = Arc::new(FailingOpenFs);
         WriterRunner::new(WriterConfig {
             fs,
+            write_authority: Arc::new(parking_lot::RwLock::new(None)),
             path: FsPath::new("wal.log"),
             queue: Arc::new(Mutex::new(Vec::new())),
             queue_cond: Arc::new(Condvar::new()),
@@ -640,6 +660,50 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             counters: crate::telemetry::CounterSink::default(),
         })
+    }
+
+    #[test]
+    fn should_reject_physical_append_when_validity_expires_after_handle_preparation() {
+        // Arrange
+        let fs = Arc::new(crate::io::MockFs::new());
+        let mut runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
+        drop(
+            fs.open(
+                &FsPath::new("wal.log"),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .unwrap(),
+        );
+        runner.config.fs = fs.clone();
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(1, Instant::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        let check = Arc::clone(&validity);
+        *runner.config.write_authority.write() = Some(Arc::new(move || {
+            check
+                .remaining(1)
+                .map(|_| ())
+                .map_err(|error| error.into_validation_error("physical WAL authority"))
+        }));
+        let mut file = Some(runner.open_file_handle().unwrap());
+        validity.expire_for_test();
+        // Act
+        let result = runner.append_once(&mut file, bytes::Bytes::from_static(b"queued"));
+        // Assert
+        assert!(matches!(
+            result,
+            Err(WriteFailure {
+                error: crate::common::MidgeError::Fenced(_),
+                unchanged: true
+            })
+        ));
+        assert_eq!(fs.metadata(&FsPath::new("wal.log")).unwrap().len, 0);
     }
 
     #[test]
