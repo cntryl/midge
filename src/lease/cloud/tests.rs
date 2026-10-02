@@ -60,7 +60,7 @@ impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
         let scripted = is_conditional
             && self
                 .scripted_puts_remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                     (remaining > 0).then_some(remaining.saturating_sub(1))
                 })
                 .is_ok();

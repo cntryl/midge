@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 /// Write-authority state owned independently from message dispatch.
 pub struct RuntimeFence {
+    pub(super) lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub(super) lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) ddl_authority_ambiguous: bool,
     pub(super) writer_epoch: u64,
@@ -23,6 +24,14 @@ impl RuntimeFence {
                     "lease heartbeat reports unhealthy — refusing writes".into(),
                 ));
             }
+        }
+        if let Some(validity) = &self.lease_validity {
+            validity.remaining(self.writer_epoch).map_err(|error| {
+                if let Some(healthy) = &self.lease_healthy {
+                    healthy.store(false, std::sync::atomic::Ordering::Release);
+                }
+                error.into_validation_error("monotonic writer lease validity lost")
+            })?;
         }
         Ok(())
     }
@@ -61,7 +70,9 @@ impl RuntimeFence {
                 tracing::error!(%error, "writer lease validation failed; runtime fenced");
             }
             error
-        })
+        })?;
+        // Provider validation may block beyond our monotonic authority window.
+        self.check_health()
     }
 }
 
@@ -89,10 +100,42 @@ mod tests {
         }
     }
 
+    struct ExpiringLeaderStore(Arc<crate::lease::LeaseValidity>);
+
+    impl LeaderStore for ExpiringLeaderStore {
+        fn acquire_leadership(&self, _: &str) -> Result<LeaderRecord, LeaseError> {
+            Err(LeaseError::Internal("unused test acquisition".into()))
+        }
+        fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
+            Ok(None)
+        }
+        fn validate_epoch(&self, _: &str, _: u64) -> Result<(), LeaseError> {
+            self.0.expire_for_test();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_reject_authority_when_provider_validation_outlives_validity() {
+        // Arrange
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
+            .unwrap();
+        let (mut fence, _) = fence(|| LeaseError::IoError("unused".into()));
+        fence.lease_validity = Some(Arc::clone(&validity));
+        fence.leader_store = Some(Arc::new(ExpiringLeaderStore(validity)));
+        // Act
+        let result = fence.validate_within(&OperationDeadline::unbounded());
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    }
+
     fn fence(make: fn() -> LeaseError) -> (RuntimeFence, Arc<AtomicBool>) {
         let healthy = Arc::new(AtomicBool::new(true));
         let fence = RuntimeFence {
             lease_healthy: Some(Arc::clone(&healthy)),
+            lease_validity: None,
             ddl_authority_ambiguous: false,
             writer_epoch: 1,
             leader_store: Some(Arc::new(FailingLeaderStore { make })),
@@ -139,5 +182,98 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
         assert!(!healthy.load(Ordering::Acquire));
+    }
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::*;
+
+    #[test]
+    fn should_reject_expired_validity_when_cached_health_is_true() {
+        // Arrange
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(
+                1,
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
+            )
+            .unwrap();
+        validity.expire_for_test();
+        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fence = RuntimeFence {
+            lease_validity: Some(validity),
+            lease_healthy: Some(Arc::clone(&healthy)),
+            ddl_authority_ambiguous: false,
+            writer_epoch: 1,
+            leader_store: None,
+            leader_holder_id: None,
+        };
+        // Act
+        let result = fence.check_health();
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    }
+}
+
+#[cfg(test)]
+mod takeover_tests {
+    use super::*;
+    use crate::lease::PrimaryLease;
+
+    #[test]
+    fn should_reject_predecessor_when_successor_takes_expired_lease() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let predecessor = Arc::new(
+            crate::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+                directory.path(),
+                false,
+                std::time::Duration::from_secs(2),
+                std::time::Duration::ZERO,
+            )
+            .unwrap(),
+        );
+        let _old_guard = Arc::clone(&predecessor).try_acquire().unwrap();
+        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fence = RuntimeFence {
+            lease_validity: Some(predecessor.lease_validity()),
+            lease_healthy: Some(Arc::clone(&healthy)),
+            ddl_authority_ambiguous: false,
+            writer_epoch: predecessor.epoch(),
+            leader_store: predecessor.get_leader_store(),
+            leader_holder_id: Some(predecessor.holder_id()),
+        };
+        let remaining = predecessor
+            .lease_validity()
+            .remaining(predecessor.epoch())
+            .unwrap();
+        std::thread::sleep(remaining + std::time::Duration::from_millis(100));
+        let successor = Arc::new(
+            crate::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+                directory.path(),
+                false,
+                std::time::Duration::from_secs(2),
+                std::time::Duration::ZERO,
+            )
+            .unwrap(),
+        );
+        let _new_guard = Arc::clone(&successor).try_acquire().unwrap();
+        assert!(healthy.load(std::sync::atomic::Ordering::Acquire));
+        // Act
+        let result = fence.check_health();
+        // Assert
+        assert!(successor.epoch() > predecessor.epoch());
+        assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+        assert_eq!(
+            successor
+                .get_leader_store()
+                .unwrap()
+                .read_current()
+                .unwrap()
+                .unwrap()
+                .holder_id,
+            successor.holder_id()
+        );
     }
 }

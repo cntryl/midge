@@ -913,3 +913,28 @@ fn should_keep_accepted_cloud_commit_replayable_when_batch_is_between_half_and_f
         ),
     }
 }
+
+#[test]
+fn should_reject_startup_publication_when_validity_expires_without_watchdog() {
+    // Arrange
+    let validity = std::sync::Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(
+            1,
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
+        .unwrap();
+    let config = crate::runtime::RuntimeConfig {
+        writer_epoch: 1,
+        lease_validity: Some(std::sync::Arc::clone(&validity)),
+        lease_healthy: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            true,
+        ))),
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    validity.expire_for_test();
+    // Act
+    let result = super::validate_lease(&config);
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+}

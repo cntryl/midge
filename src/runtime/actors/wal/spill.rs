@@ -45,6 +45,7 @@ impl WalActor {
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         params: super::SpilledTransactionAppendParams,
     ) -> MidgeResult<(u64, usize, bool)> {
+        self.ensure_lease_validity()?;
         let super::SpilledTransactionAppendParams {
             request_id,
             assertions,
@@ -85,6 +86,8 @@ impl WalActor {
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
             Self::preflight_point(state, &apply_op).map(|_| ())
         })?;
+        crate::failpoints::fail_point!("midge::wal::after_spilled_preparation");
+        self.ensure_lease_validity()?;
         let mut wal_may_have_changed = false;
         let (wal_bytes, wal_records) = match self.append_spilled_wal_records(
             request_id,
@@ -111,7 +114,8 @@ impl WalActor {
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
-        if let Err(error) = Self::apply_spilled_transaction_ops(
+        self.ensure_lease_validity()?;
+        if let Err(error) = self.apply_spilled_transaction_ops(
             state,
             source,
             &sequence_plan,
@@ -129,7 +133,11 @@ impl WalActor {
             self.fence_transition(state, message.clone());
             state.mark_persistence_anomaly();
             // Durably logged but not applied: a restart applies it (#537).
-            return Err(MidgeError::RecoveryFailed(message));
+            return Err(if matches!(error, MidgeError::Fenced(_)) {
+                error
+            } else {
+                MidgeError::RecoveryFailed(message)
+            });
         }
 
         let deferred = matches!(
@@ -353,6 +361,10 @@ impl WalActor {
     ) -> MidgeResult<()> {
         let admitted = self.admit_wal_records(std::slice::from_ref(record))?;
         let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        if let Err(error) = self.ensure_lease_validity() {
+            self.settle_wal_append(admitted, previous_position);
+            return Err(error);
+        }
         let Some(writer) = self.writer_mut() else {
             if let Some(storage) = &self.storage_budget {
                 storage.settle_local_wal_admission(admitted, 0);
@@ -371,6 +383,7 @@ impl WalActor {
     }
 
     fn apply_spilled_transaction_ops(
+        &self,
         state: &mut RuntimeState,
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         sequence_plan: &TxnSequencePlan,
@@ -385,6 +398,7 @@ impl WalActor {
             ));
             let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
+            self.ensure_lease_validity()?;
             Self::apply_transaction_op_to_memtable(state, apply_op)
         })?;
         tracing::trace!(

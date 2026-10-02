@@ -327,6 +327,7 @@ impl EventLoop {
             snapshot_cache: None,
             read_resources,
             fencing: fencing::RuntimeFence {
+                lease_validity: config.lease_validity.clone(),
                 lease_healthy: config.lease_healthy.clone(),
                 ddl_authority_ambiguous: false,
                 writer_epoch: config.writer_epoch,
@@ -416,6 +417,7 @@ impl EventLoop {
     ) {
         Self::attach_engine_counters(state, wal_actor, config);
         wal_actor.set_read_resources(read_resources.cloned());
+        wal_actor.set_lease_validity(config.lease_validity.clone());
         if let Some(store) = config.leader_store.clone() {
             wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
         }

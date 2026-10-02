@@ -767,12 +767,15 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.frontiers.local_durable(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
     assert!(matches!(later, Err(MidgeError::RecoveryFailed(_))));
     assert_eq!(state.sequence, sequence_after_failure);
     Ok(())
@@ -1117,12 +1120,15 @@ fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() ->
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
     assert_eq!(wal_actor.append_calls(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
     Ok(())
 }
 
@@ -1211,12 +1217,15 @@ fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> Mi
     // Assert
     assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
     assert_eq!(wal_actor.append_calls(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("first column family remains")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("first column family remains")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
     Ok(())
 }
 
@@ -1286,12 +1295,15 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
     assert!(matches!(result, Err(MidgeError::NoSpace(_))));
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(wal_actor.sync_calls(), 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
 
     fail::remove("midge::wal::inject_no_space_on_sync");
     scenario.teardown();
@@ -1727,12 +1739,15 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
         assert!(state.persistence_anomaly_detected());
         assert_eq!(state.wal.pending_writes, 0);
         assert_eq!(state.wal.frontiers.local_durable(), 0);
-        assert!(state
-            .get_cf(0)
-            .expect("default column family")
-            .memtable
-            .iter_all()
-            .is_empty());
+        assert_eq!(
+            state
+                .get_cf(0)
+                .expect("default column family")
+                .memtable
+                .iter_all()
+                .len(),
+            0
+        );
         let later = prepare_put_transaction(
             &mut actor,
             &mut state,
@@ -2490,5 +2505,242 @@ fn should_not_regress_local_durable_seq_when_older_sync_receipt_completes_after_
     // Assert
     assert_eq!(state.wal.frontiers.local_durable(), 20);
     assert_eq!(state.wal.frontiers.last_synced(), 20);
+    Ok(())
+}
+
+#[test]
+fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeResult<()> {
+    // Arrange
+    for policy in [
+        DurabilityPolicy::BestEffort,
+        DurabilityPolicy::CloudAsync,
+        DurabilityPolicy::Strict,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+        let mut actor = WalActor::new(
+            temp.path().join("wal"),
+            policy,
+            BatchConfig::default(),
+            false,
+            1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        )?;
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity.activate(1, Instant::now() + Duration::from_mins(1))?;
+        actor.set_lease_validity(Some(Arc::clone(&validity)));
+        let first = prepare_put_transaction(&mut actor, &mut state, 1, b"first", b"value", policy)?;
+        let second =
+            prepare_put_transaction(&mut actor, &mut state, 2, b"second", b"value", policy)?;
+        validity.expire_for_test();
+        // Act
+        let result = actor.append_prepared_transactions(&mut state, vec![first, second]);
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert_eq!(actor.append_calls(), 0);
+        assert_eq!(state.get_cf(0).unwrap().memtable.iter_all().len(), 0);
+        assert_eq!(
+            std::fs::metadata(temp.path().join("wal").join(crate::wal::ACTIVE_FILE_NAME))?.len(),
+            0
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    for policy in [DurabilityPolicy::BestEffort, DurabilityPolicy::CloudAsync] {
+        for spilled in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+            let mut actor = WalActor::new(
+                temp.path().join("wal"),
+                policy,
+                BatchConfig::default(),
+                false,
+                1,
+                crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            )?;
+            let validity = Arc::new(crate::lease::LeaseValidity::new());
+            validity.activate(1, Instant::now() + Duration::from_secs(60))?;
+            actor.set_lease_validity(Some(Arc::clone(&validity)));
+            let trigger = if spilled {
+                "midge::wal::after_spilled_preparation"
+            } else {
+                "midge::wal::after_transaction_preparation"
+            };
+            let observed = Arc::clone(&validity);
+            fail::cfg_callback(trigger, move || observed.expire_for_test()).unwrap();
+            // Act
+            let result = if spilled {
+                let pool =
+                    Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0));
+                let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
+                    pool,
+                    temp.path(),
+                    false,
+                    1,
+                );
+                writes.push(crate::runtime::TransactionOp::Put {
+                    cf_id: 0,
+                    key: Bytes::from_static(b"key"),
+                    value: Bytes::from_static(b"value"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                })?;
+                actor.append_spilled_transaction(
+                    &mut state,
+                    &writes.take_source(),
+                    SpilledTransactionAppendParams {
+                        request_id: 1,
+                        assertions: Vec::new(),
+                        durability_policy: Some(policy),
+                        start_sequence: 0,
+                        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+                    },
+                )
+            } else {
+                prepare_put_transaction(&mut actor, &mut state, 1, b"key", b"value", policy)
+                    .map(|_| (0, 0, false))
+            };
+            fail::remove(trigger);
+            // Assert
+            assert!(matches!(result, Err(MidgeError::Fenced(_))));
+            assert_eq!(actor.append_calls(), 0);
+            assert_eq!(state.get_cf(0).unwrap().memtable.iter_all().len(), 0);
+            assert_eq!(
+                std::fs::metadata(temp.path().join("wal").join(crate::wal::ACTIVE_FILE_NAME))?
+                    .len(),
+                0
+            );
+        }
+    }
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(1, Instant::now() + Duration::from_mins(1))
+        .unwrap();
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let ticket = seal_ticket_for_test(&actor, &state);
+    actor.rotate(&mut state, &ticket)?;
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"key"),
+        Some(Bytes::from_static(b"value")),
+        1,
+        1,
+    );
+    // Act
+    validity.expire_for_test();
+    let result = actor.writer().unwrap().append_record_accounted(&record);
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::wal::traits::WalAppendError {
+            error: MidgeError::Fenced(_),
+            unchanged: true
+        })
+    ));
+    assert_eq!(std::fs::metadata(temp.path().join("wal/wal.log"))?.len(), 0);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_preserve_active_wal_when_validity_expires_before_rotation_rename() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(1, Instant::now() + Duration::from_secs(60))
+        .unwrap();
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let ticket = seal_ticket_for_test(&actor, &state);
+    let expire = Arc::clone(&validity);
+    fail::cfg_callback("midge::wal::inject_fail_before_rename", move || {
+        expire.expire_for_test();
+    })
+    .unwrap();
+    let active = temp.path().join("wal/wal.log");
+    let before = std::fs::read(&active)?;
+    // Act
+    let result = actor.rotate(&mut state, &ticket);
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    assert_eq!(std::fs::read(&active)?, before);
+    assert!(!temp
+        .path()
+        .join("wal")
+        .join(crate::wal::segment_file_name(1))
+        .exists());
+    drop(scenario);
+    Ok(())
+}
+
+#[test]
+fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(1, Instant::now() + Duration::from_mins(1))
+        .unwrap();
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let ticket = seal_ticket_for_test(&actor, &state);
+    actor.flush_for_cloud_upload(&mut state, &ticket)?;
+    let active = temp.path().join("wal/wal.log");
+    let before = std::fs::read(&active)?;
+    validity.expire_for_test();
+    // Act
+    let result = actor.rotate(&mut state, &ticket);
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    assert!(actor.is_open() || actor.is_fenced());
+    assert_eq!(std::fs::read(&active)?, before);
+    assert!(!temp
+        .path()
+        .join("wal")
+        .join(crate::wal::segment_file_name(1))
+        .exists());
     Ok(())
 }

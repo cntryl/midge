@@ -24,7 +24,8 @@ pub(crate) use metadata_snapshot::{
 };
 mod streaming_prune;
 use crate::storage::hybrid::backend::ControlObject;
-use catalog::{commit_catalog_within, load_and_repair_catalog_within, AdmittedCatalog};
+pub(crate) use catalog::AdmittedCatalog;
+use catalog::{commit_catalog_within, load_and_repair_catalog_within};
 
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneProgress(Arc<parking_lot::Mutex<streaming_prune::Progress>>);
@@ -395,6 +396,9 @@ fn retire_covered_wal_catalog_prefix_within(
             &current_catalog,
             deadline,
         ) {
+            if matches!(error, MidgeError::Fenced(_)) {
+                return Err(error);
+            }
             let message =
                 contextualize_cloud_error(error, "cloud WAL catalog batch retirement failed")
                     .to_string();
@@ -550,17 +554,20 @@ impl CloudPersistence {
     /// writes made after it. Their objects stay in place: retirement here is
     /// not followed by a delete. The sequence floor covering them must
     /// already be persisted (`raise_wal_sequence_floor`).
-    pub(crate) fn retire_unreplayed_wal_segments(
+    pub(crate) fn retire_unreplayed_wal_segments_with_authority(
         &self,
         writer_epoch: u64,
         segments: &[PublishedWalSegment],
+        validate: &dyn Fn() -> MidgeResult<()>,
     ) -> MidgeResult<()> {
+        validate()?;
         let deadline = crate::common::OperationDeadline::unbounded();
         let _catalog_mutation =
             self.lock_wal_catalog_mutation_within(&deadline, "cloud WAL salvage retirement")?;
-        let authority = load_and_repair_catalog_within(self, &deadline)?.ok_or_else(|| {
-            MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
-        })?;
+        let authority = catalog::load_and_repair_catalog_with_authority(self, &deadline, validate)?
+            .ok_or_else(|| {
+                MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+            })?;
         let mut catalog = authority.catalog;
         let mut changed = false;
         for segment in segments {
@@ -569,30 +576,54 @@ impl CloudPersistence {
                 .map_err(MidgeError::Fenced)?;
         }
         if changed {
-            commit_catalog_within(self, Some(&authority.primary), &catalog, &deadline)?;
+            catalog::commit_catalog_with_authority(
+                self,
+                Some(&authority.primary),
+                &catalog,
+                &deadline,
+                validate,
+            )?;
         }
         Ok(())
     }
 
     /// Persist a sequence floor above WAL that salvage sets aside, so a crash
     /// before the first flush cannot hand those sequences out again (#529).
+    #[cfg(test)]
     pub(crate) fn raise_wal_sequence_floor(
         &self,
         writer_epoch: u64,
         sequence_floor: u64,
     ) -> MidgeResult<()> {
+        self.raise_wal_sequence_floor_with_authority(writer_epoch, sequence_floor, &|| Ok(()))
+    }
+
+    pub(crate) fn raise_wal_sequence_floor_with_authority(
+        &self,
+        writer_epoch: u64,
+        sequence_floor: u64,
+        validate: &dyn Fn() -> MidgeResult<()>,
+    ) -> MidgeResult<()> {
+        validate()?;
         let deadline = crate::common::OperationDeadline::unbounded();
         let _catalog_mutation =
             self.lock_wal_catalog_mutation_within(&deadline, "cloud WAL salvage floor")?;
-        let authority = load_and_repair_catalog_within(self, &deadline)?.ok_or_else(|| {
-            MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
-        })?;
+        let authority = catalog::load_and_repair_catalog_with_authority(self, &deadline, validate)?
+            .ok_or_else(|| {
+                MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+            })?;
         let mut catalog = authority.catalog;
         if catalog
             .raise_sequence_floor(writer_epoch, sequence_floor)
             .map_err(MidgeError::Fenced)?
         {
-            commit_catalog_within(self, Some(&authority.primary), &catalog, &deadline)?;
+            catalog::commit_catalog_with_authority(
+                self,
+                Some(&authority.primary),
+                &catalog,
+                &deadline,
+                validate,
+            )?;
         }
         Ok(())
     }
@@ -673,6 +704,7 @@ impl CloudPersistence {
                     "cloud WAL catalog publication failed",
                 ))
             }
+            Err(error @ MidgeError::Fenced(_)) => Err(error),
             Err(error) => Err(contextualize_cloud_error(
                 error,
                 "cloud WAL catalog publication failed",

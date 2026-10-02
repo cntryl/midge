@@ -37,6 +37,7 @@ const MAX_WAIT_ATTEMPTS: u32 = 50;
 pub struct FsWalWriterIo {
     /// Reserved for segment rotation.
     fs: Arc<dyn Fs>,
+    write_authority: Arc<parking_lot::RwLock<Option<crate::wal::traits::WriteAuthority>>>,
     /// Operational counters of the owning engine.
     counters: crate::telemetry::CounterSink,
 
@@ -103,12 +104,26 @@ impl FsWalWriterIo {
     /// # Errors
     ///
     /// Returns an error if the WAL file cannot be created or opened.
+    #[cfg(test)]
     pub(crate) fn new_with_counters(
         path_str: &str,
         fs: Arc<dyn Fs>,
         io_timeout: Duration,
         counters: crate::telemetry::CounterSink,
     ) -> MidgeResult<Self> {
+        Self::new_with_authority(path_str, fs, io_timeout, counters, None)
+    }
+
+    pub(crate) fn new_with_authority(
+        path_str: &str,
+        fs: Arc<dyn Fs>,
+        io_timeout: Duration,
+        counters: crate::telemetry::CounterSink,
+        authority: Option<crate::wal::traits::WriteAuthority>,
+    ) -> MidgeResult<Self> {
+        if let Some(check) = &authority {
+            check()?;
+        }
         let path = FsPath::new(path_str);
 
         // Verify file exists or can be created by checking metadata
@@ -127,6 +142,9 @@ impl FsWalWriterIo {
         // Get current file size
         let metadata = fs.metadata(&path).map_err(FsError::into_midge)?;
         let current_pos = metadata.len;
+        if let Some(check) = &authority {
+            check()?;
+        }
         if current_pos == 0 {
             // A new (or still empty) active WAL: frames fsynced into it later
             // are lost after a crash unless its directory entry is durable.
@@ -146,6 +164,7 @@ impl FsWalWriterIo {
 
         let writer = Self {
             fs,
+            write_authority: Arc::new(parking_lot::RwLock::new(authority)),
             counters,
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(current_pos)),
             queue: Arc::new(Mutex::new(Vec::new())),
@@ -160,6 +179,7 @@ impl FsWalWriterIo {
 
         // Spawn background writer thread
         let config = WriterConfig {
+            write_authority: Arc::clone(&writer.write_authority),
             fs: Arc::clone(&writer.fs),
             path,
             queue: writer.queue.clone(),
@@ -291,6 +311,10 @@ impl FsWalWriterIo {
 }
 
 impl WalWriter for FsWalWriterIo {
+    fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
+        *self.write_authority.write() = authority;
+    }
+
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
         self.append_record_accounted(record)
             .map_err(|failure| failure.error)
@@ -410,6 +434,7 @@ mod tests {
 
     fn writer_without_background_worker() -> FsWalWriterIo {
         FsWalWriterIo {
+            write_authority: Arc::new(parking_lot::RwLock::new(None)),
             fs: Arc::new(crate::io::MockFs::new()),
             counters: crate::telemetry::CounterSink::default(),
             queue: Arc::new(Mutex::new(Vec::new())),
@@ -455,8 +480,14 @@ mod tests {
         }
     }
 
+    type OpenGate = (
+        std::sync::mpsc::Sender<()>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    );
+
     #[derive(Default)]
     struct SyncCountingFs {
+        open_gate: Option<Arc<OpenGate>>,
         inner: crate::io::MockFs,
         durable_sync_count: Arc<AtomicUsize>,
     }
@@ -471,6 +502,10 @@ mod tests {
             path: &FsPath,
             options: OpenOptions,
         ) -> FsResult<Box<dyn File>> {
+            if let Some(gate) = &self.open_gate {
+                gate.0.send(()).unwrap();
+                gate.1.lock().unwrap().recv().unwrap();
+            }
             Ok(Box::new(SyncCountingFile {
                 inner: self.inner.open_persistent_handle(path, options)?,
                 durable_sync_count: Arc::clone(&self.durable_sync_count),
@@ -831,6 +866,95 @@ mod tests {
 
         // Assert
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_physical_fsync_when_validity_expires_without_watchdog() -> MidgeResult<()> {
+        // Arrange
+        let fs = Arc::new(SyncCountingFs::default());
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
+            .unwrap();
+        let check = Arc::clone(&validity);
+        let writer = FsWalWriterIo::new_with_authority(
+            "wal.log",
+            fs.clone(),
+            Duration::from_secs(5),
+            crate::telemetry::CounterSink::default(),
+            Some(Arc::new(move || {
+                check
+                    .remaining(1)
+                    .map(|_| ())
+                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))
+            })),
+        )?;
+        validity.expire_for_test();
+        // Act
+        let result = writer.sync();
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+        assert_eq!(fs.durable_sync_count.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_queued_append_when_validity_expires_during_handle_open() -> MidgeResult<()> {
+        // Arrange
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let fs = Arc::new(SyncCountingFs {
+            open_gate: Some(Arc::new((entered_tx, std::sync::Mutex::new(release_rx)))),
+            ..SyncCountingFs::default()
+        });
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
+            .unwrap();
+        let check = Arc::clone(&validity);
+        let writer = Arc::new(FsWalWriterIo::new_with_authority(
+            "wal.log",
+            fs.clone(),
+            Duration::from_secs(10),
+            crate::telemetry::CounterSink::default(),
+            Some(Arc::new(move || {
+                check
+                    .remaining(1)
+                    .map(|_| ())
+                    .map_err(|error| error.into_validation_error("queued WAL authority"))
+            })),
+        )?);
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let append_writer = Arc::clone(&writer);
+        let appender = std::thread::spawn(move || {
+            append_writer.append_record_accounted(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+                1,
+            ))
+        });
+        let watchdog = std::time::Instant::now() + Duration::from_secs(5);
+        while writer.queue.lock().is_empty() {
+            assert!(std::time::Instant::now() < watchdog, "append did not queue");
+            std::thread::yield_now();
+        }
+        // Act
+        validity.expire_for_test();
+        release_tx.send(()).unwrap();
+        let result = appender.join().unwrap();
+        // Assert
+        assert!(matches!(
+            result,
+            Err(WalAppendError {
+                error: crate::common::MidgeError::Fenced(_),
+                unchanged: true
+            })
+        ));
+        assert_eq!(fs.metadata(&FsPath::new("wal.log")).unwrap().len, 0);
+        assert_eq!(writer.current_pos(), 0);
         Ok(())
     }
 

@@ -105,6 +105,8 @@ pub(crate) const MAX_BUFFER_POOL_SIZE: usize = 64;
 
 /// Configuration struct to reduce constructor arguments
 pub struct WriterConfig {
+    pub(crate) write_authority:
+        Arc<parking_lot::RwLock<Option<crate::wal::traits::WriteAuthority>>>,
     pub fs: Arc<dyn Fs>,
     pub path: FsPath,
     pub queue: Arc<Mutex<Vec<QueuedWrite>>>,
@@ -266,6 +268,11 @@ impl WriterRunner {
                 unchanged: true,
             })?;
 
+        self.check_write_authority().map_err(|error| WriteFailure {
+            error,
+            unchanged: true,
+        })?;
+
         if let Some(file) = file_opt.as_mut() {
             let write_result =
                 if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
@@ -283,9 +290,25 @@ impl WriterRunner {
                 Ok(()) => Ok(start_pos),
                 Err(write_error) => {
                     tracing::error!(error = ?write_error, start_pos, "wal writer write_at failed");
-                    match file
-                        .truncate(start_pos)
-                        .and_then(|()| file.sync(Durability::Durable))
+                    self.check_write_authority().map_err(|error| WriteFailure {
+                        error,
+                        unchanged: false,
+                    })?;
+                    let rollback = file.truncate(start_pos);
+                    if rollback.is_ok() {
+                        self.check_write_authority().map_err(|error| WriteFailure {
+                            error,
+                            unchanged: false,
+                        })?;
+                    }
+                    let rollback = rollback.and_then(|()| file.sync(Durability::Durable));
+                    if rollback.is_ok() {
+                        self.check_write_authority().map_err(|error| WriteFailure {
+                            error,
+                            unchanged: false,
+                        })?;
+                    }
+                    match rollback
                     {
                         Ok(()) => Err(WriteFailure {
                             error: writer_error(
@@ -310,6 +333,14 @@ impl WriterRunner {
             error: crate::common::MidgeError::Internal("wal writer has no file handle".to_string()),
             unchanged: true,
         })
+    }
+
+    fn check_write_authority(&self) -> crate::common::MidgeResult<()> {
+        let authority = self.config.write_authority.read().clone();
+        if let Some(check) = authority {
+            check()?;
+        }
+        Ok(())
     }
 
     fn ensure_file_handle<'a>(
@@ -373,6 +404,10 @@ impl WriterRunner {
                     return Err(());
                 }
             }
+        }
+        if let Err(error) = self.check_write_authority() {
+            self.mark_sync_failure(error);
+            return Err(());
         }
         if let Some(file) = file_opt.as_mut() {
             let sync_start = Instant::now();
@@ -472,6 +507,9 @@ mod tests {
         physical_bytes: Arc<AtomicU64>,
         truncate_succeeds: bool,
         sync_succeeds: bool,
+        expire_on_write: Option<Arc<crate::lease::LeaseValidity>>,
+        expire_on_truncate: Option<Arc<crate::lease::LeaseValidity>>,
+        sync_count: Arc<AtomicU64>,
     }
 
     impl crate::io::File for PartialWriteFile {
@@ -483,6 +521,12 @@ mod tests {
                 offset + data.len() as u64 / 2,
                 std::sync::atomic::Ordering::SeqCst,
             );
+            if let Some(validity) = &self.expire_on_write {
+                // Represents successor bytes beyond the predecessor append position.
+                self.physical_bytes
+                    .store(1024, std::sync::atomic::Ordering::SeqCst);
+                validity.expire_for_test();
+            }
             Err(FsError::NoSpace("after partial write".into()))
         }
         fn truncate(&mut self, len: u64) -> FsResult<()> {
@@ -491,6 +535,9 @@ mod tests {
             }
             self.physical_bytes
                 .store(len, std::sync::atomic::Ordering::SeqCst);
+            if let Some(validity) = &self.expire_on_truncate {
+                validity.expire_for_test();
+            }
             Ok(())
         }
         fn append(&mut self, _data: Bytes) -> FsResult<u64> {
@@ -502,11 +549,60 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst))
         }
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
+            self.sync_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.sync_succeeds {
                 Ok(())
             } else {
                 Err(FsError::Io("rollback sync failed".into()))
             }
+        }
+    }
+
+    #[test]
+    fn should_stop_rollback_mutations_when_validity_expires_during_io() {
+        for expire_during_write in [true, false] {
+            // Arrange
+            let validity = Arc::new(crate::lease::LeaseValidity::new());
+            validity
+                .activate(1, Instant::now() + Duration::from_mins(1))
+                .unwrap();
+            let check = Arc::clone(&validity);
+            let runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
+            *runner.config.write_authority.write() = Some(Arc::new(move || {
+                check
+                    .remaining(1)
+                    .map(|_| ())
+                    .map_err(|error| error.into_validation_error("rollback authority"))
+            }));
+            let physical_bytes = Arc::new(AtomicU64::new(0));
+            let sync_count = Arc::new(AtomicU64::new(0));
+            let mut file: Option<Box<dyn crate::io::File>> = Some(Box::new(PartialWriteFile {
+                physical_bytes: Arc::clone(&physical_bytes),
+                truncate_succeeds: true,
+                sync_succeeds: true,
+                expire_on_write: expire_during_write.then(|| Arc::clone(&validity)),
+                expire_on_truncate: (!expire_during_write).then(|| Arc::clone(&validity)),
+                sync_count: Arc::clone(&sync_count),
+            }));
+            // Act
+            let failure = runner
+                .append_once(&mut file, Bytes::from_static(b"partial frame"))
+                .unwrap_err();
+            // Assert
+            assert!(matches!(
+                failure.error,
+                crate::common::MidgeError::Fenced(_)
+            ));
+            assert!(
+                !failure.unchanged,
+                "rollback lacks a durable unchanged proof"
+            );
+            assert_eq!(sync_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert_eq!(
+                physical_bytes.load(std::sync::atomic::Ordering::SeqCst),
+                if expire_during_write { 1024 } else { 0 }
+            );
         }
     }
 
@@ -520,6 +616,9 @@ mod tests {
                 physical_bytes: Arc::clone(&physical_bytes),
                 truncate_succeeds,
                 sync_succeeds,
+                expire_on_write: None,
+                expire_on_truncate: None,
+                sync_count: Arc::new(AtomicU64::new(0)),
             }));
 
             // Act
@@ -630,6 +729,7 @@ mod tests {
         let fs: Arc<dyn Fs> = Arc::new(FailingOpenFs);
         WriterRunner::new(WriterConfig {
             fs,
+            write_authority: Arc::new(parking_lot::RwLock::new(None)),
             path: FsPath::new("wal.log"),
             queue: Arc::new(Mutex::new(Vec::new())),
             queue_cond: Arc::new(Condvar::new()),
@@ -640,6 +740,50 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             counters: crate::telemetry::CounterSink::default(),
         })
+    }
+
+    #[test]
+    fn should_reject_physical_append_when_validity_expires_after_handle_preparation() {
+        // Arrange
+        let fs = Arc::new(crate::io::MockFs::new());
+        let mut runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
+        drop(
+            fs.open(
+                &FsPath::new("wal.log"),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .unwrap(),
+        );
+        runner.config.fs = fs.clone();
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(1, Instant::now() + std::time::Duration::from_mins(1))
+            .unwrap();
+        let check = Arc::clone(&validity);
+        *runner.config.write_authority.write() = Some(Arc::new(move || {
+            check
+                .remaining(1)
+                .map(|_| ())
+                .map_err(|error| error.into_validation_error("physical WAL authority"))
+        }));
+        let mut file = Some(runner.open_file_handle().unwrap());
+        validity.expire_for_test();
+        // Act
+        let result = runner.append_once(&mut file, bytes::Bytes::from_static(b"queued"));
+        // Assert
+        assert!(matches!(
+            result,
+            Err(WriteFailure {
+                error: crate::common::MidgeError::Fenced(_),
+                unchanged: true
+            })
+        ));
+        assert_eq!(fs.metadata(&FsPath::new("wal.log")).unwrap().len, 0);
     }
 
     #[test]

@@ -38,7 +38,7 @@ impl CloudBackend for LimitedRanges {
         if delay >= timeout
             || self
                 .allowance
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                     left.checked_sub(1)
                 })
                 .is_err()

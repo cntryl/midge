@@ -1,6 +1,8 @@
 use super::format::{previous_sparse_offset, read_op_primary_key_frame, RunFile, RunHeader};
-use super::{op_primary_key_bytes, SpillRun, TransactionWriteSet, RUN_HEADER_LEN};
+use super::range::{read_ordered_range, RangeEntry, RangeHeader, RangeOrder};
+use super::{lookup_run_points, IntentLookup, SpillRun, TransactionWriteSet, RUN_HEADER_LEN};
 use crate::common::{MidgeError, MidgeResult};
+use crate::runtime::range_cover::RangeCoverSweep;
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -242,61 +244,195 @@ impl std::iter::Iterator for RunKeyCursor {
     }
 }
 
-enum IntentKeyIterator {
-    Resident(std::vec::IntoIter<Bytes>),
-    Run(RunKeyCursor),
+/// Newest point (put or delete) intent for a key, with its ordinal.
+pub(crate) type IntentPoint = (u64, IntentLookup);
+
+/// One distinct intent key with its newest point intent. Range deletes are
+/// resolved separately by [`IntentKeyScan::resolve`], because they also hide
+/// keys that only the snapshot holds.
+pub(crate) struct IntentEntry {
+    pub(crate) key: Bytes,
+    pub(crate) point: Option<IntentPoint>,
 }
 
-impl IntentKeyIterator {
-    fn next(&mut self) -> Option<MidgeResult<Bytes>> {
-        match self {
-            Self::Resident(keys) => keys.next().map(Ok),
-            Self::Run(keys) => keys.next(),
+/// Heap entry ordered so the scan's next key pops first.
+struct HeadEntry {
+    key: Bytes,
+    source: usize,
+    reverse: bool,
+}
+
+impl PartialEq for HeadEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for HeadEntry {}
+impl PartialOrd for HeadEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for HeadEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let order = self
+            .key
+            .cmp(&other.key)
+            .then_with(|| self.source.cmp(&other.source));
+        if self.reverse {
+            order
+        } else {
+            order.reverse()
         }
     }
 }
 
-struct IntentKeySource {
-    iterator: IntentKeyIterator,
-    head: Option<MidgeResult<Bytes>>,
-    primed: bool,
-    needs_advance: bool,
+/// Streams one run's range deletes in the order a scan reaches them: by
+/// ascending start for forward scans, by descending end for reverse scans.
+/// It holds a position and nothing else, so it costs no pool memory.
+struct RunRangeCursor {
+    path: std::path::PathBuf,
+    header: RangeHeader,
+    order: RangeOrder,
+    /// Forward cursors count up from `0`; reverse cursors count down from
+    /// `node_count`.
+    position: usize,
+    scan_start: Option<Vec<u8>>,
+    scan_end: Option<Vec<u8>>,
 }
 
-impl IntentKeySource {
-    fn new(iterator: IntentKeyIterator) -> Self {
-        Self {
-            iterator,
-            head: None,
-            primed: false,
-            needs_advance: false,
-        }
+impl RunRangeCursor {
+    fn new(
+        run: &SpillRun,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        reverse: bool,
+    ) -> MidgeResult<Self> {
+        let header = run.with_reader(|reader| Ok(reader.range_header()))?;
+        Ok(Self {
+            path: run.range_path.clone(),
+            header,
+            order: if reverse {
+                RangeOrder::End
+            } else {
+                RangeOrder::Start
+            },
+            position: if reverse { header.node_count() } else { 0 },
+            scan_start: start.map(<[u8]>::to_vec),
+            scan_end: end.map(<[u8]>::to_vec),
+        })
     }
 
-    fn prime(&mut self) {
-        if !self.primed {
-            self.head = self.iterator.next();
-            self.primed = true;
+    /// Next range overlapping the scan bounds. Ranges that start at or after
+    /// the scan end (forward) or end at or before the scan start (reverse)
+    /// end the stream: every later range is further out still.
+    fn next(&mut self) -> MidgeResult<Option<RangeEntry>> {
+        let mut file = None;
+        loop {
+            let position = if self.order == RangeOrder::End {
+                if self.position == 0 {
+                    return Ok(None);
+                }
+                self.position - 1
+            } else {
+                if self.position >= self.header.node_count() {
+                    return Ok(None);
+                }
+                self.position
+            };
+            if file.is_none() {
+                file = Some(RunFile::open(&self.path)?);
+            }
+            let file = file.as_mut().expect("opened above");
+            let entry = read_ordered_range(file, &self.header, self.order, position)?;
+            if self.order == RangeOrder::End {
+                self.position -= 1;
+            } else {
+                self.position += 1;
+            }
+            let (past_scan, outside) = if self.order == RangeOrder::End {
+                (
+                    self.scan_start
+                        .as_deref()
+                        .is_some_and(|start| entry.end.as_ref() <= start),
+                    self.scan_end
+                        .as_deref()
+                        .is_some_and(|end| entry.start.as_ref() >= end),
+                )
+            } else {
+                (
+                    self.scan_end
+                        .as_deref()
+                        .is_some_and(|end| entry.start.as_ref() >= end),
+                    self.scan_start
+                        .as_deref()
+                        .is_some_and(|start| entry.end.as_ref() <= start),
+                )
+            };
+            if past_scan {
+                self.position = if self.order == RangeOrder::End {
+                    0
+                } else {
+                    self.header.node_count()
+                };
+                return Ok(None);
+            }
+            if !outside {
+                return Ok(Some(entry));
+            }
         }
     }
+}
 
-    fn advance_if_needed(&mut self) {
-        if self.needs_advance {
-            self.head = self.iterator.next();
-            self.needs_advance = false;
-        }
+/// A run's next unreached range, ordered so the scan's next range pops first.
+struct RangeHead {
+    activation: Bytes,
+    entry: RangeEntry,
+    cursor: usize,
+    reverse: bool,
+}
+
+impl PartialEq for RangeHead {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
-
-    fn consume(&mut self) {
-        self.head = None;
-        self.needs_advance = true;
+}
+impl Eq for RangeHead {}
+impl PartialOrd for RangeHead {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RangeHead {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let order = self.activation.cmp(&other.activation);
+        if self.reverse {
+            order
+        } else {
+            order.reverse()
+        }
     }
 }
 
 /// K-way unique-key merge over resident intents and private spill runs.
+///
+/// Source `0` is the resident index; source `n + 1` is spill run `n`. A heap
+/// of source heads makes each key cost `O(log R)` plus one point probe per
+/// run that actually holds the key, instead of comparing every run per key.
+/// Range deletes stream lazily from every run into a sweep over the ranges
+/// covering the current key, so they cost `O((K + D) log D)` rather than one
+/// index stab per run per key.
 pub(crate) struct IntentKeyScan {
     reverse: bool,
-    sources: Vec<IntentKeySource>,
+    resident: std::vec::IntoIter<(Bytes, IntentPoint)>,
+    resident_head: Option<IntentPoint>,
+    cursors: Vec<RunKeyCursor>,
+    heap: std::collections::BinaryHeap<HeadEntry>,
+    consumed: Vec<usize>,
+    primed: bool,
+    range_cursors: Vec<RunRangeCursor>,
+    range_heap: std::collections::BinaryHeap<RangeHead>,
+    covering: RangeCoverSweep,
     exhausted: bool,
 }
 
@@ -307,96 +443,130 @@ impl IntentKeyScan {
         end: Option<&[u8]>,
         reverse: bool,
     ) -> MidgeResult<Self> {
-        let mut resident = write_set
-            .resident
-            .iter()
-            .map(|entry| op_primary_key_bytes(&entry.op))
-            .filter(|key| {
-                start.is_none_or(|start| key.as_ref() >= start)
-                    && end.is_none_or(|end| key.as_ref() < end)
-            })
-            .collect::<Vec<_>>();
-        resident.sort_unstable();
-        resident.dedup();
+        let mut resident = write_set.resident_index.points_in(start, end);
         if reverse {
             resident.reverse();
         }
-
-        let mut sources = Vec::with_capacity(write_set.runs.len() + 1);
-        sources.push(IntentKeySource::new(IntentKeyIterator::Resident(
-            resident.into_iter(),
-        )));
+        let mut cursors = Vec::with_capacity(write_set.runs.len());
+        let mut range_cursors = Vec::new();
         for run in &write_set.runs {
-            sources.push(IntentKeySource::new(IntentKeyIterator::Run(
-                RunKeyCursor::new(run, start, end, reverse)?,
-            )));
+            cursors.push(RunKeyCursor::new(run, start, end, reverse)?);
+            if run.range_count != 0 {
+                range_cursors.push(RunRangeCursor::new(run, start, end, reverse)?);
+            }
         }
-        Ok(Self {
+        let mut scan = Self {
             reverse,
-            sources,
+            resident: resident.into_iter(),
+            resident_head: None,
+            cursors,
+            heap: std::collections::BinaryHeap::new(),
+            consumed: Vec::new(),
+            primed: false,
+            range_cursors,
+            range_heap: std::collections::BinaryHeap::new(),
+            covering: RangeCoverSweep::new(reverse),
             exhausted: false,
-        })
+        };
+        for cursor in 0..scan.range_cursors.len() {
+            scan.advance_range_cursor(write_set, cursor)?;
+        }
+        Ok(scan)
     }
 
-    fn next_key(&mut self) -> MidgeResult<Option<Bytes>> {
-        for source in &mut self.sources {
-            source.prime();
-            source.advance_if_needed();
+    /// Pulls the next key of `source` into the heap.
+    fn advance(&mut self, write_set: &TransactionWriteSet, source: usize) -> MidgeResult<()> {
+        write_set.record_work(1);
+        let key = if source == 0 {
+            self.resident.next().map(|(key, point)| {
+                self.resident_head = Some(point);
+                key
+            })
+        } else {
+            self.cursors[source - 1].next().transpose()?
+        };
+        if let Some(key) = key {
+            self.heap.push(HeadEntry {
+                key,
+                source,
+                reverse: self.reverse,
+            });
         }
-        if let Some(error) = self.sources.iter_mut().find_map(|source| {
-            if source.head.as_ref().is_some_and(Result::is_err) {
-                source.head.take().and_then(Result::err)
+        Ok(())
+    }
+
+    /// Pulls the next unreached range of one run into the range heap.
+    fn advance_range_cursor(
+        &mut self,
+        write_set: &TransactionWriteSet,
+        cursor: usize,
+    ) -> MidgeResult<()> {
+        write_set.record_work(1);
+        if let Some(entry) = self.range_cursors[cursor].next()? {
+            let activation = if self.reverse {
+                entry.end.clone()
             } else {
-                None
+                entry.start.clone()
+            };
+            self.range_heap.push(RangeHead {
+                activation,
+                entry,
+                cursor,
+                reverse: self.reverse,
+            });
+        }
+        Ok(())
+    }
+
+    fn next_entry_inner(
+        &mut self,
+        write_set: &TransactionWriteSet,
+    ) -> MidgeResult<Option<IntentEntry>> {
+        if self.primed {
+            for source in std::mem::take(&mut self.consumed) {
+                self.advance(write_set, source)?;
             }
-        }) {
-            return Err(error);
+        } else {
+            self.primed = true;
+            for source in 0..=self.cursors.len() {
+                self.advance(write_set, source)?;
+            }
         }
 
-        let Some(selected) = self
-            .sources
-            .iter()
-            .filter_map(|source| source.head.as_ref()?.as_ref().ok())
-            .cloned()
-            .reduce(|selected, candidate| {
-                let candidate_wins = if self.reverse {
-                    candidate > selected
-                } else {
-                    candidate < selected
-                };
-                if candidate_wins {
-                    candidate
-                } else {
-                    selected
-                }
-            })
-        else {
+        let Some(first) = self.heap.pop() else {
             return Ok(None);
         };
-
-        for source in &mut self.sources {
-            if source
-                .head
-                .as_ref()
-                .and_then(|head| head.as_ref().ok())
-                .is_some_and(|key| key == &selected)
-            {
-                source.consume();
+        let key = first.key;
+        let mut sources = vec![first.source];
+        while self.heap.peek().is_some_and(|head| head.key == key) {
+            if let Some(head) = self.heap.pop() {
+                sources.push(head.source);
             }
         }
-        Ok(Some(selected))
+
+        let mut point = None;
+        for source in sources {
+            if source == 0 {
+                point = self.resident_head.take();
+            } else {
+                write_set.record_work(1);
+                lookup_run_points(&write_set.runs[source - 1], &key, u64::MAX, &mut point)?;
+            }
+            self.consumed.push(source);
+        }
+        Ok(Some(IntentEntry { key, point }))
     }
-}
 
-impl std::iter::Iterator for IntentKeyScan {
-    type Item = MidgeResult<Bytes>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Next distinct intent key in scan order.
+    pub(crate) fn next_entry(
+        &mut self,
+        write_set: &TransactionWriteSet,
+    ) -> Option<MidgeResult<IntentEntry>> {
         if self.exhausted {
             return None;
         }
-        match self.next_key() {
-            Ok(Some(key)) => Some(Ok(key)),
+        match self.next_entry_inner(write_set) {
+            Ok(Some(entry)) => Some(Ok(entry)),
             Ok(None) => {
                 self.exhausted = true;
                 None
@@ -406,5 +576,59 @@ impl std::iter::Iterator for IntentKeyScan {
                 Some(Err(error))
             }
         }
+    }
+
+    /// Moves every spilled range the scan has reached into the sweep.
+    fn reach_ranges(&mut self, write_set: &TransactionWriteSet, key: &[u8]) -> MidgeResult<()> {
+        while self.range_heap.peek().is_some_and(|head| {
+            if self.reverse {
+                head.activation.as_ref() > key
+            } else {
+                head.activation.as_ref() <= key
+            }
+        }) {
+            let Some(head) = self.range_heap.pop() else {
+                break;
+            };
+            self.covering.insert(
+                head.entry.start.to_vec(),
+                head.entry.end.to_vec(),
+                head.entry.ordinal,
+            );
+            self.advance_range_cursor(write_set, head.cursor)?;
+        }
+        Ok(())
+    }
+
+    /// Newest intent for `key` given its newest point intent: a covering range
+    /// delete with a higher ordinal turns it into a deletion. `key` may come
+    /// from the snapshot alone, in which case `point` is `None`. Keys must be
+    /// resolved in scan order.
+    pub(crate) fn resolve(
+        &mut self,
+        write_set: &TransactionWriteSet,
+        key: &[u8],
+        point: Option<IntentPoint>,
+    ) -> MidgeResult<Option<IntentLookup>> {
+        write_set.record_work(1);
+        let mut latest = point;
+        if let Some(ordinal) = write_set.resident_index.covering_range(key) {
+            if latest
+                .as_ref()
+                .is_none_or(|(point_ordinal, _)| ordinal > *point_ordinal)
+            {
+                latest = Some((ordinal, IntentLookup::Deleted));
+            }
+        }
+        self.reach_ranges(write_set, key)?;
+        if let Some(ordinal) = self.covering.max_cover_seq(key) {
+            if latest
+                .as_ref()
+                .is_none_or(|(point_ordinal, _)| ordinal > *point_ordinal)
+            {
+                latest = Some((ordinal, IntentLookup::Deleted));
+            }
+        }
+        Ok(latest.map(|(_, lookup)| lookup))
     }
 }

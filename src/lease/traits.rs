@@ -131,6 +131,17 @@ impl LeaseValidity {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let LeaseValidityState::Active { valid_until, .. } = &mut *state {
+            *valid_until = Instant::now();
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> LeaseValidityState {
         *self
             .state

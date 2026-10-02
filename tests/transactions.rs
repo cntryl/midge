@@ -730,7 +730,7 @@ mod transaction_basic {
             );
 
             // Assert
-            assert!(rows.is_empty());
+            assert_eq!(rows, [] as [(bytes::Bytes, bytes::Bytes); 0]);
         });
     }
 
@@ -6773,6 +6773,19 @@ mod transaction_delete_range_window {
         stage: TombstoneStage,
         stage_tx: impl Fn(&mut Transaction),
     ) {
+        assert_commit_conflicts_after_staging_check(mode, opts, stage, stage_tx, || {});
+    }
+
+    /// Like `assert_commit_conflicts_after_eviction`, but runs `after_stage`
+    /// once the transaction is staged and before the concurrent transaction
+    /// begins.
+    fn assert_commit_conflicts_after_staging_check(
+        mode: &str,
+        opts: &MidgeOptions,
+        stage: TombstoneStage,
+        stage_tx: impl Fn(&mut Transaction),
+        after_stage: impl Fn(),
+    ) {
         // Arrange
         let engine = open_with_mode(opts, mode);
         let cf = engine
@@ -6787,6 +6800,7 @@ mod transaction_delete_range_window {
             .expect("begin tx");
         tx.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict);
         stage_tx(&mut tx);
+        after_stage();
         commit_covering_range_delete_then_evict_it(&engine, &cf, mode);
         move_tombstone_to_stage(&engine, &cf, stage);
 
@@ -6873,26 +6887,62 @@ mod transaction_delete_range_window {
 
         // Act
         for_each_storage_mode(modes, |mode, _opts| {
-            // A small memory budget forces the transaction's write set to
-            // spill. The tombstones are flushed before commit so the evicting
-            // range deletes don't hold the budget and stall the commit.
             for stage in [TombstoneStage::Flushed, TombstoneStage::Compacted] {
-                let opts = opts_for_mode(mode).memory_budget(256 * 1024);
-                assert_commit_conflicts_after_eviction(mode, &opts, stage, |tx| {
-                    stage_point_put(tx);
-                    for i in 0..200 {
-                        tx.put(
-                            format!("spill-key{i:04}").into_bytes(),
-                            format!("spill-value_{i:04}").into_bytes(),
-                            None,
-                        )
-                        .expect("spill put");
-                    }
-                });
+                // A tiny transaction pool forces the staged write set to
+                // spill, while the engine memtable keeps tombstone headroom so
+                // the concurrent range deletes reach conflict validation.
+                let opts = MidgeOptions {
+                    memtable_size: 32 * 1024 * 1024,
+                    ..opts_for_mode(mode).memory_budget(1_024)
+                };
+                let dir = spill_dir(&opts);
+                assert_commit_conflicts_after_staging_check(
+                    mode,
+                    &opts,
+                    stage,
+                    |tx| {
+                        stage_point_put(tx);
+                        for i in 0..200 {
+                            tx.put(
+                                format!("spill-key{i:04}").into_bytes(),
+                                format!("spill-value_{i:04}").into_bytes(),
+                                None,
+                            )
+                            .expect("spill put");
+                        }
+                    },
+                    || {
+                        let runs = count_spill_runs(&dir);
+                        assert!(
+                            runs > 0,
+                            "expected staged transaction spill files in {} (mode {mode}, stage {stage:?}), observed {runs}",
+                            dir.display()
+                        );
+                    },
+                );
             }
         });
 
         // Assert
-        // `assert_commit_conflicts_after_eviction` checks every staged commit above.
+        // The staging check proves a spill happened before the concurrent
+        // transaction began; the helper asserts WriteConflict on every commit.
+    }
+
+    /// Directory holding the engine's transaction spill runs for `opts`.
+    fn spill_dir(opts: &MidgeOptions) -> std::path::PathBuf {
+        match &opts.storage_mode {
+            StorageMode::LocalDisk { db_path } => db_path.join("txn"),
+            StorageMode::CloudBacked { local_cache_path } => local_cache_path.join("txn"),
+            StorageMode::Memory => unreachable!("memory mode never spills"),
+        }
+    }
+
+    fn count_spill_runs(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
+                .count()
+        })
     }
 }

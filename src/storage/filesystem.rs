@@ -266,7 +266,7 @@ fn next_object_modified_time(replaced: Option<std::time::SystemTime>) -> std::ti
         nanos(time).saturating_add(OBJECT_MODIFIED_STEP_NANOS)
     }));
     let mut stamped = floor;
-    let _ = LAST_OBJECT_MODIFIED_NANOS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |last| {
+    let _ = LAST_OBJECT_MODIFIED_NANOS.try_update(Ordering::AcqRel, Ordering::Acquire, |last| {
         stamped = floor.max(last.saturating_add(OBJECT_MODIFIED_STEP_NANOS));
         Some(stamped)
     });
@@ -882,7 +882,7 @@ mod tests {
             StorageEvent::WriteComplete { result, .. } => {
                 assert!(result.is_ok());
                 let content = std::fs::read(temp_dir.path().join("empty.txt")).unwrap();
-                assert!(content.is_empty());
+                assert_eq!(content.len(), 0);
             }
             _ => panic!("Expected WriteComplete"),
         }
@@ -1243,7 +1243,7 @@ mod tests {
 
         // Assert
         match event {
-            Ok((content, _metadata)) => assert!(content.is_empty()),
+            Ok((content, _metadata)) => assert_eq!(content.len(), 0),
             Err(e) => panic!("Read failed: {e}"),
         }
     }

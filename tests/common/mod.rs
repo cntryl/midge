@@ -2,6 +2,30 @@
 
 pub mod crash;
 
+#[cfg(feature = "sqrzl-tests")]
+#[path = "../support/sqrzl.rs"]
+mod sqrzl;
+
+#[cfg(feature = "sqrzl-tests")]
+pub fn prepare_sqrzl_namespace(provider: &cntryl_midge::CloudProviderConfig) -> Result<(), String> {
+    sqrzl::require_sqrzl("discovery model");
+    match provider {
+        cntryl_midge::CloudProviderConfig::AwsS3(_) => Ok(()),
+        cntryl_midge::CloudProviderConfig::S3Compatible(config) => {
+            sqrzl::ensure_sqrzl_s3_bucket(config.bucket())
+        }
+        cntryl_midge::CloudProviderConfig::Gcs(config) => {
+            sqrzl::ensure_sqrzl_gcs_bucket(config.bucket())
+        }
+        cntryl_midge::CloudProviderConfig::AzureBlob(config) => {
+            sqrzl::ensure_sqrzl_azure_container(config.container())
+        }
+        cntryl_midge::CloudProviderConfig::OciObjectStorage(config) => {
+            sqrzl::ensure_sqrzl_s3_bucket(config.bucket())
+        }
+    }
+}
+
 use cntryl_midge::{
     CloudWritePolicy, ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeResult, OpenOptions,
     Storage, WorkloadProfile, WriteOptions,

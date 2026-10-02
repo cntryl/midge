@@ -1121,14 +1121,17 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
         assert_eq!(fixture.event_loop.wal_actor.pending_sync_count(), 0);
         assert_eq!(fixture.event_loop.wal_actor.bytes_since_sync(), 0);
         assert!(!fixture.event_loop.state.pending_transaction_started());
-        assert!(fixture
-            .event_loop
-            .state
-            .get_cf(0)
-            .expect("default column family should exist")
-            .memtable
-            .iter_all()
-            .is_empty());
+        assert_eq!(
+            fixture
+                .event_loop
+                .state
+                .get_cf(0)
+                .expect("default column family should exist")
+                .memtable
+                .iter_all()
+                .len(),
+            0
+        );
         assert!(
             fixture.event_loop.state.sequence > 0,
             "failed preparation may leave sequence gaps"
@@ -1200,14 +1203,17 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> 
         });
         assert_eq!(fixture.event_loop.wal_actor.append_calls(), 0);
         assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
-        assert!(fixture
-            .event_loop
-            .state
-            .get_cf(0)
-            .expect("default column family")
-            .memtable
-            .iter_all()
-            .is_empty());
+        assert_eq!(
+            fixture
+                .event_loop
+                .state
+                .get_cf(0)
+                .expect("default column family")
+                .memtable
+                .iter_all()
+                .len(),
+            0
+        );
 
         drop(failpoint_guard);
     }
@@ -1262,14 +1268,17 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
     assert!(fixture.event_loop.state.persistence_anomaly_detected());
     assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
-    assert!(fixture
-        .event_loop
-        .state
-        .get_cf(0)
-        .expect("default column family")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        fixture
+            .event_loop
+            .state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
 
     fail::remove("midge::wal::inject_no_space_on_sync");
     scenario.teardown();

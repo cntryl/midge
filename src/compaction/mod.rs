@@ -258,7 +258,7 @@ mod tests {
         )?;
 
         // Assert
-        assert!(!outputs.is_empty());
+        assert_ne!(outputs.len(), 0);
         let reader = factory.open(Path::new(&outputs[0]))?;
         assert!(
             matches!(reader.get_state_at_with_time(b"key", u64::MAX, 100)?,
@@ -868,7 +868,7 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        assert!(output_names.is_empty());
+        assert_eq!(output_names.len(), 0);
         assert!(!output_path.exists());
         Ok(())
     }
@@ -1364,7 +1364,7 @@ mod tests {
             reader.get_state(b"middle")?,
             crate::types::KeyState::Absent
         ));
-        assert!(reader.range_tombstones().is_empty());
+        assert_eq!(reader.range_tombstones().len(), 0);
         assert!(matches!(
             reader.get_state(b"zulu")?,
             crate::types::KeyState::Value(_, 3, _, _)
@@ -1393,7 +1393,7 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        assert!(output_names.is_empty());
+        assert_eq!(output_names.len(), 0);
         assert!(!temp_dir
             .path()
             .join(crate::cloud_layout::file_name(0, 6, 47))
@@ -2189,7 +2189,7 @@ mod tests {
         let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        assert!(!outputs.is_empty());
+        assert_ne!(outputs.len(), 0);
         let reader = factory.open(Path::new(&outputs[0]))?;
         assert!(matches!(
             reader.get_state(b"key-032")?,

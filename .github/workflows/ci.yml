@@ -69,8 +69,25 @@ jobs:
             if [[ "$target" == "fault_injection" ]]; then
               continue
             fi
-            cargo test --test "$target" --all-features -- --test-threads=1
+            if [[ "$target" == "discovery_model" ]]; then
+              MIDGE_DISCOVERY_PROFILE=pr cargo test --test "$target" --all-features -- --test-threads=1
+            else
+              cargo test --test "$target" --all-features -- --test-threads=1
+            fi
           done
+
+      - name: Test named backup and empty-compaction aborts
+        env:
+          MIDGE_PHYSICAL_DISCOVERY: "1"
+        run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
+
+      - name: Retain discovery corpus and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: discovery-model-${{ github.sha }}
+          path: target/discovery-031
+          if-no-files-found: ignore
 
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
@@ -142,6 +159,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
 
+      - name: Test backup path isolation and publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --test backup_paths --all-features
+          cargo test --test backup_publish_races --all-features -- --test-threads=1
+
+      - name: Test named backup and empty-compaction aborts
+        env:
+          MIDGE_PHYSICAL_DISCOVERY: "1"
+        run: cargo test --test discovery_model --all-features physical::should_execute_named_abort_histories -- --test-threads=1
+
+      - name: Test lease validity and salvage crash ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --lib validity --all-features -- --test-threads=1
+          cargo test --lib should_reject_predecessor --all-features -- --test-threads=1
+          cargo test --lib should_preserve_floor_when_salvage_aborts --all-features -- --test-threads=1
+
       - name: Test workspace
         if: matrix.os == 'macos-latest'
         run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
@@ -149,6 +186,14 @@ jobs:
       - name: Fault injection suite (serial; failpoints are process-global)
         if: matrix.os == 'macos-latest'
         run: cargo test --test fault_injection --all-features -- --test-threads=1
+
+      - name: Retain platform discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: discovery-model-${{ matrix.os }}-${{ github.sha }}
+          path: target/discovery-031
+          if-no-files-found: ignore
 
   tier3_lifecycle_bench:
     name: Tier 3 lifecycle (${{ matrix.os }})

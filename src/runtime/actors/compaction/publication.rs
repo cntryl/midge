@@ -46,6 +46,7 @@ pub(crate) struct CompactionPublishTask {
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
+    pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
     pub metadata_sequence: u64,
@@ -238,6 +239,17 @@ fn validate_task_lease(
             ));
         }
     }
+    let validate = || {
+        if let Some(validity) = &task.lease_validity {
+            validity
+                .remaining(task.token.writer_epoch)
+                .map_err(|error| {
+                    error.into_validation_error("compaction monotonic lease validity")
+                })?;
+        }
+        Ok(())
+    };
+    validate()?;
     if deadline.is_expired() {
         return Err(MidgeError::Timeout(
             "operation deadline exhausted before compaction lease validation".to_string(),
@@ -264,7 +276,8 @@ fn validate_task_lease(
                 tracing::error!(%mapped, "compaction publication lease validation failed; runtime fenced");
             }
             mapped
-        })
+        })?;
+    validate()
 }
 
 fn verify_or_stage_outputs(
@@ -287,6 +300,7 @@ fn verify_or_stage_outputs(
                 output.metadata.name
             ))
         })?;
+        validate_task_lease(task, deadline)?;
         hybrid.publish_immutable_file(
             &crate::cloud_layout::object_key(&output.metadata.name),
             &task.sst_dir.join(&output.metadata.name),
@@ -298,7 +312,7 @@ fn verify_or_stage_outputs(
     if !proofs.is_empty() {
         hybrid.verify_remote_object_guards_within(&proofs, deadline)?;
     }
-    Ok(())
+    validate_task_lease(task, deadline)
 }
 
 fn mirror_control_metadata(
@@ -337,4 +351,51 @@ pub(crate) fn checksummed_file_crc_for_publication_test(
     const CRC_BUFFER_SIZE: usize = 64 * 1024;
     let _reservation = budget.reserve(CRC_BUFFER_SIZE, "SST checksum buffer")?;
     Ok(crate::sst::identity::SstIdentity::of_path(path)?.crc32c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_reject_compaction_publication_when_validity_expires_without_watchdog() {
+        // Arrange
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(
+                7,
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
+            )
+            .unwrap();
+        let task = CompactionPublishTask {
+            token: CompactionPublicationToken {
+                request_id: 1,
+                writer_epoch: 7,
+                cf_id: 0,
+                target_level: 1,
+                output_generation: 1,
+                input_ssts: Vec::new(),
+                output_ssts: Vec::new(),
+            },
+            phase: CompactionPublishPhase::OutputDurable,
+            outputs: Vec::new(),
+            sst_dir: PathBuf::from("sst"),
+            fs: Arc::new(crate::io::MockFs::new()),
+            hybrid_storage: None,
+            cloud_metadata_storage: None,
+            metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
+            lease_healthy: Some(Arc::new(AtomicBool::new(true))),
+            lease_validity: Some(Arc::clone(&validity)),
+            leader_store: None,
+            leader_holder_id: None,
+            metadata_sequence: 1,
+            publication_memory_limit: 4096,
+            runtime_response_timeout: std::time::Duration::from_secs(5),
+        };
+        validity.expire_for_test();
+        // Act
+        let result = run_task(&task);
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    }
 }

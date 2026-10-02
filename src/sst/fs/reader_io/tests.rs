@@ -596,7 +596,7 @@ fn should_return_empty_scan_given_start_bound_after_all_keys_when_reading() -> M
         .collect::<MidgeResult<Vec<_>>>()?;
 
     // Assert
-    assert!(rows.is_empty());
+    assert_eq!(rows.len(), 0);
     Ok(())
 }
 
@@ -619,7 +619,7 @@ fn should_return_empty_scan_given_end_bound_before_all_keys_when_reading() -> Mi
         .collect::<MidgeResult<Vec<_>>>()?;
 
     // Assert
-    assert!(rows.is_empty());
+    assert_eq!(rows.len(), 0);
     Ok(())
 }
 
@@ -768,8 +768,8 @@ fn should_skip_range_scan_when_requested_keys_are_outside_persisted_bounds() -> 
     let rows = reader.scan_range_state(Some(b"zzz"), Some(b"zzzz"))?;
 
     // Assert
-    assert!(rows.is_empty());
-    assert!(counting_fs.reads().is_empty());
+    assert_eq!(rows.len(), 0);
+    assert_eq!(counting_fs.reads().len(), 0);
     Ok(())
 }
 

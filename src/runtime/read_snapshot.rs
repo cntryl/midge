@@ -7,6 +7,7 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::memtable::SkipListMemtable;
 use crate::metadata::FileMeta;
+use crate::runtime::range_cover::RangeCoverSweep;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
 use crate::sst::fs::reader_io::SstStateScan;
@@ -222,9 +223,11 @@ impl SnapshotStateSource {
 
     /// Moves tombstones of level files opened while computing heads into
     /// `into`; see `SstLevelStateIterator::opened_tombstones`.
-    fn drain_opened_tombstones(&mut self, into: &mut Vec<RangeTombstone>) {
+    fn drain_opened_tombstones(&mut self, into: &mut RangeCoverSweep) {
         if let SnapshotStateIterator::SstLevel(level) = &mut self.iterator {
-            into.append(&mut level.opened_tombstones);
+            for tombstone in level.opened_tombstones.drain(..) {
+                into.insert(tombstone.start, tombstone.end, tombstone.seq);
+            }
         }
     }
 
@@ -245,7 +248,7 @@ pub(crate) struct SnapshotScan {
     initialized: bool,
     lifecycle: SnapshotScanLifecycle,
     sources: Vec<SnapshotStateSource>,
-    range_tombstones: Vec<RangeTombstone>,
+    range_cover: RangeCoverSweep,
 }
 
 enum SnapshotScanLifecycle {
@@ -271,8 +274,14 @@ impl SnapshotScan {
             initialized: false,
             lifecycle: SnapshotScanLifecycle::Active,
             sources: Vec::new(),
-            range_tombstones: Vec::new(),
+            range_cover: RangeCoverSweep::new(reverse),
         }
+    }
+
+    /// Deterministic count of range-tombstone coverage steps performed.
+    #[cfg(test)]
+    fn tombstone_work(&self) -> u64 {
+        self.range_cover.work()
     }
 
     fn memory_iterator(
@@ -298,15 +307,18 @@ impl SnapshotScan {
         end: Option<&[u8]>,
     ) -> MidgeResult<Arc<SstFileIo>> {
         let reader = self.snapshot.sst_reader(file_meta)?;
-        self.range_tombstones
-            .extend(reader.range_tombstones().into_iter().filter(|tombstone| {
-                self.snapshot
-                    .diagnostics
-                    .sst_metrics()
-                    .record_range_tombstone_scan();
-                (self.sequence == u64::MAX || tombstone.seq <= self.sequence)
-                    && ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
-            }));
+        for tombstone in reader.range_tombstones() {
+            self.snapshot
+                .diagnostics
+                .sst_metrics()
+                .record_range_tombstone_scan();
+            if tombstone.visible_at(self.sequence)
+                && ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end)
+            {
+                self.range_cover
+                    .insert(tombstone.start, tombstone.end, tombstone.seq);
+            }
+        }
         Ok(reader)
     }
 
@@ -428,15 +440,12 @@ impl SnapshotScan {
                     .range_raw_state_at(start, end, self.sequence),
                 self.reverse,
             )));
-        self.range_tombstones.extend(
-            snapshot
-                .memtable
-                .range_tombstones_at(self.sequence)
-                .into_iter()
-                .filter(|tombstone| {
-                    ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
-                }),
-        );
+        for tombstone in snapshot.memtable.range_tombstones_at(self.sequence) {
+            if ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end) {
+                self.range_cover
+                    .insert(tombstone.start, tombstone.end, tombstone.seq);
+            }
+        }
 
         for immutable in &snapshot.immutable_memtables {
             self.sources
@@ -444,14 +453,12 @@ impl SnapshotScan {
                     immutable.range_raw_state_at(start, end, self.sequence),
                     self.reverse,
                 )));
-            self.range_tombstones.extend(
-                immutable
-                    .range_tombstones_at(self.sequence)
-                    .into_iter()
-                    .filter(|tombstone| {
-                        ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
-                    }),
-            );
+            for tombstone in immutable.range_tombstones_at(self.sequence) {
+                if ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end) {
+                    self.range_cover
+                        .insert(tombstone.start, tombstone.end, tombstone.seq);
+                }
+            }
         }
 
         if !snapshot.memory_mode {
@@ -503,7 +510,7 @@ impl SnapshotScan {
                 // before any key is checked against them. (The level cursor
                 // also reads one entry ahead, which opens files a round early;
                 // draining here does not rely on that.)
-                source.drain_opened_tombstones(&mut self.range_tombstones);
+                source.drain_opened_tombstones(&mut self.range_cover);
             }
             if let Some(error) = self.take_source_error() {
                 return Err(error);
@@ -535,11 +542,12 @@ impl SnapshotScan {
                 continue;
             };
 
-            if ReadSnapshot::range_tombstone_covers_state(
-                &self.range_tombstones,
-                key.as_ref(),
-                &best,
-            ) {
+            let state_seq = ReadSnapshot::state_sequence(&best).unwrap_or(0);
+            if self
+                .range_cover
+                .max_cover_seq(key.as_ref())
+                .is_some_and(|cover_seq| cover_seq >= state_seq)
+            {
                 continue;
             }
 
@@ -665,6 +673,7 @@ impl ReadSnapshot {
         true
     }
 
+    #[cfg(test)]
     fn range_tombstone_covers_state(
         tombstones: &[RangeTombstone],
         key: &[u8],
@@ -1279,9 +1288,7 @@ mod tests {
             0,
         ));
         assert_eq!(duplicate_snapshot.get(b"key", u64::MAX)?, None);
-        assert!(duplicate_snapshot
-            .range_scan(b"", b"", u64::MAX)?
-            .is_empty());
+        assert_eq!(duplicate_snapshot.range_scan(b"", b"", u64::MAX)?.len(), 0);
         assert!(duplicate_snapshot
             .state_scan(None, None, false, u64::MAX)
             .next()
@@ -1363,7 +1370,7 @@ mod tests {
 
         // Assert
         assert_eq!(result?, None);
-        assert!(snapshot.range_scan(b"", b"", u64::MAX)?.is_empty());
+        assert_eq!(snapshot.range_scan(b"", b"", u64::MAX)?.len(), 0);
         assert!(snapshot
             .state_scan(None, None, false, u64::MAX)
             .next()
@@ -1755,5 +1762,177 @@ mod tests {
         // Assert
         assert_eq!(value, None);
         Ok(())
+    }
+
+    /// Builds a memory-mode snapshot with `keys` point writes at sequence 1
+    /// and `ranges` (start, end, seq) range tombstones.
+    fn snapshot_with_ranges(
+        keys: &[(Vec<u8>, u64)],
+        ranges: &[(Vec<u8>, Vec<u8>, u64)],
+    ) -> Arc<ReadSnapshot> {
+        let memtable = SkipListMemtable::new();
+        for (key, seq) in keys {
+            memtable
+                .put_with_seq(key.clone(), b"v".to_vec(), *seq, None)
+                .expect("put");
+        }
+        for (start, end, seq) in ranges {
+            memtable
+                .delete_range_with_seq(start, end, *seq)
+                .expect("delete range");
+        }
+        Arc::new(ReadSnapshot::new(
+            Arc::new(memtable),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(crate::io::MockFs::new()),
+            std::path::PathBuf::new(),
+            true,
+            0,
+        ))
+    }
+
+    #[test]
+    fn should_bound_tombstone_work_by_keys_plus_tombstones_when_none_cover_returned_keys() {
+        // Arrange: 2,000 live keys under "k", 2,000 old noncovering ranges
+        // under "z" that overlap the unbounded scan but cover no key.
+        let keys: Vec<(Vec<u8>, u64)> = (0..2_000u32)
+            .map(|i| (format!("k{i:06}").into_bytes(), 100))
+            .collect();
+        let ranges: Vec<(Vec<u8>, Vec<u8>, u64)> = (0..2_000u32)
+            .map(|i| {
+                (
+                    format!("z{i:06}").into_bytes(),
+                    format!("z{i:06}~").into_bytes(),
+                    1,
+                )
+            })
+            .collect();
+        let snapshot = snapshot_with_ranges(&keys, &ranges);
+
+        // Act
+        let mut scan = snapshot.state_scan(None, None, false, u64::MAX);
+        let rows = scan
+            .by_ref()
+            .collect::<MidgeResult<Vec<_>>>()
+            .expect("scan");
+
+        // Assert: work is linear in K + T, not K x T.
+        assert_eq!(rows.len(), 2_000);
+        let bound = 8 * (keys.len() + ranges.len()) as u64;
+        assert!(
+            scan.tombstone_work() <= bound,
+            "tombstone work {} exceeds {bound}",
+            scan.tombstone_work()
+        );
+    }
+
+    #[test]
+    fn should_match_brute_force_oracle_when_scans_cross_overlapping_range_tombstones() {
+        let key = |n: u64| format!("k{n:02}").into_bytes();
+        let mut state = 0x9e37_79b9_u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for round in 0..40 {
+            // Arrange: versions and tombstones share a small sequence space so
+            // equal-sequence ties, nesting and overlap all occur, split
+            // between the active and an immutable memtable.
+            let active = SkipListMemtable::new();
+            let immutable = SkipListMemtable::new();
+            let mut versions: Vec<(Vec<u8>, u64)> = Vec::new();
+            let mut ranges: Vec<(Vec<u8>, Vec<u8>, u64)> = Vec::new();
+            for n in 0..30 {
+                for seq in 1..=8 {
+                    if next(4) == 0 {
+                        let table = if next(2) == 0 { &active } else { &immutable };
+                        table
+                            .put_with_seq(key(n), format!("v{n}-{seq}").into_bytes(), seq, None)
+                            .expect("put");
+                        versions.push((key(n), seq));
+                    }
+                }
+            }
+            for _ in 0..10 {
+                let (a, b) = (next(31), next(31));
+                let (start, end, seq) = (key(a.min(b)), key(a.max(b) + 1), 1 + next(8));
+                let table = if next(2) == 0 { &active } else { &immutable };
+                table
+                    .delete_range_with_seq(&start, &end, seq)
+                    .expect("range");
+                ranges.push((start, end, seq));
+            }
+            let snapshot = Arc::new(ReadSnapshot::new(
+                Arc::new(active),
+                vec![Arc::new(immutable)],
+                Vec::new(),
+                Arc::new(crate::io::MockFs::new()),
+                std::path::PathBuf::new(),
+                true,
+                0,
+            ));
+
+            for sequence in [3, 5, u64::MAX] {
+                for (start, end) in [
+                    (None, None),
+                    (Some(key(5)), Some(key(22))),
+                    (Some(key(9)), None),
+                    (None, Some(key(14))),
+                ] {
+                    // Oracle: newest version visible at `sequence`, hidden by
+                    // any visible range with an equal or higher sequence.
+                    let mut expected: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                    for n in 0..30 {
+                        let k = key(n);
+                        if start.as_ref().is_some_and(|s| &k < s)
+                            || end.as_ref().is_some_and(|e| &k >= e)
+                        {
+                            continue;
+                        }
+                        let newest = versions
+                            .iter()
+                            .filter(|(vk, vs)| *vk == k && *vs <= sequence)
+                            .map(|(_, vs)| *vs)
+                            .max();
+                        let Some(newest) = newest else { continue };
+                        let hidden = ranges.iter().any(|(rs, re, rq)| {
+                            *rq <= sequence && *rq >= newest && *rs <= k && k < *re
+                        });
+                        if !hidden {
+                            expected.push((k, format!("v{n}-{newest}").into_bytes()));
+                        }
+                    }
+
+                    for reverse in [false, true] {
+                        for limit in [None, Some(3_usize)] {
+                            // Act
+                            let scan =
+                                snapshot.state_scan(start.clone(), end.clone(), reverse, sequence);
+                            let rows: Vec<(Vec<u8>, Vec<u8>)> = scan
+                                .take(limit.unwrap_or(usize::MAX))
+                                .map(|row| {
+                                    let (k, v) = row.expect("row");
+                                    (k.to_vec(), v.to_vec())
+                                })
+                                .collect();
+
+                            // Assert
+                            let mut want = expected.clone();
+                            if reverse {
+                                want.reverse();
+                            }
+                            want.truncate(limit.unwrap_or(usize::MAX));
+                            assert_eq!(
+                                rows, want,
+                                "round {round} seq {sequence} bounds {start:?}..{end:?} reverse {reverse} limit {limit:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -245,12 +245,15 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     assert!(!actor.is_fenced());
     assert!(!state.persistence_anomaly_detected());
     assert_eq!(state.wal.pending_writes, 0);
-    assert!(state
-        .get_cf(0)
-        .expect("default CF")
-        .memtable
-        .iter_all()
-        .is_empty());
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default CF")
+            .memtable
+            .iter_all()
+            .len(),
+        0
+    );
 
     setup.hybrid_storage.release_local_wal_bytes(1024);
     actor.append_spilled_transaction(
@@ -404,12 +407,15 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
         );
         assert!(setup.hybrid_storage.budget_snapshot().total_committed_bytes > 0,
             "unchanged logical position cannot release ambiguous bytes (spilled={spilled}, timeout={timeout})");
-        assert!(state
-            .get_cf(0)
-            .expect("default CF")
-            .memtable
-            .iter_all()
-            .is_empty());
+        assert_eq!(
+            state
+                .get_cf(0)
+                .expect("default CF")
+                .memtable
+                .iter_all()
+                .len(),
+            0
+        );
     }
     Ok(())
 }

@@ -51,6 +51,7 @@ impl WalActor {
         state: &mut RuntimeState,
         ticket: &WalSealTicket,
     ) -> MidgeResult<WalRotationReceipt> {
+        self.ensure_transition_authority(state)?;
         let old_segment = state.wal.current_segment_id;
         let next_segment = old_segment.checked_add(1).ok_or_else(|| {
             MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
@@ -146,7 +147,12 @@ impl WalActor {
             return Err(error);
         }
 
+        if let Err(error) = self.ensure_lease_validity() {
+            self.finish_io_transition()?;
+            return Err(error);
+        }
         drop(self.take_transition_writer());
+        self.ensure_transition_authority(state)?;
         let sealed_file_created = match fs.rename_atomic(&old_path, &new_path) {
             Ok(()) => true,
             Err(FsError::NotFound(_)) if self.can_ignore_missing_active_segment() => {
@@ -192,6 +198,7 @@ impl WalActor {
                 self.fence_transition(state, error.to_string());
                 return Err(error);
             }
+            self.ensure_transition_authority(state)?;
             if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
                 let error = FsError::into_midge(error);
                 self.fence_transition(state, format!("sealed WAL directory sync failed: {error}"));
@@ -230,6 +237,7 @@ impl WalActor {
                     self.fence_transition(state, error.to_string());
                     return Err(error);
                 }
+                self.ensure_transition_authority(state)?;
                 if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
                     let error = FsError::into_midge(error);
                     self.fence_transition(
@@ -258,6 +266,18 @@ impl WalActor {
         Ok(())
     }
 
+    fn ensure_transition_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        if let Err(error) = self.ensure_lease_validity() {
+            self.fence_with_cause(
+                state,
+                error.to_string(),
+                matches!(error, MidgeError::Fenced(_)),
+            );
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn can_ignore_missing_active_segment(&self) -> bool {
         self.segment_max_sequence == 0 && !self.has_pending_data()
     }
@@ -268,14 +288,16 @@ impl WalActor {
     ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
         let factory = FsWalFactoryIo::new(Arc::clone(fs))
             .with_io_timeout(self.storage_io_timeout)
-            .with_counters(self.counters.clone());
+            .with_counters(self.counters.clone())
+            .with_write_authority(self.write_authority());
         factory.create_writer(crate::wal::ACTIVE_FILE_NAME)
     }
 
     fn restore_active_writer_after_failed_rotate(&mut self, fs: &Arc<dyn Fs>) -> MidgeResult<()> {
         let factory = FsWalFactoryIo::new(Arc::clone(fs))
             .with_io_timeout(self.storage_io_timeout)
-            .with_counters(self.counters.clone());
+            .with_counters(self.counters.clone())
+            .with_write_authority(self.write_authority());
         match factory.create_writer(crate::wal::ACTIVE_FILE_NAME) {
             Ok(writer) => {
                 self.install_transition_writer(writer)?;

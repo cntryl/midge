@@ -2469,3 +2469,141 @@ mod salvage_removes_definitively_lost_ssts {
         assert!(persisted_names(&state).contains(&sst_name));
     }
 }
+
+#[test]
+fn should_reject_commit_when_runtime_validity_expires_without_watchdog() -> MidgeResult<()> {
+    // Arrange
+    for cloud in [false, true] {
+        for writes in [
+            WriteOptions::best_effort(),
+            if cloud {
+                WriteOptions::cloud_async()
+            } else {
+                WriteOptions::sync()
+            },
+        ] {
+            let directory = tempfile::tempdir()?;
+            let options = if cloud {
+                OpenOptions::cloud_simulated(directory.path(), "authority-test", "db").build()?
+            } else {
+                OpenOptions::local(directory.path()).build()?
+            };
+            let engine = Engine::open(options)?;
+            let cf = engine.get_column_family("default").expect("default CF");
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+            tx.put(b"expired".to_vec(), b"value".to_vec(), None)?;
+            let mut heartbeat = engine
+                .lease_state
+                .heartbeat
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            heartbeat.stop();
+            assert!(heartbeat.is_healthy());
+            heartbeat.validity_for_test().unwrap().expire_for_test();
+            // Act
+            let result = tx.commit(writes);
+            drop(heartbeat);
+            // Assert
+            assert!(
+                matches!(result, Err(MidgeError::Fenced(_))),
+                "cloud={cloud}, outcome={result:?}"
+            );
+            assert_eq!(
+                engine
+                    .begin_tx(cf.id(), TransactionMode::ReadOnly)?
+                    .get(b"expired")?,
+                None
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> MidgeResult<()> {
+    // Arrange
+    for cloud in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let build_options = |ttl| {
+            let builder = if cloud {
+                OpenOptions::cloud_simulated(directory.path(), "authority-test", "db")
+            } else {
+                OpenOptions::local(directory.path())
+            };
+            builder
+                .lease_ttl(ttl)
+                .lease_clock_skew_tolerance(Duration::ZERO)
+                .build()
+        };
+        // All holders use the same TTL: filesystem takeover judges freshness
+        // with the acquiring holder's TTL. Stop the predecessor and wait for
+        // real expiry without putting healthy I/O on a one-second deadline.
+        let options = build_options(Duration::from_secs(30))?;
+        eprintln!("takeover cloud={cloud}: seed under healthy lease");
+        let mut seeder = Engine::open(options.clone())?;
+        let cf = seeder.get_column_family("default").unwrap();
+        let durability = if cloud {
+            WriteOptions::cloud_strict()
+        } else {
+            WriteOptions::sync()
+        };
+        let mut seed = seeder.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        seed.put(b"seed".to_vec(), b"original".to_vec(), None)?;
+        seed.commit(durability)?;
+        seeder.flush_cf(&cf)?;
+        seeder.shutdown(Duration::from_secs(5))?;
+        eprintln!("takeover cloud={cloud}: prepare predecessor for real expiry");
+        let predecessor = Engine::open(options.clone())?;
+        let mut before_gc = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        before_gc.put(b"stale-before".to_vec(), b"invalid".to_vec(), None)?;
+        let mut after_gc = predecessor.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        after_gc.put(b"stale-after".to_vec(), b"invalid".to_vec(), None)?;
+        let mut heartbeat = predecessor
+            .lease_state
+            .heartbeat
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        heartbeat.stop();
+        let validity = heartbeat.validity_for_test().unwrap();
+        let old_epoch = predecessor.lease_state.lease.as_ref().unwrap().epoch();
+        let remaining = validity.remaining(old_epoch)?;
+        std::thread::sleep(remaining + Duration::from_millis(100));
+        assert!(heartbeat.is_healthy());
+        drop(heartbeat);
+        // Act
+        eprintln!("takeover cloud={cloud}: open healthy successor after real expiry");
+        let mut successor = Engine::open(options.clone())?;
+        assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
+        let first = before_gc.commit(WriteOptions::best_effort());
+        let successor_cf = successor.get_column_family("default").unwrap();
+        let mut update = successor.begin_tx(successor_cf.id(), TransactionMode::ReadWrite)?;
+        update.put(b"seed".to_vec(), b"successor".to_vec(), None)?;
+        eprintln!("takeover cloud={cloud}: successor publication");
+        update.commit(durability)?;
+        successor.flush_cf(&successor_cf)?;
+        eprintln!("takeover cloud={cloud}: successor compaction");
+        successor.compact_all()?;
+        let second = after_gc.commit(if cloud {
+            WriteOptions::cloud_async()
+        } else {
+            WriteOptions::best_effort()
+        });
+        successor.shutdown(Duration::from_secs(5))?;
+        eprintln!("takeover cloud={cloud}: reopen and assert durable state");
+        let mut reopened = Engine::open(options)?;
+        let read = reopened.begin_tx(successor_cf.id(), TransactionMode::ReadOnly)?;
+        // Assert
+        assert!(matches!(first, Err(MidgeError::Fenced(_))));
+        assert!(matches!(second, Err(MidgeError::Fenced(_))));
+        assert_eq!(read.get(b"seed")?.as_deref(), Some(b"successor".as_slice()));
+        assert_eq!(read.get(b"stale-before")?, None);
+        assert_eq!(read.get(b"stale-after")?, None);
+        drop(read);
+        reopened.shutdown(Duration::from_secs(5))?;
+    }
+    Ok(())
+}

@@ -929,7 +929,7 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
         1,
         "startup must pay down an over-ceiling recovered layout even when ordinary background work is disabled"
     );
-    assert!(!event_loop.state.compaction.compacting_ssts.is_empty());
+    assert_ne!(event_loop.state.compaction.compacting_ssts.len(), 0);
 }
 
 #[test]

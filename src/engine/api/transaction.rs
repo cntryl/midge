@@ -12,7 +12,7 @@ use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
 use crate::runtime::read_snapshot::SnapshotScan;
 use crate::runtime::transaction_spill::{
-    IntentKeyScan, IntentLookup, TransactionMemoryPool, TransactionWriteSet,
+    IntentEntry, IntentKeyScan, IntentLookup, TransactionMemoryPool, TransactionWriteSet,
 };
 use crate::runtime::{KeyAssertion, RuntimeHandle};
 use crate::types::ConflictPolicy;
@@ -208,7 +208,7 @@ struct TransactionScan<'a> {
     intents: IntentKeyScan,
     write_set: &'a TransactionWriteSet,
     snapshot_head: Option<MidgeResult<(bytes::Bytes, bytes::Bytes)>>,
-    intent_head: Option<MidgeResult<bytes::Bytes>>,
+    intent_head: Option<MidgeResult<IntentEntry>>,
     direction: super::iterator::Direction,
     prefix: Option<bytes::Bytes>,
     remaining: Option<usize>,
@@ -240,7 +240,7 @@ impl<'a> TransactionScan<'a> {
     fn initialize(&mut self) {
         if matches!(self.lifecycle, ScanLifecycle::Uninitialized) {
             self.snapshot_head = self.snapshot.next();
-            self.intent_head = self.intents.next();
+            self.intent_head = self.intents.next_entry(self.write_set);
             self.lifecycle = ScanLifecycle::Active;
         }
     }
@@ -258,10 +258,10 @@ impl<'a> TransactionScan<'a> {
     fn advance_consumed_sources(&mut self) {
         match self.pending_advance {
             SourceAdvance::Snapshot => self.snapshot_head = self.snapshot.next(),
-            SourceAdvance::Intent => self.intent_head = self.intents.next(),
+            SourceAdvance::Intent => self.intent_head = self.intents.next_entry(self.write_set),
             SourceAdvance::Both => {
                 self.snapshot_head = self.snapshot.next();
-                self.intent_head = self.intents.next();
+                self.intent_head = self.intents.next_entry(self.write_set);
             }
             SourceAdvance::None => {}
         }
@@ -274,7 +274,11 @@ impl<'a> TransactionScan<'a> {
             .as_ref()
             .and_then(|row| row.as_ref().ok())
             .map(|(key, _)| key);
-        let intent_key = self.intent_head.as_ref().and_then(|key| key.as_ref().ok());
+        let intent_key = self
+            .intent_head
+            .as_ref()
+            .and_then(|entry| entry.as_ref().ok())
+            .map(|entry| &entry.key);
         match (snapshot_key, intent_key) {
             (Some(snapshot), Some(intent)) => {
                 let intent_wins = if self.direction == super::iterator::Direction::Reverse {
@@ -323,17 +327,22 @@ impl<'a> TransactionScan<'a> {
                     .map(|(_, value)| value);
                 self.pending_advance = self.pending_advance.include_snapshot();
             }
+            let mut intent_point = None;
             if self
                 .intent_head
                 .as_ref()
                 .and_then(|candidate| candidate.as_ref().ok())
-                .is_some_and(|candidate| candidate == &key)
+                .is_some_and(|candidate| candidate.key == key)
             {
-                self.intent_head = None;
+                intent_point = self
+                    .intent_head
+                    .take()
+                    .and_then(Result::ok)
+                    .and_then(|entry| entry.point);
                 self.pending_advance = self.pending_advance.include_intent();
             }
 
-            let value = match self.write_set.latest_for_key(&key)? {
+            let value = match self.intents.resolve(self.write_set, &key, intent_point)? {
                 Some(IntentLookup::Present(value)) => Some(value),
                 Some(IntentLookup::Deleted) => None,
                 None => base_value,

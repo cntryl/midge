@@ -40,6 +40,8 @@ impl RemoteCasFailure {
     }
 }
 
+use crate::common::{MidgeError, MidgeResult};
+
 use super::actor;
 use super::policy;
 use crate::storage::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
@@ -53,7 +55,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 mod control_io;
-pub(crate) use control_io::ControlObject;
+pub(crate) use control_io::{ControlObject, ControlWriteFailure};
 mod file_publication;
 mod object_io;
 mod proofs;
@@ -124,6 +126,8 @@ struct WalUploadWorker {
     handle: Option<JoinHandle<()>>,
 }
 
+pub(crate) type StorageWriteAuthority = Arc<dyn Fn() -> MidgeResult<()> + Send + Sync>;
+
 pub struct HybridStorage {
     /// Format-neutral object-store routing, separate from admission and worker ownership.
     stores: ObjectStores,
@@ -157,6 +161,7 @@ pub struct HybridStorage {
     /// Provider compare-exchange remains the cross-process authority boundary.
     wal_catalog_mutation: Mutex<()>,
     maintenance_memory: std::sync::OnceLock<crate::common::resource_budget::ResourceBudget>,
+    write_authority: std::sync::OnceLock<StorageWriteAuthority>,
 
     /// Remote WAL prune workers are tracked so shutdown can join them before
     /// releasing the lease that fenced their conditional deletes.
@@ -335,11 +340,27 @@ impl HybridStorage {
             upload_worker_failed,
             wal_catalog_mutation: Mutex::new(()),
             maintenance_memory: std::sync::OnceLock::new(),
+            write_authority: std::sync::OnceLock::new(),
             prune_workers: Mutex::new(PruneWorkerRegistry::new(
                 limits.prune_workers,
                 limits.prune_requests,
             )),
         }
+    }
+
+    pub(crate) fn configure_write_authority(
+        &self,
+        authority: StorageWriteAuthority,
+    ) -> MidgeResult<()> {
+        self.write_authority.set(authority).map_err(|_| {
+            MidgeError::Internal("storage write authority was already configured".into())
+        })
+    }
+
+    pub(crate) fn check_write_authority(&self) -> MidgeResult<()> {
+        self.write_authority
+            .get()
+            .map_or(Ok(()), |validate| validate())
     }
 
     pub(crate) fn configure_maintenance_memory(

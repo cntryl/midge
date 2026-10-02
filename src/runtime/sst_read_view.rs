@@ -502,7 +502,7 @@ mod tests {
         if value <= 1 {
             0
         } else {
-            usize::try_from(usize::BITS - (value - 1).leading_zeros()).expect("log2 fits usize")
+            usize::try_from((value - 1).bit_width()).expect("log2 fits usize")
         }
     }
 

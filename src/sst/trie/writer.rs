@@ -151,7 +151,7 @@ mod tests {
 
         // Assert
         assert!(result.is_some());
-        assert!(!result.unwrap().is_empty());
+        assert_ne!(result.unwrap().len(), 0);
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
         // Assert
         assert!(result.is_some());
         let data = result.unwrap();
-        assert!(!data.is_empty());
+        assert_ne!(data.len(), 0);
 
         // Verify it can be read back
         let reader = TrieReader::new(&data).unwrap();

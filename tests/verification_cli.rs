@@ -49,7 +49,7 @@ fn should_emit_v1_json_given_healthy_database_when_midge_verify_runs() {
     // Assert
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(parse_stdout(&output), expected);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn should_emit_v1_json_given_degraded_local_database_when_midge_verify_runs() {
     // Assert
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(parse_stdout(&output), expected);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn should_emit_v1_usage_error_json_given_missing_path_when_midge_verify_runs() {
     // Assert
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(parse_stdout(&output), expected);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn should_emit_v1_storage_error_json_given_missing_database_when_midge_verify_ru
     // Assert
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(parse_stdout(&output), expected);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 #[test]
@@ -136,5 +136,5 @@ fn should_emit_v1_corruption_error_json_given_future_format_when_midge_verify_ru
     // Assert
     assert_eq!(output.status.code(), Some(4));
     assert_eq!(parse_stdout(&output), expected);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
