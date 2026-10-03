@@ -1,0 +1,88 @@
+name: Benchmark Tier 5
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-tier5-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: write-heavy-local
+            workload: tier5_write_heavy_local
+            cloud: false
+          - case: read-heavy-local
+            workload: tier5_read_heavy_local
+            cloud: false
+          - case: balanced-local
+            workload: tier5_balanced_local
+            cloud: false
+          - case: many-small-transactions-local
+            workload: tier5_many_small_transactions_local
+            cloud: false
+          - case: mixed-transaction-sizes-local
+            workload: tier5_mixed_transaction_sizes_local
+            cloud: false
+          - case: write-pressure-s3
+            workload: tier5_write_pressure_s3
+            cloud: true
+          - case: write-pressure-azure
+            workload: tier5_write_pressure_azure
+            cloud: true
+          - case: write-pressure-gcs-xml
+            workload: tier5_write_pressure_gcs_xml
+            cloud: true
+          - case: write-pressure-gcs-json
+            workload: tier5_write_pressure_gcs_json
+            cloud: true
+    env:
+      CARGO_INCREMENTAL: 0
+      MIDGE_TIER5_DURATION_SECS: "3600"
+      MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/midge-stress/${{ matrix.case }}
+      STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/stress/${{ matrix.case }}
+      STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-tier5
+      - name: Start Sqrzl
+        if: matrix.cloud
+        run: docker compose up -d sqrzl
+      - name: Wait for Sqrzl
+        if: matrix.cloud
+        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
+      - name: Run isolated Tier 5 case
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+        run: >-
+          cargo bench --bench tier5_stress_workloads --features stress-soak
+          -- --workload ${{ matrix.workload }} --profile smoke --samples 1
+          --warmup-samples 0 --cooldown-samples 0 --timeout-secs 4500
+          --no-progress-timeout-secs 60
+      - name: Upload framework and workload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier5-${{ matrix.case }}-${{ github.sha }}
+          path: |
+            target/stress/${{ matrix.case }}/**
+            target/midge-stress/${{ matrix.case }}/**
+          if-no-files-found: ignore
+          retention-days: 180
+      - name: Stop Sqrzl
+        if: always() && matrix.cloud
+        run: docker compose down -v

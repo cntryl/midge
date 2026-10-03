@@ -1,0 +1,43 @@
+name: Benchmark Tier 3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-tier3-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-tier3-${{ matrix.os }}
+      - name: Run registered Tier 3 targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in tier3_system_engine tier3_system_mvcc tier3_system_sst tier3_system_scan tier3_system_lifecycle; do
+            cargo bench --bench "$target" -- --profile default
+          done
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier3-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore
+          retention-days: 90

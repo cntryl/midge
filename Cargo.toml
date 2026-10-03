@@ -99,7 +99,7 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
 proptest = "1.11"
-cntryl-stress = "0.5"
+cntryl-stress = "0.5.1"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
 # without those modules being public API for downstream consumers.
@@ -119,6 +119,7 @@ telemetry = [
     "dep:opentelemetry_sdk",
 ]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
+stress-soak = ["cloud-all"]
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [
@@ -381,3 +382,17 @@ name = "tier4_bounded_compaction_qualification"
 path = "benches/tier4_bounded_compaction_qualification.rs"
 harness = false
 required-features = ["failpoints"]
+
+# Tiers 5 and 6 are opt-in, long-running stress campaigns. The required
+# feature keeps ordinary `cargo bench` from starting a soak accidentally.
+[[bench]]
+name = "tier5_stress_workloads"
+path = "benches/tier5_stress_workloads.rs"
+harness = false
+required-features = ["stress-soak"]
+
+[[bench]]
+name = "tier6_mixed_workload_soak"
+path = "benches/tier6_mixed_workload_soak.rs"
+harness = false
+required-features = ["stress-soak"]
