@@ -591,7 +591,14 @@ fn verify_database(
         artifacts,
         &format!("{phase}-workload"),
     );
-    verify_accounts(engine, family, expected, progress);
+    verify_accounts(
+        engine,
+        family,
+        expected,
+        progress,
+        artifacts,
+        &format!("{phase}-accounts"),
+    );
 }
 
 fn case_duration(tier: u8) -> Duration {
@@ -1206,7 +1213,11 @@ fn verify_seed(
     for row in scan.by_ref() {
         let (key, value) = row.expect("read seed verification row");
         let label = std::str::from_utf8(&key).expect("seed key is UTF-8");
-        if value.as_ref() != workload_value(label) {
+        let valid_key = label
+            .strip_prefix("midge:seed:")
+            .and_then(|index| index.parse::<usize>().ok())
+            .is_some_and(|index| index < SEED_ROWS && label == format!("midge:seed:{index:08}"));
+        if !valid_key || value.as_ref() != workload_value(label) {
             mismatches = mismatches.saturating_add(1);
         }
         rows = rows.saturating_add(1);
@@ -1286,26 +1297,61 @@ fn verify_accounts(
     family: &ColumnFamilyHandle,
     expected: &BTreeMap<(usize, usize, usize), u64>,
     progress: &ProgressHandle,
+    artifacts: &mut WorkloadArtifacts,
+    phase: &str,
 ) {
-    for (&(stage, client, kind), &count) in expected {
-        if kind != 11 {
-            continue;
+    let expected_accounts = expected
+        .iter()
+        .filter_map(|(&(stage, client, kind), &count)| {
+            (kind == 11).then_some(((stage, client), count))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let transaction = engine
+        .begin_tx(family.id(), TransactionMode::ReadOnly)
+        .expect("begin account verification");
+    let mut scan = transaction
+        .scan(&Query::new().prefix(Bytes::from_static(b"midge:account:")))
+        .expect("start account verification scan");
+    let (mut rows, mut mismatches) = (0_u64, 0_u64);
+    for row in scan.by_ref() {
+        let (key, value) = row.expect("read acknowledged account");
+        let label = std::str::from_utf8(&key).expect("account key is UTF-8");
+        let fields = label.split(':').collect::<Vec<_>>();
+        let valid = if fields.len() == 4 && fields[0] == "midge" && fields[1] == "account" {
+            if let (Ok(stage), Ok(client)) =
+                (fields[2].parse::<usize>(), fields[3].parse::<usize>())
+            {
+                let canonical_key = format!("midge:account:{stage:02}:{client:02}");
+                let balance = std::str::from_utf8(&value)
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok());
+                label == canonical_key
+                    && expected_accounts
+                        .get(&(stage, client))
+                        .is_some_and(|expected| balance == Some(*expected))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !valid {
+            mismatches = mismatches.saturating_add(1);
         }
-        let key = format!("midge:account:{stage:02}:{client:02}");
-        let transaction = engine
-            .begin_tx(family.id(), TransactionMode::ReadOnly)
-            .expect("begin account verification");
-        let value = transaction
-            .get(key.as_bytes())
-            .expect("read acknowledged account")
-            .expect("acknowledged account exists");
-        assert_eq!(
-            std::str::from_utf8(&value).expect("account balance is UTF-8"),
-            count.to_string(),
-            "account balance matches acknowledged small transactions"
-        );
+        rows = rows.saturating_add(1);
         progress.advance();
     }
+    assert!(
+        scan.exhausted(),
+        "account verification scan exhausted normally"
+    );
+    artifacts.verification(
+        phase,
+        u64::try_from(expected_accounts.len()).expect("account count fits u64"),
+        rows,
+        mismatches,
+        progress,
+    );
 }
 
 fn record_resources(
