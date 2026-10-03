@@ -1,9 +1,9 @@
 //! Shared Tier 5 and Tier 6 workloads for Midge's isolated stress benches.
 
 use cntryl_midge::{
-    Bytes, CloudProviderConfig, CloudStorageLocation, ColumnFamilyHandle, Engine, MemoryBudget,
-    MidgeError, OpenOptions, Query, RuntimeMetricsSnapshot, TransactionMode, WorkloadProfile,
-    WriteOptions,
+    Bytes, CloudProviderConfig, CloudStorageLocation, CloudWritePolicy, ColumnFamilyHandle, Engine,
+    MemoryBudget, MidgeError, OpenOptions, Query, RuntimeMetricsSnapshot, TransactionMode,
+    WorkloadProfile, WriteOptions,
 };
 use cntryl_stress::{
     LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome, ProgressHandle,
@@ -27,6 +27,8 @@ const WRITE_BATCH_ROWS: usize = 32;
 const MIXED_ROWS: [usize; 5] = [1, 8, 128, 1_024, 4_096];
 const WRITE_ROW_COUNTS: [usize; 11] = [32, 1, 1, 1, 8, 128, 1_024, 4_096, 1, 1, 128];
 const RESOURCE_SAMPLE_PERIOD: Duration = Duration::from_secs(60);
+const SATURATION_BACKOFF_MAX_SHIFT: u32 = 4;
+const CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkloadCase {
@@ -41,6 +43,7 @@ pub(super) struct WorkloadCase {
 struct SaturationCounts {
     resource_limit: u64,
     write_stall: u64,
+    backoff_ms: u64,
 }
 
 #[derive(Debug)]
@@ -84,6 +87,10 @@ impl StageStats {
             .saturation
             .write_stall
             .saturating_add(other.saturation.write_stall);
+        self.saturation.backoff_ms = self
+            .saturation
+            .backoff_ms
+            .saturating_add(other.saturation.backoff_ms);
         self.latency_us
             .add(&other.latency_us)
             .expect("merge transaction latency histogram");
@@ -111,6 +118,7 @@ struct WorkloadArtifacts {
     acknowledged_rows: u64,
     resource_limit: u64,
     write_stall: u64,
+    saturation_backoff_ms: u64,
     progress_units: u64,
     checks: Vec<serde_json::Value>,
     complete: bool,
@@ -143,6 +151,7 @@ impl WorkloadArtifacts {
             acknowledged_rows: 0,
             resource_limit: 0,
             write_stall: 0,
+            saturation_backoff_ms: 0,
             progress_units: 0,
             checks: Vec::new(),
             complete: false,
@@ -165,6 +174,9 @@ impl WorkloadArtifacts {
         self.write_stall = self
             .write_stall
             .saturating_add(stats.saturation.write_stall);
+        self.saturation_backoff_ms = self
+            .saturation_backoff_ms
+            .saturating_add(stats.saturation.backoff_ms);
         self.progress_units = progress.completed_units();
         append_stage_csv(&self.path, stage, stats);
         self.persist("running");
@@ -231,6 +243,7 @@ impl WorkloadArtifacts {
                 "acknowledged_rows": self.acknowledged_rows,
                 "resource_limit_responses": self.resource_limit,
                 "write_stall_responses": self.write_stall,
+                "saturation_backoff_ms": self.saturation_backoff_ms,
                 "progress_completed_units": self.progress_units,
                 "verification_checks": self.checks.len(),
             }))
@@ -652,10 +665,16 @@ fn cloud_options(path: &Path, backend: &str, namespace: &str, object_prefix: &st
     }
     .with_endpoint(endpoint)
     .unwrap_or_else(|error| panic!("configure Sqrzl endpoint: {error}"));
+    let cloud_write_policy = CloudWritePolicy {
+        // Batch asynchronous WAL into fewer objects during one-hour sweeps.
+        wal_seal_max_flush_delay: CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY,
+        ..CloudWritePolicy::default()
+    };
     OpenOptions::cloud(
         path,
         CloudStorageLocation::new(provider, object_prefix.to_string()),
     )
+    .cloud_write_policy(cloud_write_policy)
     .memory_budget(MemoryBudget::Auto)
     .workload(WorkloadProfile::default())
     .with_memtable_size_limit(8 * 1024 * 1024)
@@ -730,9 +749,11 @@ fn run_client(
     let mut sequences = [0_u64; 11];
     let mut account = 0_u64;
     let mut attempt = 0_u64;
+    let mut consecutive_saturation_responses = 0_u32;
     while Instant::now() < deadline {
         let started = Instant::now();
         result.stats.attempts = result.stats.attempts.saturating_add(1);
+        let mut backoff_ms = 0;
         match run_operation(
             engine,
             family_id,
@@ -753,14 +774,21 @@ fn run_client(
                 result.account_updates = result
                     .account_updates
                     .saturating_add(u64::from(account_updated));
+                consecutive_saturation_responses = 0;
             }
             Err(MidgeError::ResourceLimit(_)) => {
                 result.stats.saturation.resource_limit =
                     result.stats.saturation.resource_limit.saturating_add(1);
+                consecutive_saturation_responses =
+                    consecutive_saturation_responses.saturating_add(1);
+                backoff_ms = saturation_backoff_ms(consecutive_saturation_responses);
             }
             Err(MidgeError::WriteStall(_)) => {
                 result.stats.saturation.write_stall =
                     result.stats.saturation.write_stall.saturating_add(1);
+                consecutive_saturation_responses =
+                    consecutive_saturation_responses.saturating_add(1);
+                backoff_ms = saturation_backoff_ms(consecutive_saturation_responses);
             }
             Err(error) => panic!(
                 "{} workload transaction failed: {error}",
@@ -769,9 +797,24 @@ fn run_client(
         }
         result.stats.record_latency(started.elapsed());
         progress.advance();
+        if backoff_ms > 0 {
+            result.stats.saturation.backoff_ms = result
+                .stats
+                .saturation
+                .backoff_ms
+                .saturating_add(backoff_ms);
+            thread::sleep(Duration::from_millis(backoff_ms));
+        }
         attempt = attempt.saturating_add(1);
     }
     result
+}
+
+fn saturation_backoff_ms(consecutive_responses: u32) -> u64 {
+    let shift = consecutive_responses
+        .saturating_sub(1)
+        .min(SATURATION_BACKOFF_MAX_SHIFT);
+    1_u64 << shift
 }
 
 type OperationResult = Result<(Option<usize>, u64, u64, bool), MidgeError>;
@@ -1094,6 +1137,7 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
         .parameter("acknowledged_rows", stats.acknowledged_rows)
         .parameter("resource_limit_responses", stats.saturation.resource_limit)
         .parameter("write_stall_responses", stats.saturation.write_stall)
+        .parameter("saturation_backoff_ms", stats.saturation.backoff_ms)
         .parameter("midge_write_stalls_total", after.write_stalls_total)
         .parameter("midge_write_stalls_memory", after.write_stalls_memory_total)
         .parameter(
@@ -1141,6 +1185,12 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
         ObservationDirection::Informational,
     )
     .record_observation(
+        "saturation_backoff_us",
+        observation_value(stats.saturation.backoff_ms.saturating_mul(1_000)),
+        ObservationUnit::Microseconds,
+        ObservationDirection::Informational,
+    )
+    .record_observation(
         "midge_write_stalls_delta",
         observation_value(
             after
@@ -1168,18 +1218,19 @@ fn append_stage_csv(path: &Path, stage: &str, stats: &StageStats) {
         .open(report)
         .expect("open stage report");
     if needs_header {
-        writeln!(file,"stage,attempted_transactions,acknowledged_transactions,logical_operations,acknowledged_rows,resource_limit_responses,write_stall_responses,latency_p50_us,latency_p95_us,latency_p99_us")
+        writeln!(file,"stage,attempted_transactions,acknowledged_transactions,logical_operations,acknowledged_rows,resource_limit_responses,write_stall_responses,saturation_backoff_ms,latency_p50_us,latency_p95_us,latency_p99_us")
             .expect("write stage report header");
     }
     writeln!(
         file,
-        "{stage},{},{},{},{},{},{},{},{},{}",
+        "{stage},{},{},{},{},{},{},{},{},{},{}",
         stats.attempts,
         stats.acknowledged,
         stats.logical_operations,
         stats.acknowledged_rows,
         stats.saturation.resource_limit,
         stats.saturation.write_stall,
+        stats.saturation.backoff_ms,
         quantile(&stats.latency_us, 0.50),
         quantile(&stats.latency_us, 0.95),
         quantile(&stats.latency_us, 0.99),
