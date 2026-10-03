@@ -71,7 +71,9 @@ concurrency sweep; Tier 6 uses one hour per composite soak. Short smoke runs
 can set `MIDGE_TIER5_DURATION_SECS` or `MIDGE_TIER6_DURATION_SECS` to a smaller
 positive value. Sqrzl protocol cases use the local emulator at
 `MIDGE_STRESS_SQRZL_ENDPOINT` (default `http://127.0.0.1:9000`); they measure
-those protocol surfaces and do not claim live-provider capacity.
+those protocol surfaces and do not claim live-provider capacity. Namespace
+setup reads `SQRZL_SECRET_ACCESS_KEY`, which must match the Sqrzl credentials;
+the benchmark workflows set it for their local emulator jobs.
 
 Tier 5/6 runs set a 60-second `cntryl-stress` no-progress watchdog. Workload
 artifacts under `target/midge-stress/` include status, stage latency and

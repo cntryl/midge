@@ -203,7 +203,7 @@ impl WorkloadArtifacts {
         self.persist(if passed { "running" } else { "failed" });
         assert!(
             passed,
-            "{phase} verification failed: expected {expected_rows} rows, found {actual_rows}, mismatches {mismatches}; artifacts: {}",
+            "{phase} verification failed; see artifacts: {}",
             self.path.display()
         );
     }
@@ -1498,6 +1498,15 @@ fn sqrzl_endpoint() -> String {
         .unwrap_or_else(|_| "http://127.0.0.1:9000".to_string())
 }
 
+fn sqrzl_secret() -> Result<String, String> {
+    let secret = std::env::var("SQRZL_SECRET_ACCESS_KEY")
+        .map_err(|_| "SQRZL_SECRET_ACCESS_KEY is required for Sqrzl namespace setup".to_string())?;
+    if secret.is_empty() {
+        return Err("SQRZL_SECRET_ACCESS_KEY must not be empty".to_string());
+    }
+    Ok(secret)
+}
+
 fn sqrzl_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -1548,7 +1557,8 @@ fn signed_s3_namespace(namespace: &str) -> Result<(), String> {
         mac.update(data);
         Ok(mac.finalize().into_bytes().to_vec())
     };
-    let date_key = mac(b"AWS4easy-peasy", date.as_bytes())?;
+    let aws_key = format!("AWS4{}", sqrzl_secret()?);
+    let date_key = mac(aws_key.as_bytes(), date.as_bytes())?;
     let region_key = mac(&date_key, b"us-east-1")?;
     let service_key = mac(&region_key, b"s3")?;
     let signing_key = mac(&service_key, b"aws4_request")?;
@@ -1582,10 +1592,9 @@ fn signed_azure_namespace(container: &str) -> Result<(), String> {
     let canonical_resource = format!("/admin{path}\nrestype:container");
     let string_to_sign =
         format!("PUT\n\n\n\n\n\n\n\n\n\n\n\n{canonical_headers}{canonical_resource}");
-    let key = base64::engine::general_purpose::STANDARD
-        .decode("easy-peasy")
-        .unwrap_or_else(|_| b"easy-peasy".to_vec());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| error.to_string())?;
+    let key = sqrzl_secret()?;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key.as_bytes()).map_err(|error| error.to_string())?;
     mac.update(string_to_sign.as_bytes());
     let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
     let response = sqrzl_client()?
@@ -1610,7 +1619,9 @@ fn signed_gcs_xml_namespace(bucket: &str) -> Result<(), String> {
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
     let string_to_sign = format!("PUT\n\n\n{date}\n{path}");
-    let mut mac = Hmac::<Sha1>::new_from_slice(b"easy-peasy").map_err(|error| error.to_string())?;
+    let secret = sqrzl_secret()?;
+    let mut mac =
+        Hmac::<Sha1>::new_from_slice(secret.as_bytes()).map_err(|error| error.to_string())?;
     mac.update(string_to_sign.as_bytes());
     let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
     let response = sqrzl_client()?
