@@ -1,0 +1,43 @@
+name: Benchmark Tier 1
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-tier1-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-tier1
+      - name: Run registered Tier 1 targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in \
+            tier1_hotpath_api tier1_hotpath_bloom tier1_hotpath_block_cache \
+            tier1_hotpath_iterator tier1_hotpath_memtable tier1_hotpath_sst \
+            tier1_hotpath_trie tier1_hotpath_wal tier1_hotpath_keyed_group_commit \
+            tier1_hotpath_compression tier1_hotpath_event_loop; do
+            cargo bench --bench "$target" -- --profile default
+          done
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier1-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore
+          retention-days: 90

@@ -59,10 +59,26 @@ whole measured workload.
 Its row names and results start a new baseline; old simulator numbers cannot
 be compared with Engine throughput or block counts.
 
-To qualify the Tier 3 lifecycle benchmark on Ubuntu, Windows, and macOS,
-dispatch `CI` with `tier3_lifecycle_bench` enabled. This runs only the
-`tier3_system_lifecycle` benchmark target as an opt-in platform check.
-Its repeated flush-cycle row enables compaction so L0 slots can be recycled.
+Tier benchmarks run in separate manually dispatched workflows named
+`Benchmark Tier 1` through `Benchmark Tier 6`. Tier 3 runs all registered Tier
+3 targets on Ubuntu, Windows, and macOS; the repeated flush-cycle row enables
+compaction so L0 slots can be recycled.
+
+The old Destroyer scenarios now live in the opt-in `stress-soak` bench targets.
+The feature gates both Tier 5 and Tier 6, so a plain `cargo bench` cannot start
+an hours-long run. Local Tier 5 runs use one hour per workload/backend
+concurrency sweep; Tier 6 uses one hour per composite soak. Short smoke runs
+can set `MIDGE_TIER5_DURATION_SECS` or `MIDGE_TIER6_DURATION_SECS` to a smaller
+positive value. Sqrzl protocol cases use the local emulator at
+`MIDGE_STRESS_SQRZL_ENDPOINT` (default `http://127.0.0.1:9000`); they measure
+those protocol surfaces and do not claim live-provider capacity.
+
+Tier 5/6 runs set a 60-second `cntryl-stress` no-progress watchdog. Workload
+artifacts under `target/midge-stress/` include status, stage latency and
+saturation summaries, resource samples, and flush/reopen or cloud-cache-loss
+verification summaries. `ResourceLimit` and `WriteStall` responses are
+reported as saturation. Data mismatches, failed recovery, a stalled workload,
+or the hard benchmark deadline fail the run.
 
 ## Comparing Changes
 
