@@ -299,6 +299,7 @@ impl CompactionActor {
         }
     }
 
+    #[cfg(test)]
     pub fn set_l0_file_count_threshold(&mut self, threshold: usize) {
         self.compactor.config.l0_file_count_threshold = threshold.max(1);
     }

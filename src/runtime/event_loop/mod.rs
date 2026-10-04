@@ -342,6 +342,7 @@ impl EventLoop {
             config.hybrid_storage,
             config.compaction_memory_limit,
             &recovered_cloud_wal,
+            config.startup_scope.as_ref(),
         )?;
 
         Ok(event_loop)
@@ -352,12 +353,13 @@ impl EventLoop {
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
         compaction_memory_limit: usize,
         recovered_cloud_wal: &RecoveredCloudWalConfig,
+        startup_scope: Option<&crate::common::DeadlineScope>,
     ) -> crate::common::MidgeResult<()> {
         if let Some(storage) = hybrid_storage {
             storage.configure_maintenance_memory(compaction_memory_limit);
             self.set_hybrid_storage(storage);
         }
-        self.initialize_recovered_cloud_wal(recovered_cloud_wal)
+        self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)
     }
 
     /// The compaction publisher shares the flush worker's inline mode so
@@ -434,7 +436,9 @@ impl EventLoop {
     fn initialize_recovered_cloud_wal(
         &mut self,
         config: &RecoveredCloudWalConfig,
+        startup_scope: Option<&crate::common::DeadlineScope>,
     ) -> crate::common::MidgeResult<()> {
+        check_startup_scope(startup_scope, "recovered cloud WAL initialization")?;
         let remote_segments = &config.remote_segments;
         let local_segments = &config.local_segments;
         let active_wal = config.active_wal;
@@ -457,6 +461,7 @@ impl EventLoop {
 
         let mut recovered_segments = remote_segments.clone();
         for (&segment_id, &segment) in local_segments {
+            check_startup_scope(startup_scope, "recovered cloud WAL identities")?;
             if let Some(remote_segment) = recovered_segments.insert(segment_id, segment) {
                 return Err(crate::common::MidgeError::RecoveryFailed(format!(
                     "WAL segment {segment_id} is both remote and local-only during recovery: remote max {}, local max {}",
@@ -466,6 +471,7 @@ impl EventLoop {
             }
         }
         for (&segment_id, segment) in &recovered_segments {
+            check_startup_scope(startup_scope, "recovered cloud WAL obligations")?;
             self.durability
                 .record_cloud_segment_inflight(segment_id, segment.max_sequence);
             self.wal_transition.register_recovered(
@@ -479,10 +485,12 @@ impl EventLoop {
             .durability
             .contiguous_acked_cloud_segments(&self.cloud_coordinator.cloud_wal.acked_segments)
             .map_err(crate::common::MidgeError::RecoveryFailed)?;
+        check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some((_, max_sequence)) = initially_durable.last() {
             self.state.wal.frontiers.advance_cloud_to(*max_sequence);
         }
         for (segment_id, _) in initially_durable {
+            check_startup_scope(startup_scope, "recovered durable cloud WAL")?;
             self.wal_transition.note_cloud_durable(segment_id)?;
             self.durability.retire_cloud_segment(segment_id);
             if self.remove_cloud_durable_local_wal_segment(segment_id) {
@@ -491,6 +499,7 @@ impl EventLoop {
         }
 
         for (&segment_id, segment) in local_segments {
+            check_startup_scope(startup_scope, "recovered cloud WAL upload backlog")?;
             self.cloud_coordinator
                 .cloud_wal
                 .upload_backlog
@@ -498,15 +507,24 @@ impl EventLoop {
         }
 
         if let Some(active_wal) = active_wal {
+            check_startup_scope(startup_scope, "recovered active cloud WAL")?;
             self.wal_actor
                 .restore_recovered_cloud_active_wal(&mut self.state, active_wal)?;
-            if self.seal_recovered_cloud_active_segment()?.is_none() {
+            let deadline = startup_scope.map_or_else(
+                crate::common::OperationDeadline::unbounded,
+                crate::common::DeadlineScope::deadline,
+            );
+            if self
+                .seal_recovered_cloud_active_segment(&deadline)?
+                .is_none()
+            {
                 return Err(crate::common::MidgeError::RecoveryFailed(
                     "recovered active cloud WAL was not sealed for resumed upload".to_string(),
                 ));
             }
         }
 
+        check_startup_scope(startup_scope, "recovered cloud WAL completion")?;
         Ok(())
     }
 
@@ -687,6 +705,13 @@ impl EventLoop {
     ) -> HandleOutcome {
         gc::GcCoordinator::retry_within(self, deadline)
     }
+}
+
+fn check_startup_scope(
+    scope: Option<&crate::common::DeadlineScope>,
+    context: &str,
+) -> crate::common::MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check(context))
 }
 
 #[cfg(test)]

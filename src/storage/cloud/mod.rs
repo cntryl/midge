@@ -34,6 +34,8 @@ mod config;
 pub(crate) mod range;
 #[cfg(test)]
 mod test_support;
+#[cfg(all(test, feature = "cloud-all"))]
+pub(crate) use test_support::native_http;
 #[cfg(test)]
 pub(crate) use test_support::{
     forward_cloud_backend, unsupported_cloud_backend, UnsupportedCloudBackend,
@@ -161,9 +163,10 @@ mod dispatcher;
 pub use dispatcher::CloudStorage;
 
 mod proof;
+#[cfg(test)]
+pub(crate) use proof::blocking_cloud_object_proof;
 pub(crate) use proof::{
-    blocking_cloud_object_proof, blocking_cloud_object_proof_within, validate_object_proof,
-    CloudObjectProof,
+    blocking_cloud_object_proof_within, validate_object_proof, CloudObjectProof,
 };
 
 pub(crate) fn is_not_found_error(error: &CloudError) -> bool {

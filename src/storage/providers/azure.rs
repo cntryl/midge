@@ -1134,10 +1134,11 @@ impl CloudBackend for AzureBackend {
                 sas_token: self.sas_token.clone(),
             },
         );
-        self.executor.spawn_request_loop(
+        self.executor.spawn_request_loop_with_timeout(
             state,
             prefix,
             callback,
+            request_timeout,
             move |state| {
                 let mut request = CloudRequest::new(Method::GET, state.url());
                 if let Some(timeout) = request_timeout {

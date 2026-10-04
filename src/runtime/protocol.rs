@@ -400,6 +400,7 @@ pub enum RuntimeMsg {
     },
 
     /// Set runtime configuration atomically. Any field set to `None` will be left unchanged.
+    #[cfg(test)]
     SetRuntimeConfig {
         request_id: u64,
         memtable_size_limit: Option<usize>,
@@ -692,8 +693,11 @@ impl RuntimeMsg {
             | RuntimeMsg::ManifestPersist { request_id }
             | RuntimeMsg::ManifestCreateColumnFamily { request_id, .. }
             | RuntimeMsg::ManifestDropColumnFamily { request_id, .. }
-            | RuntimeMsg::SetRuntimeConfig { request_id, .. }
             | RuntimeMsg::CompactAll { request_id } => VerificationBarrierAction::Reject {
+                request_id: *request_id,
+            },
+            #[cfg(test)]
+            RuntimeMsg::SetRuntimeConfig { request_id, .. } => VerificationBarrierAction::Reject {
                 request_id: *request_id,
             },
             RuntimeMsg::Test(msg) => msg.verification_barrier_action(),
@@ -724,11 +728,13 @@ impl RuntimeMsg {
             | RuntimeMsg::BeginBackupCapture { request_id }
             | RuntimeMsg::EndStorageVerification { request_id, .. }
             | RuntimeMsg::BeginTransaction { request_id, .. }
-            | RuntimeMsg::SetRuntimeConfig { request_id, .. }
             | RuntimeMsg::CompactAll { request_id }
             | RuntimeMsg::CheckWriteStall { request_id, .. }
             | RuntimeMsg::ShutdownWithResponse { request_id }
             | RuntimeMsg::WaitForWriteStallClear { request_id, .. } => Some(*request_id),
+
+            #[cfg(test)]
+            RuntimeMsg::SetRuntimeConfig { request_id, .. } => Some(*request_id),
 
             RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::Shutdown
@@ -757,6 +763,7 @@ impl RuntimeMsg {
             RuntimeMsg::BeginBackupCapture { .. } => "BeginBackupCapture",
             RuntimeMsg::EndStorageVerification { .. } => "EndStorageVerification",
             RuntimeMsg::BeginTransaction { .. } => "BeginTransaction",
+            #[cfg(test)]
             RuntimeMsg::SetRuntimeConfig { .. } => "SetRuntimeConfig",
             RuntimeMsg::CompactAll { .. } => "CompactAll",
             RuntimeMsg::Shutdown => "Shutdown",

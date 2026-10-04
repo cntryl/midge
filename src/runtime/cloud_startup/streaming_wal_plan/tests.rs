@@ -1164,3 +1164,176 @@ proptest::proptest! {
 
 #[cfg(feature = "failpoints")]
 mod crashes;
+
+#[derive(Default)]
+struct PlannerEvidence {
+    successful_heads: std::sync::atomic::AtomicUsize,
+    mutations: std::sync::atomic::AtomicUsize,
+}
+
+struct DelayedPlannerBackend {
+    inner: Arc<dyn StorageBackend>,
+    evidence: Arc<PlannerEvidence>,
+    delay: Duration,
+}
+
+impl StorageBackend for DelayedPlannerBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.inner.submit_range_head_request(request, tx);
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual filesystem HEAD");
+        assert!(matches!(
+            &event,
+            crate::storage::StorageEvent::HeadComplete {
+                result: crate::storage::StorageOutcome::Ok(_),
+                ..
+            }
+        ));
+        self.evidence
+            .successful_heads
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        std::thread::sleep(self.delay);
+        let _ = callback.send(event);
+    }
+
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        self.inner
+            .submit_range_read_request(request, range, callback);
+    }
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        self.inner.submit_metadata_read_request(request, callback);
+    }
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.inner.submit_head_request(request, callback);
+    }
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.evidence
+            .mutations
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.inner.submit_delete_request(request, callback);
+    }
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.evidence
+            .mutations
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.inner.submit_write_request(request, data, callback);
+    }
+}
+
+fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
+    // Arrange: a real catalog names four genuine sealed WAL objects. The
+    // second successful delayed HEAD crosses one shared 150 ms budget.
+    let mut fixture = Fixture::new().expect("actual planner fixture");
+    let mut objects = Vec::new();
+    for id in 1..=4 {
+        let bytes = framed_wal(id, 7, b"acknowledged value");
+        fixture.publish(id, id, 7, &bytes).unwrap();
+        objects.push((fixture.catalog.segments[&id].object_key.clone(), bytes));
+    }
+    let local_name = crate::wal::segment_file_name(4);
+    let local_bytes = framed_wal(4, 7, b"acknowledged value");
+    let local_path = fixture.local(&local_name, &local_bytes).unwrap();
+    let catalog_before = fixture.catalog.encode().unwrap();
+    let evidence = Arc::new(PlannerEvidence::default());
+    let remote: Arc<dyn StorageBackend> = Arc::new(DelayedPlannerBackend {
+        inner: Arc::clone(&fixture.cloud),
+        evidence: Arc::clone(&evidence),
+        delay: Duration::from_millis(100),
+    });
+    let scope = crate::common::DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        Duration::from_millis(150),
+    ));
+
+    // Act: the real planner owns checksum/inspection and receives real HEADs;
+    // a completed successful submission is not free aggregate time.
+    let result = StreamingCloudWalRecovery::build_within(
+        &fixture.directory.path().join("local"),
+        &remote,
+        &fixture.catalog,
+        policy,
+        Duration::from_secs(5),
+        127,
+        limits(),
+        &scope,
+    );
+
+    // Assert: Timeout is typed under both policies and stops before later
+    // segment admission, alias quarantine, remote deletion, or catalog changes.
+    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert_eq!(
+        evidence
+            .successful_heads
+            .load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+    assert_eq!(
+        evidence
+            .mutations
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert_eq!(fixture.catalog.encode().unwrap(), catalog_before);
+    assert_eq!(std::fs::read(local_path).unwrap(), local_bytes);
+    assert_eq!(
+        std::fs::read_dir(fixture.directory.path().join("local/wal"))
+            .unwrap()
+            .count(),
+        1
+    );
+    for (key, bytes) in objects {
+        assert_eq!(
+            std::fs::read(fixture.directory.path().join("cloud").join(key)).unwrap(),
+            bytes
+        );
+    }
+    assert!(!fixture
+        .directory
+        .path()
+        .join("local/cloud_recovery")
+        .exists());
+
+    // A fresh healthy compatibility attempt still verifies the exact history.
+    let recovered = fixture
+        .plan_only(policy, limits())
+        .expect("healthy planner after timeout");
+    assert_eq!(recovered.plan.remote_segments.len(), 4);
+    assert!(!recovered.plan.opened_in_salvage_mode);
+}
+
+#[test]
+fn should_preserve_recovery_inputs_when_strict_planner_exhausts_aggregate_head_budget() {
+    assert_planner_aggregate_timeout(RecoveryPolicy::Strict);
+}
+
+#[test]
+fn should_preserve_recovery_inputs_when_salvage_planner_exhausts_aggregate_head_budget() {
+    assert_planner_aggregate_timeout(RecoveryPolicy::Salvage);
+}

@@ -549,7 +549,7 @@ impl Engine {
                     .lease_state
                     .schedule_runtime_cleanup(runtime, self.runtime_handle.clone())
                 {
-                    self.runtime = Some(runtime);
+                    self.runtime = Some(*runtime);
                     return Err(error);
                 }
                 return shutdown_result;

@@ -5,7 +5,7 @@
 //! `engine::startup` wires these decisions into engine startup; the coverage
 //! rule they rely on is the shared one in `runtime::hybrid_persistence`.
 
-use crate::io::{Fs, FsError};
+use crate::io::FsError;
 
 pub(crate) mod cloud_io;
 mod cloud_recovery;
@@ -116,24 +116,50 @@ impl CloudWalRecoveryPlan {
         db_path: &std::path::Path,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
+        self.commit_set_aside_with_authority_within(
+            persistence,
+            writer_epoch,
+            catalog,
+            db_path,
+            validate,
+            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        )
+    }
+
+    pub(crate) fn commit_set_aside_with_authority_within(
+        &self,
+        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
+        writer_epoch: u64,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        db_path: &std::path::Path,
+        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
+        scope: &crate::common::DeadlineScope,
+    ) -> crate::common::MidgeResult<()> {
+        let deadline = scope.deadline();
+        let validate = &|| {
+            scope.check("cloud WAL salvage authority")?;
+            validate()
+        };
         validate()?;
         if self.max_unreplayed_sequence > catalog.sequence_floor {
-            persistence.raise_wal_sequence_floor_with_authority(
+            persistence.raise_wal_sequence_floor_with_authority_within(
                 writer_epoch,
                 self.max_unreplayed_sequence,
                 validate,
+                &deadline,
             )?;
         }
         crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
         validate()?;
-        self.set_aside_local_wal_with_authority(db_path, validate)?;
+        self.set_aside_local_wal_with_authority_within(db_path, validate, scope)?;
         crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
         validate()?;
         if !self.unreplayed_segments.is_empty() {
-            persistence.retire_unreplayed_wal_segments_with_authority(
+            persistence.retire_unreplayed_wal_segments_with_authority_within(
                 writer_epoch,
                 &self.unreplayed_segments,
                 validate,
+                &deadline,
             )?;
         }
         validate()
@@ -148,18 +174,37 @@ impl CloudWalRecoveryPlan {
         self.set_aside_local_wal_with_authority(db_path, &|| Ok(()))
     }
 
+    #[cfg(test)]
     pub(crate) fn set_aside_local_wal_with_authority(
         &self,
         db_path: &std::path::Path,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
+        self.set_aside_local_wal_with_authority_within(
+            db_path,
+            validate,
+            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        )
+    }
+
+    pub(crate) fn set_aside_local_wal_with_authority_within(
+        &self,
+        db_path: &std::path::Path,
+        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
+        scope: &crate::common::DeadlineScope,
+    ) -> crate::common::MidgeResult<()> {
+        scope.check("local WAL salvage set-aside")?;
         let fs = crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?;
+        let fs = crate::io::scope_fs(std::sync::Arc::new(fs), scope.clone());
         let mut renamed = false;
         for path in &self.set_aside_local_paths {
+            scope.check("local WAL salvage rename")?;
             let path = streaming_wal_plan::local_path(path)?;
             if fs.exists(&path).map_err(FsError::into_midge)? {
                 CloudStartupRecovery::quarantine_local_wal_alias_with_authority(
-                    &fs, &path, validate,
+                    fs.as_ref(),
+                    &path,
+                    validate,
                 )?;
                 renamed = true;
                 crate::failpoints::fail_point!("midge::recovery::after_salvage_quarantine_rename");

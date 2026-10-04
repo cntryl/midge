@@ -7,13 +7,37 @@ use super::{
     SnapshotPinRegistry, SnapshotState, TransactionCoordination, WalRecoveryState, WalState,
     WritePressureState,
 };
+use crate::common::DeadlineScope;
 use crate::io::FsError;
+
+fn check_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check(context))
+}
+
+fn preserve_timeout(error: MidgeError, context: &str) -> MidgeError {
+    match error {
+        error @ MidgeError::Timeout(_) => error,
+        error => MidgeError::RecoveryFailed(format!("{context}: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactionManifestState {
     Prepublication,
     Published,
     Partial,
+}
+
+struct RecoveredStartup {
+    wal_dir: PathBuf,
+    sst_dir: PathBuf,
+    opened_in_salvage_mode: bool,
+    manifest: Manifest,
+    intent_log: Vec<IntentLogEntry>,
+    wal: WalRecoveryState,
 }
 
 impl RuntimeState {
@@ -94,28 +118,103 @@ impl RuntimeState {
         recovery_policy: crate::config::RecoveryPolicy,
         replay_wal: bool,
     ) -> MidgeResult<Self> {
+        Self::ensure_directories(&db_path, memory_mode)?;
+        let fs = Self::initialize_fs(&db_path, memory_mode)?;
+        Self::initialize_recovery_core(
+            db_path,
+            memory_mode,
+            recovery_wal_dir,
+            recovery_policy,
+            replay_wal,
+            fs,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn initialize_recovery_within(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_wal_dir: Option<&PathBuf>,
+        recovery_policy: crate::config::RecoveryPolicy,
+        replay_wal: bool,
+        fs: Arc<dyn Fs>,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Self> {
+        scope.check("recovery filesystem view")?;
+        let fs = crate::io::scope_fs(fs, scope.clone());
+        Self::initialize_recovery_core(
+            db_path,
+            memory_mode,
+            recovery_wal_dir,
+            recovery_policy,
+            replay_wal,
+            fs,
+            Some(scope),
+        )
+    }
+
+    pub(crate) fn try_new_with_recovery_dir_within(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_wal_dir: Option<&PathBuf>,
+        policy: crate::config::RecoveryPolicy,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Self> {
+        scope.check("local recovery filesystem")?;
+        Self::ensure_directories(&db_path, memory_mode)?;
+        scope.check("local recovery directories")?;
+        let fs = Self::initialize_fs(&db_path, memory_mode)?;
+        Self::initialize_recovery_within(
+            db_path,
+            memory_mode,
+            recovery_wal_dir,
+            policy,
+            true,
+            fs,
+            scope,
+        )
+    }
+
+    pub(crate) fn try_new_before_cloud_replay_within(
+        db_path: PathBuf,
+        policy: crate::config::RecoveryPolicy,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Self> {
+        scope.check("cloud recovery filesystem")?;
+        Self::ensure_directories(&db_path, false)?;
+        scope.check("cloud recovery directories")?;
+        let fs = Self::initialize_fs(&db_path, false)?;
+        Self::initialize_recovery_within(db_path, false, None, policy, false, fs, scope)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initialize_recovery_core(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_wal_dir: Option<&PathBuf>,
+        recovery_policy: crate::config::RecoveryPolicy,
+        replay_wal: bool,
+        fs: Arc<dyn Fs>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Self> {
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
-        let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, persistence.is_memory())?;
-        let fs = Self::initialize_fs(&db_path, persistence.is_memory())?;
-        let RecoveryLoadState {
+        let RecoveredStartup {
+            wal_dir,
+            sst_dir,
             opened_in_salvage_mode,
             manifest,
             intent_log,
-        } = Self::load_recovery_state(&db_path, persistence.is_memory(), recovery_policy, &fs)?;
-        let column_families = Self::bootstrap_column_families(&manifest);
-        let wal_recovery = if replay_wal {
-            Self::recover_wal_state(
-                persistence.is_memory(),
-                &wal_dir,
-                &sst_dir,
-                recovery_wal_dir,
-                recovery_policy,
-                &manifest,
-                column_families,
-            )?
-        } else {
-            Self::empty_wal_recovery(&manifest, column_families)
-        };
+            wal: wal_recovery,
+        } = Self::load_startup_recovery(
+            &db_path,
+            persistence,
+            recovery_wal_dir,
+            recovery_policy,
+            replay_wal,
+            &fs,
+            scope,
+        )?;
         let recovered_memtable_bytes = Self::recovered_memtable_bytes(&wal_recovery);
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
@@ -134,7 +233,8 @@ impl RuntimeState {
             column_families: wal_recovery.column_families,
             manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
-            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(fs.clone())),
+            startup_scope: scope.cloned(),
+            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(fs)),
             sst_names: super::SstNameAllocation::default(),
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),
@@ -183,9 +283,57 @@ impl RuntimeState {
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_compaction_waits: std::collections::HashSet::new(),
         };
+        check_scope(scope, "recovery state construction")?;
         state.record_recovery_metrics();
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)
+    }
+
+    fn load_startup_recovery(
+        db_path: &std::path::Path,
+        persistence: RuntimePersistence,
+        recovery_wal_dir: Option<&PathBuf>,
+        recovery_policy: crate::config::RecoveryPolicy,
+        replay_wal: bool,
+        fs: &Arc<dyn Fs>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<RecoveredStartup> {
+        check_scope(scope, "recovery directories")?;
+        let (wal_dir, sst_dir) = Self::ensure_directories(db_path, persistence.is_memory())?;
+        check_scope(scope, "recovery directories")?;
+        let RecoveryLoadState {
+            opened_in_salvage_mode,
+            manifest,
+            intent_log,
+        } = Self::load_recovery_state(
+            db_path,
+            persistence.is_memory(),
+            recovery_policy,
+            fs,
+            scope,
+        )?;
+        let column_families = Self::bootstrap_column_families(&manifest);
+        let wal_recovery = if replay_wal {
+            Self::recover_wal_state(
+                persistence.is_memory(),
+                recovery_wal_dir.map_or(wal_dir.as_path(), PathBuf::as_path),
+                &sst_dir,
+                recovery_policy,
+                &manifest,
+                column_families,
+                scope,
+            )?
+        } else {
+            Self::empty_wal_recovery(&manifest, column_families)
+        };
+        Ok(RecoveredStartup {
+            wal_dir,
+            sst_dir,
+            opened_in_salvage_mode,
+            manifest,
+            intent_log,
+            wal: wal_recovery,
+        })
     }
 
     fn record_recovery_metrics(&self) {
@@ -245,14 +393,17 @@ impl RuntimeState {
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
         fs: &Arc<dyn Fs>,
+        scope: Option<&DeadlineScope>,
     ) -> MidgeResult<RecoveryLoadState> {
+        check_scope(scope, "recovery metadata")?;
         let mut opened_in_salvage_mode = false;
-        let manifest = Self::load_manifest(
+        let manifest = Self::load_manifest_within(
             db_path,
             memory_mode,
             recovery_policy,
             fs,
             &mut opened_in_salvage_mode,
+            scope,
         )?;
         let intent_log = Self::load_intent_log(
             memory_mode,
@@ -260,6 +411,7 @@ impl RuntimeState {
             fs,
             &mut opened_in_salvage_mode,
         )?;
+        check_scope(scope, "recovery metadata")?;
         Ok(RecoveryLoadState {
             opened_in_salvage_mode,
             manifest,
@@ -267,25 +419,50 @@ impl RuntimeState {
         })
     }
 
+    #[cfg(test)]
     fn load_manifest(
-        _db_path: &std::path::Path,
+        db_path: &std::path::Path,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
         fs: &Arc<dyn Fs>,
         opened_in_salvage_mode: &mut bool,
     ) -> MidgeResult<Manifest> {
+        Self::load_manifest_within(
+            db_path,
+            memory_mode,
+            recovery_policy,
+            fs,
+            opened_in_salvage_mode,
+            None,
+        )
+    }
+
+    fn load_manifest_within(
+        _db_path: &std::path::Path,
+        memory_mode: bool,
+        recovery_policy: crate::config::RecoveryPolicy,
+        fs: &Arc<dyn Fs>,
+        opened_in_salvage_mode: &mut bool,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
         if memory_mode {
             return Ok(Manifest::default());
         }
-        match crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-            fs,
-            crate::config::RecoveryPolicy::Strict,
-        ) {
+        let load = |policy| match scope {
+            Some(scope) => crate::metadata::ManifestPersistence::load_with_fs_and_policy_within(
+                fs, policy, scope,
+            ),
+            None => crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(fs, policy),
+        };
+        match load(crate::config::RecoveryPolicy::Strict) {
             Ok(manifest) => {
                 tracing::info!("manifest loaded from disk");
                 Ok(manifest)
             }
             Err(error) => {
+                if matches!(error, MidgeError::Timeout(_)) {
+                    return Err(error);
+                }
                 if recovery_policy == crate::config::RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
                         "failed to load manifest: {error}"
@@ -301,17 +478,16 @@ impl RuntimeState {
                 // than deleting it. Telling a transient read error apart
                 // from corruption here needs a typed load error (#494).
                 Ok(
-                    crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-                        fs,
-                        crate::config::RecoveryPolicy::Salvage,
-                    )
-                    .unwrap_or_else(|salvage_error| {
+                    load(crate::config::RecoveryPolicy::Salvage).or_else(|salvage_error| {
+                        if matches!(salvage_error, MidgeError::Timeout(_)) {
+                            return Err(salvage_error);
+                        }
                         tracing::warn!(
                             "failed to load manifest in salvage mode, using default: {}",
                             salvage_error
                         );
-                        Manifest::default()
-                    }),
+                        Ok(Manifest::default())
+                    })?,
                 )
             }
         }
@@ -326,12 +502,15 @@ impl RuntimeState {
         if memory_mode {
             return Ok(Vec::new());
         }
-        match crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        match crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
             fs,
             crate::config::RecoveryPolicy::Strict,
         ) {
             Ok(intent_log) => Ok(intent_log),
             Err(error) => {
+                if matches!(error, MidgeError::Timeout(_)) {
+                    return Err(error);
+                }
                 if recovery_policy == crate::config::RecoveryPolicy::Strict {
                     return Err(MidgeError::RecoveryFailed(format!(
                         "failed to load intent log: {error}"
@@ -342,17 +521,22 @@ impl RuntimeState {
                     error = %error,
                     "failed to load intent log strictly, retrying in salvage mode"
                 );
-                Ok(crate::runtime::IntentPersistence::load_with_fs_and_policy(
-                    fs,
-                    crate::config::RecoveryPolicy::Salvage,
+                Ok(
+                    crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+                        fs,
+                        crate::config::RecoveryPolicy::Salvage,
+                    )
+                    .or_else(|salvage_error| {
+                        if matches!(salvage_error, MidgeError::Timeout(_)) {
+                            return Err(salvage_error);
+                        }
+                        tracing::warn!(
+                            error = %salvage_error,
+                            "failed to load intent log in salvage mode, starting empty"
+                        );
+                        Ok(Vec::new())
+                    })?,
                 )
-                .unwrap_or_else(|salvage_error| {
-                    tracing::warn!(
-                        error = %salvage_error,
-                        "failed to load intent log in salvage mode, starting empty"
-                    );
-                    Vec::new()
-                }))
             }
         }
     }
@@ -373,56 +557,85 @@ impl RuntimeState {
 
     fn recover_wal_state(
         memory_mode: bool,
-        wal_dir: &std::path::Path,
+        replay_dir: &std::path::Path,
         sst_dir: &std::path::Path,
-        recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
+        scope: Option<&DeadlineScope>,
     ) -> MidgeResult<WalRecoveryState> {
-        let replay_dir = recovery_wal_dir.map_or(wal_dir, PathBuf::as_path);
-        let mut wal_recovery = Self::replay_wal(
+        let mut wal_recovery = Self::replay_wal_within(
             memory_mode,
             replay_dir,
             sst_dir,
             recovery_policy,
             manifest,
             column_families,
+            scope,
         )?;
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
             .max(Self::manifest_visible_sequence_floor(manifest));
-        wal_recovery.next_segment_id = Self::recover_next_segment_id(memory_mode, replay_dir)?;
+        wal_recovery.next_segment_id =
+            Self::recover_next_segment_id(memory_mode, replay_dir, scope)?;
         Ok(wal_recovery)
     }
 
     /// The prover recovery uses to skip WAL records the manifest's SSTs
     /// already hold. Without a readable SST directory nothing is proven
     /// covered, so every record replays.
-    fn recovery_wal_coverage<'a>(
+    fn recovery_wal_coverage(
         sst_dir: &std::path::Path,
-        manifest: &'a Manifest,
-        proven: &'a mut crate::runtime::hybrid_persistence::ProvenSstIdentities,
-    ) -> Option<crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage<'a>> {
-        let fs = crate::io::RealFs::new(sst_dir).ok()?;
-        Some(
-            crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
-                Arc::new(fs),
-                "",
-                manifest,
-                proven,
+        manifest: &Manifest,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<crate::runtime::cloud_startup::replay_coverage::ReplayCoverage> {
+        check_scope(scope, "local SST coverage filesystem")?;
+        let db_path = sst_dir.parent().unwrap_or(sst_dir);
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
+        let fs = scope.map_or_else(
+            || Arc::clone(&fs),
+            |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
+        );
+        Ok(
+            crate::runtime::cloud_startup::replay_coverage::ReplayCoverage::new(
+                manifest.clone(),
+                fs,
+                usize::MAX,
             ),
         )
     }
 
+    #[cfg(test)]
     fn replay_wal(
         memory_mode: bool,
         replay_dir: &std::path::Path,
         sst_dir: &std::path::Path,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
-        mut column_families: HashMap<u32, ColumnFamilyState>,
+        column_families: HashMap<u32, ColumnFamilyState>,
     ) -> MidgeResult<WalRecoveryState> {
+        Self::replay_wal_within(
+            memory_mode,
+            replay_dir,
+            sst_dir,
+            recovery_policy,
+            manifest,
+            column_families,
+            None,
+        )
+    }
+
+    fn replay_wal_within(
+        memory_mode: bool,
+        replay_dir: &std::path::Path,
+        sst_dir: &std::path::Path,
+        recovery_policy: crate::config::RecoveryPolicy,
+        manifest: &Manifest,
+        column_families: HashMap<u32, ColumnFamilyState>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<WalRecoveryState> {
+        check_scope(scope, "local WAL replay")?;
         if memory_mode || !replay_dir.exists() {
             return Ok(WalRecoveryState {
                 column_families,
@@ -434,9 +647,14 @@ impl RuntimeState {
             });
         }
 
-        let mut recovery_memtables = HashMap::new();
         let storage = match crate::io::RealFs::new(replay_dir) {
-            Ok(storage) => storage,
+            Ok(storage) => {
+                let fs: Arc<dyn Fs> = Arc::new(storage);
+                scope.map_or_else(
+                    || Arc::clone(&fs),
+                    |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
+                )
+            }
             Err(error) => {
                 return Self::handle_wal_recovery_failure(
                     recovery_policy,
@@ -445,44 +663,73 @@ impl RuntimeState {
                 );
             }
         };
+        Self::replay_wal_storage_within(
+            replay_dir,
+            sst_dir,
+            recovery_policy,
+            manifest,
+            column_families,
+            scope,
+            storage.as_ref(),
+        )
+    }
+
+    fn replay_wal_storage_within(
+        replay_dir: &std::path::Path,
+        sst_dir: &std::path::Path,
+        recovery_policy: crate::config::RecoveryPolicy,
+        manifest: &Manifest,
+        mut column_families: HashMap<u32, ColumnFamilyState>,
+        scope: Option<&DeadlineScope>,
+        storage: &dyn Fs,
+    ) -> MidgeResult<WalRecoveryState> {
+        check_scope(scope, "local WAL replay filesystem")?;
+        let mut recovery_memtables = HashMap::new();
         let replay_policy = match recovery_policy {
             crate::config::RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
             crate::config::RecoveryPolicy::Salvage => {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
+        let coverage = scope
+            .map(|scope| Self::recovery_wal_coverage(sst_dir, manifest, Some(scope)))
+            .transpose()?;
         let mut proven = crate::runtime::hybrid_persistence::ProvenSstIdentities::default();
-        let coverage = Self::recovery_wal_coverage(sst_dir, manifest, &mut proven);
-        let should_apply = |record: &crate::wal::WalRecord| {
-            !coverage
-                .as_ref()
-                .is_some_and(|coverage| coverage.covers_wal_record(record))
+        let legacy_fs = if scope.is_none() {
+            crate::io::RealFs::new(sst_dir).ok()
+        } else {
+            None
         };
-        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter(
-            &storage,
+        let legacy_coverage = legacy_fs.map(|fs| {
+            crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+                Arc::new(fs),
+                "",
+                manifest,
+                &mut proven,
+            )
+        });
+        let should_apply = |record: &crate::wal::WalRecord| match (scope, &coverage) {
+            (Some(scope), Some(coverage)) => coverage
+                .contains_within(record, scope)
+                .map(|covered| !covered),
+            _ => Ok(!legacy_coverage
+                .as_ref()
+                .is_some_and(|coverage| coverage.covers_wal_record(record))),
+        };
+        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter_within(
+            storage,
             &crate::io::FsPath::new(""),
             &mut recovery_memtables,
             replay_policy,
             &should_apply,
+            scope,
         ) {
             Ok(stats) => stats,
             Err(error) => {
-                if recovery_policy == crate::config::RecoveryPolicy::Salvage {
-                    // Salvage continues without the WAL's state, so set every
-                    // WAL file aside first: new records must not land behind
-                    // them or reuse the sequences they hold.
-                    let files = Self::replayable_wal_files(&storage).and_then(|files| {
-                        Self::quarantine_wal_files(&storage, None, &files).map(|()| files)
-                    });
-                    if let Err(quarantine_error) = files {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "WAL recovery failed ({error}) and the WAL could not be set aside: {quarantine_error}"
-                        )));
-                    }
-                }
-                return Self::handle_wal_recovery_failure(
+                return Self::handle_local_wal_replay_failure(
+                    storage,
                     recovery_policy,
-                    format!("WAL recovery failed: {error}"),
+                    error,
                     column_families,
                 );
             }
@@ -492,23 +739,18 @@ impl RuntimeState {
             // Fail the open under either policy: appending past a torn tail
             // would corrupt acknowledged writes, and salvage's fallback would
             // discard the state replay just recovered.
-            Self::truncate_tolerated_active_tail(&storage, tail).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to truncate torn active WAL tail: {error}"
-                ))
+            Self::truncate_tolerated_active_tail(storage, tail).map_err(|error| {
+                preserve_timeout(error, "failed to truncate torn active WAL tail")
             })?;
         }
         let mut recovered_sequence = stats.max_sequence.unwrap_or(0);
         if let Some(stop) = &stats.salvage_stop {
-            Self::quarantine_wal_files(&storage, Some(stop), &stop.unreplayed_paths).map_err(
-                |error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to set aside WAL beyond the salvage point: {error}"
-                    ))
-                },
+            Self::quarantine_wal_files(storage, Some(stop), &stop.unreplayed_paths).map_err(
+                |error| preserve_timeout(error, "failed to set aside WAL beyond the salvage point"),
             )?;
             recovered_sequence = recovered_sequence.max(stop.max_unreplayed_sequence.unwrap_or(0));
         }
+        check_scope(scope, "local WAL replay completion")?;
         Self::record_wal_recovery_stats(replay_dir, &stats);
         let opened_in_salvage_mode = stats.had_corruption;
         if opened_in_salvage_mode {
@@ -526,6 +768,38 @@ impl RuntimeState {
             bytes_replayed: stats.bytes,
             opened_in_salvage_mode,
         })
+    }
+
+    fn handle_local_wal_replay_failure(
+        storage: &dyn Fs,
+        recovery_policy: crate::config::RecoveryPolicy,
+        error: MidgeError,
+        column_families: HashMap<u32, ColumnFamilyState>,
+    ) -> MidgeResult<WalRecoveryState> {
+        if matches!(error, MidgeError::Timeout(_)) {
+            return Err(error);
+        }
+        if recovery_policy == crate::config::RecoveryPolicy::Salvage {
+            // Salvage continues without the WAL's state, so set every
+            // WAL file aside first: new records must not land behind
+            // them or reuse the sequences they hold.
+            let files = Self::replayable_wal_files(storage).and_then(|files| {
+                Self::quarantine_wal_files(storage, None, &files).map(|()| files)
+            });
+            if let Err(quarantine_error) = files {
+                if matches!(quarantine_error, MidgeError::Timeout(_)) {
+                    return Err(quarantine_error);
+                }
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "WAL recovery failed ({error}) and the WAL could not be set aside: {quarantine_error}"
+                )));
+            }
+        }
+        Self::handle_wal_recovery_failure(
+            recovery_policy,
+            format!("WAL recovery failed: {error}"),
+            column_families,
+        )
     }
 
     /// WAL files that replay would read, relative to the WAL directory.
@@ -738,13 +1012,16 @@ impl RuntimeState {
     fn recover_next_segment_id(
         memory_mode: bool,
         replay_dir: &std::path::Path,
+        scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
+        check_scope(scope, "WAL segment identity discovery")?;
         if memory_mode || !replay_dir.exists() {
             return Ok(1);
         }
         let mut max_segment_id: u64 = 0;
         if let Ok(entries) = std::fs::read_dir(replay_dir) {
             for entry in entries.flatten() {
+                check_scope(scope, "WAL segment identity entry")?;
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("wal") {
                     continue;
@@ -767,6 +1044,7 @@ impl RuntimeState {
     }
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {
+        self.check_startup_scope("recovery issue classification")?;
         if self.recovery_policy() == crate::config::RecoveryPolicy::Strict {
             return Err(MidgeError::RecoveryFailed(message));
         }
@@ -830,6 +1108,10 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub(crate) fn check_startup_scope(&self, context: &str) -> MidgeResult<()> {
+        check_scope(self.startup_scope.as_ref(), context)
+    }
+
     fn validate_recovered_sst(
         &mut self,
         file_meta: &crate::runtime::FileMeta,
@@ -837,6 +1119,7 @@ impl RuntimeState {
         let fs = self.recovery_sst_fs.as_ref().unwrap_or(&self.fs).clone();
         match Self::validate_sst_fs_proof(fs, file_meta) {
             Ok(()) => Ok(true),
+            Err(error @ MidgeError::Timeout(_)) => Err(error),
             Err(error) => self.handle_recovery_issue(format!(
                 "recovery intent references missing or invalid SST '{}': {error}",
                 file_meta.name
@@ -850,6 +1133,7 @@ impl RuntimeState {
     ) -> MidgeResult<bool> {
         match Self::validate_sst_fs_proof(Arc::clone(&self.fs), file_meta) {
             Ok(()) => Ok(true),
+            Err(error @ MidgeError::Timeout(_)) => Err(error),
             Err(error) => self.handle_recovery_issue(format!(
                 "recovery intent references missing or invalid local SST '{}': {error}",
                 file_meta.name
@@ -858,6 +1142,7 @@ impl RuntimeState {
     }
 
     fn delete_sst_if_exists(&mut self, sst_name: &str) -> MidgeResult<()> {
+        self.check_startup_scope("recovery SST deletion")?;
         let path = self.sst_dir.join(sst_name);
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -942,6 +1227,7 @@ impl RuntimeState {
         match (phase, manifest_state) {
             (PublicationPhase::OutputDurable, CompactionManifestState::Prepublication) => {
                 for file_meta in added {
+            self.check_startup_scope("compaction intent proof")?;
                     let path = self.sst_dir.join(&file_meta.name);
                     if !path.exists() {
                         continue;
@@ -963,6 +1249,7 @@ impl RuntimeState {
                 CompactionManifestState::Published,
             ) => {
                 for file_meta in added {
+            self.check_startup_scope("compaction intent proof")?;
                     if !self.validate_recovered_sst(file_meta)? {
                         return Ok(false);
                     }
@@ -974,6 +1261,7 @@ impl RuntimeState {
             }
             (PublicationPhase::ManifestPublished, CompactionManifestState::Prepublication) => {
                 for file_meta in added {
+            self.check_startup_scope("compaction intent proof")?;
                     if !self.validate_recovered_sst(file_meta)? {
                         return Ok(false);
                     }
@@ -1038,6 +1326,7 @@ impl RuntimeState {
         intents: &[crate::runtime::IntentLogEntry],
     ) -> MidgeResult<bool> {
         for (left_index, left) in intents.iter().enumerate() {
+            self.check_startup_scope("compaction intent groups")?;
             let crate::runtime::IntentLogEntry::CompactionPublish {
                 phase: left_phase,
                 cf_id: left_cf_id,
@@ -1048,6 +1337,7 @@ impl RuntimeState {
                 continue;
             };
             for right in intents.iter().skip(left_index + 1) {
+                self.check_startup_scope("compaction intent groups")?;
                 let crate::runtime::IntentLogEntry::CompactionPublish {
                     phase: right_phase,
                     cf_id: right_cf_id,
@@ -1092,6 +1382,7 @@ impl RuntimeState {
         added: &[crate::runtime::FileMeta],
     ) -> MidgeResult<()> {
         for file_meta in added {
+            self.check_startup_scope("compaction intent proof")?;
             if self.manifest_has_file(&file_meta.name)
                 || !self.sst_dir.join(&file_meta.name).exists()
             {
@@ -1115,6 +1406,7 @@ impl RuntimeState {
         added: &[crate::runtime::FileMeta],
     ) -> MidgeResult<()> {
         for file_meta in added {
+            self.check_startup_scope("compaction intent proof")?;
             if self.manifest_has_file(&file_meta.name)
                 || !self.sst_dir.join(&file_meta.name).exists()
             {
@@ -1167,6 +1459,7 @@ impl RuntimeState {
         let mut candidates = std::collections::BTreeMap::<String, crate::runtime::FileMeta>::new();
 
         for (intent_index, intent) in intents.iter().enumerate() {
+            self.check_startup_scope("intent replay decision")?;
             let crate::runtime::IntentLogEntry::CompactionPublish {
                 phase,
                 cf_id,
@@ -1204,6 +1497,7 @@ impl RuntimeState {
             }
 
             for file_meta in added {
+                self.check_startup_scope("compaction intent proof")?;
                 if self.manifest_has_file(&file_meta.name) {
                     continue;
                 }
@@ -1226,13 +1520,7 @@ impl RuntimeState {
         Ok(candidates.into_values().collect())
     }
 
-    /// Replay intent log to recover incomplete mutations
-    /// Called during startup to apply any interrupted manifest or durability changes
-    pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
-        if self.intent_log.is_empty() {
-            return Ok(());
-        }
-
+    fn record_intent_replay(&mut self) {
         self.diagnostics.record(|m| {
             m.record_intent_log_replay(self.intent_log.len() as u64);
         });
@@ -1248,12 +1536,24 @@ impl RuntimeState {
             intent_count = self.intent_log.len(),
             "replaying intent log during recovery"
         );
+    }
+
+    /// Replay intent log to recover incomplete mutations
+    /// Called during startup to apply any interrupted manifest or durability changes
+    pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
+        self.check_startup_scope("intent replay")?;
+        if self.intent_log.is_empty() {
+            return Ok(());
+        }
+
+        self.record_intent_replay();
 
         let intents = self.intent_log.clone();
         let compaction_replay_safe = self.compaction_retry_groups_are_unambiguous(&intents)?;
         let mut manifest_changed = false;
 
         for (intent_index, intent) in intents.iter().enumerate() {
+            self.check_startup_scope("intent replay decision")?;
             match intent {
                 crate::runtime::IntentLogEntry::FlushPublish {
                     phase, file_meta, ..
@@ -1316,6 +1616,9 @@ impl RuntimeState {
 
         if manifest_changed {
             if let Err(error) = self.persist_manifest_checkpoint() {
+                if matches!(error, MidgeError::Timeout(_)) {
+                    return Err(error);
+                }
                 let _ = self.handle_recovery_issue(format!(
                     "failed to persist manifest checkpoint after intent replay: {error}"
                 ))?;
@@ -1326,16 +1629,20 @@ impl RuntimeState {
 
         // Clear the intent log after successful replay
         // New intents will be written during normal operation
-        self.intent_log.clear();
+        self.check_startup_scope("intent log clear")?;
         if !self.is_memory_mode() {
-            if let Err(error) =
-                crate::runtime::IntentPersistence::save(&self.db_path, &self.intent_log)
+            if let Err(error) = crate::runtime::IntentPersistence::save_with_fs_typed(&self.fs, &[])
             {
+                if matches!(error, MidgeError::Timeout(_)) {
+                    return Err(error);
+                }
                 let _ = self.handle_recovery_issue(format!(
                     "failed to clear intent log after replay: {error}"
                 ))?;
             }
         }
+        self.check_startup_scope("intent replay completion")?;
+        self.intent_log.clear();
 
         tracing::info!("intent log replay complete and cleared");
         Ok(())

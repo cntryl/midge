@@ -1,4 +1,6 @@
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+#[cfg(test)]
+use crate::common::MidgeError;
+use crate::common::{MidgeResult, OperationDeadline};
 use crate::storage::cloud::{BlockingCloud, CloudStorage, ObjectMetadata};
 
 /// Synchronous startup adapter over the runtime's callback-oriented cloud API.
@@ -16,6 +18,13 @@ impl<'a> BlockingCloudIo<'a> {
         Self {
             cloud,
             deadline: OperationDeadline::unbounded(),
+        }
+    }
+
+    pub(crate) fn within(cloud: &'a CloudStorage, scope: &crate::common::DeadlineScope) -> Self {
+        Self {
+            cloud,
+            deadline: scope.deadline(),
         }
     }
 
@@ -59,7 +68,6 @@ impl<'a> BlockingCloudIo<'a> {
         &self,
         key: &str,
     ) -> MidgeResult<Option<crate::storage::cloud::CloudObjectProof>> {
-        crate::storage::cloud::blocking_cloud_object_proof(self.cloud, key)
-            .map_err(MidgeError::Internal)
+        crate::storage::cloud::blocking_cloud_object_proof_within(self.cloud, key, &self.deadline)
     }
 }

@@ -349,7 +349,11 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
     let started_upload = backend.pending.lock().take().is_some();
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert!(
+        matches!(&result, Err(MidgeError::Timeout(_))),
+        "{:?}",
+        result.as_ref().err()
+    );
     assert!(
         !started_upload,
         "sequential storage calls must consume one attempt budget"

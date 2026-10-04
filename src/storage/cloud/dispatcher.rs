@@ -8,6 +8,7 @@ pub struct CloudStorage {
     pub(super) backend: Arc<dyn CloudBackend>,
     namespace: String,
     pub(super) callback_timeout: std::time::Duration,
+    pub(super) startup_scope: Option<crate::common::DeadlineScope>,
 }
 
 impl CloudStorage {
@@ -30,6 +31,7 @@ impl CloudStorage {
             backend,
             namespace,
             callback_timeout,
+            startup_scope: None,
         }
     }
 
@@ -40,7 +42,63 @@ impl CloudStorage {
     }
 
     pub(crate) fn callback_timeout(&self) -> std::time::Duration {
-        self.callback_timeout
+        self.scoped_timeout(self.callback_timeout)
+    }
+
+    pub(crate) fn with_startup_scope(&self, scope: crate::common::DeadlineScope) -> Self {
+        Self {
+            backend: Arc::clone(&self.backend),
+            namespace: self.namespace.clone(),
+            callback_timeout: self.callback_timeout,
+            startup_scope: Some(scope),
+        }
+    }
+
+    pub(super) fn scoped_timeout(&self, timeout: std::time::Duration) -> std::time::Duration {
+        self.startup_scope.as_ref().map_or(timeout, |scope| {
+            let deadline = scope.deadline();
+            if deadline.is_bounded() {
+                deadline.clamp(timeout.min(self.callback_timeout))
+            } else {
+                timeout
+            }
+        })
+    }
+
+    pub(super) fn check_startup_scope(&self, context: &str) -> crate::common::MidgeResult<()> {
+        self.startup_scope
+            .as_ref()
+            .map_or(Ok(()), |scope| scope.check(context))
+    }
+
+    fn scope_request_headers(
+        &self,
+        headers: &mut Vec<(String, String)>,
+    ) -> Result<(), super::CloudError> {
+        let Some(scope) = self.startup_scope.as_ref() else {
+            return Ok(());
+        };
+        let deadline = scope.deadline();
+        if !deadline.is_bounded() {
+            return Ok(());
+        }
+        let mut timeout = self.callback_timeout;
+        for (_, value) in headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(super::REQUEST_TIMEOUT_HEADER))
+        {
+            timeout = std::time::Duration::from_millis(value.parse::<u64>().map_err(|error| {
+                super::CloudError::Protocol(format!("invalid internal request timeout: {error}"))
+            })?);
+        }
+        let timeout = deadline.clamp(timeout.min(self.callback_timeout));
+        if timeout.is_zero() {
+            return Err(super::CloudError::Timeout(
+                "cloud mutation has no startup budget".into(),
+            ));
+        }
+        set_request_timeout_header(headers, timeout);
+        Ok(())
     }
 
     pub(super) fn full_path(&self, suffix: &str) -> String {
@@ -69,9 +127,16 @@ impl CloudStorage {
         &self,
         key: &str,
         data: Vec<u8>,
-        headers: Vec<(String, String)>,
+        mut headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        if let Err(error) = self.scope_request_headers(&mut headers) {
+            let _ = callback.send(super::CloudEvent::Put {
+                key: key.to_string(),
+                result: Err(error),
+            });
+            return;
+        }
         let full_key = self.full_path(key);
         self.backend.submit_put(&full_key, data, headers, callback);
     }
@@ -88,6 +153,7 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        let timeout = self.scoped_timeout(timeout);
         if timeout.is_zero() {
             let _ = callback.send(super::CloudEvent::Get {
                 key: key.to_string(),
@@ -107,6 +173,7 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        let timeout = self.scoped_timeout(timeout);
         if timeout.is_zero() {
             let _ = callback.send(super::CloudEvent::GetWithMetadata {
                 key: key.to_string(),
@@ -137,30 +204,58 @@ impl CloudStorage {
     /// timeout.
     pub fn submit_delete(&self, key: &str, callback: CloudCallback) {
         let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, self.callback_timeout);
+        set_request_timeout_header(&mut headers, self.callback_timeout());
         self.submit_delete_with_headers(key, headers, callback);
     }
 
     pub fn submit_delete_with_headers(
         &self,
         key: &str,
-        headers: Vec<(String, String)>,
+        mut headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        if let Err(error) = self.scope_request_headers(&mut headers) {
+            let _ = callback.send(super::CloudEvent::Delete {
+                key: key.to_string(),
+                result: Err(error),
+            });
+            return;
+        }
         let full_key = self.full_path(key);
         self.backend.submit_delete(&full_key, headers, callback);
     }
 
+    #[cfg(test)]
     pub fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        self.submit_list_within(prefix, self.callback_timeout(), callback);
+    }
+
+    pub(crate) fn submit_list_within(
+        &self,
+        prefix: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        let timeout = self.scoped_timeout(timeout);
+        if timeout.is_zero() {
+            let _ = callback.send(super::CloudEvent::List {
+                prefix: prefix.to_string(),
+                result: Err(super::CloudError::Timeout(
+                    "cloud LIST has no remaining budget".into(),
+                )),
+            });
+            return;
+        }
         let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, self.callback_timeout);
+        set_request_timeout_header(&mut headers, timeout);
         let full_prefix = self.full_path(prefix);
         self.backend
             .submit_list_with_headers(&full_prefix, headers, callback);
     }
 
+    #[cfg(test)]
     pub fn submit_head(&self, key: &str, callback: CloudCallback) {
-        self.submit_head_within(key, self.callback_timeout, callback);
+        self.submit_head_within(key, self.callback_timeout(), callback);
     }
 
     pub fn submit_head_within(
@@ -169,6 +264,16 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        let timeout = self.scoped_timeout(timeout);
+        if timeout.is_zero() {
+            let _ = callback.send(super::CloudEvent::Head {
+                key: key.to_string(),
+                result: Err(super::CloudError::Timeout(
+                    "cloud HEAD has no remaining budget".into(),
+                )),
+            });
+            return;
+        }
         let mut headers = Vec::new();
         set_request_timeout_header(&mut headers, timeout);
         let full_key = self.full_path(key);

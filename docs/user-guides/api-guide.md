@@ -55,7 +55,7 @@ progress.
 
 Every Engine operation that submits a `RuntimeMsg` and waits for its response is
 bounded. Transactions, column-family changes, flushes, compaction, metrics,
-storage-layout capture, and post-start configuration use
+storage-layout capture use
 `runtime_response_timeout`. The default is 60 seconds. When
 `storage_io_timeout` is raised without an explicit runtime override, Midge
 derives the enclosing deadline as at least 30 seconds longer than the storage
@@ -69,9 +69,19 @@ response. Engine drop hands teardown to a reaper which may continue waiting for
 durability workers so writer fencing is not released early.
 
 Engine open and recovery happen before the event loop accepts runtime messages,
-so `runtime_response_timeout` is not an aggregate startup deadline. Individual
-provider callbacks use `storage_io_timeout`; embedders that need to bound total
-startup should retain an outer process or startup watchdog.
+so `runtime_response_timeout` does not bound startup. Set
+`OpenOptionsBuilder::open_timeout(Duration)` to give one open attempt an aggregate
+monotonic budget, including epoch discovery, lease acquisition, recovery and
+runtime preparation. Each provider request uses the smaller of its ordinary
+`storage_io_timeout` and the remaining startup budget. The default is `None`.
+
+An exhausted startup budget returns `MidgeError::Timeout` without admitting the
+runtime. If a lease mutation has an unresolved outcome, the result is
+`MidgeError::LeaseIndeterminate`. A startup worker retains fencing and accepted
+work until cleanup finishes; a caller timeout does not prove that a remote
+mutation was cancelled or that a local syscall has stopped. A later open may
+temporarily encounter the retained lease. Successful startup restores ordinary
+runtime I/O budgets.
 
 A configured runtime-response `MidgeError::Timeout` identifies the request kind
 and request ID. The timeout removes the caller's response route but does not

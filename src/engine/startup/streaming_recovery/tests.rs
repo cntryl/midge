@@ -1,5 +1,8 @@
 use crate::{Engine, OpenOptions, TransactionMode};
 
+#[cfg(all(feature = "failpoints", feature = "internal-testing"))]
+mod deadline_checkpoint;
+
 fn value(sequence: u64) -> Vec<u8> {
     let mut random = sequence.wrapping_mul(0x9e37_79b9);
     (0..2048)

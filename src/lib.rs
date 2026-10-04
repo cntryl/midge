@@ -115,6 +115,9 @@ pub mod __internal {
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
     }
+    pub mod startup {
+        pub use crate::runtime::{StartupEvent, StartupObserver};
+    }
     pub mod maintenance {
         #[doc(hidden)]
         pub fn flush_cf_with_timeout(

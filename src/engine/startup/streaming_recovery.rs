@@ -8,7 +8,9 @@ use crate::runtime::actors::flush::{
     FlushActor, FlushBuildOutput, FlushIdentity, FlushMirrorTask, FlushPublicationDelta,
     FlushPublishTask, FlushWorkerResult,
 };
-use crate::wal::recovery::streaming::{replay_wal_with_checkpoint, StreamingReplayLimits};
+use crate::wal::recovery::streaming::{
+    replay_wal_with_options, ReplayOptions, StreamingReplayLimits,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -22,6 +24,7 @@ pub(super) struct CloudReplay {
     pub limits: StreamingReplayLimits,
     /// Sequences at or below this belong to WAL salvage set aside unreplayed.
     pub sequence_floor: u64,
+    pub scope: Option<crate::common::DeadlineScope>,
 }
 
 impl CloudReplay {
@@ -85,8 +88,16 @@ impl CloudReplay {
                 .unwrap_or_else(|| Arc::clone(&materialized.state.fs)),
             self.limits.max_frame_bytes,
         );
+        let scope = self
+            .scope
+            .clone()
+            .or_else(|| materialized.state.startup_scope.clone());
         let should_apply = |record: &crate::wal::WalRecord| {
-            known_cfs.contains(&record.cf_id) && !coverage.contains(record)
+            let covered = match scope.as_ref() {
+                Some(scope) => coverage.contains_within(record, scope)?,
+                None => coverage.contains(record),
+            };
+            Ok(known_cfs.contains(&record.cf_id) && !covered)
         };
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut actor = FlushActor::new_with_memory_limit(
@@ -98,21 +109,39 @@ impl CloudReplay {
         )?;
         let mut memtables = HashMap::new();
         let mut names = names::Names::new(self.limits);
-        let replay_result = replay_wal_with_checkpoint(
+        let replay_result = replay_wal_with_options(
             self.fs.as_ref(),
             &FsPath::new("wal"),
             &mut memtables,
             policy,
-            Some(&should_apply),
+            None,
             self.limits,
+            ReplayOptions {
+                scope: scope.as_ref(),
+                fallible_should_apply: Some(&should_apply),
+                ..ReplayOptions::default()
+            },
             &mut |tables, _stats| {
                 coverage.release_reader();
                 checkpoint(materialized, &mut actor, &rx, tables, &mut names)
             },
         );
+        // Accepted worker work stays owned while the outer startup worker holds its lease.
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;
         shutdown?;
+        self.install_recovered_tables(materialized, &stats, memtables)
+    }
+
+    fn install_recovered_tables(
+        &self,
+        materialized: &mut RuntimeStorageMaterialization,
+        stats: &crate::wal::recovery::RecoveryStats,
+        memtables: HashMap<u32, Arc<SkipListMemtable>>,
+    ) -> MidgeResult<()> {
+        materialized
+            .state
+            .check_startup_scope("cloud WAL replay installation")?;
         let runtime = &mut materialized.state;
         runtime.sequence = runtime
             .sequence
@@ -163,6 +192,9 @@ fn checkpoint(
     let mut families: Vec<_> = tables.keys().copied().collect();
     families.sort_unstable();
     for cf_id in families {
+        materialized
+            .state
+            .check_startup_scope("recovery checkpoint family")?;
         let table = Arc::clone(&tables[&cf_id]);
         if table.size_bytes() == 0 {
             tables.remove(&cf_id);
@@ -186,6 +218,9 @@ fn checkpoint_family(
     table: Arc<SkipListMemtable>,
     names: &mut names::Names,
 ) -> MidgeResult<()> {
+    materialized
+        .state
+        .check_startup_scope("recovery checkpoint acceptance")?;
     let sst_seq = super::timing::measure("recovery_checkpoint_reservation", || {
         names.take(cf_id, |count| {
             reserve_sst_sequence(materialized, cf_id, count)
@@ -208,9 +243,8 @@ fn checkpoint_family(
     ));
     let completion = super::timing::measure("recovery_checkpoint_construction", || {
         actor.submit_build(identity, table, staging_path, config.hybrid_storage.clone())?;
-        let FlushWorkerResult::Build(completion) = rx
-            .recv()
-            .map_err(|error| MidgeError::Internal(format!("recovery flush build: {error}")))?
+        let FlushWorkerResult::Build(completion) =
+            receive_completion(rx, state.startup_scope.as_ref(), "recovery flush build")?
         else {
             return Err(MidgeError::Internal(
                 "unexpected recovery publication completion".into(),
@@ -245,9 +279,8 @@ fn checkpoint_family(
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         })?;
-        let FlushWorkerResult::Publish(completion) = rx
-            .recv()
-            .map_err(|error| MidgeError::Internal(format!("recovery flush publish: {error}")))?
+        let FlushWorkerResult::Publish(completion) =
+            receive_completion(rx, state.startup_scope.as_ref(), "recovery flush publish")?
         else {
             return Err(MidgeError::Internal(
                 "unexpected recovery build completion".into(),
@@ -279,12 +312,14 @@ fn commit_and_mirror_checkpoint(
     delta: &FlushPublicationDelta,
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
 ) -> MidgeResult<bool> {
+    state.check_startup_scope("recovery checkpoint commit")?;
     validate_lease(config)?;
     state.record_flush_publication_intent(
         delta.identity.cf_id,
         delta.identity.sequence,
         &delta.file_meta,
     )?;
+    state.check_startup_scope("recovery checkpoint manifest publication")?;
     validate_monotonic_lease(config)?;
     state.commit_flush_publication(
         delta.identity.cf_id,
@@ -307,11 +342,15 @@ fn commit_and_mirror_checkpoint(
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
         manifest_sequence: state.manifest.last_persisted_sequence,
-        runtime_response_timeout: config.runtime_response_timeout,
+        runtime_response_timeout: state
+            .startup_scope
+            .as_ref()
+            .map_or(config.runtime_response_timeout, |scope| {
+                scope.clamp(config.runtime_response_timeout)
+            }),
     })?;
-    let FlushWorkerResult::Mirror(mirror) = rx
-        .recv()
-        .map_err(|error| MidgeError::Internal(format!("recovery flush mirror: {error}")))?
+    let FlushWorkerResult::Mirror(mirror) =
+        receive_completion(rx, state.startup_scope.as_ref(), "recovery flush mirror")?
     else {
         return Err(MidgeError::Internal(
             "unexpected recovery mirror completion".into(),
@@ -327,6 +366,9 @@ fn reserve_sst_sequence(
     cf_id: u32,
     count: u64,
 ) -> MidgeResult<std::ops::Range<u64>> {
+    materialized
+        .state
+        .check_startup_scope("recovery SST name reservation")?;
     validate_lease(&materialized.runtime_config)?;
     let state = &mut materialized.state;
     let config = &materialized.runtime_config;
@@ -347,7 +389,7 @@ fn reserve_sst_sequence(
     state.manifest.adopt_checkpoint(checkpoint);
     if let Some(cloud) = &materialized.cloud_metadata_storage_for_mirror {
         validate_lease(config)?;
-        super::CloudStartupRecovery::mirror_cloud_metadata(
+        super::CloudStartupRecovery::mirror_cloud_metadata_within(
             cloud,
             &state.db_path,
             crate::config::RecoveryPolicy::Strict,
@@ -366,6 +408,9 @@ fn reserve_sst_sequence(
             },
             &config.metadata_publication_lock,
             |_| validate_lease(config),
+            &state.startup_scope.clone().unwrap_or_else(|| {
+                crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded())
+            }),
         )?;
         validate_lease(config)?;
     }
@@ -381,6 +426,9 @@ fn install_checkpoint_output(
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     cloud_metadata_published: bool,
 ) -> MidgeResult<()> {
+    materialized
+        .state
+        .check_startup_scope("recovery checkpoint installation")?;
     let state = &mut materialized.state;
     let config = &materialized.runtime_config;
     let name = &delta.file_meta.name;
@@ -392,18 +440,26 @@ fn install_checkpoint_output(
             std::fs::remove_file(state.sst_dir.join(name))?;
             storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
             storage.reconcile_local_disk_usage(
-                super::RuntimeRecoveryMaterialization::local_directory_bytes(&state.sst_dir)?
-                    .saturating_add(
-                        super::RuntimeRecoveryMaterialization::local_directory_bytes(
-                            &state.db_path.join("hybrid_local/sst"),
-                        )?,
-                    ),
-                super::RuntimeRecoveryMaterialization::local_directory_bytes(&state.wal_dir)?
-                    .saturating_add(
-                        super::RuntimeRecoveryMaterialization::local_directory_bytes(
-                            &state.db_path.join("hybrid_local/wal"),
-                        )?,
-                    ),
+                super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
+                    &state.sst_dir,
+                    state.startup_scope.as_ref(),
+                )?
+                .saturating_add(
+                    super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
+                        &state.db_path.join("hybrid_local/sst"),
+                        state.startup_scope.as_ref(),
+                    )?,
+                ),
+                super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
+                    &state.wal_dir,
+                    state.startup_scope.as_ref(),
+                )?
+                .saturating_add(
+                    super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
+                        &state.db_path.join("hybrid_local/wal"),
+                        state.startup_scope.as_ref(),
+                    )?,
+                ),
             );
         }
     }
@@ -411,6 +467,9 @@ fn install_checkpoint_output(
 }
 
 pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {
+    if let Some(scope) = &config.startup_scope {
+        scope.check("recovery lease validation")?;
+    }
     validate_monotonic_lease(config)?;
     if config
         .lease_healthy
@@ -429,6 +488,9 @@ pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeRes
             )
             .map_err(|error| error.into_validation_error("cloud WAL recovery"))?;
     }
+    if let Some(scope) = &config.startup_scope {
+        scope.check("recovery lease validation completion")?;
+    }
     validate_monotonic_lease(config)
 }
 
@@ -439,4 +501,33 @@ fn validate_monotonic_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResu
         })?;
     }
     Ok(())
+}
+
+fn receive_completion(
+    rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
+    scope: Option<&crate::common::DeadlineScope>,
+    context: &str,
+) -> MidgeResult<FlushWorkerResult> {
+    if let Some(scope) = scope {
+        scope.check(context)?;
+    }
+    let result = match scope.filter(|scope| scope.deadline().is_bounded()) {
+        Some(scope) => rx
+            .recv_timeout(scope.deadline().remaining())
+            .map_err(|error| match error {
+                crossbeam::channel::RecvTimeoutError::Timeout => {
+                    MidgeError::Timeout(format!("{context} timed out"))
+                }
+                crossbeam::channel::RecvTimeoutError::Disconnected => {
+                    MidgeError::Internal(format!("{context} disconnected"))
+                }
+            }),
+        None => rx
+            .recv()
+            .map_err(|error| MidgeError::Internal(format!("{context}: {error}"))),
+    };
+    if let Some(scope) = scope {
+        scope.check(context)?;
+    }
+    result
 }

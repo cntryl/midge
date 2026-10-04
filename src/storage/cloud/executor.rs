@@ -287,11 +287,42 @@ impl CloudExecutor {
         });
     }
 
+    #[cfg(test)]
     pub fn spawn_request_loop<State, Make, Step, Finish>(
         &self,
         initial_state: State,
         context: String,
         callback: CloudCallback,
+        make_request: Make,
+        step: Step,
+        finish: Finish,
+    ) where
+        State: Send + 'static,
+        Make: Fn(&State) -> MidgeResult<CloudRequest> + Send + Sync + 'static,
+        Step: FnMut(&mut State, CloudResponse) -> MidgeResult<bool> + Send + 'static,
+        Finish: FnOnce(String, MidgeResult<State>) -> CloudEvent + Send + 'static,
+    {
+        self.spawn_request_loop_with_timeout(
+            initial_state,
+            context,
+            callback,
+            None,
+            make_request,
+            step,
+            finish,
+        );
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the explicit budget extends the existing public loop callback protocol"
+    )]
+    pub(crate) fn spawn_request_loop_with_timeout<State, Make, Step, Finish>(
+        &self,
+        initial_state: State,
+        context: String,
+        callback: CloudCallback,
+        timeout: Option<Duration>,
         make_request: Make,
         mut step: Step,
         finish: Finish,
@@ -304,7 +335,9 @@ impl CloudExecutor {
         let client = self.client.clone();
         let signer = self.signer.clone();
         let default_timeout = self.default_timeout();
-        let operation_deadline = Self::deadline_from_timeout(Some(default_timeout));
+        let operation_timeout =
+            timeout.map_or(default_timeout, |timeout| timeout.min(default_timeout));
+        let operation_deadline = Self::deadline_from_timeout(Some(operation_timeout));
 
         let Some(rt) = self.rt.as_ref() else {
             let event = finish(
@@ -321,7 +354,7 @@ impl CloudExecutor {
             let operation = async move {
                 let mut state = initial_state;
                 loop {
-                    Self::ensure_deadline_active(Some(default_timeout), operation_deadline)?;
+                    Self::ensure_deadline_active(Some(operation_timeout), operation_deadline)?;
                     let request = match make_request(&state) {
                         Ok(request) => Self::apply_default_timeout(request, default_timeout),
                         Err(error) => break Err(error),
@@ -353,15 +386,15 @@ impl CloudExecutor {
             let result = if operation_deadline
                 .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
             {
-                Err(Self::timeout_error(default_timeout))
+                Err(Self::timeout_error(operation_timeout))
             } else if let Some(deadline) = operation_deadline {
                 tokio::time::timeout_at(deadline, operation)
                     .await
-                    .unwrap_or_else(|_| Err(Self::timeout_error(default_timeout)))
+                    .unwrap_or_else(|_| Err(Self::timeout_error(operation_timeout)))
             } else {
-                tokio::time::timeout(default_timeout, operation)
+                tokio::time::timeout(operation_timeout, operation)
                     .await
-                    .unwrap_or_else(|_| Err(Self::timeout_error(default_timeout)))
+                    .unwrap_or_else(|_| Err(Self::timeout_error(operation_timeout)))
             };
 
             let event = finish(context, result);

@@ -155,6 +155,8 @@ pub struct OpenOptions {
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
     io_timeouts: IoTimeouts<Duration>,
+    open_timeout: Option<Duration>,
+    startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -176,6 +178,8 @@ pub struct OpenOptionsBuilder {
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
     io_timeouts: IoTimeouts<Option<Duration>>,
+    open_timeout: Option<Duration>,
+    startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -365,6 +369,16 @@ impl OpenOptions {
         self.io_timeouts.runtime_response
     }
 
+    /// The optional aggregate budget for opening and recovering the engine.
+    #[must_use]
+    pub fn open_timeout(&self) -> Option<Duration> {
+        self.open_timeout
+    }
+
+    pub(crate) fn startup_observer(&self) -> Option<Arc<dyn crate::runtime::StartupObserver>> {
+        self.startup_observer.clone()
+    }
+
     /// Return the derived WAL buffer size.
     #[must_use]
     pub fn wal_buffer_size(&self) -> usize {
@@ -472,6 +486,8 @@ impl OpenOptionsBuilder {
                 storage: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
                 runtime_response: None,
             },
+            open_timeout: None,
+            startup_observer: None,
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease: LeaseConfig::new(Duration::from_secs(30), None, None),
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
@@ -583,6 +599,29 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Bound opening and recovery by one monotonic budget.
+    ///
+    /// The budget includes preparation, lease acquisition, recovery and runtime
+    /// initialization. Each native storage request uses the smaller of its
+    /// ordinary I/O cap and this remaining budget. Accepted work retains its
+    /// fencing resources during cleanup after timeout. The default is unbounded.
+    #[must_use]
+    pub fn open_timeout(mut self, timeout: Duration) -> Self {
+        self.open_timeout = Some(timeout);
+        self
+    }
+
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn startup_observer_for_testing(
+        mut self,
+        observer: Arc<dyn crate::runtime::StartupObserver>,
+    ) -> Self {
+        self.startup_observer = Some(observer);
+        self
+    }
+
     /// Override the CloudAsync drain budget used by deterministic shutdown
     /// fault-injection tests.
     #[cfg(feature = "failpoints")]
@@ -647,6 +686,19 @@ impl OpenOptionsBuilder {
         self.local_storage_budget(bytes)
     }
 
+    fn validate_open_timeout(&self) -> MidgeResult<()> {
+        if let Some(timeout) = self.open_timeout {
+            if timeout < Duration::from_millis(1)
+                || std::time::Instant::now().checked_add(timeout).is_none()
+            {
+                return Err(MidgeError::InvalidArgument(
+                    "open timeout must be at least 1 millisecond and representable by a monotonic instant".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Build immutable options and derive every dependent value once.
     ///
     /// # Errors
@@ -682,6 +734,7 @@ impl OpenOptionsBuilder {
                 "storage I/O timeout must be at least 1 millisecond".to_string(),
             ));
         }
+        self.validate_open_timeout()?;
         let runtime_response_timeout = self.io_timeouts.runtime_response.unwrap_or_else(|| {
             crate::config::default_runtime_response_timeout(self.io_timeouts.storage)
         });
@@ -748,6 +801,8 @@ impl OpenOptionsBuilder {
                 storage: self.io_timeouts.storage,
                 runtime_response: runtime_response_timeout,
             },
+            open_timeout: self.open_timeout,
+            startup_observer: self.startup_observer,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease: self.lease,
             ttl_clock: self.ttl_clock,

@@ -4,13 +4,113 @@ use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
 use crate::storage::cloud::{CloudCallback, CloudError, CloudEvent};
 use crate::types::EntryType;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WalRangeTrace {
+    Submitted { start: u64, end: u64 },
+    ForwardedSuccess { start: u64, end: u64 },
+    TimedOutBeforeForwarding { start: u64, end: u64 },
+}
+
 struct LimitedRanges {
     inner: MockCloudBackend,
     allowance: AtomicUsize,
     reads: Mutex<Vec<(String, u64)>>,
     delay_micros: AtomicUsize,
     expire_after_next_wal_range: AtomicBool,
+    expire_before_next_wal_range: AtomicBool,
+    delay_return_after_next_wal_range: AtomicBool,
+    wal_range_trace: Mutex<Vec<WalRangeTrace>>,
 }
+
+impl LimitedRanges {
+    fn interrupt_wal_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        timeout: Duration,
+        callback: &CloudCallback,
+    ) -> bool {
+        if !key.starts_with("wal/") {
+            return false;
+        }
+        self.wal_range_trace
+            .lock()
+            .push(WalRangeTrace::Submitted { start, end });
+        if !self
+            .expire_before_next_wal_range
+            .swap(false, Ordering::SeqCst)
+        {
+            return false;
+        }
+        // The previous range has returned to the actual CRC consumer. Hold
+        // this next request without forwarding any additional valid bytes.
+        std::thread::sleep(timeout);
+        self.wal_range_trace
+            .lock()
+            .push(WalRangeTrace::TimedOutBeforeForwarding { start, end });
+        let _ = callback.send(CloudEvent::GetRange {
+            key: key.into(),
+            start,
+            end: Some(end),
+            result: Err(CloudError::Timeout(
+                "injected next range exhausted the attempt deadline".into(),
+            )),
+        });
+        true
+    }
+
+    fn forward_range(
+        &self,
+        key: &str,
+        range: &std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: Duration,
+        callback: &CloudCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.inner
+            .submit_get_range_with_identity(key, start, end, expected, timeout, tx);
+        let event = rx.try_recv().expect("synchronous mock range response");
+        let successful = matches!(
+            &event,
+            CloudEvent::GetRange {
+                key: actual,
+                start: actual_start,
+                end: Some(actual_end),
+                result: Ok(bytes),
+            } if actual == key
+                && *actual_start == start
+                && *actual_end == end
+                && u64::try_from(bytes.len()) == Ok(end - start)
+        );
+        let forwarded = callback.send(event).is_ok();
+        if !key.starts_with("wal/") || !successful || !forwarded {
+            return;
+        }
+        self.wal_range_trace
+            .lock()
+            .push(WalRangeTrace::ForwardedSuccess { start, end });
+        if self
+            .expire_after_next_wal_range
+            .swap(false, Ordering::SeqCst)
+        {
+            self.expire_before_next_wal_range
+                .store(true, Ordering::SeqCst);
+        }
+        if self
+            .delay_return_after_next_wal_range
+            .swap(false, Ordering::SeqCst)
+        {
+            // A queued provider callback is not an engine-acknowledged read
+            // when synchronous submission itself exhausts the read deadline.
+            std::thread::sleep(timeout);
+        }
+    }
+}
+
 impl CloudBackend for LimitedRanges {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
     fn submit_get_range_with_identity(
@@ -29,6 +129,9 @@ impl CloudBackend for LimitedRanges {
         {
             self.inner
                 .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+            return;
+        }
+        if self.interrupt_wal_range(key, start, end, timeout, &callback) {
             return;
         }
         let delay = Duration::from_micros(self.delay_micros.load(Ordering::SeqCst) as u64);
@@ -54,18 +157,7 @@ impl CloudBackend for LimitedRanges {
             return;
         }
         self.reads.lock().push((key.into(), start));
-        self.inner
-            .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
-        if key.starts_with("wal/")
-            && self
-                .expire_after_next_wal_range
-                .swap(false, Ordering::SeqCst)
-        {
-            // Return valid bytes, but finish this synchronous submission only
-            // after its shared deadline. The caller can acknowledge this CRC
-            // range; its next read must observe the real expired deadline.
-            std::thread::sleep(timeout);
-        }
+        self.forward_range(key, &(start..end), expected, timeout, &callback);
     }
 }
 
@@ -87,6 +179,9 @@ fn fixture(
         reads: Mutex::new(Vec::new()),
         delay_micros: AtomicUsize::new(0),
         expire_after_next_wal_range: AtomicBool::new(false),
+        expire_before_next_wal_range: AtomicBool::new(false),
+        delay_return_after_next_wal_range: AtomicBool::new(false),
+        wal_range_trace: Mutex::new(Vec::new()),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
@@ -326,17 +421,25 @@ fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_ke
 
 #[test]
 fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
-    // Arrange: several WAL windows allow deadline interruption after known
-    // acknowledged ranges, without requiring a loaded runner to fit all
-    // metadata and cursor setup inside repeated twenty-millisecond attempts.
+    // Arrange: acknowledge one actual pinned range in the CRC consumer, then
+    // spend the remaining attempt deadline on its next range request.
     let records = 400;
     let (_directory, backend, storage, manifest) = fixture(records);
     let progress = CloudWalPruneProgress::default();
     let mut resumed_offsets = Vec::new();
+    // The seed helper updates primary authority only. Converge its mirror
+    // through the actual fencing path before capturing exact attempt inputs.
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("settle seeded catalog copies before deadline interruption");
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    let key = &catalog.segments[&1].object_key;
+    let original_wal = read_cloud_object(&storage, key);
 
     // Act
     for _ in 0..2 {
         backend.reads.lock().clear();
+        backend.wal_range_trace.lock().clear();
         backend
             .expire_after_next_wal_range
             .store(true, Ordering::SeqCst);
@@ -354,6 +457,8 @@ fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
         );
         assert!(deadline.is_expired());
         assert!(!backend.expire_after_next_wal_range.load(Ordering::SeqCst));
+        assert!(!backend.expire_before_next_wal_range.load(Ordering::SeqCst));
+        assert_crc_acknowledged_before_next_timeout(&backend);
         let reads = backend.reads.lock();
         assert_eq!(
             reads.len(),
@@ -362,24 +467,56 @@ fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
         );
         resumed_offsets.push(reads[0].1);
         drop(reads);
-        assert!(assert_wal_catalog_copies_match(&storage)
-            .segments
-            .contains_key(&1));
+        assert_eq!(assert_wal_catalog_copies_match(&storage), catalog);
+        assert_eq!(read_cloud_object(&storage, key), original_wal);
     }
     assert_eq!(resumed_offsets[0], 0);
     assert!(
         resumed_offsets[1] > resumed_offsets[0],
         "CRC progress must survive deadline expiry"
     );
+    finish_interrupted_proof(&storage, &manifest, &progress, records);
+}
+
+fn assert_crc_acknowledged_before_next_timeout(backend: &LimitedRanges) {
+    let trace = backend.wal_range_trace.lock();
+    let [WalRangeTrace::Submitted { start, end }, WalRangeTrace::ForwardedSuccess {
+        start: success_start,
+        end: success_end,
+    }, WalRangeTrace::Submitted {
+        start: next_start,
+        end: next_end,
+    }, WalRangeTrace::TimedOutBeforeForwarding {
+        start: timeout_start,
+        end: timeout_end,
+    }] = trace.as_slice()
+    else {
+        panic!("expected one actual success followed by a range timeout: {trace:?}");
+    };
+    assert!(end > start);
+    assert_eq!((success_start, success_end), (start, end));
+    // CrcProgress updates checksum and offset before its next read_at call.
+    // The next actual request at exactly that end proves engine consumption,
+    // rather than merely a provider callback queued before submission returns.
+    assert_eq!(next_start, end);
+    assert_eq!((timeout_start, timeout_end), (next_start, next_end));
+}
+
+fn finish_interrupted_proof(
+    storage: &CloudPersistence,
+    manifest: &Manifest,
+    progress: &CloudWalPruneProgress,
+    records: u64,
+) {
     let mut retired = false;
     for _ in 0..10 {
-        match attempt(&storage, &manifest, &progress, records) {
+        match attempt(storage, manifest, progress, records) {
             Ok(()) => {
                 retired = true;
                 break;
             }
             Err(crate::MidgeError::Timeout(_)) => {
-                assert!(assert_wal_catalog_copies_match(&storage)
+                assert!(assert_wal_catalog_copies_match(storage)
                     .segments
                     .contains_key(&1));
             }
@@ -390,11 +527,62 @@ fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
         retired,
         "the interrupted proof must finish once storage stops delaying"
     );
-    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .is_empty());
+    assert!(wait_for_wal_prune_result(storage, 1).is_ok());
+    assert!(assert_wal_catalog_copies_match(storage).segments.is_empty());
     assert_eq!(progress.retained_bytes(), Some(0));
+}
+
+#[test]
+fn should_reject_queued_range_when_submission_exhausts_attempt_deadline() {
+    // Arrange: use a genuine pinned mock range, then hold its synchronous
+    // submission after forwarding bytes. This is provider delivery evidence,
+    // deliberately not engine CRC acknowledgment or a native-provider claim.
+    let records = 400;
+    let (_directory, backend, storage, manifest) = fixture(records);
+    let progress = CloudWalPruneProgress::default();
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("settle seeded catalog copies before late-range interruption");
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    let key = &catalog.segments[&1].object_key;
+    let original_wal = read_cloud_object(&storage, key);
+
+    // Act
+    for _ in 0..2 {
+        backend.reads.lock().clear();
+        backend.wal_range_trace.lock().clear();
+        backend
+            .delay_return_after_next_wal_range
+            .store(true, Ordering::SeqCst);
+        let guard = CloudWalPruneGuard::new(manifest.clone(), None)
+            .with_memory_limit(256 * 1024)
+            .with_progress(progress.clone());
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(1));
+        let result = storage.prune_cloud_wal_segment_within(1, records, guard, 2, &deadline);
+
+        // Assert: queued bytes are rejected before reaching the CRC consumer,
+        // so the next attempt starts at zero and retains all recovery inputs.
+        assert!(matches!(result, Err(crate::MidgeError::Timeout(_))));
+        assert!(deadline.is_expired());
+        assert!(!backend
+            .delay_return_after_next_wal_range
+            .load(Ordering::SeqCst));
+        let trace = backend.wal_range_trace.lock();
+        let [WalRangeTrace::Submitted { start: 0, end }, WalRangeTrace::ForwardedSuccess {
+            start: 0,
+            end: success_end,
+        }] = trace.as_slice()
+        else {
+            panic!("expected one queued positive range at offset zero: {trace:?}");
+        };
+        assert!(*end > 0);
+        assert_eq!(end, success_end);
+        assert_eq!(backend.reads.lock().as_slice(), &[(key.clone(), 0)]);
+        drop(trace);
+        assert_eq!(assert_wal_catalog_copies_match(&storage), catalog);
+        assert_eq!(read_cloud_object(&storage, key), original_wal);
+    }
+    finish_interrupted_proof(&storage, &manifest, &progress, records);
 }
 
 #[test]

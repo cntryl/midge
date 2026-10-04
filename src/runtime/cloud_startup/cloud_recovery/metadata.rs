@@ -1,20 +1,26 @@
 use super::{BlockingCloudIo, CloudStartupRecovery, MidgeError, MidgeResult, RecoveryPolicy};
+use crate::common::DeadlineScope;
 use crate::io::FsError;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 impl CloudStartupRecovery {
-    pub(crate) fn reject_legacy_cloud_metadata_without_generation(
+    pub(crate) fn reject_legacy_cloud_metadata_without_generation_within(
         cloud: &crate::storage::cloud::CloudStorage,
+        scope: &DeadlineScope,
     ) -> MidgeResult<()> {
         for file_name in crate::metadata::files::CLOUD_MIRRORED
             .iter()
             .copied()
             .chain(std::iter::once(crate::metadata::files::MANIFEST))
         {
+            scope.check("legacy cloud metadata inventory")?;
             let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-            if BlockingCloudIo::new(cloud).head_optional(&key)?.is_some() {
+            if BlockingCloudIo::within(cloud, scope)
+                .head_optional(&key)?
+                .is_some()
+            {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "cloud metadata '{key}' has no committed lease generation; offline migration is required"
                 )));
@@ -23,12 +29,14 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    pub(crate) fn read_committed_cloud_metadata(
+    pub(crate) fn read_committed_cloud_metadata_within(
         cloud: &crate::storage::cloud::CloudStorage,
         generation: &crate::lease::CloudMetadataGeneration,
+        scope: &DeadlineScope,
     ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
         let mut objects = BTreeMap::new();
         for object in &generation.objects {
+            scope.check("committed cloud metadata object")?;
             if !crate::metadata::files::CLOUD_MIRRORED.contains(&object.file_name.as_str()) {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "committed cloud metadata has an unknown file '{}'",
@@ -58,13 +66,10 @@ impl CloudStartupRecovery {
                     "committed cloud metadata generation has duplicate file identities".into(),
                 ));
             }
-            let data = BlockingCloudIo::new(cloud)
+            let data = BlockingCloudIo::within(cloud, scope)
                 .get_optional(&object.object_key)
                 .map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to read committed cloud metadata '{}': {error}",
-                        object.file_name
-                    ))
+                    super::preserve_timeout(error, "failed to read committed cloud metadata")
                 })?
                 .ok_or_else(|| {
                     MidgeError::RecoveryFailed(format!(
@@ -94,6 +99,7 @@ impl CloudStartupRecovery {
                     )));
                 }
             }
+            scope.check("committed cloud metadata validation")?;
             objects.insert(object.file_name.clone(), data);
         }
         for file_name in [
@@ -109,12 +115,18 @@ impl CloudStartupRecovery {
         Ok(objects)
     }
 
-    pub(crate) fn load_local_manifest_for_cloud_metadata_mirror(
+    pub(crate) fn load_local_manifest_for_cloud_metadata_mirror_within(
         db_path: &Path,
+        scope: &DeadlineScope,
     ) -> MidgeResult<crate::metadata::Manifest> {
+        scope.check("local cloud mirror manifest")?;
         let fs: Arc<dyn crate::io::traits::Fs> =
             Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
-        crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
-            .map_err(MidgeError::Internal)
+        let fs = crate::io::scope_fs(fs, scope.clone());
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy_within(
+            &fs,
+            RecoveryPolicy::Strict,
+            scope,
+        )
     }
 }
