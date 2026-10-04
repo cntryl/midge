@@ -14,7 +14,7 @@ use super::traits::{
     LeaseValidity, PrimaryLease,
 };
 use crate::io::{staging, Fs, FsError, FsPath, OpenMode, OpenOptions, RealFs};
-use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
+use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -140,7 +140,7 @@ impl ProviderLeaderStore {
                 Ok(MetadataPointerCasOutcome::Committed)
             }
             Err(LeaseError::AcquisitionFailed(_)) => {
-                // A heartbeat or successor changed the lease object's identity.
+                // Definite rejection requires a fresh authority read before retry.
                 Ok(MetadataPointerCasOutcome::Retry)
             }
             Err(error) => {
@@ -545,8 +545,8 @@ impl LeaderStore for ProviderLeaderStore {
                     return Ok(());
                 }
                 Err(LeaseError::AcquisitionFailed(_)) => {
-                    // Another CAS won. Retry only after rereading the same
-                    // holder, token, epoch and still-live persisted expiry.
+                    // This PUT was definitely rejected. Retry only after
+                    // rereading the same holder, token, epoch and live expiry.
                 }
                 Err(error) => {
                     if matches!(
@@ -617,8 +617,8 @@ impl LeaderStore for ProviderLeaderStore {
             match provider_write_doc_with_timeout(&self.cloud, &released, headers, remaining) {
                 Ok(()) => return Ok(()),
                 Err(LeaseError::AcquisitionFailed(_)) => {
-                    // A metadata pointer CAS or renewal may have won. Re-read
-                    // the current epoch and preserve its committed pointer.
+                    // This PUT was definitely rejected. Re-read the current
+                    // epoch and preserve its committed pointer.
                 }
                 Err(error) => return Err(error),
             }
@@ -1859,16 +1859,17 @@ fn provider_write_doc_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
-            // Only a genuine conditional-write race — another writer's PUT
-            // already changed the object out from under our If-Match /
-            // If-None-Match precondition — is confirmed contention. Every
-            // other failure (auth, transport, server error, malformed
-            // response) means the outcome is unknown, not that someone else
-            // holds the lease.
+            // These typed responses establish that this PUT did not commit.
+            // A fresh read can retry the CAS under the caller's existing
+            // deadline; failure of that read does not make this PUT uncertain.
+            CloudOutcome::Err(
+                error @ (CloudError::PreconditionFailed(_) | CloudError::ConditionalConflict(_)),
+            ) => Err(LeaseError::AcquisitionFailed(format!(
+                "cloud lease conditional write was rejected: {error}"
+            ))),
             CloudOutcome::Err(error) => reconcile_ambiguous_lease_write(
                 cloud,
                 document,
-                error.is_precondition_failed(),
                 format!("cloud lease conditional write failed: {error}"),
                 timeout.saturating_sub(started.elapsed()),
             ),
@@ -1876,14 +1877,12 @@ fn provider_write_doc_with_timeout(
         Ok(other) => reconcile_ambiguous_lease_write(
             cloud,
             document,
-            false,
             format!("unexpected cloud lease PUT response: {other:?}"),
             timeout.saturating_sub(started.elapsed()),
         ),
         Err(error) => reconcile_ambiguous_lease_write(
             cloud,
             document,
-            false,
             format!("cloud lease PUT timed out: {error}"),
             timeout.saturating_sub(started.elapsed()),
         ),
@@ -1893,7 +1892,6 @@ fn provider_write_doc_with_timeout(
 fn reconcile_ambiguous_lease_write(
     cloud: &CloudStorage,
     expected: &LeaseDocument,
-    response_was_precondition_failure: bool,
     original_error: String,
     remaining: Duration,
 ) -> Result<(), LeaseError> {
@@ -1910,11 +1908,6 @@ fn reconcile_ambiguous_lease_write(
                 "confirmed ambiguous cloud lease write by readback"
             );
             Ok(())
-        }
-        Ok(_) if response_was_precondition_failure => {
-            Err(LeaseError::AcquisitionFailed(format!(
-                "cloud lease conditional write lost a precondition race: {original_error}"
-            )))
         }
         Ok(_) => Err(LeaseError::IoError(original_error)),
         Err(read_error) => Err(LeaseError::Indeterminate(format!(
