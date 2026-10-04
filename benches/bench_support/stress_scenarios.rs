@@ -26,7 +26,7 @@ const SEED_BATCH: usize = 64;
 const WRITE_BATCH_ROWS: usize = 32;
 const MIXED_ROWS: [usize; 5] = [1, 8, 128, 1_024, 4_096];
 const WRITE_ROW_COUNTS: [usize; 11] = [32, 1, 1, 1, 8, 128, 1_024, 4_096, 1, 1, 128];
-const RESOURCE_SAMPLE_PERIOD: Duration = Duration::from_secs(60);
+const RESOURCE_SAMPLE_PERIOD: Duration = Duration::from_secs(10);
 const SATURATION_BACKOFF_MAX_SHIFT: u32 = 8;
 const SATURATION_BACKOFF_RECOVERY_SUCCESSES: u32 = 32;
 const CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY: Duration = Duration::from_secs(5);
@@ -250,6 +250,13 @@ impl WorkloadArtifacts {
         );
     }
 
+    fn enter_phase(&mut self, phase: &'static str, stage: &str, progress: &ProgressHandle) {
+        self.phase = phase;
+        self.stage = stage.to_string();
+        self.progress_units = progress.completed_units();
+        self.persist("running");
+    }
+
     fn finish(&mut self, progress: &ProgressHandle) {
         self.phase = "complete";
         self.stage = "flush-reopen-recovery".to_string();
@@ -316,7 +323,7 @@ struct ResourceSampler {
 }
 
 impl ResourceSampler {
-    fn start(artifacts: &WorkloadArtifacts, database: &Path) -> Self {
+    fn start(artifacts: &WorkloadArtifacts, database: &Path, progress: ProgressHandle) -> Self {
         let started = Instant::now();
         let report = artifacts.path.join("resource-samples.csv");
         fs::write(&report, "elapsed_ms,rss_bytes,database_disk_bytes\n")
@@ -327,6 +334,7 @@ impl ResourceSampler {
         let thread_stop = Arc::clone(&stop);
         let thread_database = database.to_path_buf();
         let thread_report = report.clone();
+        let thread_progress = progress;
         let peak = Arc::new(Mutex::new(start.rss_bytes));
         let thread_peak = Arc::clone(&peak);
         let interval = std::env::var("MIDGE_STRESS_RESOURCE_SAMPLE_SECS")
@@ -335,12 +343,17 @@ impl ResourceSampler {
             .filter(|value| *value > 0)
             .map_or(RESOURCE_SAMPLE_PERIOD, Duration::from_secs);
         let handle = thread::spawn(move || {
+            let mut previous = start;
             while !thread_stop.load(Ordering::Acquire) {
                 thread::park_timeout(interval);
                 if thread_stop.load(Ordering::Acquire) {
                     break;
                 }
                 let point = resource_point(started, &thread_database);
+                if point.database_bytes != previous.database_bytes {
+                    thread_progress.advance();
+                }
+                previous = point;
                 if let Some(rss) = point.rss_bytes {
                     let mut current = thread_peak.lock().expect("RSS peak lock");
                     *current = Some(current.map_or(rss, |observed| observed.max(rss)));
@@ -360,11 +373,8 @@ impl ResourceSampler {
     }
 
     fn finish(mut self) -> (ResourcePoint, ResourcePoint, Option<u64>) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            handle.thread().unpark();
-            handle.join().expect("resource sampler thread completes");
-        }
+        self.stop_sampler()
+            .expect("resource sampler thread completes");
         let end = resource_point(self.started, &self.database);
         append_resource_point(&self.report, end);
         let sampled_peak = *self.peak.lock().expect("RSS peak lock");
@@ -374,6 +384,20 @@ impl ResourceSampler {
             (None, current) => current,
         };
         (self.start, end, peak)
+    }
+
+    fn stop_sampler(&mut self) -> std::thread::Result<()> {
+        self.stop.store(true, Ordering::Release);
+        self.handle.take().map_or(Ok(()), |handle| {
+            handle.thread().unpark();
+            handle.join()
+        })
+    }
+}
+
+impl Drop for ResourceSampler {
+    fn drop(&mut self) {
+        let _ = self.stop_sampler();
     }
 }
 
@@ -414,11 +438,11 @@ pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
     let mut artifacts = WorkloadArtifacts::begin(case, duration);
     let run_dir = tempfile::tempdir().expect("create isolated stress directory");
     let mut opened = open_case(case, run_dir.path(), &progress);
-    let sampler = ResourceSampler::start(&artifacts, &opened.database);
+    let sampler = ResourceSampler::start(&artifacts, &opened.database, progress.clone());
     let expected = run_stages(ctx, case, duration, &mut opened, &progress, &mut artifacts);
+    finish_case(opened, &expected, &progress, &mut artifacts);
     let (resource_start, resource_end, peak_rss) = sampler.finish();
     record_resources(ctx, resource_start, resource_end, peak_rss);
-    finish_case(opened, &expected, &progress, &mut artifacts);
     artifacts.finish(&progress);
 }
 
@@ -551,10 +575,12 @@ fn finish_case(
     progress: &ProgressHandle,
     artifacts: &mut WorkloadArtifacts,
 ) {
+    artifacts.enter_phase("flush", "flush-acknowledged-data", progress);
     opened
         .engine
         .flush_cf(&opened.family)
         .expect("flush acknowledged stress data");
+    progress.advance();
     let expected_seed =
         u64::try_from(if opened.has_reads { SEED_ROWS } else { 0 }).expect("seed count fits u64");
     verify_database(
@@ -566,20 +592,26 @@ fn finish_case(
         artifacts,
         "flushed",
     );
+    artifacts.enter_phase("shutdown", "shutdown-before-recovery", progress);
     opened
         .engine
         .shutdown(Duration::from_secs(60))
         .expect("shutdown stress engine before recovery check");
+    progress.advance();
     drop(opened.engine);
     if opened.cloud {
+        artifacts.enter_phase("cache-loss", "remove-local-cloud-cache", progress);
         fs::remove_dir_all(&opened.database).expect("remove local cloud cache before recovery");
+        progress.advance();
         let options = cloud_options(
             &opened.database,
             opened.backend,
             &opened.namespace,
             &opened.object_prefix,
         );
+        artifacts.enter_phase("recovery", "open-cloud-from-empty-cache", progress);
         let (mut recovered, family) = open_family(options, false);
+        progress.advance();
         verify_database(
             &recovered,
             &family,
@@ -589,11 +621,15 @@ fn finish_case(
             artifacts,
             "cloud-recovered",
         );
+        artifacts.enter_phase("shutdown", "shutdown-recovered-cloud-engine", progress);
         recovered
             .shutdown(Duration::from_secs(60))
             .expect("shutdown recovered cloud engine");
+        progress.advance();
     } else {
+        artifacts.enter_phase("recovery", "reopen-local-engine", progress);
         let (mut recovered, family) = open_family(local_options(&opened.database), false);
+        progress.advance();
         verify_database(
             &recovered,
             &family,
@@ -603,9 +639,11 @@ fn finish_case(
             artifacts,
             "reopened",
         );
+        artifacts.enter_phase("shutdown", "shutdown-reopened-local-engine", progress);
         recovered
             .shutdown(Duration::from_secs(60))
             .expect("shutdown reopened local engine");
+        progress.advance();
     }
 }
 
