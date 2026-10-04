@@ -2,6 +2,7 @@ use super::*;
 use crate::io::FsError;
 use crate::runtime::event_loop::compaction::CompactionCoordinator;
 
+mod manual_flush_tests;
 mod quantum_tests;
 mod wake_tests;
 

@@ -281,6 +281,32 @@ impl Engine {
                 cf_id: cf.id(),
             })?;
 
+        Self::finish_flush_response(response)
+    }
+
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn flush_cf_with_timeout(
+        &self,
+        cf: &ColumnFamilyHandle,
+        timeout: Duration,
+    ) -> MidgeResult<()> {
+        let request_id = next_request_id()?;
+        let response = self.runtime_handle.send_and_wait_timeout(
+            RuntimeMsg::FlushMemtable {
+                request_id,
+                cf_id: cf.id(),
+            },
+            timeout,
+        )?;
+        match response {
+            Some(response) => Self::finish_flush_response(response),
+            None => Err(MidgeError::Timeout(format!(
+                "FlushMemtable request {request_id} exceeded caller wait {timeout:?}"
+            ))),
+        }
+    }
+
+    fn finish_flush_response(response: RuntimeResponse) -> MidgeResult<()> {
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
             RuntimeResponse::Error { error, .. } => Err(error),

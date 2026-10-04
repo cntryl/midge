@@ -29,6 +29,17 @@ use client_progress::{
 #[path = "stress_scenarios/recovery_progress.rs"]
 mod recovery_progress;
 use recovery_progress::{is_recovery_work, RecoveryProgressLayer, RecoveryScope};
+#[cfg(all(test, feature = "failpoints"))]
+#[path = "stress_scenarios/final_flush_watchdog.rs"]
+mod final_flush_watchdog;
+#[cfg(all(test, feature = "failpoints"))]
+#[allow(
+    unused_imports,
+    reason = "Only the watchdog integration target uses these shared fixture exports"
+)]
+pub(super) use final_flush_watchdog::{
+    run_final_flush_terminal_policy_fixture, run_final_flush_watchdog_fixture,
+};
 
 const VALUE_SIZE: usize = 128;
 const SEED_ROWS: usize = 512;
@@ -41,6 +52,9 @@ const SATURATION_BACKOFF_MAX_SHIFT: u32 = 8;
 const SATURATION_BACKOFF_RECOVERY_SUCCESSES: u32 = 32;
 const CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY: Duration = Duration::from_secs(5);
 const SHUTDOWN_CALLER_BUDGET: Duration = Duration::from_secs(45);
+const FINAL_FLUSH_CALLER_SLICE: Duration = Duration::from_secs(1);
+const FINAL_FLUSH_INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+const FINAL_FLUSH_MAX_BACKOFF: Duration = Duration::from_millis(200);
 
 fn enable_phase_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
@@ -175,6 +189,20 @@ impl StageStats {
     }
 }
 
+#[derive(Default, serde::Serialize)]
+struct FinalFlushReport {
+    attempts: u64,
+    completed: bool,
+    operation_in_flight: bool,
+    timeout_responses: u64,
+    busy_responses: u64,
+    write_stall_responses: u64,
+    backoff_ms: u64,
+    last_error: Option<String>,
+    last_error_kind: Option<&'static str>,
+    observed_primary_lease_healthy: Option<bool>,
+}
+
 struct WorkloadArtifacts {
     path: PathBuf,
     started: Instant,
@@ -186,6 +214,7 @@ struct WorkloadArtifacts {
     stage_index: Option<usize>,
     shutdown_results: Vec<serde_json::Value>,
     terminal_error: Option<String>,
+    final_flush: FinalFlushReport,
     scenario: &'static str,
     backend: &'static str,
     configured_seconds: u64,
@@ -229,6 +258,7 @@ impl WorkloadArtifacts {
             stage_index: None,
             shutdown_results: Vec::new(),
             terminal_error: None,
+            final_flush: FinalFlushReport::default(),
             scenario: case.scenario,
             backend: case.backend,
             configured_seconds: duration.as_secs(),
@@ -429,6 +459,7 @@ impl WorkloadArtifacts {
                 "progress_completed_units": self.progress_units,
                 "verification_checks": self.checks.len(),
                 "terminal_error": self.terminal_error,
+                "final_flush": self.final_flush,
             }),
         )
         .expect("write workload status");
@@ -841,12 +872,26 @@ fn finish_case(
     progress: &ProgressHandle,
     artifacts: &mut WorkloadArtifacts,
 ) {
-    artifacts.enter_phase("flush", "flush-acknowledged-data", progress);
-    opened
-        .engine
-        .flush_cf(&opened.family)
-        .expect("flush acknowledged stress data");
-    progress.advance();
+    flush_acknowledged_data_with(
+        &opened.engine,
+        &opened.family,
+        opened.cloud,
+        opened.cloud.then_some(FINAL_FLUSH_CALLER_SLICE),
+        progress,
+        artifacts,
+        |engine, family| {
+            if opened.cloud {
+                cntryl_midge::__internal::maintenance::flush_cf_with_timeout(
+                    engine,
+                    family,
+                    FINAL_FLUSH_CALLER_SLICE,
+                )
+            } else {
+                engine.flush_cf(family)
+            }
+        },
+    )
+    .expect("flush acknowledged stress data");
     let expected_seed =
         u64::try_from(if opened.has_reads { SEED_ROWS } else { 0 }).expect("seed count fits u64");
     verify_database(
@@ -919,6 +964,140 @@ fn finish_case(
             artifacts,
         );
     }
+}
+
+fn flush_acknowledged_data_with(
+    engine: &Engine,
+    family: &ColumnFamilyHandle,
+    cloud: bool,
+    caller_budget: Option<Duration>,
+    progress: &ProgressHandle,
+    artifacts: &mut WorkloadArtifacts,
+    mut flush: impl FnMut(&Engine, &ColumnFamilyHandle) -> Result<(), MidgeError>,
+) -> Result<(), MidgeError> {
+    artifacts.enter_phase("flush", "flush-acknowledged-data", progress);
+    let mut backoff = FINAL_FLUSH_INITIAL_BACKOFF;
+    loop {
+        let before_health = cloud.then(|| engine.is_primary_lease_healthy());
+        artifacts.final_flush.observed_primary_lease_healthy = before_health;
+        if before_health == Some(false) {
+            let error =
+                MidgeError::Fenced("primary lease became unhealthy before final flush".into());
+            artifacts.final_flush.last_error = Some(format!("{error:?}"));
+            artifacts.final_flush.last_error_kind = Some("fenced");
+            artifacts.terminal_error = Some(format!("{error:?}"));
+            artifacts.persist("failed");
+            return Err(error);
+        }
+
+        artifacts.final_flush.attempts = artifacts.final_flush.attempts.saturating_add(1);
+        artifacts.final_flush.operation_in_flight = true;
+        artifacts.progress_units = progress.completed_units();
+        artifacts.persist("running");
+        let started = Instant::now();
+        let result = flush(engine, family);
+        let after_health = cloud.then(|| engine.is_primary_lease_healthy());
+        artifacts.final_flush.operation_in_flight = false;
+        artifacts.final_flush.observed_primary_lease_healthy = after_health;
+        let retry = cloud
+            && before_health == Some(true)
+            && after_health == Some(true)
+            && result.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error,
+                    MidgeError::Timeout(_) | MidgeError::Busy(_) | MidgeError::WriteStall(_)
+                )
+            });
+        let error_kind = result.as_ref().err().map(final_flush_error_kind);
+        if let Err(error) = &result {
+            record_final_flush_error(&mut artifacts.final_flush, error);
+        }
+        if retry {
+            artifacts.final_flush.backoff_ms = artifacts.final_flush.backoff_ms.saturating_add(
+                u64::try_from(backoff.as_millis()).expect("bounded flush backoff fits u64"),
+            );
+        }
+        append_final_flush_attempt(
+            artifacts,
+            &json!({
+                "attempt": artifacts.final_flush.attempts,
+                "recorded_elapsed_ms": artifacts.started.elapsed().as_millis(),
+                "elapsed_ms": started.elapsed().as_millis(),
+                "caller_budget_ms": caller_budget.map(|budget| budget.as_millis()),
+                "success": result.is_ok(),
+                "error_kind": error_kind,
+                "error": result.as_ref().err().map(|error| format!("{error:?}")),
+                "lease_healthy_before": before_health,
+                "lease_healthy_after": after_health,
+                "retry": retry,
+                "backoff_ms": if retry { backoff.as_millis() } else { 0 },
+                "progress_completed_units": progress.completed_units(),
+            }),
+        );
+        match result {
+            Ok(()) => {
+                artifacts.final_flush.completed = true;
+                progress.advance();
+                artifacts.progress_units = progress.completed_units();
+                artifacts.persist("running");
+                return Ok(());
+            }
+            Err(error) if !retry => {
+                artifacts.terminal_error = Some(format!("{error:?}"));
+                artifacts.progress_units = progress.completed_units();
+                artifacts.persist("failed");
+                return Err(error);
+            }
+            Err(_) => {
+                artifacts.progress_units = progress.completed_units();
+                artifacts.persist("running");
+                // Retry only the caller's barrier wait. Submission, rejection,
+                // timeout and sleeping never advance the progress watchdog.
+                thread::sleep(backoff);
+                backoff = backoff.saturating_mul(2).min(FINAL_FLUSH_MAX_BACKOFF);
+            }
+        }
+    }
+}
+
+fn record_final_flush_error(report: &mut FinalFlushReport, error: &MidgeError) {
+    report.last_error = Some(format!("{error:?}"));
+    report.last_error_kind = Some(final_flush_error_kind(error));
+    match error {
+        MidgeError::Timeout(_) => {
+            report.timeout_responses = report.timeout_responses.saturating_add(1);
+        }
+        MidgeError::Busy(_) => {
+            report.busy_responses = report.busy_responses.saturating_add(1);
+        }
+        MidgeError::WriteStall(_) => {
+            report.write_stall_responses = report.write_stall_responses.saturating_add(1);
+        }
+        _ => {}
+    }
+}
+
+fn final_flush_error_kind(error: &MidgeError) -> &'static str {
+    match error {
+        MidgeError::Timeout(_) => "timeout",
+        MidgeError::Busy(_) => "busy",
+        MidgeError::WriteStall(_) => "write_stall",
+        MidgeError::NoSpace(_) => "no_space",
+        MidgeError::Fenced(_) => "fenced",
+        MidgeError::Corruption(_) => "corruption",
+        MidgeError::ResourceLimit(_) => "resource_limit",
+        MidgeError::Internal(_) => "internal",
+        _ => "other_terminal",
+    }
+}
+
+fn append_final_flush_attempt(artifacts: &WorkloadArtifacts, attempt: &serde_json::Value) {
+    let mut output = FileOptions::new()
+        .create(true)
+        .append(true)
+        .open(artifacts.path.join("final-flush-attempts.jsonl"))
+        .expect("open final-flush attempt report");
+    writeln!(output, "{attempt}").expect("retain actual final-flush result");
 }
 
 fn shutdown_engine(

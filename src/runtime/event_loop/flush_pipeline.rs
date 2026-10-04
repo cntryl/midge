@@ -111,6 +111,10 @@ impl EventLoop {
             || self.flush_actor.is_inflight()
             || self.publication_gate.is_active()
             || (!allow_during_shutdown && self.pending_msg.is_some())
+            || (!allow_during_shutdown
+                && self.cloud_maintenance_enabled()
+                && (self.cloud_maintenance_control_blocked()
+                    || (self.compaction_compute_owned() && !self.has_manual_flush_obligation())))
     }
 
     fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
@@ -124,9 +128,27 @@ impl EventLoop {
         if self.flush_start_blocked(allow_during_shutdown) {
             return;
         }
-        let Some(flush) = self.state.begin_next_immutable_flush() else {
+        let Some(mut flush) = self.state.begin_next_immutable_flush() else {
             return;
         };
+        let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {
+            return;
+        };
+        let identity = FlushIdentity {
+            flush_id: flush.flush_id,
+            writer_epoch: flush.writer_epoch,
+            cf_id,
+            sequence: flush.sequence,
+        };
+        let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.fail_flush_pipeline(flush.flush_id, None, &error);
+                return;
+            }
+        };
+        flush.sst_name = Some(sst_name);
+        flush.sst_seq = Some(sst_seq);
         if let Some(mut build) = flush.built.clone() {
             if build.reservation.is_none() {
                 let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {
@@ -152,15 +174,6 @@ impl EventLoop {
             return;
         }
 
-        let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {
-            return;
-        };
-        let identity = FlushIdentity {
-            flush_id: flush.flush_id,
-            writer_epoch: flush.writer_epoch,
-            cf_id,
-            sequence: flush.sequence,
-        };
         let staging_path = self.state.sst_dir.join(".flush-staging").join(format!(
             "{}-{}.sst",
             identity.writer_epoch, identity.flush_id
@@ -373,6 +386,57 @@ impl EventLoop {
         Ok(sst_seq)
     }
 
+    fn ensure_flush_sst_identity(
+        &mut self,
+        identity: FlushIdentity,
+    ) -> crate::common::MidgeResult<(String, u64)> {
+        let (cf_id, flush) = self
+            .state
+            .immutable_flush_by_id(identity.flush_id)
+            .ok_or_else(|| {
+                crate::common::MidgeError::Fenced(format!(
+                    "flush {} lost immutable ownership before name reservation",
+                    identity.flush_id
+                ))
+            })?;
+        if cf_id != identity.cf_id
+            || flush.writer_epoch != identity.writer_epoch
+            || flush.sequence != identity.sequence
+        {
+            return Err(crate::common::MidgeError::Fenced(
+                "flush identity changed before name reservation".into(),
+            ));
+        }
+        match (&flush.sst_name, flush.sst_seq) {
+            (Some(name), Some(seq)) if *name == crate::cloud_layout::file_name(cf_id, 0, seq) => {
+                return Ok((name.clone(), seq));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(crate::common::MidgeError::Internal(
+                    "flush has an inconsistent canonical SST identity".into(),
+                ));
+            }
+        }
+        if self.publication_gate.is_active() {
+            return Err(crate::common::MidgeError::Busy(
+                "SST name reservation waits for the publication owner".into(),
+            ));
+        }
+        // Reserve while this event-loop turn owns metadata, before build can
+        // overlap compute. A later publisher may park the build without a new
+        // journal append or mirror. Retries retain this canonical identity.
+        let sst_seq = self.reserve_flush_sst_seq(cf_id)?;
+        let sst_name = crate::cloud_layout::file_name(cf_id, 0, sst_seq);
+        let (_, flush) = self
+            .state
+            .immutable_flush_by_id_mut(identity.flush_id)
+            .expect("immutable ownership is stable during the event-loop turn");
+        flush.sst_name = Some(sst_name.clone());
+        flush.sst_seq = Some(sst_seq);
+        Ok((sst_name, sst_seq))
+    }
+
     fn prepare_flush_publication(
         &mut self,
         identity: FlushIdentity,
@@ -380,14 +444,13 @@ impl EventLoop {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
         file_meta: crate::runtime::FileMeta,
     ) {
-        let sst_seq = match self.reserve_flush_sst_seq(identity.cf_id) {
-            Ok(sst_seq) => sst_seq,
+        let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
+            Ok(identity) => identity,
             Err(error) => {
                 self.fail_flush_pipeline(identity.flush_id, reservation, &error);
                 return;
             }
         };
-        let sst_name = crate::cloud_layout::file_name(identity.cf_id, 0, sst_seq);
         let build = FlushBuildOutput {
             identity,
             staging_path,
@@ -1198,6 +1261,7 @@ mod tests {
             cf_id: 0,
             sequence: 1,
         };
+        event_loop.ensure_flush_sst_identity(identity)?;
         event_loop.publication_gate.try_acquire(
             crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
         );
