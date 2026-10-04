@@ -71,12 +71,19 @@ impl EventLoop {
     }
 
     pub(super) fn idle_progress_timeout(&self) -> Option<Duration> {
+        // Lease loss can occur without a storage completion or pressure
+        // change. Keep pending admission waiters observing terminal authority.
+        let stall_poll =
+            (!self.write_stall_waiters.is_empty()).then_some(Duration::from_millis(100));
         if self.verification_barrier.is_active() {
             // Verification deliberately freezes maintenance. Ignoring due
             // retry deadlines here makes the run loop block for the release
             // message instead of repeatedly timing out at zero duration. The
             // batched WAL sync deadline still applies.
-            return self.wal_actor.sync_deadline_timeout();
+            return [self.wal_actor.sync_deadline_timeout(), stall_poll]
+                .into_iter()
+                .flatten()
+                .min();
         }
 
         [
@@ -101,6 +108,7 @@ impl EventLoop {
             self.compaction_publish_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
+            stall_poll,
         ]
         .into_iter()
         .flatten()
@@ -125,6 +133,7 @@ impl EventLoop {
 
     pub(super) fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         if self.verification_barrier.token.is_some() {
+            self.wake_write_stall_waiters();
             // Mutations stay deferred behind the barrier, so sync only what
             // is already in the WAL; do not drain queued writes into it.
             // Cloud acknowledgements still complete their waiters.
@@ -141,6 +150,7 @@ impl EventLoop {
     /// writes into its batched sync; the fairness slot runs after dispatch
     /// and leaves the queue in order.
     pub(super) fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
+        self.wake_write_stall_waiters();
         CompactionCoordinator::drain_publish_results(self);
         self.drain_flush_worker_results();
         match drain_writes_from {
@@ -221,7 +231,7 @@ impl EventLoop {
             self.run_background_compaction_maintenance_if_due();
         }
         let outcome = self.handle_runtime_msg(msg, msg_rx);
-        if outcome == HandleOutcome::Continue && self.verification_barrier.token.is_none() {
+        if outcome == HandleOutcome::Continue {
             self.run_request_fairness_slot();
         }
         outcome
@@ -236,13 +246,19 @@ impl EventLoop {
         // available. Running maintenance before dispatch can start another
         // flush and re-defer the same request forever under steady flush debt.
         let outcome = self.handle_runtime_msg(msg, msg_rx);
-        if outcome == HandleOutcome::Continue && self.verification_barrier.token.is_none() {
+        if outcome == HandleOutcome::Continue {
             self.run_request_fairness_slot();
         }
         outcome
     }
 
     pub(super) fn run_request_fairness_slot(&mut self) {
+        if self.verification_barrier.token.is_some() {
+            // Allowed control traffic can keep the idle timer from firing.
+            // Admission waiters still observe fencing while layout is frozen.
+            self.wake_write_stall_waiters();
+            return;
+        }
         // A continuously non-empty request queue must not starve background
         // durability and storage progress. Run this bounded slot only after
         // dispatch so a restored control request keeps the publication turn

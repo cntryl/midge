@@ -1456,6 +1456,144 @@ fn should_stop_strict_group_at_existing_batch_cap() -> MidgeResult<()> {
     Ok(())
 }
 
+fn fence_stalled_writer(fixture: &mut EventLoopFixture, expired: bool) {
+    fixture.event_loop.state.set_write_stalled(true);
+    if expired {
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        validity
+            .activate(1, std::time::Instant::now() + Duration::from_secs(60))
+            .expect("activate test writer authority");
+        validity.expire_for_test();
+        fixture.event_loop.fencing.writer_epoch = 1;
+        fixture.event_loop.fencing.lease_validity = Some(validity);
+        fixture.event_loop.fencing.lease_healthy =
+            Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    } else {
+        fixture.event_loop.fencing.lease_healthy =
+            Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    }
+}
+
+#[test]
+fn should_report_fenced_when_stall_probe_observes_lost_authority() -> MidgeResult<()> {
+    for expired in [false, true] {
+        // Arrange
+        let mut fixture = EventLoopFixture::batched()?;
+        fence_stalled_writer(&mut fixture, expired);
+        let response_rx = fixture.register(920);
+        let (_tx, msg_rx) = crossbeam::channel::unbounded();
+        let sequence_before = fixture.event_loop.state.sequence;
+        let wal_appends_before = fixture.event_loop.wal_actor.append_calls();
+
+        // Act
+        crate::runtime::event_loop::dispatch::RuntimeDispatcher::handle(
+            &mut fixture.event_loop,
+            RuntimeMsg::CheckWriteStall {
+                request_id: 920,
+                cf_id: 0,
+            },
+            &msg_rx,
+        );
+
+        // Assert
+        expect_error(&response_rx, 920, |error| {
+            matches!(error, MidgeError::Fenced(_))
+        });
+        assert_eq!(fixture.event_loop.state.sequence, sequence_before);
+        assert_eq!(
+            fixture.event_loop.wal_actor.append_calls(),
+            wal_appends_before
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn should_reject_new_stall_waiter_when_writer_authority_is_lost() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    fence_stalled_writer(&mut fixture, false);
+    let response_rx = fixture.register(921);
+
+    // Act
+    fixture.event_loop.handle_wait_for_write_stall_clear(921, 0);
+
+    // Assert
+    expect_error(&response_rx, 921, |error| {
+        matches!(error, MidgeError::Fenced(_))
+    });
+    assert!(!fixture.event_loop.write_stall_waiters.contains(921));
+    Ok(())
+}
+
+#[test]
+fn should_fail_existing_stall_waiters_when_authority_expires_under_pressure() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    fixture.event_loop.state.set_write_stalled(true);
+    let first_rx = fixture.register(922);
+    let second_rx = fixture.register(923);
+    fixture.event_loop.handle_wait_for_write_stall_clear(922, 0);
+    fixture.event_loop.handle_wait_for_write_stall_clear(923, 0);
+    assert!(fixture.event_loop.write_stall_waiters.contains(922));
+    assert!(fixture.event_loop.write_stall_waiters.contains(923));
+    assert!(fixture
+        .event_loop
+        .idle_progress_timeout()
+        .is_some_and(|wait| wait <= Duration::from_millis(100)));
+    fence_stalled_writer(&mut fixture, true);
+
+    // Act
+    fixture.event_loop.background_progress(None);
+
+    // Assert
+    expect_error(&first_rx, 922, |error| {
+        matches!(error, MidgeError::Fenced(_))
+    });
+    expect_error(&second_rx, 923, |error| {
+        matches!(error, MidgeError::Fenced(_))
+    });
+    assert!(!fixture.event_loop.write_stall_waiters.contains(922));
+    assert!(!fixture.event_loop.write_stall_waiters.contains(923));
+    assert!(fixture
+        .event_loop
+        .write_stall_waiters
+        .column_family_queue(0)
+        .is_none());
+    Ok(())
+}
+
+#[test]
+fn should_fail_stall_waiter_when_verification_control_requests_keep_runtime_busy() -> MidgeResult<()>
+{
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    fixture.event_loop.state.set_write_stalled(true);
+    let stall_rx = fixture.register(924);
+    let metrics_rx = fixture.register(925);
+    fixture.event_loop.handle_wait_for_write_stall_clear(924, 0);
+    fixture.event_loop.verification_barrier.token = Some(1);
+    fence_stalled_writer(&mut fixture, true);
+    let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    fixture
+        .event_loop
+        .process_one(RuntimeMsg::GetRuntimeMetrics { request_id: 925 }, &msg_rx);
+
+    // Assert
+    assert!(matches!(
+        recv_response(&metrics_rx),
+        RuntimeResponse::RuntimeMetricsSnapshot { .. }
+    ));
+    expect_error(&stall_rx, 924, |error| {
+        matches!(error, MidgeError::Fenced(_))
+    });
+    assert_eq!(fixture.event_loop.verification_barrier.token, Some(1));
+    assert!(!fixture.event_loop.write_stall_waiters.contains(924));
+    Ok(())
+}
+
 #[test]
 fn should_remove_cancelled_write_stall_waiter_from_all_indexes() -> MidgeResult<()> {
     // Arrange
