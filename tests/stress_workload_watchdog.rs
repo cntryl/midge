@@ -71,6 +71,24 @@ mod child_harness {
         super::stress_scenarios::run_recovery_listener_fixture(ctx);
     }
 
+    #[cfg(feature = "failpoints")]
+    #[cntryl_stress::stress(tier = 5)]
+    fn delayed_final_flush_publication(ctx: &mut cntryl_stress::StressContext) {
+        super::stress_scenarios::run_final_flush_watchdog_fixture(ctx, false);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[cntryl_stress::stress(tier = 5)]
+    fn held_final_flush_publication(ctx: &mut cntryl_stress::StressContext) {
+        super::stress_scenarios::run_final_flush_watchdog_fixture(ctx, true);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[cntryl_stress::stress(tier = 5)]
+    fn terminal_final_flush_retry_policy(ctx: &mut cntryl_stress::StressContext) {
+        super::stress_scenarios::run_final_flush_terminal_policy_fixture(ctx);
+    }
+
     cntryl_stress::stress_main!();
 
     pub(super) fn run() {
@@ -85,7 +103,10 @@ fn invoke_child(artifacts: &Path, workload: &str) -> Output {
             command.env_remove(name);
         }
     }
-    if workload.ends_with("recovery_with_flat_cache") {
+    if workload.ends_with("recovery_with_flat_cache")
+        || workload.ends_with("final_flush_publication")
+        || workload == "terminal_final_flush_retry_policy"
+    {
         command.env("RUST_LOG", "off");
     }
     command
@@ -127,6 +148,15 @@ fn workload_directory(artifacts: &Path) -> PathBuf {
 fn read_json(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).expect("retained atomic JSON"))
         .expect("complete JSON after child process exit")
+}
+
+#[cfg(feature = "failpoints")]
+fn final_flush_attempts(workload: &Path) -> Vec<Value> {
+    fs::read_to_string(workload.join("final-flush-attempts.jsonl"))
+        .expect("retained actual final-flush results")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("complete final-flush result JSON"))
+        .collect()
 }
 
 fn client_snapshot(workload: &Path) -> Value {
@@ -464,6 +494,197 @@ fn should_count_recovery_work_only_within_its_active_caller_scope() {
         .any(|spec| spec["metadata"]["fixture_listener_progress_units"] == "5"));
 }
 
+#[cfg(feature = "failpoints")]
+fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
+    // Arrange: one genuine publication is delayed 350ms, with a healthy
+    // acquired primary lease and actual callers waiting only 50ms each.
+    let artifacts = tempfile::tempdir().expect("create delayed final flush artifacts");
+
+    // Act: the native child invokes the same final-flush boundary as the soaks.
+    let output = invoke_child(artifacts.path(), "delayed_final_flush_publication");
+    let receipt = receipt(&output);
+    let workload = workload_directory(artifacts.path());
+    let publication = read_json(&workload.join("publication-observations.json"));
+    let outcomes = read_json(&workload.join("flush-attempt-observations.json"));
+
+    // Assert: a timeout is not successful flush, and abandoned callers cannot
+    // abort the accepted publication or allow verification to run early.
+    assert!(
+        output.status.success(),
+        "real eventual flush must precede verification; status={}, publication={publication}, outcomes={outcomes}, receipt={receipt}; stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(publication["worker_entries"], 1);
+    assert_eq!(publication["worker_released"], true);
+    let attempts = outcomes["attempts"]
+        .as_array()
+        .expect("actual flush attempts");
+    assert!(attempts.len() > 1);
+    assert_eq!(attempts[0]["error_kind"], "timeout");
+    assert!(attempts[..attempts.len() - 1].iter().all(|attempt| {
+        attempt["success"] == false
+            && attempt["error_kind"] == "timeout"
+            && attempt["observed_lease_healthy"] == true
+            && attempt["progress_units"] == 0
+    }));
+    assert_eq!(attempts.last().unwrap()["success"], true);
+    let result = read_json(&workload.join("flush-result.json"));
+    assert_eq!(
+        result["attempts"].as_u64(),
+        Some(u64::try_from(attempts.len()).expect("fixture attempts fit u64"))
+    );
+    assert_eq!(result["flush_progress_units"], 1);
+    assert_eq!(result["worker_entries"], 1);
+    assert_eq!(result["flush_publish_count"], 1);
+    assert_eq!(result["authoritative_sst_count"], 1);
+    assert_eq!(result["verified_rows"], 32);
+    assert_eq!(result["mismatches"], 0);
+    let verification = read_json(&workload.join("verification-summary.json"));
+    assert_eq!(verification["passed"], true);
+    assert!(verification["checks"]
+        .as_array()
+        .expect("actual verification checks")
+        .iter()
+        .all(|check| check["passed"] == true && check["value_mismatches"] == 0));
+    let status = read_json(&workload.join("workload-status.json"));
+    assert_eq!(status["status"], "passed");
+    assert_eq!(status["terminal_error"], Value::Null);
+    assert_eq!(status["final_flush"]["completed"], true);
+    assert_eq!(status["final_flush"]["operation_in_flight"], false);
+    assert_eq!(status["final_flush"]["attempts"], result["attempts"]);
+    assert_eq!(status["final_flush"]["last_error_kind"], "timeout");
+    let recorded_attempts = final_flush_attempts(&workload);
+    assert_eq!(recorded_attempts.len(), attempts.len());
+    assert!(recorded_attempts[..recorded_attempts.len() - 1]
+        .iter()
+        .all(|attempt| attempt["error_kind"] == "timeout"
+            && attempt["retry"] == true
+            && attempt["lease_healthy_before"] == true
+            && attempt["lease_healthy_after"] == true
+            && attempt["progress_completed_units"] == 0));
+    assert_eq!(recorded_attempts.last().unwrap()["success"], true);
+    assert!(receipt["benchmark_specs"]
+        .as_array()
+        .expect("canonical final-flush specs")
+        .iter()
+        .all(|spec| spec["metadata"]["failure_kind"] != "no_progress_timeout"));
+}
+
+#[cfg(feature = "failpoints")]
+fn should_report_no_progress_when_final_flush_publication_remains_held() {
+    // Arrange: accepted real publication is retained while caller slots expire.
+    let artifacts = tempfile::tempdir().expect("create held final flush artifacts");
+
+    // Act: only the native watchdog decides that retries made no progress.
+    let output = invoke_child(artifacts.path(), "held_final_flush_publication");
+    let receipt = receipt(&output);
+    let workload = workload_directory(artifacts.path());
+
+    // Assert: attempts, timeout responses and sleeps never make work healthy.
+    assert!(!output.status.success());
+    let failure = receipt["benchmark_specs"]
+        .as_array()
+        .expect("canonical held final-flush specs")
+        .iter()
+        .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
+        .unwrap_or_else(|| panic!("held publication must native-timeout: {receipt}"));
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["progress_completed_units"], "0");
+    let status = read_json(&workload.join("workload-status.json"));
+    assert_eq!(status["phase"], "flush");
+    assert_eq!(status["final_flush"]["completed"], false);
+    assert_eq!(status["final_flush"]["last_error_kind"], "timeout");
+    assert_eq!(
+        status["final_flush"]["observed_primary_lease_healthy"],
+        true
+    );
+    let publication = read_json(&workload.join("publication-observations.json"));
+    assert_eq!(publication["worker_entries"], 1);
+    assert_eq!(publication["worker_released"], false);
+    let outcomes = read_json(&workload.join("flush-attempt-observations.json"));
+    let attempts = outcomes["attempts"]
+        .as_array()
+        .expect("actual abandoned callers");
+    assert!(attempts.len() > 1);
+    assert!(attempts.iter().all(|attempt| {
+        attempt["success"] == false
+            && attempt["error_kind"] == "timeout"
+            && attempt["observed_lease_healthy"] == true
+            && attempt["progress_units"] == 0
+    }));
+    let recorded_attempts = final_flush_attempts(&workload);
+    assert!(recorded_attempts.len() > 1);
+    assert!(recorded_attempts.iter().all(|attempt| {
+        attempt["success"] == false
+            && attempt["error_kind"] == "timeout"
+            && attempt["retry"] == true
+            && attempt["lease_healthy_before"] == true
+            && attempt["lease_healthy_after"] == true
+            && attempt["progress_completed_units"] == 0
+    }));
+    assert!(!workload.join("flush-result.json").exists());
+    assert!(!workload.join("verification-summary.json").exists());
+}
+
+#[cfg(feature = "failpoints")]
+fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
+    // Arrange: errors originate at the benchmark callback boundary. A real
+    // healthy Engine backs the control and any unexpected second invocation.
+    let artifacts = tempfile::tempdir().expect("create terminal retry-policy artifacts");
+
+    // Act: this proves benchmark classification, not provider error behavior.
+    let output = invoke_child(artifacts.path(), "terminal_final_flush_retry_policy");
+    let receipt = receipt(&output);
+    let workload = workload_directory(artifacts.path());
+
+    // Assert: original error, one call, no success/heartbeat or verification.
+    assert!(
+        output.status.success(),
+        "terminal policy controls failed; receipt={receipt}; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let results = read_json(&workload.join("retry-policy-results.json"));
+    assert_eq!(results["fixture_scope"], "benchmark_retry_policy");
+    assert_eq!(results["error_source"], "callback_injected");
+    assert_eq!(results["provider_error_behavior_proved"], false);
+    assert_eq!(results["verification_checks"], 0);
+    let cases = results["cases"].as_array().expect("typed policy controls");
+    let expected_kinds = [
+        "resource_limit",
+        "fenced",
+        "corruption",
+        "internal",
+        "io",
+        "no_space",
+        "lease_unavailable",
+        "aborted",
+    ];
+    assert_eq!(cases.len(), expected_kinds.len());
+    for (case, expected_kind) in cases.iter().zip(expected_kinds) {
+        assert_eq!(case["kind"], expected_kind);
+        assert_eq!(case["error_source"], "callback_injected");
+        assert_eq!(case["calls"], 1);
+        assert_eq!(case["returned_error"], case["original_error"]);
+        assert_eq!(case["progress_units"], 0);
+        assert_eq!(case["completed"], false);
+        assert_eq!(case["operation_in_flight"], false);
+        assert_eq!(case["observed_primary_lease_healthy"], true);
+        assert_eq!(case["persisted"]["retry"], false);
+        assert_eq!(case["persisted"]["success"], false);
+        assert_eq!(case["persisted"]["error"], case["original_error"]);
+        assert_eq!(case["persisted"]["lease_healthy_before"], true);
+        assert_eq!(case["persisted"]["lease_healthy_after"], true);
+        assert_eq!(case["persisted"]["progress_completed_units"], 0);
+    }
+    let recorded_attempts = final_flush_attempts(&workload);
+    assert_eq!(recorded_attempts.len(), expected_kinds.len());
+    assert!(recorded_attempts
+        .iter()
+        .all(|attempt| attempt["retry"] == false && attempt["success"] == false));
+    assert!(!workload.join("verification-summary.json").exists());
+}
+
 fn main() {
     if std::env::var_os(CHILD_FLAG).is_some() {
         child_harness::run();
@@ -478,5 +699,13 @@ fn main() {
     should_remain_healthy_when_actual_inventory_validates_delayed_heads();
     should_remain_healthy_when_actual_cloud_recovery_completes_read_only_work();
     should_remain_healthy_when_cached_recovery_finishes_verified_coverage_work();
+    #[cfg(feature = "failpoints")]
+    {
+        should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
+        should_report_no_progress_when_final_flush_publication_remains_held();
+        should_stop_retry_policy_when_callback_returns_a_terminal_error();
+        println!("twelve real stress watchdog integration checks passed");
+    }
+    #[cfg(not(feature = "failpoints"))]
     println!("nine real stress watchdog integration checks passed");
 }

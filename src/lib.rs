@@ -115,6 +115,16 @@ pub mod __internal {
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
     }
+    pub mod maintenance {
+        #[doc(hidden)]
+        pub fn flush_cf_with_timeout(
+            engine: &crate::Engine,
+            cf: &crate::ColumnFamilyHandle,
+            timeout: std::time::Duration,
+        ) -> crate::MidgeResult<()> {
+            engine.flush_cf_with_timeout(cf, timeout)
+        }
+    }
     pub mod recovery {
         pub use crate::metadata::recovery_progress_fixture::{
             run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
