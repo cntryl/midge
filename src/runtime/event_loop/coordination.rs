@@ -301,7 +301,6 @@ impl WriteStallWaiters {
         self.by_column_family.get(&cf_id)
     }
 
-    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.by_request.is_empty() && self.by_column_family.is_empty()
     }

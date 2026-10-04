@@ -92,17 +92,21 @@ impl EventLoop {
         let cf_ids: Vec<crate::types::ColumnFamilyId> = self.write_stall_waiters.column_families();
 
         for cf_id in cf_ids {
-            if self.should_stall_writes(cf_id) {
+            if self.check_lease_health().is_ok() && self.should_stall_writes(cf_id) {
                 continue;
             }
 
             for wait_request_id in self.write_stall_waiters.take_column_family(cf_id) {
-                self.respond(
-                    wait_request_id,
-                    RuntimeResponse::Ok {
+                let response = match self.check_lease_health() {
+                    Ok(()) => RuntimeResponse::Ok {
                         request_id: wait_request_id,
                     },
-                );
+                    Err(error) => RuntimeResponse::Error {
+                        request_id: wait_request_id,
+                        error,
+                    },
+                };
+                self.respond(wait_request_id, response);
             }
         }
     }
