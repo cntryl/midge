@@ -338,6 +338,12 @@ impl CloudStartupRecovery {
             scope.clone(),
         );
         let deadline = scope.deadline();
+        // Untimed startup retains the ordinary finite mirror attempt budget.
+        let deadline = if deadline.is_bounded() {
+            deadline
+        } else {
+            OperationDeadline::from_budget(cloud.callback_timeout().saturating_mul(16))
+        };
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
             crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
                 cloud,

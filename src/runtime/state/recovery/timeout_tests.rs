@@ -21,7 +21,7 @@ struct ReadEvidence {
 #[derive(Clone, Copy)]
 enum ReadDelivery {
     Timeout,
-    Successful,
+    SuccessfulUntilExpiry(crate::common::OperationDeadline),
     IoBeforeQuarantine,
 }
 
@@ -44,7 +44,18 @@ impl File for TimedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         let started = Instant::now();
         let bytes = self.inner.read_at(offset, len)?;
-        self.evidence.completed_reads.fetch_add(1, Ordering::AcqRel);
+        let completed = self.evidence.completed_reads.fetch_add(1, Ordering::AcqRel) + 1;
+        if let ReadDelivery::SuccessfulUntilExpiry(deadline) = self.delivery {
+            if completed == 2 {
+                // The parser consumed the first genuine read to request this
+                // next one. Successful bytes spend the original shared budget;
+                // the scoped production file decides whether to accept them.
+                while !deadline.is_expired() {
+                    std::thread::sleep(deadline.remaining());
+                }
+            }
+            return Ok(bytes);
+        }
         // This is an actual RealFs read whose controlled local caller budget
         // expires before its result is delivered. It is not provider evidence.
         std::thread::sleep(self.delay);
@@ -287,31 +298,9 @@ fn assert_journal_timeout(policy: RecoveryPolicy, aggregate: bool) {
     let directory = tempfile::tempdir().unwrap();
     let target = crate::metadata::files::JOURNAL;
     let before = seed_journal(directory.path());
-    let delivery = if aggregate {
-        ReadDelivery::Successful
-    } else {
-        ReadDelivery::Timeout
-    };
-    let (fs, evidence) = read_fs(directory.path(), target, READ_DELAY, delivery);
-    let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
-        if aggregate {
-            Duration::from_millis(60)
-        } else {
-            Duration::from_secs(5)
-        },
-    ));
-    let fs = crate::io::scope_fs(fs, scope.clone());
-    let mut salvaged = false;
-
     // Act: successful individual reads still consume one aggregate budget.
-    let result = RuntimeState::load_manifest_within(
-        directory.path(),
-        false,
-        policy,
-        &fs,
-        &mut salvaged,
-        Some(&scope),
-    );
+    let (result, evidence, salvaged, scope) =
+        run_journal_with_controlled_read_expiry(directory.path(), policy, aggregate);
 
     // Assert: neither policy may checkpoint or truncate a timed-out journal.
     assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
@@ -319,7 +308,8 @@ fn assert_journal_timeout(policy: RecoveryPolicy, aggregate: bool) {
     assert_preserved_read(directory.path(), target, &before, &evidence);
     let reads = evidence.completed_reads.load(Ordering::Acquire);
     if aggregate {
-        assert!(reads > 1);
+        assert_eq!(reads, 2);
+        assert!(scope.deadline().is_expired());
     } else {
         assert_eq!(reads, 1);
     }
@@ -337,6 +327,48 @@ fn assert_journal_timeout(policy: RecoveryPolicy, aggregate: bool) {
             .iter()
             .any(|cf| cf.id == id && cf.name == format!("deadline-cf-{id}")));
     }
+}
+
+fn run_journal_with_controlled_read_expiry(
+    root: &std::path::Path,
+    policy: RecoveryPolicy,
+    aggregate: bool,
+) -> (MidgeResult<Manifest>, ReadEvidence, bool, DeadlineScope) {
+    crate::failpoints::with_read_gate(|| {
+        let inner = crate::io::RealFs::new(root).unwrap();
+        let evidence = ReadEvidence::default();
+        // Admit setup before capturing the real budget; a successful second
+        // read forces its expiry without depending on per-read sleep timing.
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ));
+        let (delivery, delay) = if aggregate {
+            (
+                ReadDelivery::SuccessfulUntilExpiry(scope.deadline()),
+                Duration::ZERO,
+            )
+        } else {
+            (ReadDelivery::Timeout, READ_DELAY)
+        };
+        let fs: Arc<dyn Fs> = Arc::new(TimedReadFs {
+            inner,
+            target: crate::metadata::files::JOURNAL,
+            evidence: evidence.clone(),
+            delay,
+            delivery,
+        });
+        let fs = crate::io::scope_fs(fs, scope.clone());
+        let mut salvaged = false;
+        let result = RuntimeState::load_manifest_within(
+            root,
+            false,
+            policy,
+            &fs,
+            &mut salvaged,
+            Some(&scope),
+        );
+        (result, evidence, salvaged, scope)
+    })
 }
 
 #[test]

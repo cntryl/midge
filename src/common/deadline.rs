@@ -19,7 +19,7 @@
 use std::time::{Duration, Instant};
 
 /// A shared budget for a sequence of storage operations.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperationDeadline {
     expires_at: Option<Instant>,
 }

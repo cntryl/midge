@@ -1168,13 +1168,15 @@ mod crashes;
 #[derive(Default)]
 struct PlannerEvidence {
     successful_heads: std::sync::atomic::AtomicUsize,
+    deliveries_before_expiry: std::sync::atomic::AtomicUsize,
+    deliveries_after_expiry: std::sync::atomic::AtomicUsize,
     mutations: std::sync::atomic::AtomicUsize,
 }
 
 struct DelayedPlannerBackend {
     inner: Arc<dyn StorageBackend>,
     evidence: Arc<PlannerEvidence>,
-    delay: Duration,
+    deadline: OperationDeadline,
 }
 
 impl StorageBackend for DelayedPlannerBackend {
@@ -1195,10 +1197,25 @@ impl StorageBackend for DelayedPlannerBackend {
                 ..
             }
         ));
-        self.evidence
+        let completed = self
+            .evidence
             .successful_heads
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        std::thread::sleep(self.delay);
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        if completed == 2 {
+            // Admission of this second real HEAD proves the first segment's
+            // checksum and inspection finished. Expire the original budget
+            // here, rather than assuming two calibrated sleeps fit the runner.
+            while !self.deadline.is_expired() {
+                std::thread::sleep(self.deadline.remaining());
+            }
+        }
+        let deliveries = if self.deadline.is_expired() {
+            &self.evidence.deliveries_after_expiry
+        } else {
+            &self.evidence.deliveries_before_expiry
+        };
+        deliveries.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let _ = callback.send(event);
     }
 
@@ -1248,9 +1265,45 @@ impl StorageBackend for DelayedPlannerBackend {
     }
 }
 
+fn run_planner_with_expiring_second_head(
+    fixture: &Fixture,
+    policy: RecoveryPolicy,
+) -> (
+    MidgeResult<StreamingCloudWalRecovery>,
+    Arc<PlannerEvidence>,
+    OperationDeadline,
+) {
+    crate::failpoints::with_read_gate(|| {
+        let db_path = fixture.directory.path().join("local");
+        let local: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&db_path).unwrap());
+        let evidence = Arc::new(PlannerEvidence::default());
+        // Setup and failpoint-gate admission precede this real immutable clock.
+        // The second completed HEAD forces expiry, independent of runner speed.
+        let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+        let scope = crate::common::DeadlineScope::new(deadline);
+        let remote: Arc<dyn StorageBackend> = Arc::new(DelayedPlannerBackend {
+            inner: Arc::clone(&fixture.cloud),
+            evidence: Arc::clone(&evidence),
+            deadline,
+        });
+        let result = StreamingCloudWalRecovery::build_with_local_fs_within(
+            &db_path,
+            &local,
+            &remote,
+            &fixture.catalog,
+            policy,
+            Duration::from_secs(5),
+            127,
+            limits(),
+            &scope,
+        );
+        (result, evidence, deadline)
+    })
+}
+
 fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
     // Arrange: a real catalog names four genuine sealed WAL objects. The
-    // second successful delayed HEAD crosses one shared 150 ms budget.
+    // second successful HEAD is held until the same captured budget expires.
     let mut fixture = Fixture::new().expect("actual planner fixture");
     let mut objects = Vec::new();
     for id in 1..=4 {
@@ -1262,37 +1315,31 @@ fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
     let local_bytes = framed_wal(4, 7, b"acknowledged value");
     let local_path = fixture.local(&local_name, &local_bytes).unwrap();
     let catalog_before = fixture.catalog.encode().unwrap();
-    let evidence = Arc::new(PlannerEvidence::default());
-    let remote: Arc<dyn StorageBackend> = Arc::new(DelayedPlannerBackend {
-        inner: Arc::clone(&fixture.cloud),
-        evidence: Arc::clone(&evidence),
-        delay: Duration::from_millis(100),
-    });
-    let scope = crate::common::DeadlineScope::new(crate::common::OperationDeadline::from_budget(
-        Duration::from_millis(150),
-    ));
-
     // Act: the real planner owns checksum/inspection and receives real HEADs;
     // a completed successful submission is not free aggregate time.
-    let result = StreamingCloudWalRecovery::build_within(
-        &fixture.directory.path().join("local"),
-        &remote,
-        &fixture.catalog,
-        policy,
-        Duration::from_secs(5),
-        127,
-        limits(),
-        &scope,
-    );
+    let (result, evidence, deadline) = run_planner_with_expiring_second_head(&fixture, policy);
 
     // Assert: Timeout is typed under both policies and stops before later
     // segment admission, alias quarantine, remote deletion, or catalog changes.
     assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert!(deadline.is_expired());
     assert_eq!(
         evidence
             .successful_heads
             .load(std::sync::atomic::Ordering::Acquire),
         2
+    );
+    assert_eq!(
+        evidence
+            .deliveries_before_expiry
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        evidence
+            .deliveries_after_expiry
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
     );
     assert_eq!(
         evidence

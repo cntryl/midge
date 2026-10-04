@@ -2,6 +2,7 @@ use super::*;
 use crate::common::{MidgeError, OperationDeadline};
 use crate::config::CloudProviderConfig;
 use crate::storage::cloud::native_http::{observe_cancellation, NativeHttpServer, Response};
+use std::sync::{atomic::AtomicBool, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
@@ -148,18 +149,101 @@ fn should_cancel_native_put_when_blocking_caller_budget_expires() {
     assert_held_deadline(HeldPath::Put);
 }
 
-fn pagination_observation(dialect: Dialect) -> (bool, usize, usize, Duration) {
-    let requests = Arc::new(AtomicUsize::new(0));
-    let completed = Arc::new(AtomicUsize::new(0));
-    let worker_requests = Arc::clone(&requests);
-    let worker_completed = Arc::clone(&completed);
-    let server = NativeHttpServer::start(move |_stream, request| {
+const LIST_BUDGET: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+struct PaginationControl {
+    started: Mutex<Option<Instant>>,
+    requests: AtomicUsize,
+    consumed: AtomicUsize,
+    cancelled: AtomicBool,
+}
+
+impl PaginationControl {
+    fn response(
+        &self,
+        stream: &std::net::TcpStream,
+        request: &crate::storage::cloud::native_http::Request,
+        dialect: Dialect,
+    ) -> Option<Response> {
         assert_eq!(request.method, "GET", "actual native LIST page request");
-        let page = worker_requests.fetch_add(1, Ordering::AcqRel) + 1;
+        let page = self.requests.fetch_add(1, Ordering::AcqRel) + 1;
         assert!(page <= 3, "finite native pagination fixture");
-        std::thread::sleep(Duration::from_millis(90));
-        worker_completed.fetch_add(1, Ordering::Release);
+        if page > 1 {
+            assert!(
+                request.path.contains(&format!("page-{}", page - 1)),
+                "a continuation request must consume the preceding real page: {}",
+                request.path
+            );
+            self.consumed.store(page - 1, Ordering::Release);
+        }
+        let started = *self.started.lock().unwrap();
+        if let Some(started) = started {
+            if page == 2 {
+                // Spend earlier-page work inside the one captured wall budget.
+                std::thread::sleep((LIST_BUDGET / 2).saturating_sub(started.elapsed()));
+            } else if page == 3 {
+                // A reset budget would accept this final page: the previous
+                // successful page spent half the original allowance already.
+                let release_at = started + LIST_BUDGET + LIST_BUDGET / 4;
+                let cancelled = hold_pagination_response(stream, release_at);
+                self.cancelled.store(cancelled, Ordering::Release);
+                if cancelled {
+                    return None;
+                }
+            }
+        }
         Some(Response::new(200, dialect.page(page, page == 3)))
+    }
+
+    fn arm(&self, started: Instant) {
+        self.requests.store(0, Ordering::Release);
+        self.consumed.store(0, Ordering::Release);
+        self.cancelled.store(false, Ordering::Release);
+        *self.started.lock().unwrap() = Some(started);
+    }
+}
+
+fn hold_pagination_response(stream: &std::net::TcpStream, release_at: Instant) -> bool {
+    stream.set_nonblocking(true).unwrap();
+    let cancelled = loop {
+        match stream.peek(&mut [0_u8; 1]) {
+            Ok(0) => break true,
+            Ok(_) => panic!("unexpected client data while holding native LIST response"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                break true;
+            }
+            Err(error) => panic!("observe held native LIST socket: {error}"),
+        }
+        let remaining = release_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break false;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(5)));
+    };
+    stream.set_nonblocking(false).unwrap();
+    cancelled
+}
+
+struct PaginationObservation {
+    event: CloudEvent,
+    admitted: usize,
+    consumed: usize,
+    cancelled: bool,
+    elapsed: Duration,
+}
+
+fn pagination_observation(dialect: Dialect) -> PaginationObservation {
+    let control = Arc::new(PaginationControl::default());
+    let worker_control = Arc::clone(&control);
+    let server = NativeHttpServer::start(move |stream, request| {
+        worker_control.response(stream, &request, dialect)
     });
     let provider = dialect.provider().with_endpoint(&server.endpoint).unwrap();
     let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
@@ -169,53 +253,80 @@ fn pagination_observation(dialect: Dialect) -> (bool, usize, usize, Duration) {
     )
     .unwrap();
     let mut headers = Vec::new();
-    set_request_timeout_header(&mut headers, Duration::from_millis(150));
+    set_request_timeout_header(&mut headers, LIST_BUDGET);
+    // Qualify all three real pages and warm the executor before timed phases.
+    let (sender, receiver) = mpsc::channel();
+    cloud
+        .backend
+        .submit_list_with_headers(&cloud.full_path(""), headers.clone(), sender);
+    let positive = receiver.recv_timeout(Duration::from_secs(6)).unwrap();
+    let expected: Vec<_> = (1..=3)
+        .map(|page| format!("native-deadline/object-{page}"))
+        .collect();
+    assert!(
+        matches!(&positive, CloudEvent::List { result: Ok(keys), .. } if keys == &expected),
+        "{dialect:?}: healthy real pagination must succeed: {positive:?}"
+    );
+    assert_eq!(control.requests.load(Ordering::Acquire), 3);
+    assert_eq!(control.consumed.load(Ordering::Acquire), 2);
+
     let (sender, receiver) = mpsc::channel();
     let started = Instant::now();
-    // This existing native API's explicit timeout must bound the whole LIST,
-    // not grant a fresh 150ms allowance to each sequential 90ms page.
+    control.arm(started);
+    // One native LIST budget spans the successful prefix and the held final page.
     cloud
         .backend
         .submit_list_with_headers(&cloud.full_path(""), headers, sender);
-    let timed_out = matches!(
-        receiver.recv_timeout(Duration::from_secs(2)),
-        Ok(CloudEvent::List {
-            result: Err(CloudError::Timeout(_)),
-            ..
-        })
-    );
+    let event = receiver.recv_timeout(Duration::from_secs(6)).unwrap();
     let elapsed = started.elapsed();
+    // Cancellation or the finite response release always precedes assertions.
     drop(server);
-    let admitted = requests.load(Ordering::Acquire);
-    let completed = completed.load(Ordering::Acquire);
     drop(cloud);
-    (timed_out, admitted, completed, elapsed)
+    PaginationObservation {
+        event,
+        admitted: control.requests.load(Ordering::Acquire),
+        consumed: control.consumed.load(Ordering::Acquire),
+        cancelled: control.cancelled.load(Ordering::Acquire),
+        elapsed,
+    }
 }
 
 #[test]
 fn should_stop_native_pagination_when_aggregate_list_budget_expires() {
-    // Arrange: three 90ms pages each fit a 150ms request cap, but together
-    // exceed it. Actual native requests and completions are counted independently.
+    // Arrange: healthy real three-page pagination qualifies each dialect first.
+    // Two pages then succeed, spending half one deadline before the held third.
     // Act
     let observations = DIALECTS.map(|dialect| (dialect, pagination_observation(dialect)));
     // Assert
-    for (dialect, (timed_out, admitted, completed, elapsed)) in observations {
-        assert!(
-            completed >= 1,
-            "{dialect:?}: fixture must complete real work"
-        );
-        assert!(admitted >= 2, "{dialect:?}: a later page must be admitted");
-        assert!(
-            timed_out,
-            "{dialect:?}: per-page timeout replenished the LIST budget"
+    for (dialect, observation) in observations {
+        assert_eq!(
+            observation.admitted, 3,
+            "{dialect:?}: final page must arrive"
         );
         assert_eq!(
-            admitted, 2,
-            "{dialect:?}: third page must not be admitted after aggregate expiry"
+            observation.consumed, 2,
+            "{dialect:?}: continuations must acknowledge two successful pages"
         );
         assert!(
-            elapsed < Duration::from_millis(500),
-            "{dialect:?}: {elapsed:?}"
+            matches!(
+                &observation.event,
+                CloudEvent::List {
+                    result: Err(CloudError::Timeout(_)),
+                    ..
+                }
+            ),
+            "{dialect:?}: per-page timeout replenished the LIST budget: {:?}",
+            observation.event
+        );
+        assert!(
+            observation.cancelled,
+            "{dialect:?}: final page must close before its finite release"
+        );
+        assert!(
+            observation.elapsed >= LIST_BUDGET * 3 / 4
+                && observation.elapsed < LIST_BUDGET + Duration::from_secs(1),
+            "{dialect:?}: callback must use the original deadline: {:?}",
+            observation.elapsed
         );
     }
 }
