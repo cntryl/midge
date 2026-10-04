@@ -45,6 +45,9 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      - name: Test stress artifact finalization
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 

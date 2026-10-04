@@ -47,9 +47,24 @@ jobs:
         run: docker compose up -d sqrzl
 
       - name: Run Tier 5 workload
+        id: workload
         env:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: cargo bench --bench 'tier5_*' --features stress-soak -- --workload ${{ matrix.workload }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/midge-stress/runner-logs
+          cargo bench --bench 'tier5_*' --features stress-soak -- --workload ${{ matrix.workload }} 2>&1 | tee target/midge-stress/runner-logs/workload.log
+
+      - name: Preserve workload failure and emulator diagnostics
+        if: always()
+        env:
+          WORKLOAD_OUTCOME: ${{ steps.workload.outcome }}
+          SELECTED_WORKLOAD: ${{ matrix.workload }}
+        run: |
+          mkdir -p target/midge-stress/emulator-logs
+          docker compose logs --no-color sqrzl > target/midge-stress/emulator-logs/sqrzl.log 2>&1 || true
+          python3 tools/finalize_stress_artifacts.py --workload "$SELECTED_WORKLOAD" --suite tier5-stress-workloads --sha "$GITHUB_SHA" --outcome "$WORKLOAD_OUTCOME"
 
       - name: Upload benchmark reports
         if: always()
