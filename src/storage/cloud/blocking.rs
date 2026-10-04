@@ -64,10 +64,26 @@ impl<'a> BlockingCloud<'a> {
     }
 
     pub(crate) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
+        let started = std::time::Instant::now();
         let timeout = self.timeout("get", key)?;
+        let read_deadline = OperationDeadline::from_start(started, timeout);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_get(key, tx);
-        self.wait(&rx, timeout, "get", key, |event| match event {
+        let request_timeout = read_deadline
+            .clamp_nonzero(self.deadline.remaining())
+            .ok_or_else(|| {
+                MidgeError::Timeout(format!(
+                    "operation deadline exhausted before cloud get for '{key}'"
+                ))
+            })?;
+        self.cloud.submit_get_within(key, request_timeout, tx);
+        let wait_timeout = read_deadline
+            .clamp_nonzero(self.deadline.remaining())
+            .ok_or_else(|| {
+                MidgeError::Timeout(format!(
+                    "operation deadline exhausted during cloud get submission for '{key}'"
+                ))
+            })?;
+        self.wait(&rx, wait_timeout, "get", key, |event| match event {
             CloudEvent::Get { result, .. } => Some(result),
             _ => None,
         })

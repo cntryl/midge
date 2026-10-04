@@ -76,14 +76,48 @@ impl CloudStorage {
         self.backend.submit_put(&full_key, data, headers, callback);
     }
 
+    #[cfg(test)]
     pub fn submit_get(&self, key: &str, callback: CloudCallback) {
         let full_key = self.full_path(key);
         self.backend.submit_get(&full_key, callback);
     }
 
-    pub fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        let full_key = self.full_path(key);
-        self.backend.submit_get_with_metadata(&full_key, callback);
+    pub(crate) fn submit_get_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        if timeout.is_zero() {
+            let _ = callback.send(super::CloudEvent::Get {
+                key: key.to_string(),
+                result: Err(super::CloudError::Timeout(
+                    "cloud GET has no remaining budget".to_string(),
+                )),
+            });
+            return;
+        }
+        self.backend
+            .submit_get_with_timeout(&self.full_path(key), timeout, callback);
+    }
+
+    pub(crate) fn submit_get_with_metadata_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        if timeout.is_zero() {
+            let _ = callback.send(super::CloudEvent::GetWithMetadata {
+                key: key.to_string(),
+                result: Err(super::CloudError::Timeout(
+                    "cloud metadata GET has no remaining budget".to_string(),
+                )),
+            });
+            return;
+        }
+        self.backend
+            .submit_get_with_metadata_with_timeout(&self.full_path(key), timeout, callback);
     }
 
     #[cfg(test)]
