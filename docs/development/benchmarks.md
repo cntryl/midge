@@ -75,16 +75,32 @@ those protocol surfaces and do not claim live-provider capacity. Namespace
 setup reads `SQRZL_SECRET_ACCESS_KEY`, which must match the Sqrzl credentials;
 the benchmark workflows set it for their local emulator jobs.
 
-Tier 5/6 runs set a 60-second `cntryl-stress` no-progress watchdog. Workload
-artifacts under `target/midge-stress/` include status, stage latency and
-saturation summaries, resource samples, and flush/reopen or cloud-cache-loss
-verification summaries. `ResourceLimit` and `WriteStall` responses are
+Tier 5/6 workflows set a 60-second `cntryl-stress` no-progress watchdog.
+Only successful client operations advance workload progress; retryable
+rejections and background database growth do not reset that watchdog during
+client stages or shutdown. Workload artifacts under `target/midge-stress/`
+include status, stage latency and saturation summaries, per-client snapshots,
+phase timings, resource samples, shutdown results, and flush/reopen or
+cloud-cache-loss verification summaries. `ResourceLimit` and `WriteStall` responses are
 reported as saturation; repeated responses back off exponentially up to 256 ms
 and the delay decays only after 32 successful operations. The accumulated
 backoff is recorded separately. Sqrzl Tier 5 sweeps cover 1, 2, and 4
 clients; Tier 6 uses four local clients and two Sqrzl clients. The resource
-sampler follows database-file changes through flush and cache-loss recovery,
-so the no-progress heartbeat reflects observed work in those phases. Sqrzl
+sampler follows database-file changes only during flush and recovery, so the
+no-progress heartbeat reflects observed storage work in those phases.
+Client snapshots are published atomically before the first operation,
+periodically during the stage, and at completion or a terminal error. They
+retain partial counters if the external watchdog abandons the worker;
+`cntryl-stress` supplies the authoritative timeout receipt. Artifact collection
+finalizes abandoned workload status from that receipt and preserves emulator
+logs before teardown. Completed-stage totals and partial-stage counters are
+reported separately.
+
+Shutdown calls use a 45-second caller budget, leaving 15 seconds before the
+workflows' 60-second watchdog to record the result and unwind. A stricter
+watchdog selected on the command line can expire earlier. Runtime worker joins
+continue to retain fencing after a caller timeout. Phase traces show those
+joins without treating them as successful workload progress. Sqrzl
 workloads use a 5-second cloud WAL seal window to batch objects during the long
 sweeps. Data mismatches, failed recovery, a stalled workload, or the hard
 benchmark deadline fail the run.

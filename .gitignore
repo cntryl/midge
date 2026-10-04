@@ -122,7 +122,11 @@ midge_db/
 .midge_dev/
 test_db_*/
 
-tools/
+tools/*
+!tools/finalize_stress_artifacts.py
+!tools/tests/
+tools/tests/*
+!tools/tests/test_finalize_stress_artifacts.py
 tmp/
 .docker/bench/results
 .docker/bench/target

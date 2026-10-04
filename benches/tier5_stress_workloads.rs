@@ -18,6 +18,7 @@ fn tier5_write_heavy_local(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_write_heavy_local",
             scenario: "write-heavy",
             backend: "local",
             tier: 5,
@@ -32,6 +33,7 @@ fn tier5_read_heavy_local(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_read_heavy_local",
             scenario: "read-heavy",
             backend: "local",
             tier: 5,
@@ -46,6 +48,7 @@ fn tier5_balanced_local(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_balanced_local",
             scenario: "balanced",
             backend: "local",
             tier: 5,
@@ -60,6 +63,7 @@ fn tier5_many_small_transactions_local(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_many_small_transactions_local",
             scenario: "many-small-transactions",
             backend: "local",
             tier: 5,
@@ -74,6 +78,7 @@ fn tier5_mixed_transaction_sizes_local(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_mixed_transaction_sizes_local",
             scenario: "mixed-transaction-sizes",
             backend: "local",
             tier: 5,
@@ -88,6 +93,7 @@ fn tier5_write_pressure_s3(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_write_pressure_s3",
             scenario: "write-pressure-s3",
             backend: "s3",
             tier: 5,
@@ -102,6 +108,7 @@ fn tier5_write_pressure_azure(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_write_pressure_azure",
             scenario: "write-pressure-azure",
             backend: "azure",
             tier: 5,
@@ -116,6 +123,7 @@ fn tier5_write_pressure_gcs_xml(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_write_pressure_gcs_xml",
             scenario: "write-pressure-gcs-xml",
             backend: "gcs-xml",
             tier: 5,
@@ -130,6 +138,7 @@ fn tier5_write_pressure_gcs_json(ctx: &mut StressContext) {
     run_case(
         ctx,
         WorkloadCase {
+            benchmark: "tier5_write_pressure_gcs_json",
             scenario: "write-pressure-gcs-json",
             backend: "gcs-json",
             tier: 5,

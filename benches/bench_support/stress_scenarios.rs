@@ -15,10 +15,17 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions as FileOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[path = "stress_scenarios/client_progress.rs"]
+mod client_progress;
+use client_progress::{
+    run_client_with, write_atomic_json, ClientClock, ClientControl, ClientReporter, WorkerResult,
+    CLIENT_REPORT_PERIOD,
+};
 
 const VALUE_SIZE: usize = 128;
 const SEED_ROWS: usize = 512;
@@ -30,9 +37,27 @@ const RESOURCE_SAMPLE_PERIOD: Duration = Duration::from_secs(10);
 const SATURATION_BACKOFF_MAX_SHIFT: u32 = 8;
 const SATURATION_BACKOFF_RECOVERY_SUCCESSES: u32 = 32;
 const CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY: Duration = Duration::from_secs(5);
+const SHUTDOWN_CALLER_BUDGET: Duration = Duration::from_secs(45);
+
+fn enable_phase_tracing() {
+    static INITIALIZE: std::sync::Once = std::sync::Once::new();
+    INITIALIZE.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new(
+                "warn,cntryl_midge::runtime::event_loop::shutdown=info,cntryl_midge::engine::lease_state=info,cntryl_midge::lease=info",
+            )
+        });
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .try_init();
+    });
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkloadCase {
+    pub(super) benchmark: &'static str,
     pub(super) scenario: &'static str,
     pub(super) backend: &'static str,
     pub(super) tier: u8,
@@ -138,6 +163,15 @@ impl StageStats {
 
 struct WorkloadArtifacts {
     path: PathBuf,
+    started: Instant,
+    started_unix_ms: u128,
+    phase_started_elapsed_ms: u128,
+    resource_phase: Arc<AtomicU64>,
+    benchmark: &'static str,
+    git_commit: String,
+    stage_index: Option<usize>,
+    shutdown_results: Vec<serde_json::Value>,
+    terminal_error: Option<String>,
     scenario: &'static str,
     backend: &'static str,
     configured_seconds: u64,
@@ -156,6 +190,7 @@ struct WorkloadArtifacts {
 
 impl WorkloadArtifacts {
     fn begin(case: WorkloadCase, duration: Duration) -> Self {
+        let started = Instant::now();
         let base = std::env::var_os("MIDGE_STRESS_ARTIFACT_DIR")
             .map_or_else(|| PathBuf::from("target/midge-stress"), PathBuf::from);
         let time = SystemTime::now()
@@ -171,6 +206,15 @@ impl WorkloadArtifacts {
         fs::create_dir_all(&path).expect("create workload artifact directory");
         let artifacts = Self {
             path,
+            started,
+            started_unix_ms: time,
+            phase_started_elapsed_ms: 0,
+            resource_phase: Arc::new(AtomicU64::new(0)),
+            benchmark: case.benchmark,
+            git_commit: current_commit(),
+            stage_index: None,
+            shutdown_results: Vec::new(),
+            terminal_error: None,
             scenario: case.scenario,
             backend: case.backend,
             configured_seconds: duration.as_secs(),
@@ -186,6 +230,12 @@ impl WorkloadArtifacts {
             checks: Vec::new(),
             complete: false,
         };
+        fs::write(
+            artifacts.path.join("phase-events.csv"),
+            "elapsed_ms,unix_ms,phase,stage\n",
+        )
+        .expect("write phase event header");
+        artifacts.append_phase_event();
         artifacts.persist("running");
         artifacts
     }
@@ -193,6 +243,7 @@ impl WorkloadArtifacts {
     fn record_stage(&mut self, stage: &str, stats: &StageStats, progress: &ProgressHandle) {
         self.phase = "workload";
         self.stage = stage.to_string();
+        self.stage_index = None;
         self.attempts = self.attempts.saturating_add(stats.attempts);
         self.acknowledged = self.acknowledged.saturating_add(stats.acknowledged);
         self.acknowledged_rows = self
@@ -210,6 +261,29 @@ impl WorkloadArtifacts {
         self.progress_units = progress.completed_units();
         append_stage_csv(&self.path, stage, stats);
         self.persist("running");
+    }
+
+    fn record_terminal_errors(&mut self, outcomes: &[WorkerResult], progress: &ProgressHandle) {
+        let errors: Vec<_> = outcomes
+            .iter()
+            .enumerate()
+            .filter_map(|(client_index, outcome)| {
+                outcome.terminal_error.as_ref().map(
+                    |error| json!({ "client_index": client_index, "error": error.to_string() }),
+                )
+            })
+            .collect();
+        self.terminal_error = errors
+            .first()
+            .and_then(|error| error["error"].as_str())
+            .map(str::to_string);
+        self.progress_units = progress.completed_units();
+        write_atomic_json(
+            &self.path.join("stage-failure.json"),
+            &json!({ "phase": self.phase, "stage": self.stage, "errors": errors }),
+        )
+        .expect("publish failed stage details");
+        self.persist("failed");
     }
 
     fn verification(
@@ -230,17 +304,19 @@ impl WorkloadArtifacts {
             "value_mismatches": mismatches,
             "passed": passed,
         }));
-        fs::write(
-            self.path.join("verification-summary.json"),
-            serde_json::to_vec_pretty(&json!({
+        write_atomic_json(
+            &self.path.join("verification-summary.json"),
+            &json!({
                 "scenario": self.scenario,
                 "backend": self.backend,
                 "passed": self.checks.iter().all(|check| check["passed"] == true),
                 "checks": self.checks,
-            }))
-            .expect("serialize verification summary"),
+            }),
         )
         .expect("write verification summary");
+        if passed {
+            progress.advance();
+        }
         self.progress_units = progress.completed_units();
         self.persist(if passed { "running" } else { "failed" });
         assert!(
@@ -251,29 +327,84 @@ impl WorkloadArtifacts {
     }
 
     fn enter_phase(&mut self, phase: &'static str, stage: &str, progress: &ProgressHandle) {
+        // Bit zero permits storage progress; higher bits identify the phase.
+        // A new generation invalidates any sampler baseline from earlier work.
+        let generation = self.resource_phase.load(Ordering::Relaxed).wrapping_add(2) & !1;
+        self.resource_phase.store(
+            generation | u64::from(storage_progress_phase(phase)),
+            Ordering::Release,
+        );
         self.phase = phase;
         self.stage = stage.to_string();
+        self.stage_index = None;
+        self.phase_started_elapsed_ms = self.started.elapsed().as_millis();
+        self.append_phase_event();
         self.progress_units = progress.completed_units();
         self.persist("running");
     }
 
+    fn enter_stage(&mut self, index: usize, stage: &str, progress: &ProgressHandle) {
+        self.enter_phase("workload", stage, progress);
+        self.stage_index = Some(index);
+        self.persist("running");
+    }
+
+    fn append_phase_event(&self) {
+        let mut output = FileOptions::new()
+            .append(true)
+            .open(self.path.join("phase-events.csv"))
+            .expect("open phase event report");
+        writeln!(
+            output,
+            "{},{},{},{}",
+            self.phase_started_elapsed_ms,
+            self.started_unix_ms + self.phase_started_elapsed_ms,
+            self.phase,
+            self.stage,
+        )
+        .expect("write phase event");
+    }
+
+    fn record_shutdown(&mut self, stage: &str, result: &Result<(), MidgeError>, elapsed: Duration) {
+        let caller_result = match result {
+            Ok(()) => "ok",
+            Err(MidgeError::Timeout(_)) => "timeout",
+            Err(MidgeError::Fenced(_)) => "fenced",
+            Err(_) => "error",
+        };
+        self.shutdown_results.push(json!({
+            "stage": stage,
+            "caller_result": caller_result,
+            "caller_budget_ms": SHUTDOWN_CALLER_BUDGET.as_millis(),
+            "elapsed_ms": elapsed.as_millis(),
+            "recorded_elapsed_ms": self.started.elapsed().as_millis(),
+            "error": result.as_ref().err().map(|error| format!("{error:?}")),
+        }));
+        self.persist(if result.is_ok() { "running" } else { "failed" });
+    }
+
     fn finish(&mut self, progress: &ProgressHandle) {
-        self.phase = "complete";
-        self.stage = "flush-reopen-recovery".to_string();
-        self.progress_units = progress.completed_units();
+        self.enter_phase("complete", "flush-reopen-recovery", progress);
         self.complete = true;
         self.persist("passed");
     }
 
     fn persist(&self, status: &str) {
-        fs::write(
-            self.path.join("workload-status.json"),
-            serde_json::to_vec_pretty(&json!({
+        write_atomic_json(
+            &self.path.join("workload-status.json"),
+            &json!({
+                "benchmark_workload": self.benchmark,
+                "git_commit": self.git_commit,
+                "process_id": std::process::id(),
                 "scenario": self.scenario,
                 "backend": self.backend,
                 "status": status,
                 "phase": self.phase,
                 "stage": self.stage,
+                "stage_index": self.stage_index,
+                "phase_started_elapsed_ms": self.phase_started_elapsed_ms,
+                "phase_started_unix_ms": self.started_unix_ms + self.phase_started_elapsed_ms,
+                "shutdown_results": self.shutdown_results,
                 "configured_duration_seconds": self.configured_seconds,
                 "attempted_transactions": self.attempts,
                 "acknowledged_transactions": self.acknowledged,
@@ -283,8 +414,8 @@ impl WorkloadArtifacts {
                 "saturation_backoff_ms": self.saturation_backoff_ms,
                 "progress_completed_units": self.progress_units,
                 "verification_checks": self.checks.len(),
-            }))
-            .expect("serialize workload status"),
+                "terminal_error": self.terminal_error,
+            }),
         )
         .expect("write workload status");
     }
@@ -298,11 +429,52 @@ impl Drop for WorkloadArtifacts {
     }
 }
 
-#[derive(Default)]
-struct WorkerResult {
-    stats: StageStats,
-    kind_counts: [u64; 11],
-    account_updates: u64,
+fn current_commit() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "unknown".to_string(), |commit| commit.trim().to_string())
+}
+
+fn storage_progress_phase(phase: &str) -> bool {
+    matches!(phase, "flush" | "recovery")
+}
+
+fn resource_progress_observed(
+    previous_phase: u64,
+    before_phase: u64,
+    after_phase: u64,
+    previous_bytes: u64,
+    current_bytes: u64,
+) -> bool {
+    before_phase & 1 != 0
+        && previous_phase == before_phase
+        && before_phase == after_phase
+        && previous_bytes != current_bytes
+}
+
+struct ResourceProgress {
+    phase: u64,
+    database_bytes: u64,
+}
+
+impl ResourceProgress {
+    fn observe(&mut self, before_phase: u64, after_phase: u64, database_bytes: u64) -> bool {
+        let observed = resource_progress_observed(
+            self.phase,
+            before_phase,
+            after_phase,
+            self.database_bytes,
+            database_bytes,
+        );
+        // A phase change during a scan also invalidates the next comparison.
+        self.phase = before_phase;
+        self.database_bytes = database_bytes;
+        observed
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -324,10 +496,25 @@ struct ResourceSampler {
 
 impl ResourceSampler {
     fn start(artifacts: &WorkloadArtifacts, database: &Path, progress: ProgressHandle) -> Self {
-        let started = Instant::now();
+        let interval = std::env::var("MIDGE_STRESS_RESOURCE_SAMPLE_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map_or(RESOURCE_SAMPLE_PERIOD, Duration::from_secs);
+        Self::start_with_interval(artifacts, database, progress, interval)
+    }
+
+    fn start_with_interval(
+        artifacts: &WorkloadArtifacts,
+        database: &Path,
+        progress: ProgressHandle,
+        interval: Duration,
+    ) -> Self {
+        let started = artifacts.started;
         let report = artifacts.path.join("resource-samples.csv");
         fs::write(&report, "elapsed_ms,rss_bytes,database_disk_bytes\n")
             .expect("write resource sample header");
+        let start_phase = artifacts.resource_phase.load(Ordering::Acquire);
         let start = resource_point(started, database);
         append_resource_point(&report, start);
         let stop = Arc::new(AtomicBool::new(false));
@@ -335,25 +522,25 @@ impl ResourceSampler {
         let thread_database = database.to_path_buf();
         let thread_report = report.clone();
         let thread_progress = progress;
+        let thread_resource_phase = Arc::clone(&artifacts.resource_phase);
         let peak = Arc::new(Mutex::new(start.rss_bytes));
         let thread_peak = Arc::clone(&peak);
-        let interval = std::env::var("MIDGE_STRESS_RESOURCE_SAMPLE_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .map_or(RESOURCE_SAMPLE_PERIOD, Duration::from_secs);
         let handle = thread::spawn(move || {
-            let mut previous = start;
+            let mut resource_progress = ResourceProgress {
+                phase: start_phase,
+                database_bytes: start.database_bytes,
+            };
             while !thread_stop.load(Ordering::Acquire) {
                 thread::park_timeout(interval);
                 if thread_stop.load(Ordering::Acquire) {
                     break;
                 }
+                let before_phase = thread_resource_phase.load(Ordering::Acquire);
                 let point = resource_point(started, &thread_database);
-                if point.database_bytes != previous.database_bytes {
+                let after_phase = thread_resource_phase.load(Ordering::Acquire);
+                if resource_progress.observe(before_phase, after_phase, point.database_bytes) {
                     thread_progress.advance();
                 }
-                previous = point;
                 if let Some(rss) = point.rss_bytes {
                     let mut current = thread_peak.lock().expect("RSS peak lock");
                     *current = Some(current.map_or(rss, |observed| observed.max(rss)));
@@ -433,11 +620,12 @@ struct StageReport<'a> {
 }
 
 pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
+    enable_phase_tracing();
     let duration = case_duration(case.tier);
     let progress = ctx.progress_handle();
     let mut artifacts = WorkloadArtifacts::begin(case, duration);
     let run_dir = tempfile::tempdir().expect("create isolated stress directory");
-    let mut opened = open_case(case, run_dir.path(), &progress);
+    let mut opened = open_case(case, run_dir.path(), &progress, &artifacts);
     let sampler = ResourceSampler::start(&artifacts, &opened.database, progress.clone());
     let expected = run_stages(ctx, case, duration, &mut opened, &progress, &mut artifacts);
     finish_case(opened, &expected, &progress, &mut artifacts);
@@ -446,7 +634,12 @@ pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
     artifacts.finish(&progress);
 }
 
-fn open_case(case: WorkloadCase, root: &Path, progress: &ProgressHandle) -> OpenedCase {
+fn open_case(
+    case: WorkloadCase,
+    root: &Path,
+    progress: &ProgressHandle,
+    artifacts: &WorkloadArtifacts,
+) -> OpenedCase {
     let database = root.join("database");
     let cloud = case.backend != "local";
     let namespace = unique_namespace(case.scenario);
@@ -461,6 +654,20 @@ fn open_case(case: WorkloadCase, root: &Path, progress: &ProgressHandle) -> Open
     } else {
         local_options(&database)
     };
+    write_atomic_json(
+        &artifacts.path.join("resolved-options.json"),
+        &json!({
+            "requested_memory_budget": format!("{:?}", options.memory_budget()),
+            "resolved_memory_budget_bytes": options.memory_budget_bytes(),
+            "sst_read_budget_bytes": options.block_cache_size(),
+            "memtable_size_limit_bytes": options.memtable_size_limit(),
+            "memtable_flush_threshold_bytes": options.memtable_flush_threshold(),
+            "transaction_memory_pool_bytes": options.transaction_memory_pool_size(),
+            "block_size_bytes": options.block_size(),
+            "target_sst_size_bytes": options.target_sst_size(),
+        }),
+    )
+    .expect("persist resolved stress options");
     let (engine, family) = open_family(options, true);
     progress.advance();
     let has_reads = matches!(
@@ -493,9 +700,32 @@ fn run_stages(
     let mut expected = BTreeMap::new();
     let budgets = stage_budgets(duration, case.stages.len());
     for (stage_index, (&clients, budget)) in case.stages.iter().zip(budgets).enumerate() {
+        let stage_label = format!("{clients}-clients");
+        artifacts.enter_stage(stage_index, &stage_label, progress);
         let started = Instant::now();
         let before = runtime_metrics(&opened.engine);
-        let (stage, outcomes) = run_stage(case, stage_index, clients, budget, opened, progress);
+        let (stage, outcomes) = run_stage(
+            case,
+            stage_index,
+            clients,
+            budget,
+            opened,
+            progress,
+            artifacts,
+        );
+        // Preserve a failed client's partial statistics before querying a
+        // runtime that may already be fenced or propagating the fatal result.
+        artifacts.record_stage(&stage_label, &stage, progress);
+        if let Some(error) = outcomes
+            .iter()
+            .find_map(|outcome| outcome.terminal_error.as_ref())
+        {
+            artifacts.record_terminal_errors(&outcomes, progress);
+            panic!(
+                "{} workload client failed: {error}",
+                workload_name(case.workload)
+            );
+        }
         for (client, outcome) in outcomes.into_iter().enumerate() {
             stage_expected_rows(&mut expected, stage_index, client, &outcome);
         }
@@ -513,7 +743,6 @@ fn run_stages(
                 after: &after,
             },
         );
-        artifacts.record_stage(&format!("{clients}-clients"), &stage, progress);
     }
     expected
 }
@@ -525,7 +754,11 @@ fn run_stage(
     budget: Duration,
     opened: &OpenedCase,
     progress: &ProgressHandle,
+    artifacts: &WorkloadArtifacts,
 ) -> (StageStats, Vec<WorkerResult>) {
+    let stop = AtomicBool::new(false);
+    let snapshots = client_snapshot_directory(artifacts, stage_index);
+    let stage_label = format!("{clients}-clients");
     let outcomes = thread::scope(|scope| {
         let mut handles = Vec::with_capacity(clients);
         for client in 0..clients {
@@ -539,9 +772,19 @@ fn run_stage(
             let heartbeat = progress.clone();
             let engine = &opened.engine;
             let family_id = opened.family.id();
-            handles.push(
-                scope.spawn(move || run_client(engine, family_id, config, budget, &heartbeat)),
+            let reporter = ClientReporter::new(
+                &snapshots,
+                config,
+                artifacts.started,
+                CLIENT_REPORT_PERIOD,
+                &stage_label,
             );
+            let stop = &stop;
+            handles.push(scope.spawn(move || {
+                run_client(
+                    engine, family_id, config, budget, &heartbeat, reporter, stop,
+                )
+            }));
         }
         handles
             .into_iter()
@@ -553,6 +796,15 @@ fn run_stage(
         stage.merge(&outcome.stats);
     }
     (stage, outcomes)
+}
+
+fn client_snapshot_directory(artifacts: &WorkloadArtifacts, stage_index: usize) -> PathBuf {
+    let directory = artifacts
+        .path
+        .join("client-snapshots")
+        .join(format!("stage-{stage_index:02}"));
+    fs::create_dir_all(&directory).expect("create stage client snapshot directory");
+    directory
 }
 
 fn stage_expected_rows(
@@ -592,12 +844,12 @@ fn finish_case(
         artifacts,
         "flushed",
     );
-    artifacts.enter_phase("shutdown", "shutdown-before-recovery", progress);
-    opened
-        .engine
-        .shutdown(Duration::from_secs(60))
-        .expect("shutdown stress engine before recovery check");
-    progress.advance();
+    shutdown_engine(
+        &mut opened.engine,
+        "shutdown-before-recovery",
+        progress,
+        artifacts,
+    );
     drop(opened.engine);
     if opened.cloud {
         artifacts.enter_phase("cache-loss", "remove-local-cloud-cache", progress);
@@ -621,11 +873,12 @@ fn finish_case(
             artifacts,
             "cloud-recovered",
         );
-        artifacts.enter_phase("shutdown", "shutdown-recovered-cloud-engine", progress);
-        recovered
-            .shutdown(Duration::from_secs(60))
-            .expect("shutdown recovered cloud engine");
-        progress.advance();
+        shutdown_engine(
+            &mut recovered,
+            "shutdown-recovered-cloud-engine",
+            progress,
+            artifacts,
+        );
     } else {
         artifacts.enter_phase("recovery", "reopen-local-engine", progress);
         let (mut recovered, family) = open_family(local_options(&opened.database), false);
@@ -639,12 +892,27 @@ fn finish_case(
             artifacts,
             "reopened",
         );
-        artifacts.enter_phase("shutdown", "shutdown-reopened-local-engine", progress);
-        recovered
-            .shutdown(Duration::from_secs(60))
-            .expect("shutdown reopened local engine");
-        progress.advance();
+        shutdown_engine(
+            &mut recovered,
+            "shutdown-reopened-local-engine",
+            progress,
+            artifacts,
+        );
     }
+}
+
+fn shutdown_engine(
+    engine: &mut Engine,
+    stage: &str,
+    progress: &ProgressHandle,
+    artifacts: &mut WorkloadArtifacts,
+) {
+    artifacts.enter_phase("shutdown", stage, progress);
+    let started = Instant::now();
+    let result = engine.shutdown(SHUTDOWN_CALLER_BUDGET);
+    artifacts.record_shutdown(stage, &result, started.elapsed());
+    result.unwrap_or_else(|error| panic!("{stage} failed: {error}"));
+    progress.advance();
 }
 
 fn verify_database(
@@ -656,6 +924,7 @@ fn verify_database(
     artifacts: &mut WorkloadArtifacts,
     phase: &str,
 ) {
+    artifacts.enter_phase("verification", phase, progress);
     verify_seed(
         engine,
         family,
@@ -811,67 +1080,31 @@ fn run_client(
     config: ClientConfig,
     budget: Duration,
     progress: &ProgressHandle,
+    mut reporter: ClientReporter,
+    stop: &AtomicBool,
 ) -> WorkerResult {
-    let deadline = Instant::now() + budget;
-    let mut result = WorkerResult::default();
-    let mut sequences = [0_u64; 11];
-    let mut account = 0_u64;
-    let mut attempt = 0_u64;
-    let mut saturation_backoff = SaturationBackoff::default();
-    while Instant::now() < deadline {
-        let started = Instant::now();
-        result.stats.attempts = result.stats.attempts.saturating_add(1);
-        let mut backoff_ms = 0;
-        match run_operation(
-            engine,
-            family_id,
-            &config,
-            attempt,
-            &mut sequences,
-            &mut account,
-        ) {
-            Ok((kind, operations, rows, account_updated)) => {
-                result.stats.acknowledged = result.stats.acknowledged.saturating_add(1);
-                result.stats.logical_operations =
-                    result.stats.logical_operations.saturating_add(operations);
-                result.stats.acknowledged_rows =
-                    result.stats.acknowledged_rows.saturating_add(rows);
-                if let Some(kind) = kind {
-                    result.kind_counts[kind] = result.kind_counts[kind].saturating_add(1);
-                }
-                result.account_updates = result
-                    .account_updates
-                    .saturating_add(u64::from(account_updated));
-                saturation_backoff.on_success();
-            }
-            Err(MidgeError::ResourceLimit(_)) => {
-                result.stats.saturation.resource_limit =
-                    result.stats.saturation.resource_limit.saturating_add(1);
-                backoff_ms = saturation_backoff.on_saturation();
-            }
-            Err(MidgeError::WriteStall(_)) => {
-                result.stats.saturation.write_stall =
-                    result.stats.saturation.write_stall.saturating_add(1);
-                backoff_ms = saturation_backoff.on_saturation();
-            }
-            Err(error) => panic!(
-                "{} workload transaction failed: {error}",
-                workload_name(config.workload)
-            ),
-        }
-        result.stats.record_latency(started.elapsed());
-        progress.advance();
-        if backoff_ms > 0 {
-            result.stats.saturation.backoff_ms = result
-                .stats
-                .saturation
-                .backoff_ms
-                .saturating_add(backoff_ms);
-            thread::sleep(Duration::from_millis(backoff_ms));
-        }
-        attempt = attempt.saturating_add(1);
-    }
-    result
+    let check_health = || engine.is_primary_lease_healthy();
+    let control = ClientControl {
+        stop,
+        lease_health: config.cloud.then_some(&check_health as &dyn Fn() -> bool),
+        origin: reporter.origin(),
+    };
+    run_client_with(
+        config,
+        budget,
+        &control,
+        ClientClock {
+            now: Instant::now,
+            sleep: thread::sleep,
+        },
+        |attempt, sequences, account| {
+            run_operation(engine, family_id, &config, attempt, sequences, account)
+        },
+        || progress.advance(),
+        |result, report| {
+            reporter.report(result, report);
+        },
+    )
 }
 
 fn saturation_backoff_ms(level: u32) -> u64 {
@@ -1756,4 +1989,196 @@ fn signed_gcs_json_namespace(bucket: &str) -> Result<(), String> {
         .send()
         .map_err(|error| error.to_string())?;
     accept_namespace_response(response)
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(super) fn run_watchdog_fixture(ctx: &mut StressContext, resume_successes: bool) {
+    let duration = Duration::from_secs(if resume_successes { 2 } else { 4 });
+    let case = WorkloadCase {
+        benchmark: if resume_successes {
+            "resumed_successes_with_disk_churn"
+        } else {
+            "rejected_clients_with_disk_churn"
+        },
+        scenario: "watchdog-client-stage",
+        backend: "local",
+        tier: 5,
+        workload: "write-heavy",
+        stages: &[1],
+    };
+    let progress = ctx.progress_handle();
+    let mut artifacts = WorkloadArtifacts::begin(case, duration);
+    artifacts.enter_stage(0, "1-clients", &progress);
+    let database = artifacts.path.join("fixture-database");
+    fs::create_dir(&database).expect("create disk-change fixture");
+    let _sampler = ResourceSampler::start_with_interval(
+        &artifacts,
+        &database,
+        progress.clone(),
+        Duration::from_millis(100),
+    );
+    let mut growth = FileOptions::new()
+        .create(true)
+        .append(true)
+        .open(database.join("changing.bin"))
+        .expect("create changing database file");
+    let config = ClientConfig {
+        workload: "write-heavy",
+        stage: 0,
+        client: 0,
+        seed_count: 0,
+        cloud: false,
+    };
+    let snapshots = client_snapshot_directory(&artifacts, 0);
+    let mut reporter = ClientReporter::new(
+        &snapshots,
+        config,
+        artifacts.started,
+        Duration::from_millis(100),
+        "1-clients",
+    );
+    let stop = AtomicBool::new(false);
+    let control = ClientControl {
+        stop: &stop,
+        lease_health: None,
+        origin: artifacts.started,
+    };
+    // This is the production reporter and shared loop. Only operation results,
+    // disk churn and shorter report/sample cadences belong to this test fixture.
+    let outcome = ctx.measure("worker stage with disk churn", || {
+        run_client_with(
+            config,
+            duration,
+            &control,
+            ClientClock {
+                now: Instant::now,
+                sleep: thread::sleep,
+            },
+            |attempt, _sequences, _account| {
+                watchdog_fixture_operation(&mut growth, attempt, resume_successes)
+            },
+            || progress.advance(),
+            |result, report| {
+                reporter.report(result, report);
+            },
+        )
+    });
+    ctx.metadata(
+        "fixture_acknowledged_transactions",
+        outcome.stats.acknowledged,
+    );
+    ctx.metadata("fixture_progress_units", progress.completed_units());
+    artifacts.record_stage("1-clients", &outcome.stats, &progress);
+    artifacts.enter_phase("complete", "watchdog-client-stage", &progress);
+    artifacts.complete = true;
+    artifacts.persist("passed");
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+fn watchdog_fixture_operation(
+    growth: &mut std::fs::File,
+    attempt: u64,
+    resume_successes: bool,
+) -> OperationResult {
+    growth.write_all(&[0_u8; 1_024]).expect("grow fixture file");
+    growth.flush().expect("flush changing file");
+    if resume_successes {
+        thread::sleep(Duration::from_millis(100));
+        return match attempt {
+            0 => Err(MidgeError::WriteStall("initial pressure".into())),
+            3 => Err(MidgeError::ResourceLimit("temporary allowance".into())),
+            _ => Ok((Some(0), 32, 32, false)),
+        };
+    }
+    if attempt.is_multiple_of(2) {
+        Err(MidgeError::WriteStall("scripted pressure".into()))
+    } else {
+        Err(MidgeError::ResourceLimit("scripted budget".into()))
+    }
+}
+
+#[cfg(test)]
+mod artifact_tests {
+
+    #[test]
+    fn should_count_disk_changes_only_within_one_eligible_storage_phase() {
+        use super::*;
+        // Arrange
+        for phase in ["setup", "workload", "verification", "shutdown", "complete"] {
+            assert!(!storage_progress_phase(phase));
+        }
+        assert!(storage_progress_phase("flush"));
+        assert!(storage_progress_phase("recovery"));
+
+        // Act and Assert: disabled work, a cross-phase delta, and a phase
+        // change during sampling must all leave the external heartbeat idle.
+        assert!(!resource_progress_observed(2, 2, 2, 100, 200));
+        assert!(!resource_progress_observed(2, 5, 5, 100, 200));
+        assert!(!resource_progress_observed(5, 5, 7, 100, 200));
+        assert!(!resource_progress_observed(5, 5, 5, 100, 100));
+        assert!(resource_progress_observed(5, 5, 5, 100, 200));
+    }
+
+    #[test]
+    fn should_preserve_typed_shutdown_timeout_when_artifacts_drop_after_failure() {
+        use super::*;
+        // Arrange
+        let mut artifacts = WorkloadArtifacts::begin(
+            WorkloadCase {
+                benchmark: "shutdown_artifact_test",
+                scenario: "shutdown-artifact-test",
+                backend: "local",
+                tier: 5,
+                workload: "write-heavy",
+                stages: &[1],
+            },
+            Duration::from_secs(1),
+        );
+        let status_path = artifacts.path.join("workload-status.json");
+        let result = Err(MidgeError::Timeout("owned join still running".to_string()));
+
+        // Act
+        artifacts.record_shutdown("shutdown-before-recovery", &result, SHUTDOWN_CALLER_BUDGET);
+        let before_drop: serde_json::Value =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        drop(artifacts);
+        let after_drop: serde_json::Value =
+            serde_json::from_slice(&fs::read(status_path).unwrap()).unwrap();
+
+        // Assert
+        assert_eq!(before_drop["status"], "failed");
+        assert_eq!(
+            before_drop["shutdown_results"],
+            after_drop["shutdown_results"]
+        );
+        let shutdown = &after_drop["shutdown_results"][0];
+        assert_eq!(shutdown["caller_result"], "timeout");
+        assert_eq!(shutdown["caller_budget_ms"], 45_000);
+        assert!(shutdown["error"].as_str().unwrap().starts_with("Timeout("));
+    }
+
+    #[test]
+    fn should_reestablish_baseline_when_phase_changes_during_resource_sampling() {
+        use super::*;
+
+        // Arrange: the first scan overlaps disabled workload and enabled flush.
+        let mut resource_progress = ResourceProgress {
+            phase: 2,
+            database_bytes: 0,
+        };
+
+        // Act and Assert: the overlapping sample and its successor cannot
+        // attribute workload growth to the newly entered storage phase.
+        assert!(!resource_progress.observe(2, 5, 100));
+        assert!(!resource_progress.observe(5, 5, 200));
+        assert!(resource_progress.observe(5, 5, 300));
+    }
 }
