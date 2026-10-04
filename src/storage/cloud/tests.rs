@@ -4,6 +4,13 @@ use std::sync::{
     mpsc,
 };
 
+#[cfg(feature = "cloud-all")]
+#[path = "tests/native_metadata_deadline.rs"]
+mod native_metadata_deadline;
+
+#[path = "tests/read_deadline.rs"]
+mod read_deadline;
+
 #[test]
 fn should_fail_closed_when_mock_cannot_match_generation_precondition() {
     // Arrange

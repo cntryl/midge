@@ -21,9 +21,9 @@ use std::time::{Duration, Instant};
 
 /// Default TTL for cloud leases (30 seconds).
 const DEFAULT_CLOUD_LEASE_TTL_SECS: u64 = 30;
-// Provider HTTP clients use a 10-second request timeout. Renewal admission
-// retains one extra second so a timed-out request cannot still land after the
-// holder's monotonic expiry.
+// Retain the conservative mutation reserve before monotonic expiry. Provider
+// requests also carry their caller's remaining deadline; the reserve does not
+// describe the configurable provider default timeout.
 pub(crate) const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(11);
 
 /// Key used for the lease object in cloud storage.
@@ -482,8 +482,9 @@ impl LeaderStore for ProviderLeaderStore {
             LeaseError::Internal("cloud lease renewal deadline is out of range".to_string())
         })?;
         loop {
-            let read_timeout = deadline
-                .saturating_duration_since(Instant::now())
+            // A read may time out without mutating authority. Leave room for
+            // the heartbeat retry pause and a fresh read/CAS attempt.
+            let read_timeout = (deadline.saturating_duration_since(Instant::now()) / 2)
                 .min(self.cloud.callback_timeout())
                 .min(self.validity.remaining(expected_epoch)?);
             if read_timeout.is_zero() {
@@ -1596,9 +1597,9 @@ fn provider_read_authority_sentinel(
     cloud: &CloudStorage,
     timeout: Duration,
 ) -> Result<AuthoritySentinelState, LeaseError> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get(AUTHORITY_SENTINEL_KEY, tx);
-    match rx.recv_timeout(timeout) {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_within(AUTHORITY_SENTINEL_KEY, budget, callback);
+    }) {
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(bytes) => parse_authority_sentinel(&bytes),
             CloudOutcome::Err(error) if error.is_not_found() => Ok(AuthoritySentinelState::Missing),
@@ -1629,9 +1630,9 @@ fn provider_read_authority_sentinel_with_metadata(
     cloud: &CloudStorage,
     timeout: Duration,
 ) -> Result<Option<(AuthoritySentinelState, ObjectMetadata)>, LeaseError> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get_with_metadata(AUTHORITY_SENTINEL_KEY, tx);
-    match rx.recv_timeout(timeout) {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_with_metadata_within(AUTHORITY_SENTINEL_KEY, budget, callback);
+    }) {
         Ok(CloudEvent::GetWithMetadata { result, .. }) => match result {
             CloudOutcome::Ok((bytes, metadata)) => {
                 Ok(Some((parse_authority_sentinel(&bytes)?, metadata)))
@@ -1767,13 +1768,31 @@ fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, Leas
     provider_read_doc_with_timeout(cloud, cloud.callback_timeout())
 }
 
+/// Submission and callback waiting consume one read budget. A callback queued
+/// by a slow synchronous backend cannot turn an exhausted deadline into success.
+fn provider_read_event_with_timeout(
+    timeout: Duration,
+    submit: impl FnOnce(Duration, crate::storage::cloud::CloudCallback),
+) -> Result<CloudEvent, std::sync::mpsc::RecvTimeoutError> {
+    let deadline = crate::common::OperationDeadline::from_budget(timeout);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let request_timeout = deadline
+        .clamp_nonzero(timeout)
+        .ok_or(std::sync::mpsc::RecvTimeoutError::Timeout)?;
+    submit(request_timeout, tx);
+    let wait_timeout = deadline
+        .clamp_nonzero(request_timeout)
+        .ok_or(std::sync::mpsc::RecvTimeoutError::Timeout)?;
+    rx.recv_timeout(wait_timeout)
+}
+
 fn provider_read_doc_with_metadata(
     cloud: &CloudStorage,
     timeout: Duration,
 ) -> Result<Option<(LeaseDocument, ObjectMetadata)>, LeaseError> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get_with_metadata(LEASE_OBJECT_KEY, tx);
-    match rx.recv_timeout(timeout) {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_with_metadata_within(LEASE_OBJECT_KEY, budget, callback);
+    }) {
         Ok(CloudEvent::GetWithMetadata {
             key: returned_key,
             result,
@@ -1811,9 +1830,9 @@ fn provider_read_doc_with_timeout(
     cloud: &CloudStorage,
     timeout: Duration,
 ) -> Result<Option<LeaseDocument>, LeaseError> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get(LEASE_OBJECT_KEY, tx);
-    match rx.recv_timeout(timeout) {
+    match provider_read_event_with_timeout(timeout, |budget, callback| {
+        cloud.submit_get_within(LEASE_OBJECT_KEY, budget, callback);
+    }) {
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(bytes) => {
                 let content = String::from_utf8(bytes).map_err(|error| {

@@ -1066,6 +1066,59 @@ impl ListPageParser for S3ListContext {
     }
 }
 
+impl S3Backend {
+    fn submit_get_request(
+        &self,
+        key: &str,
+        timeout: Option<std::time::Duration>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let url = self.object_url(&key);
+        let mut request = CloudRequest::new(Method::GET, url);
+        request.timeout = timeout;
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| s3_response_error(resp, "S3 GET", false),
+            ),
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    fn submit_get_with_metadata_request(
+        &self,
+        key: &str,
+        timeout: Option<std::time::Duration>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
+        request.timeout = timeout;
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
+                key: ctx,
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        object_metadata_from_response(
+                            &resp,
+                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                            "S3",
+                        )
+                        .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| s3_response_error(resp, "S3 GET", false),
+                ),
+            };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
 impl CloudBackend for S3Backend {
     fn set_request_timeout(&self, timeout: std::time::Duration) {
         self.executor.set_default_timeout(timeout);
@@ -1129,42 +1182,29 @@ impl CloudBackend for S3Backend {
     }
 
     fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let url = self.object_url(&key);
-        let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
-            key: ctx,
-            result: map_response(
-                result,
-                |status| status == 200,
-                |resp| Ok(resp.body),
-                |resp| s3_response_error(resp, "S3 GET", false),
-            ),
-        };
-        self.executor.spawn_request(request, key, callback, mapper);
+        self.submit_get_request(key, None, callback);
+    }
+
+    fn submit_get_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_request(key, Some(timeout), callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let request = CloudRequest::new(Method::GET, self.object_url(&key));
-        let mapper =
-            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: map_response(
-                    result,
-                    |status| status == 200,
-                    |resp| {
-                        object_metadata_from_response(
-                            &resp,
-                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
-                            "S3",
-                        )
-                        .map(|metadata| (resp.body, metadata))
-                    },
-                    |resp| s3_response_error(resp, "S3 GET", false),
-                ),
-            };
-        self.executor.spawn_request(request, key, callback, mapper);
+        self.submit_get_with_metadata_request(key, None, callback);
+    }
+
+    fn submit_get_with_metadata_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_with_metadata_request(key, Some(timeout), callback);
     }
 
     fn submit_get_range_with_identity(
