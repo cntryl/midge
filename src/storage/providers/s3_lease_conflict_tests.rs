@@ -110,6 +110,11 @@ impl Drop for LeaseHttpServer {
 type RequestParts = (String, String, Vec<(String, String)>, Vec<u8>);
 
 fn read_request(stream: &mut TcpStream) -> RequestParts {
+    // macOS inherits the listener's nonblocking mode on accepted sockets.
+    // Reading the complete request needs a blocking socket with a deadline.
+    stream
+        .set_nonblocking(false)
+        .expect("use bounded blocking request reads");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
