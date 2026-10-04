@@ -31,6 +31,7 @@ pub(crate) struct ReplayCoverage {
     reader_evictions: Cell<u64>,
     manifest_scanned: Cell<u64>,
     manifest_candidates: Cell<u64>,
+    progress: RefCell<crate::telemetry::recovery_progress::WorkProgress>,
 }
 
 /// Readers retained for alternating-SST replay locality.
@@ -104,7 +105,7 @@ impl ReplayCoverage {
     ) -> Self {
         Self {
             manifest,
-            fs,
+            fs: crate::telemetry::recovery_progress::observe_reads(fs),
             verified: RefCell::new(HashMap::new()),
             readers: RefCell::new(Vec::new()),
             // Retained decoded blocks may use at most a quarter of the budget
@@ -122,6 +123,9 @@ impl ReplayCoverage {
             reader_evictions: Cell::new(0),
             manifest_scanned: Cell::new(0),
             manifest_candidates: Cell::new(0),
+            progress: RefCell::new(crate::telemetry::recovery_progress::WorkProgress::new(
+                "coverage",
+            )),
         }
     }
 
@@ -134,6 +138,9 @@ impl ReplayCoverage {
                 .get()
                 .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
         );
+        // Completing a conservative replay decision is work even when no SST
+        // supplies an exact coverage proof. It does not claim that proof held.
+        self.progress.borrow_mut().completed_operation();
         result
     }
 
@@ -156,6 +163,7 @@ impl ReplayCoverage {
         );
         for file in &self.manifest.files {
             if !file_covers_wal_point_record(file, record) {
+                self.progress.borrow_mut().completed_operation();
                 continue;
             }
             self.manifest_candidates
@@ -166,6 +174,7 @@ impl ReplayCoverage {
             if !observe_budgeted(&mut proof, &mut retained_value, observed, &self.read_budget) {
                 return false;
             }
+            self.progress.borrow_mut().completed_operation();
         }
         proof.exactly_covers_wal_point(record)
     }

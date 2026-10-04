@@ -611,6 +611,7 @@ fn zero_filled_to_end<S: FrameBytes>(
     file_len: u64,
     limits: FrameLimits,
 ) -> Result<bool, FrameError> {
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("wal_zero_tail");
     let mut offset = pos;
     let chunk_len = limits
         .zero_tail_scan_bytes
@@ -621,10 +622,14 @@ fn zero_filled_to_end<S: FrameBytes>(
             .read(offset, len as u64)
             .map_err(FrameError::Corrupt)?;
         if chunk.iter().any(|byte| *byte != 0) {
+            progress.completed_operation();
+            progress.finish();
             return Ok(false);
         }
         offset = offset.saturating_add(len as u64);
+        progress.completed(len as u64, 0);
     }
+    progress.finish();
     Ok(true)
 }
 
@@ -640,6 +645,7 @@ fn hides_verified_frame<S: FrameBytes>(
     file_len: u64,
     limits: FrameLimits,
 ) -> Result<bool, FrameError> {
+    let mut progress = CandidateScanProgress::new("wal_suffix_scan");
     let header_len = WAL_FRAME_HEADER_LEN;
     let Some(max_frame_bytes) = limits.max_frame_bytes else {
         let suffix_start = payload_start.saturating_sub(header_len as u64);
@@ -656,15 +662,18 @@ fn hides_verified_frame<S: FrameBytes>(
         let bytes = source.read(pos, len as u64).map_err(FrameError::Corrupt)?;
         for candidate_start in header_len..=bytes.len().saturating_sub(3) {
             if !crate::wal::encoding::has_current_record_prefix(&bytes[candidate_start..]) {
+                progress.completed_position();
                 continue;
             }
             let Ok((payload_len, crc)) =
                 decode_frame_header(&bytes[candidate_start - header_len..candidate_start])
             else {
+                progress.completed_position();
                 continue;
             };
             let absolute_start = pos + candidate_start as u64;
             if payload_len as u64 > file_len.saturating_sub(absolute_start) {
+                progress.completed_position();
                 continue;
             }
             if payload_len > max_frame_bytes {
@@ -680,16 +689,53 @@ fn hides_verified_frame<S: FrameBytes>(
             if verify_frame_crc(&payload, crc).is_ok()
                 && crate::wal::encoding::decode_view(&payload).is_ok()
             {
+                progress.completed_frame(payload_len as u64);
+                progress.finish();
                 return Ok(true);
             }
+            progress.completed_position();
         }
         pos += len as u64 - overlap as u64;
     }
+    progress.finish();
     Ok(false)
 }
 
 fn usize_saturating(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// Keep the completed-work clock off the per-byte candidate search path.
+struct CandidateScanProgress {
+    work: crate::telemetry::recovery_progress::WorkProgress,
+    unreported_positions: u64,
+}
+
+impl CandidateScanProgress {
+    fn new(stage: &'static str) -> Self {
+        Self {
+            work: crate::telemetry::recovery_progress::WorkProgress::new(stage),
+            unreported_positions: 0,
+        }
+    }
+
+    fn completed_position(&mut self) {
+        self.unreported_positions += 1;
+        if self.unreported_positions == 64 {
+            self.work.completed(self.unreported_positions, 0);
+            self.unreported_positions = 0;
+        }
+    }
+
+    fn completed_frame(&mut self, bytes: u64) {
+        self.work.completed(bytes, 1);
+    }
+
+    fn finish(&mut self) {
+        self.work.completed(self.unreported_positions, 0);
+        self.unreported_positions = 0;
+        self.work.finish();
+    }
 }
 
 /// Whether `bytes` contains a complete frame whose payload verifies and
@@ -698,28 +744,37 @@ pub(crate) fn contains_verified_frame(bytes: &[u8]) -> bool {
     if bytes.len() < WAL_FRAME_HEADER_LEN.saturating_add(3) {
         return false;
     }
+    let mut progress = CandidateScanProgress::new("wal_cached_suffix_scan");
     for payload_start in WAL_FRAME_HEADER_LEN..=bytes.len().saturating_sub(3) {
         if !crate::wal::encoding::has_current_record_prefix(&bytes[payload_start..]) {
+            progress.completed_position();
             continue;
         }
         let header_start = payload_start - WAL_FRAME_HEADER_LEN;
         let Ok((payload_len, expected_crc)) =
             decode_frame_header(&bytes[header_start..payload_start])
         else {
+            progress.completed_position();
             continue;
         };
         let Some(payload_end) = payload_start.checked_add(payload_len) else {
+            progress.completed_position();
             continue;
         };
         if payload_end > bytes.len() {
+            progress.completed_position();
             continue;
         }
         let payload = &bytes[payload_start..payload_end];
         if verify_frame_crc(payload, expected_crc).is_ok()
             && crate::wal::encoding::decode_view(payload).is_ok()
         {
+            progress.completed_frame(payload.len() as u64);
+            progress.finish();
             return true;
         }
+        progress.completed_position();
     }
+    progress.finish();
     false
 }

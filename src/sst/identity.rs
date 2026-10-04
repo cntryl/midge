@@ -85,15 +85,18 @@ impl SstIdentity {
         let mut buffer = [0_u8; 8192];
         let mut size_bytes = 0_u64;
         let mut crc32c = 0;
+        let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sst_crc");
         loop {
             let count = file.read(&mut buffer)?;
             if count == 0 {
+                progress.finish();
                 return Ok(Self { size_bytes, crc32c });
             }
             size_bytes = size_bytes
                 .checked_add(count as u64)
                 .ok_or_else(|| MidgeError::ResourceLimit("SST size overflow".into()))?;
             crc32c = crc32c::crc32c_append(crc32c, &buffer[..count]);
+            progress.completed(count as u64, 0);
         }
     }
 
@@ -109,6 +112,7 @@ impl SstIdentity {
     ) -> MidgeResult<Self> {
         let mut crc32c = 0;
         let mut offset = 0_u64;
+        let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sst_crc");
         while offset < file_len {
             if let Some(deadline) = deadline {
                 if deadline.is_expired() {
@@ -127,7 +131,9 @@ impl SstIdentity {
             }
             crc32c = crc32c::crc32c_append(crc32c, &chunk);
             offset += want;
+            progress.completed(want, 0);
         }
+        progress.finish();
         Ok(Self {
             size_bytes: file_len,
             crc32c,
