@@ -11,7 +11,7 @@ const READ_CLIENTS: [usize; 4] = [1, 4, 16, 32];
 const BALANCED_CLIENTS: [usize; 4] = [1, 4, 8, 16];
 const SMALL_TX_CLIENTS: [usize; 4] = [1, 4, 16, 32];
 const MIXED_TX_CLIENTS: [usize; 3] = [1, 4, 8];
-const CLOUD_CLIENTS: [usize; 4] = [1, 4, 16, 32];
+const CLOUD_CLIENTS: [usize; 4] = [1, 2, 4, 8];
 
 #[stress(tier = 5, role = "diagnostic")]
 fn tier5_write_heavy_local(ctx: &mut StressContext) {

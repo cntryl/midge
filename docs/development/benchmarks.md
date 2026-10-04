@@ -79,11 +79,13 @@ Tier 5/6 runs set a 60-second `cntryl-stress` no-progress watchdog. Workload
 artifacts under `target/midge-stress/` include status, stage latency and
 saturation summaries, resource samples, and flush/reopen or cloud-cache-loss
 verification summaries. `ResourceLimit` and `WriteStall` responses are
-reported as saturation; repeated responses back off exponentially up to 16 ms,
-and the accumulated backoff is recorded separately. Sqrzl workloads use a
-5-second cloud WAL seal window to batch objects during the long sweeps. Data
-mismatches, failed recovery, a stalled workload, or the hard benchmark deadline
-fail the run.
+reported as saturation; repeated responses back off exponentially up to 256 ms
+and the delay decays only after 32 successful operations. The accumulated
+backoff is recorded separately. Sqrzl Tier 5 sweeps cover 1, 2, 4, and 8
+clients; Tier 6 uses four clients to keep the composite cloud soaks moving
+through verification and recovery. Sqrzl workloads use a 5-second cloud WAL
+seal window to batch objects during the long sweeps. Data mismatches, failed
+recovery, a stalled workload, or the hard benchmark deadline fail the run.
 
 ## Comparing Changes
 

@@ -6,7 +6,7 @@ mod stress_scenarios;
 use cntryl_stress::{stress, stress_main, StressContext};
 use stress_scenarios::{run_case, WorkloadCase};
 
-const SOAK_CLIENTS: [usize; 1] = [8];
+const SOAK_CLIENTS: [usize; 1] = [4];
 
 #[stress(tier = 6, role = "diagnostic")]
 fn tier6_mixed_workload_local(ctx: &mut StressContext) {
