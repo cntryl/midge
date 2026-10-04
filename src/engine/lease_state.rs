@@ -6,6 +6,18 @@ use std::time::Duration;
 
 type ReaperTask = Box<dyn FnOnce() + Send>;
 
+fn trace_fencing_cleanup_phase<T>(phase: &'static str, operation: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    tracing::info!(phase, "Engine fencing cleanup phase started");
+    let result = operation();
+    tracing::info!(
+        phase,
+        elapsed_ms = started.elapsed().as_millis(),
+        "Engine fencing cleanup phase completed"
+    );
+    result
+}
+
 fn spawn_retained<T, F, S>(
     name: &str,
     payload: T,
@@ -121,19 +133,40 @@ impl LeaseState {
         lease_guard: Option<crate::lease::LeaseGuard>,
         storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<()> {
+        let cleanup_started = std::time::Instant::now();
+        tracing::info!(
+            storage_owned = storage.is_some(),
+            heartbeat_owned = lease_heartbeat.is_some(),
+            lease_owned = lease.is_some(),
+            "Engine fencing cleanup started"
+        );
         if let Some(storage) = storage {
-            storage.shutdown_background_workers();
-            storage.shutdown_wal_upload_worker();
+            trace_fencing_cleanup_phase("storage-prune-worker-join", || {
+                storage.shutdown_background_workers();
+            });
+            trace_fencing_cleanup_phase("wal-upload-worker-join", || {
+                storage.shutdown_wal_upload_worker();
+            });
         }
         if let Some(heartbeat_mutex) = lease_heartbeat {
-            let mut heartbeat = heartbeat_mutex
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            heartbeat.stop();
-            tracing::trace!("Engine: lease heartbeat stopped");
+            trace_fencing_cleanup_phase("lease-heartbeat-stop", || {
+                let mut heartbeat = heartbeat_mutex
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                heartbeat.stop();
+            });
         }
-        let result = lease.map_or(Ok(()), |lease| Self::release_lease_bounded(lease.as_ref()));
+        let result = lease.map_or(Ok(()), |lease| {
+            trace_fencing_cleanup_phase("lease-release", || {
+                Self::release_lease_bounded(lease.as_ref())
+            })
+        });
         drop(lease_guard);
+        tracing::info!(
+            elapsed_ms = cleanup_started.elapsed().as_millis(),
+            successful = result.is_ok(),
+            "Engine fencing cleanup completed"
+        );
         result
     }
 
