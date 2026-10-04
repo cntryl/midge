@@ -11,6 +11,12 @@ const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 32;
 // quantum, not a provider timeout: a started range keeps its normal hard budget.
 const CLOUD_WAL_PRUNE_WORK_QUANTUM: std::time::Duration = std::time::Duration::from_millis(100);
 
+#[cfg(test)]
+std::thread_local! {
+    static PRUNE_JOIN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 fn run_cloud_wal_prune_preflight(
     storage: &CloudPersistence,
     candidates: &[(u64, u64)],
@@ -105,6 +111,11 @@ impl EventLoop {
         // Filesystem-backed cloud simulation has no separate control store;
         // its event-loop manifest is the authority snapshot guarded below.
         let local_guard = self.local_wal_prune_guard(storage, metadata_snapshot.is_some())?;
+        let local_guard = if self.cloud_maintenance_enabled() {
+            local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
+        } else {
+            local_guard
+        };
         Ok((metadata_snapshot, local_guard))
     }
 
@@ -118,6 +129,12 @@ impl EventLoop {
     }
 
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
+        // Shutdown must settle admitted durability work without admitting a
+        // fresh optional proof from flush/upload completion or maintenance.
+        // Retain recovery authority for a later engine lifetime instead.
+        if self.shutting_down {
+            return;
+        }
         self.reap_cloud_wal_prune_worker();
         if self.cloud_maintenance_enabled() && !self.cloud_coordinator.cloud_maintenance.dispatching
         {
@@ -164,11 +181,6 @@ impl EventLoop {
                 tracing::debug!(%error, "deferring WAL cleanup admission");
                 return;
             }
-        };
-        let local_guard = if self.cloud_maintenance_enabled() {
-            local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
-        } else {
-            local_guard
         };
         let writer_epoch = self.state.writer_epoch;
         // This callerless attempt has retry ownership, but shutdown must still
@@ -278,6 +290,13 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn join_cloud_wal_prune_worker(&mut self) {
         if let Some(worker) = self.cloud_coordinator.take_prune_worker() {
+            #[cfg(test)]
+            PRUNE_JOIN_HOOK.with(|hook| {
+                let hook = hook.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            });
             if worker.join().is_err() {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!("cloud WAL prune preflight worker panicked during join");
@@ -286,6 +305,13 @@ impl EventLoop {
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
             );
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::runtime::event_loop) fn set_cloud_wal_prune_join_hook_for_test(
+        hook: impl FnOnce() + 'static,
+    ) {
+        PRUNE_JOIN_HOOK.with(|pending| *pending.borrow_mut() = Some(Box::new(hook)));
     }
 }
 
