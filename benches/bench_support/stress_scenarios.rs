@@ -27,7 +27,8 @@ const WRITE_BATCH_ROWS: usize = 32;
 const MIXED_ROWS: [usize; 5] = [1, 8, 128, 1_024, 4_096];
 const WRITE_ROW_COUNTS: [usize; 11] = [32, 1, 1, 1, 8, 128, 1_024, 4_096, 1, 1, 128];
 const RESOURCE_SAMPLE_PERIOD: Duration = Duration::from_secs(60);
-const SATURATION_BACKOFF_MAX_SHIFT: u32 = 4;
+const SATURATION_BACKOFF_MAX_SHIFT: u32 = 8;
+const SATURATION_BACKOFF_RECOVERY_SUCCESSES: u32 = 32;
 const CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,35 @@ struct SaturationCounts {
     resource_limit: u64,
     write_stall: u64,
     backoff_ms: u64,
+}
+
+#[derive(Default)]
+struct SaturationBackoff {
+    level: u32,
+    successful_operations_since_stall: u32,
+}
+
+impl SaturationBackoff {
+    fn on_saturation(&mut self) -> u64 {
+        self.level = self
+            .level
+            .saturating_add(1)
+            .min(SATURATION_BACKOFF_MAX_SHIFT + 1);
+        self.successful_operations_since_stall = 0;
+        saturation_backoff_ms(self.level)
+    }
+
+    fn on_success(&mut self) {
+        if self.level == 0 {
+            return;
+        }
+        self.successful_operations_since_stall =
+            self.successful_operations_since_stall.saturating_add(1);
+        if self.successful_operations_since_stall >= SATURATION_BACKOFF_RECOVERY_SUCCESSES {
+            self.level = self.level.saturating_sub(1);
+            self.successful_operations_since_stall = 0;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -749,7 +779,7 @@ fn run_client(
     let mut sequences = [0_u64; 11];
     let mut account = 0_u64;
     let mut attempt = 0_u64;
-    let mut consecutive_saturation_responses = 0_u32;
+    let mut saturation_backoff = SaturationBackoff::default();
     while Instant::now() < deadline {
         let started = Instant::now();
         result.stats.attempts = result.stats.attempts.saturating_add(1);
@@ -774,21 +804,17 @@ fn run_client(
                 result.account_updates = result
                     .account_updates
                     .saturating_add(u64::from(account_updated));
-                consecutive_saturation_responses = 0;
+                saturation_backoff.on_success();
             }
             Err(MidgeError::ResourceLimit(_)) => {
                 result.stats.saturation.resource_limit =
                     result.stats.saturation.resource_limit.saturating_add(1);
-                consecutive_saturation_responses =
-                    consecutive_saturation_responses.saturating_add(1);
-                backoff_ms = saturation_backoff_ms(consecutive_saturation_responses);
+                backoff_ms = saturation_backoff.on_saturation();
             }
             Err(MidgeError::WriteStall(_)) => {
                 result.stats.saturation.write_stall =
                     result.stats.saturation.write_stall.saturating_add(1);
-                consecutive_saturation_responses =
-                    consecutive_saturation_responses.saturating_add(1);
-                backoff_ms = saturation_backoff_ms(consecutive_saturation_responses);
+                backoff_ms = saturation_backoff.on_saturation();
             }
             Err(error) => panic!(
                 "{} workload transaction failed: {error}",
@@ -810,10 +836,8 @@ fn run_client(
     result
 }
 
-fn saturation_backoff_ms(consecutive_responses: u32) -> u64 {
-    let shift = consecutive_responses
-        .saturating_sub(1)
-        .min(SATURATION_BACKOFF_MAX_SHIFT);
+fn saturation_backoff_ms(level: u32) -> u64 {
+    let shift = level.saturating_sub(1).min(SATURATION_BACKOFF_MAX_SHIFT);
     1_u64 << shift
 }
 
