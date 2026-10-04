@@ -115,6 +115,15 @@ pub mod __internal {
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
     }
+    pub mod recovery {
+        pub use crate::metadata::recovery_progress_fixture::{
+            run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
+        };
+        pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
+            run_recovery_progress_fixture, RecoveryProgressFixtureMode,
+            RecoveryProgressFixtureResult,
+        };
+    }
     pub mod sst {
         pub mod bloom {
             pub use crate::sst::bloom::{BloomReader, BloomWriter};

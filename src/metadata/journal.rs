@@ -563,6 +563,7 @@ fn replay_journal_with_mode(
     let mut offset: u64 = 0;
     let mut tail = JournalReplayTail::Clean;
     let mut corruption = None;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("manifest_journal");
 
     while offset < file_len {
         let status = match read_journal_record(&*file, offset, file_len) {
@@ -581,7 +582,9 @@ fn replay_journal_with_mode(
                 let applied = validate_journal_record_crc(&record)
                     .and_then(|()| handle_journal_record(&record, &mut state));
                 match applied {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        progress.completed(record.next_offset - record.record_start, 1);
+                    }
                     Err(error) if mode == JournalReplayMode::SalvagePrefix => {
                         corruption = Some(format!("at byte {}: {error}", record.record_start));
                         break;
@@ -630,6 +633,7 @@ fn replay_journal_with_mode(
         .max()
         .unwrap_or(0);
 
+    progress.finish();
     Ok(JournalReplay {
         edits: state.edits,
         max_edit_id,

@@ -7,6 +7,7 @@ pub(super) fn measure<T>(
     action: impl FnOnce() -> MidgeResult<T>,
 ) -> MidgeResult<T> {
     let started = std::time::Instant::now();
+    tracing::info!(target: "midge::recovery", phase, "recovery phase started");
     let result = action();
     tracing::info!(
         target: "midge::recovery",

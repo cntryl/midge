@@ -26,6 +26,9 @@ use client_progress::{
     run_client_with, write_atomic_json, ClientClock, ClientControl, ClientReporter, WorkerResult,
     CLIENT_REPORT_PERIOD,
 };
+#[path = "stress_scenarios/recovery_progress.rs"]
+mod recovery_progress;
+use recovery_progress::{is_recovery_work, RecoveryProgressLayer, RecoveryScope};
 
 const VALUE_SIZE: usize = 128;
 const SEED_ROWS: usize = 512;
@@ -40,18 +43,29 @@ const CLOUD_STRESS_WAL_SEAL_MAX_FLUSH_DELAY: Duration = Duration::from_secs(5);
 const SHUTDOWN_CALLER_BUDGET: Duration = Duration::from_secs(45);
 
 fn enable_phase_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer as _;
+
     static INITIALIZE: std::sync::Once = std::sync::Once::new();
     INITIALIZE.call_once(|| {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             tracing_subscriber::EnvFilter::new(
-                "warn,cntryl_midge::runtime::event_loop::shutdown=info,cntryl_midge::engine::lease_state=info,cntryl_midge::lease=info",
+                "warn,cntryl_midge::runtime::event_loop::shutdown=info,cntryl_midge::engine::lease_state=info,cntryl_midge::lease=info,midge::recovery=info,midge::recovery::work=off",
             )
         });
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .try_init();
+        tracing_subscriber::registry()
+            .with(RecoveryProgressLayer.with_filter(tracing_subscriber::filter::filter_fn(
+                is_recovery_work,
+            )))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .with_filter(filter),
+            )
+            .try_init()
+            .expect("install stress phase tracing and recovery progress listener");
     });
 }
 
@@ -862,7 +876,10 @@ fn finish_case(
             &opened.object_prefix,
         );
         artifacts.enter_phase("recovery", "open-cloud-from-empty-cache", progress);
-        let (mut recovered, family) = open_family(options, false);
+        let (mut recovered, family) = {
+            let _scope = RecoveryScope::enter(progress, &artifacts.resource_phase, artifacts.phase);
+            open_family(options, false)
+        };
         progress.advance();
         verify_database(
             &recovered,
@@ -881,7 +898,10 @@ fn finish_case(
         );
     } else {
         artifacts.enter_phase("recovery", "reopen-local-engine", progress);
-        let (mut recovered, family) = open_family(local_options(&opened.database), false);
+        let (mut recovered, family) = {
+            let _scope = RecoveryScope::enter(progress, &artifacts.resource_phase, artifacts.phase);
+            open_family(local_options(&opened.database), false)
+        };
         progress.advance();
         verify_database(
             &recovered,
@@ -2076,6 +2096,172 @@ pub(super) fn run_watchdog_fixture(ctx: &mut StressContext, resume_successes: bo
     artifacts.enter_phase("complete", "watchdog-client-stage", &progress);
     artifacts.complete = true;
     artifacts.persist("passed");
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(super) fn run_recovery_watchdog_fixture(
+    ctx: &mut StressContext,
+    mode: cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode,
+) {
+    use cntryl_midge::__internal::recovery::{
+        run_recovery_progress_fixture, RecoveryProgressFixtureMode,
+    };
+
+    enable_phase_tracing();
+    let benchmark = match mode {
+        RecoveryProgressFixtureMode::DelayedRanges => "delayed_recovery_with_flat_cache",
+        RecoveryProgressFixtureMode::HeldFirstRange => "held_recovery_with_flat_cache",
+        RecoveryProgressFixtureMode::CachedCoverage => "cached_recovery_with_flat_cache",
+        RecoveryProgressFixtureMode::MetadataInventory => {
+            "metadata_inventory_recovery_with_flat_cache"
+        }
+        RecoveryProgressFixtureMode::HeldInventory => "held_inventory_recovery_with_flat_cache",
+    };
+    let case = WorkloadCase {
+        benchmark,
+        scenario: "watchdog-recovery-stage",
+        backend: "local",
+        tier: 5,
+        workload: "recovery-fixture",
+        stages: &[],
+    };
+    let progress = ctx.progress_handle();
+    let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(8));
+    let fixture_root = artifacts.path.join("recovery-fixture");
+    let database = fixture_root.join("local");
+    fs::create_dir_all(&database).expect("create empty recovery fixture database");
+    artifacts.enter_phase("recovery", "actual-planner-and-replay", &progress);
+    let _sampler = ResourceSampler::start_with_interval(
+        &artifacts,
+        &database,
+        progress.clone(),
+        Duration::from_millis(100),
+    );
+    // The real planner and replay own successful work. The fixture delays or
+    // holds their provider responses and retains independent observations.
+    let (result, recovery_units) = ctx
+        .measure("actual cloud WAL recovery", || {
+            let before = progress.completed_units();
+            let _scope =
+                RecoveryScope::enter(&progress, &artifacts.resource_phase, artifacts.phase);
+            run_recovery_progress_fixture(&fixture_root, mode)
+                .map(|result| (result, progress.completed_units() - before))
+        })
+        .expect("actual planner and replay fixture completes");
+    write_atomic_json(
+        &artifacts.path.join("recovery-result.json"),
+        &json!({
+            "expected_records": result.expected_records,
+            "verified_records": result.verified_records,
+            "mismatches": result.mismatches,
+            "max_sequence": result.max_sequence,
+            "max_epoch": result.max_epoch,
+            "completed_range_reads": result.completed_range_reads,
+            "completed_range_bytes": result.completed_range_bytes,
+            "maximum_range_bytes": result.maximum_range_bytes,
+            "local_wal_bytes": result.local_wal_bytes,
+            "staged_wal_count": result.staged_wal_count,
+            "elapsed_ms": result.elapsed_ms,
+            "coverage_checks": result.coverage_checks,
+            "replay_completed_range_reads": result.replay_completed_range_reads,
+            "expected_inventory_entries": result.expected_inventory_entries,
+            "retained_inventory_entries": result.retained_inventory_entries,
+            "completed_inventory_heads": result.completed_inventory_heads,
+            "completed_inventory_size_validations": result.completed_inventory_size_validations,
+        }),
+    )
+    .expect("persist successful actual recovery fixture result");
+    ctx.metadata("fixture_recovery_elapsed_ms", result.elapsed_ms);
+    ctx.metadata("fixture_recovery_verified_records", result.verified_records);
+    ctx.metadata("fixture_recovery_progress_units", recovery_units);
+    progress.advance();
+    artifacts.enter_phase("complete", "actual-planner-and-replay", &progress);
+    artifacts.complete = true;
+    artifacts.persist("passed");
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
+    use cntryl_midge::__internal::recovery::run_journal_recovery_progress_fixture;
+
+    enable_phase_tracing();
+    let case = WorkloadCase {
+        benchmark: "journal_recovery_with_flat_cache",
+        scenario: "watchdog-recovery-stage",
+        backend: "local",
+        tier: 5,
+        workload: "journal-recovery-fixture",
+        stages: &[],
+    };
+    let progress = ctx.progress_handle();
+    let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(8));
+    let fixture_root = artifacts.path.join("recovery-fixture");
+    let database = fixture_root.join("local");
+    fs::create_dir_all(&database).expect("create empty journal fixture database");
+    artifacts.enter_phase("recovery", "actual-manifest-journal-replay", &progress);
+    let _sampler = ResourceSampler::start_with_interval(
+        &artifacts,
+        &database,
+        progress.clone(),
+        Duration::from_millis(100),
+    );
+    let (result, recovery_units) = ctx
+        .measure("actual manifest journal recovery", || {
+            let before = progress.completed_units();
+            let _scope =
+                RecoveryScope::enter(&progress, &artifacts.resource_phase, artifacts.phase);
+            run_journal_recovery_progress_fixture(&fixture_root)
+                .map(|result| (result, progress.completed_units() - before))
+        })
+        .expect("actual manifest journal fixture completes");
+    write_atomic_json(
+        &artifacts.path.join("recovery-result.json"),
+        &json!({
+            "expected_edits": result.expected_edits,
+            "verified_edits": result.verified_edits,
+            "max_edit_id": result.max_edit_id,
+            "manifest_edit_checkpoint_id": result.manifest_edit_checkpoint_id,
+            "restored_cf_count": result.restored_cf_count,
+            "mismatches": result.mismatches,
+            "completed_local_reads": result.completed_local_reads,
+            "completed_local_read_bytes": result.completed_local_read_bytes,
+            "journal_bytes": result.journal_bytes,
+            "local_wal_bytes": result.local_wal_bytes,
+            "staged_wal_count": result.staged_wal_count,
+            "elapsed_ms": result.elapsed_ms,
+        }),
+    )
+    .expect("persist successful actual journal recovery result");
+    ctx.metadata("fixture_recovery_elapsed_ms", result.elapsed_ms);
+    ctx.metadata("fixture_recovery_verified_edits", result.verified_edits);
+    ctx.metadata("fixture_recovery_progress_units", recovery_units);
+    progress.advance();
+    artifacts.enter_phase("complete", "actual-manifest-journal-replay", &progress);
+    artifacts.complete = true;
+    artifacts.persist("passed");
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(super) fn run_recovery_listener_fixture(ctx: &mut StressContext) {
+    let progress = ctx.progress_handle();
+    let listener_units = ctx.measure("recovery listener isolation", || {
+        let before = progress.completed_units();
+        recovery_progress::assert_listener_isolation(&progress);
+        progress.completed_units() - before
+    });
+    ctx.metadata("fixture_listener_progress_units", listener_units);
 }
 
 #[cfg(test)]

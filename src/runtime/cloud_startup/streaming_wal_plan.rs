@@ -341,6 +341,7 @@ fn remote_source(
         metadata,
         timeout,
     ));
+    let fs = crate::telemetry::recovery_progress::observe_reads(fs);
     let path = FsPath::new(publication.object_key.clone());
     validate_wal_source(
         fs.as_ref(),

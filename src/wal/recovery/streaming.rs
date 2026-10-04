@@ -33,6 +33,7 @@ pub(crate) fn max_verified_suffix_sequence(
     let chunk_size = limits.max_frame_bytes.min(1024 * 1024).max(overlap + 1);
     let mut pos = start;
     let mut max_sequence = None;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("suffix_scan");
     while file_len.saturating_sub(pos) > overlap as u64 {
         let len = usize::try_from((file_len - pos).min(chunk_size as u64)).map_err(|_| {
             MidgeError::ResourceLimit("WAL suffix read length exceeds usize".into())
@@ -65,7 +66,9 @@ pub(crate) fn max_verified_suffix_sequence(
             }
         }
         pos += (len - overlap) as u64;
+        progress.completed((len - overlap) as u64, 0);
     }
+    progress.finish();
     Ok(max_sequence)
 }
 
@@ -190,6 +193,8 @@ impl TxnSpool {
         use std::io::{Read as _, Seek as _, Write as _};
         self.file.flush()?;
         self.file.seek(std::io::SeekFrom::Start(0))?;
+        let mut progress =
+            crate::telemetry::recovery_progress::WorkProgress::new("transaction_spool");
         for _ in 0..self.record_count {
             let mut header = [0_u8; crate::wal::frame::WAL_FRAME_HEADER_LEN];
             self.file.read_exact(&mut header)?;
@@ -198,6 +203,7 @@ impl TxnSpool {
             self.file.read_exact(&mut payload)?;
             crate::wal::frame::verify_frame_crc(&payload, expected_crc)?;
             visitor(crate::wal::encoding::decode(payload.as_slice())?)?;
+            progress.completed((payload_len + header.len()) as u64, 1);
         }
         let mut trailing = [0_u8; 1];
         if self.file.read(&mut trailing)? != 0 {
@@ -205,6 +211,7 @@ impl TxnSpool {
                 "transaction recovery spool has trailing bytes".to_string(),
             ));
         }
+        progress.finish();
         Ok(())
     }
 }
@@ -219,6 +226,7 @@ struct ReplayState<'a> {
     options: ReplayOptions<'a>,
     should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     checkpoint: &'a mut Checkpoint<'a>,
+    operation_progress: crate::telemetry::recovery_progress::WorkProgress,
 }
 
 /// The caller must expose stable, immutable input views across both passes and
@@ -280,8 +288,12 @@ pub(crate) fn replay_wal_with_options(
         options,
         should_apply,
         checkpoint,
+        operation_progress: crate::telemetry::recovery_progress::WorkProgress::new(
+            "replay_decision",
+        ),
     };
     replay_paths(storage, &paths, replay_policy, &frontiers, &mut state)?;
+    state.operation_progress.finish();
     state.stats.total_replay_ns = started.elapsed().as_nanos();
     tracing::info!(
         dir = %wal_dir,
@@ -316,12 +328,16 @@ fn max_verified_sequence_from_offset(
     let source = frame_reader::source(&*file, path, limits);
     let mut pos = offset;
     let mut max_sequence = None;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("salvage_frontier");
     while let Ok(NextWalFrame::Frame(frame)) =
         frame_reader::next_frame(&source, path, pos, limits, &mut read_ns)
     {
         max_sequence = max_sequence.max(Some(frame.record.seq));
+        let bytes = frame.next_pos.saturating_sub(pos);
         pos = frame.next_pos;
+        progress.completed(bytes, 1);
     }
+    progress.finish();
     max_sequence
 }
 
@@ -438,6 +454,7 @@ fn inspect_file_from(
     })?;
     let mut read_ns = 0;
     let source = frame_reader::source(file, path, limits);
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sealed_inspection");
     loop {
         let next = frame_reader::next_frame(
             &source,
@@ -448,6 +465,7 @@ fn inspect_file_from(
         )
         .map_err(|failure| super::wal_prefix_failure(prefix, failure))?;
         let NextWalFrame::Frame(frame) = next else {
+            progress.finish();
             return Ok(prefix);
         };
         let newest = (prefix.record_count > 0).then_some(prefix.writer_epoch);
@@ -467,6 +485,7 @@ fn inspect_file_from(
         prefix.writer_epoch = writer_epoch;
         prefix.max_sequence = prefix.max_sequence.max(frame.record.seq);
         prefix.record_count = prefix.record_count.saturating_add(1);
+        let bytes = frame.next_pos.saturating_sub(prefix.valid_bytes as u64);
         prefix.valid_bytes = usize::try_from(frame.next_pos).map_err(|_| {
             super::wal_prefix_failure(
                 prefix,
@@ -476,6 +495,7 @@ fn inspect_file_from(
             )
         })?;
         checkpoint().map_err(|error| super::wal_prefix_failure(prefix, error.into()))?;
+        progress.completed(bytes, 1);
     }
 }
 
@@ -514,6 +534,7 @@ pub(super) fn discover_frontiers(
     let mut frontiers = WriterEpochFrontiers::default();
     let mut ordinal = 0_u64;
     let mut read_ns = 0;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("frontier_scan");
     for path in paths {
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut read_ns)? else {
             continue;
@@ -527,18 +548,27 @@ pub(super) fn discover_frontiers(
                 Ok(NextWalFrame::Frame(frame)) => {
                     frontiers.record(&frame.record, ordinal);
                     ordinal = ordinal.saturating_add(1);
+                    let bytes = frame.next_pos.saturating_sub(pos);
                     pos = frame.next_pos;
+                    progress.completed(bytes, 1);
                 }
                 Err(failure) => {
                     return match replay_error_action(path, policy, &failure) {
-                        ReplayErrorAction::TolerateFinalActiveTail => Ok((frontiers, false)),
-                        ReplayErrorAction::SalvageVerifiedPrefix => Ok((frontiers, true)),
+                        ReplayErrorAction::TolerateFinalActiveTail => {
+                            progress.finish();
+                            Ok((frontiers, false))
+                        }
+                        ReplayErrorAction::SalvageVerifiedPrefix => {
+                            progress.finish();
+                            Ok((frontiers, true))
+                        }
                         ReplayErrorAction::Fail => Err(failure.into_error()),
                     }
                 }
             }
         }
     }
+    progress.finish();
     Ok((frontiers, false))
 }
 
@@ -551,6 +581,7 @@ fn replay_paths(
 ) -> MidgeResult<()> {
     let mut ordinal = 0_u64;
     let mut max_seen_sequence = None;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("replay");
     for (index, path) in paths.iter().enumerate() {
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut state.stats.wal_read_ns)?
         else {
@@ -576,6 +607,7 @@ fn replay_paths(
             };
             let record_ordinal = ordinal;
             ordinal = ordinal.saturating_add(1);
+            let bytes = frame.next_pos.saturating_sub(pos);
             // A stale record is skipped whether or not an earlier file carried
             // it, and it can never conflict, so it needs no rescan. It also
             // must not raise the high-water mark: a fenced writer's high
@@ -585,6 +617,7 @@ fn replay_paths(
             if frontiers.is_stale(&frame.record, record_ordinal) {
                 state.stats.stale_records_skipped += 1;
                 pos = frame.next_pos;
+                progress.completed(bytes, 1);
                 continue;
             }
             let may_repeat = max_seen_sequence.is_some_and(|sequence| frame.record.seq <= sequence);
@@ -624,8 +657,10 @@ fn replay_paths(
                 return Err(error);
             }
             pos = frame.next_pos;
+            progress.completed(bytes, 1);
         }
     }
+    progress.finish();
     Ok(())
 }
 
@@ -717,6 +752,7 @@ fn duplicate_before(
     DUPLICATE_RESCANS.set(DUPLICATE_RESCANS.get().saturating_add(1));
     let (record, record_ordinal) = record_with_ordinal;
     let mut prior_ordinal = 0_u64;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("duplicate_scan");
     for (index, path) in paths.iter().enumerate() {
         let current_file = index + 1 == paths.len();
         let Some(file) = open_wal_replay_file(storage, &path.path, read_ns)? else {
@@ -732,7 +768,10 @@ fn duplicate_before(
                 NextWalFrame::Eof => break,
                 NextWalFrame::Frame(frame) => frame,
             };
+            let bytes = frame.next_pos.saturating_sub(pos);
             if frame.record == *record && !current_file {
+                progress.completed(bytes, 1);
+                progress.finish();
                 return Ok(true);
             }
             if !frontiers.is_stale(record, record_ordinal)
@@ -751,8 +790,10 @@ fn duplicate_before(
             }
             pos = frame.next_pos;
             prior_ordinal = prior_ordinal.saturating_add(1);
+            progress.completed(bytes, 1);
         }
     }
+    progress.finish();
     Ok(false)
 }
 
@@ -880,10 +921,13 @@ impl ReplayState<'_> {
             return self.apply_unchecked(records);
         }
         let mut growth = HashMap::<u32, usize>::new();
-        for record in records
-            .iter()
-            .filter(|record| self.should_apply.is_none_or(|filter| filter(record)))
-        {
+        let should_apply = self.should_apply;
+        let progress = &mut self.operation_progress;
+        for record in records.iter().filter(|record| {
+            let apply = should_apply.is_none_or(|filter| filter(record));
+            progress.completed_operation();
+            apply
+        }) {
             let bytes = match record.op.role() {
                 WalOpRole::RangeDelete => size_bound::range_bytes(
                     record.key.len(),
@@ -926,10 +970,12 @@ impl ReplayState<'_> {
             }
         }
         let started = std::time::Instant::now();
-        for record in records
-            .iter()
-            .filter(|record| self.should_apply.is_none_or(|filter| filter(record)))
-        {
+        let progress = &mut self.operation_progress;
+        for record in records.iter().filter(|record| {
+            let apply = should_apply.is_none_or(|filter| filter(record));
+            progress.completed_operation();
+            apply
+        }) {
             apply_record(record, self.memtables)?;
         }
         self.stats.apply_ns = self
@@ -941,10 +987,13 @@ impl ReplayState<'_> {
 
     fn apply_unchecked(&mut self, records: &[WalRecord]) -> MidgeResult<()> {
         let started = std::time::Instant::now();
-        for record in records
-            .iter()
-            .filter(|record| self.should_apply.is_none_or(|filter| filter(record)))
-        {
+        let should_apply = self.should_apply;
+        let progress = &mut self.operation_progress;
+        for record in records.iter().filter(|record| {
+            let apply = should_apply.is_none_or(|filter| filter(record));
+            progress.completed_operation();
+            apply
+        }) {
             apply_record(record, self.memtables)?;
         }
         self.stats.apply_ns = self
@@ -960,10 +1009,12 @@ impl ReplayState<'_> {
         let started = std::time::Instant::now();
         let should_apply = self.should_apply;
         let memtables = &mut *self.memtables;
+        let progress = &mut self.operation_progress;
         spool.replay(|record| {
             if should_apply.is_none_or(|filter| filter(&record)) {
                 apply_record(&record, memtables)?;
             }
+            progress.completed_operation();
             Ok(())
         })?;
         self.stats.apply_ns = self

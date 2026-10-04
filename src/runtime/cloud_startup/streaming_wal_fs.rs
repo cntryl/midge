@@ -195,17 +195,20 @@ pub(crate) fn validate_wal_source(
     }
     let mut offset = 0_u64;
     let mut crc = 0;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("crc_validation");
     while offset < expected_len {
         let length = (range_buffer_bytes as u64).min(expected_len - offset);
         let bytes = read_exact_range(file.as_ref(), offset, length)?;
         crc = crc32c::crc32c_append(crc, &bytes);
         offset += length;
+        progress.completed(length, 0);
     }
     if file.len().map_err(FsError::into_midge)? != expected_len || crc != expected_crc {
         return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match its catalog content checksum"
         )));
     }
+    progress.finish();
     Ok(())
 }
 
@@ -229,15 +232,20 @@ pub(crate) fn wal_sources_equal(
         return Ok(false);
     }
     let mut offset = 0_u64;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("source_equality");
     while offset < size {
         let length = (range_buffer_bytes as u64).min(size - offset);
         if read_exact_range(left_file.as_ref(), offset, length)?
             != read_exact_range(right_file.as_ref(), offset, length)?
         {
+            progress.completed(length, 0);
+            progress.finish();
             return Ok(false);
         }
         offset += length;
+        progress.completed(length, 0);
     }
+    progress.finish();
     Ok(left_file.len().map_err(FsError::into_midge)? == size
         && right_file.len().map_err(FsError::into_midge)? == size)
 }

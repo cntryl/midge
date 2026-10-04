@@ -72,6 +72,7 @@ impl CloudStartupRecovery {
                     )
                     .with_deadline(deadline),
                 );
+                let pinned = crate::telemetry::recovery_progress::observe_reads(pinned);
                 RuntimeState::validate_sst_fs_proof(pinned, file_meta)?;
                 // The intent proves this name is non-authoritative and the
                 // remote checksum proves its publication. Discard its local
@@ -617,11 +618,13 @@ impl CloudStartupRecovery {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
         let mut definitively_lost: Vec<String> = Vec::new();
+        let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sst_inventory");
 
         for file in state.manifest.files.clone() {
             let validation = object_size(&file).and_then(|size| {
                 Self::validate_manifest_sst_size(&file, size).map_err(SstLoss::Definitive)
             });
+            let validated = validation.is_ok();
             match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
                 SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
                     retained_files.push(file);
@@ -631,6 +634,11 @@ impl CloudStartupRecovery {
                     manifest_changed = true;
                 }
             }
+            // A failed probe retained conservatively during salvage is not a
+            // successful metadata check and must not refresh the watchdog.
+            if validated {
+                progress.completed_operation();
+            }
         }
 
         if manifest_changed {
@@ -638,6 +646,7 @@ impl CloudStartupRecovery {
             state.restore_sequence_floor_from_manifest();
         }
 
+        progress.finish();
         Ok(())
     }
 

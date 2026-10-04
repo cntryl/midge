@@ -805,6 +805,7 @@ impl RuntimeRecoveryMaterialization {
         let Some(fs) = &materialized.runtime_config.sst_read_fs else {
             return Ok(());
         };
+        let fs = crate::telemetry::recovery_progress::observe_reads(Arc::clone(fs));
         let Some(storage) = &materialized.runtime_config.hybrid_storage else {
             return Ok(());
         };
@@ -826,7 +827,7 @@ impl RuntimeRecoveryMaterialization {
             // resident copy. An empty cache never triggers full SST validation.
             // Retain the local bytes unless the remote publication proof holds.
             let validation = RuntimeState::validate_sst_fs_proof(
-                Arc::clone(fs),
+                Arc::clone(&fs),
                 &crate::runtime::FileMeta::from(meta),
             );
             if let Err(error) = validation {
@@ -897,7 +898,8 @@ impl RuntimeRecoveryMaterialization {
                     .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
                 );
                 materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
-                materialized.state.recovery_sst_fs = Some(fs);
+                materialized.state.recovery_sst_fs =
+                    Some(crate::telemetry::recovery_progress::observe_reads(fs));
             }
         }
         if let Some(storage) = &materialized.runtime_config.hybrid_storage {
@@ -921,10 +923,11 @@ impl RuntimeRecoveryMaterialization {
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<Self> {
-        materialized
-            .state
-            .recovery_sst_fs
-            .clone_from(&materialized.runtime_config.sst_read_fs);
+        materialized.state.recovery_sst_fs = materialized
+            .runtime_config
+            .sst_read_fs
+            .as_ref()
+            .map(|fs| crate::telemetry::recovery_progress::observe_reads(Arc::clone(fs)));
         let remote_cleanup_candidates = materialized
             .state
             .non_authoritative_compaction_outputs_for_remote_cleanup()?;

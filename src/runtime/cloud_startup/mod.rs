@@ -9,6 +9,9 @@ use crate::io::{Fs, FsError};
 
 pub(crate) mod cloud_io;
 mod cloud_recovery;
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub(crate) mod recovery_progress_fixture;
 pub(crate) mod replay_coverage;
 pub(crate) mod streaming_wal_fs;
 pub(crate) mod streaming_wal_plan;
