@@ -19,70 +19,49 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - case: write-heavy-local
-            workload: tier5_write_heavy_local
-            cloud: false
-          - case: read-heavy-local
-            workload: tier5_read_heavy_local
-            cloud: false
-          - case: balanced-local
-            workload: tier5_balanced_local
-            cloud: false
-          - case: many-small-transactions-local
-            workload: tier5_many_small_transactions_local
-            cloud: false
-          - case: mixed-transaction-sizes-local
-            workload: tier5_mixed_transaction_sizes_local
-            cloud: false
-          - case: write-pressure-s3
-            workload: tier5_write_pressure_s3
-            cloud: true
-          - case: write-pressure-azure
-            workload: tier5_write_pressure_azure
-            cloud: true
-          - case: write-pressure-gcs-xml
-            workload: tier5_write_pressure_gcs_xml
-            cloud: true
-          - case: write-pressure-gcs-json
-            workload: tier5_write_pressure_gcs_json
-            cloud: true
+        workload:
+          - tier5_write_heavy_local
+          - tier5_read_heavy_local
+          - tier5_balanced_local
+          - tier5_many_small_transactions_local
+          - tier5_mixed_transaction_sizes_local
+          - tier5_write_pressure_s3
+          - tier5_write_pressure_azure
+          - tier5_write_pressure_gcs_xml
+          - tier5_write_pressure_gcs_json
     env:
       CARGO_INCREMENTAL: 0
       MIDGE_TIER5_DURATION_SECS: "3600"
-      MIDGE_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/target/midge-stress/${{ matrix.case }}
-      STRESS_OUTPUT_DIR: ${{ github.workspace }}/target/stress/${{ matrix.case }}
       STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+      STRESS_PROFILE: smoke
+      STRESS_TIMEOUT_SECS: "4500"
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup update stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bench-tier5
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
       - name: Start Sqrzl
-        if: matrix.cloud
+        if: contains(matrix.workload, 's3') || contains(matrix.workload, 'azure') || contains(matrix.workload, 'gcs')
         run: docker compose up -d sqrzl
-      - name: Wait for Sqrzl
-        if: matrix.cloud
-        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
-      - name: Run isolated Tier 5 case
+
+      - name: Run Tier 5 workload
         env:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: >-
-          cargo bench --bench tier5_stress_workloads --features stress-soak
-          -- --workload ${{ matrix.workload }} --profile smoke --samples 1
-          --warmup-samples 0 --cooldown-samples 0 --timeout-secs 4500
-          --no-progress-timeout-secs 60
-      - name: Upload framework and workload evidence
+        run: cargo bench --bench 'tier5_*' --features stress-soak -- --workload ${{ matrix.workload }}
+
+      - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bench-tier5-${{ matrix.case }}-${{ github.sha }}
+          name: bench-tier5-${{ matrix.workload }}-${{ github.sha }}
           path: |
-            target/stress/${{ matrix.case }}/**
-            target/midge-stress/${{ matrix.case }}/**
+            target/stress/**
+            target/midge-stress/**
           if-no-files-found: ignore
           retention-days: 180
+
       - name: Stop Sqrzl
-        if: always() && matrix.cloud
+        if: always() && (contains(matrix.workload, 's3') || contains(matrix.workload, 'azure') || contains(matrix.workload, 'gcs'))
         run: docker compose down -v

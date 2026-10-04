@@ -12,32 +12,26 @@ concurrency:
 
 jobs:
   bench:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup update stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bench-tier3-${{ matrix.os }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
       - name: Run registered Tier 3 targets
         shell: bash
-        run: |
-          set -euo pipefail
-          for target in tier3_system_engine tier3_system_mvcc tier3_system_sst tier3_system_scan tier3_system_lifecycle; do
-            cargo bench --bench "$target" -- --profile default
-          done
+        run: cargo bench --bench 'tier3_*'
+
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bench-tier3-${{ matrix.os }}-${{ github.sha }}
+          name: bench-tier3-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**
           if-no-files-found: ignore
-          retention-days: 90

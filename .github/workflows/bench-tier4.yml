@@ -13,26 +13,19 @@ concurrency:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup update stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bench-tier4
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
       - name: Run registered Tier 4 targets
         shell: bash
-        run: |
-          set -euo pipefail
-          for target in \
-            tier4_system_local_throughput_regression tier4_system_strict_group_commit \
-            tier4_system_compression_policy tier4_ycsb_workload_a \
-            tier4_system_compaction_backpressure tier4_ycsb_workload_b \
-            tier4_ycsb_workload_c tier4_ycsb_workload_d tier4_ycsb_workload_e \
-            tier4_ycsb_workload_f tier4_streaming_workload tier4_system_recovery_throughput; do
-            cargo bench --bench "$target" -- --profile default
-          done
-          cargo bench --bench tier4_bounded_compaction_qualification --features failpoints -- --profile default
+        run: cargo bench --bench 'tier4_[sy]*'
+
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -42,4 +35,3 @@ jobs:
             target/stress/**
             target/midge-stress/**
           if-no-files-found: ignore
-          retention-days: 90

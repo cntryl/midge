@@ -13,25 +13,19 @@ concurrency:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup update stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bench-tier2
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
       - name: Run registered Tier 2 targets
         shell: bash
-        run: |
-          set -euo pipefail
-          for target in \
-            tier2_subsystem_block_cache tier2_subsystem_bloom_build \
-            tier2_subsystem_compression tier2_subsystem_range_scan_cache \
-            tier2_subsystem_iterator_multi_sst tier2_subsystem_memtable_rotate \
-            tier2_subsystem_read_amplification tier2_subsystem_event_loop \
-            tier2_subsystem_transaction_latency tier2_subsystem_durability_commit_latency; do
-            cargo bench --bench "$target" -- --profile default
-          done
+        run: cargo bench --bench 'tier2_*'
+
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -41,4 +35,3 @@ jobs:
             target/stress/**
             target/midge-stress/**
           if-no-files-found: ignore
-          retention-days: 90
