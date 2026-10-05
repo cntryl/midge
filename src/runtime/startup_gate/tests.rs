@@ -333,7 +333,10 @@ fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_large
     });
 }
 
-struct HeldStartupAuthority(Arc<AtomicUsize>);
+struct HeldStartupAuthority {
+    validations: Arc<AtomicUsize>,
+    read_expired: Arc<AtomicBool>,
+}
 
 impl crate::lease::LeaderStore for HeldStartupAuthority {
     fn acquire_leadership(
@@ -353,14 +356,23 @@ impl crate::lease::LeaderStore for HeldStartupAuthority {
         }))
     }
 
+    fn validate_epoch(&self, holder: &str, epoch: u64) -> Result<(), crate::lease::LeaseError> {
+        // Only the fixture's authority read has this 80ms deadline. Its clock
+        // starts after actual method entry, independently of worker creation.
+        self.validate_epoch_with_timeout(holder, epoch, Duration::from_millis(80))
+    }
+
     fn validate_epoch_with_timeout(
         &self,
         _: &str,
         _: u64,
         timeout: Duration,
     ) -> Result<(), crate::lease::LeaseError> {
-        self.0.fetch_add(1, Ordering::AcqRel);
-        std::thread::sleep(timeout);
+        self.validations.fetch_add(1, Ordering::AcqRel);
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        std::thread::sleep(deadline.remaining());
+        self.read_expired
+            .store(deadline.is_expired(), Ordering::Release);
         Err(crate::lease::LeaseError::Timeout(
             "held startup authority read".into(),
         ))
@@ -368,21 +380,25 @@ impl crate::lease::LeaderStore for HeldStartupAuthority {
 }
 
 #[test]
-fn should_retain_actual_recovered_active_wal_when_startup_authority_budget_expires() {
+fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_out() {
     crate::failpoints::with_read_gate(|| {
-        // Arrange: hold the actual startup sealing authority call. The timeout
-        // occurs before fsync/rotation; the same acknowledged bytes remain recoverable.
+        // Arrange: real owned Runtime/actors must reach the fixture authority
+        // before its 80ms read clock starts. This is not aggregate-open expiry.
         let mut fixture = ActiveWalFixture::new();
         let validations = Arc::new(AtomicUsize::new(0));
-        fixture.config.leader_store =
-            Some(Arc::new(HeldStartupAuthority(Arc::clone(&validations))));
+        let read_expired = Arc::new(AtomicBool::new(false));
+        fixture.config.leader_store = Some(Arc::new(HeldStartupAuthority {
+            validations: Arc::clone(&validations),
+            read_expired: Arc::clone(&read_expired),
+        }));
         fixture.config.leader_holder_id = Some("startup-owner".into());
-        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
-            Duration::from_millis(80),
-        ));
+        let scope = unbounded_scope();
+        // Preserve the constructed delayed-setup control from Phase A without
+        // charging it to the authority read's independently captured deadline.
+        std::thread::sleep(Duration::from_millis(81));
         let (runtime, _) = Runtime::new();
 
-        // Act: failed preparation drops/joins its real runtime worker before return.
+        // Act: preparation failure drops/joins the actual worker before return.
         let result = runtime.prepare_with_config(fixture.state, fixture.config, scope);
         let timeout = match result {
             Ok((runtime, _, gate)) => {
@@ -393,29 +409,86 @@ fn should_retain_actual_recovered_active_wal_when_startup_authority_budget_expir
             Err(MidgeError::Timeout(_)) => true,
             Err(error) => panic!("startup authority timeout lost its type: {error}"),
         };
-
-        // Assert: no admission, no identity rotation and no loss of acknowledged bytes.
-        assert!(timeout);
-        assert_eq!(validations.load(Ordering::Acquire), 1);
-        assert_eq!(
-            std::fs::read(
-                fixture
-                    .directory
-                    .path()
-                    .join("database/wal")
-                    .join(crate::wal::ACTIVE_FILE_NAME)
-            )
-            .unwrap(),
-            fixture.bytes
-        );
-        assert!(!fixture
+        let retained = std::fs::read(
+            fixture
+                .directory
+                .path()
+                .join("database/wal")
+                .join(crate::wal::ACTIVE_FILE_NAME),
+        )
+        .unwrap();
+        let rotated = fixture
             .directory
             .path()
             .join("database/wal")
             .join(crate::wal::segment_file_name(1))
-            .exists());
+            .exists();
+
+        // Assert: exact seeded/framed WAL survives the entered authority failure.
+        assert!(timeout);
+        assert_eq!(validations.load(Ordering::Acquire), 1);
+        assert!(read_expired.load(Ordering::Acquire));
+        assert_eq!(retained, fixture.bytes);
+        assert!(!rotated);
         assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 0);
         assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
         assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+    });
+}
+
+#[test]
+fn should_retain_recovered_active_wal_when_startup_budget_expires_before_authority_entry() {
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: explicitly spend the unchanged original 80ms scope before
+        // calling preparation. An expired request must not submit authority I/O.
+        let mut fixture = ActiveWalFixture::new();
+        let validations = Arc::new(AtomicUsize::new(0));
+        let read_expired = Arc::new(AtomicBool::new(false));
+        fixture.config.leader_store = Some(Arc::new(HeldStartupAuthority {
+            validations: Arc::clone(&validations),
+            read_expired: Arc::clone(&read_expired),
+        }));
+        fixture.config.leader_holder_id = Some("startup-owner".into());
+        let (runtime, _) = Runtime::new();
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+            Duration::from_millis(80),
+        ));
+        std::thread::sleep(scope.deadline().remaining() + Duration::from_millis(1));
+
+        // Act: preparation rejects before creating actors or an accepted owner.
+        let result = runtime.prepare_with_config(fixture.state, fixture.config, scope);
+        let timeout = match result {
+            Ok((runtime, _, gate)) => {
+                drop(runtime);
+                drop(gate);
+                false
+            }
+            Err(MidgeError::Timeout(_)) => true,
+            Err(error) => panic!("expired startup budget lost its type: {error}"),
+        };
+        let retained = std::fs::read(
+            fixture
+                .directory
+                .path()
+                .join("database/wal")
+                .join(crate::wal::ACTIVE_FILE_NAME),
+        )
+        .unwrap();
+        let rotated = fixture
+            .directory
+            .path()
+            .join("database/wal")
+            .join(crate::wal::segment_file_name(1))
+            .exists();
+
+        // Assert: fail closed and preserve bytes without pretending the read ran.
+        assert!(timeout);
+        assert_eq!(validations.load(Ordering::Acquire), 0);
+        assert!(!read_expired.load(Ordering::Acquire));
+        assert_eq!(retained, fixture.bytes);
+        assert!(!rotated);
+        assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 0);
     });
 }
