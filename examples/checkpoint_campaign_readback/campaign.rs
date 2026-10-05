@@ -1,11 +1,14 @@
 //! Always retain the nine preregistered attempts; invalid evidence never counts as a miss.
 
 use super::{
-    accounting, array, commit_backpressure, json_files, load, native, number, provenance, require,
-    string, Cell, Identity, Result, CELLS, TARGET,
+    accounting, array, commit_backpressure, json_files, load, metadata_boundary, native, number,
+    provenance, require, string, Cell, Identity, Result, CELLS, TARGET,
 };
 use serde_json::{json, Value};
 use std::path::Path;
+
+#[cfg(test)]
+mod boundary_tests;
 
 fn job<'a>(jobs: &'a Value, cell: Cell, repeat: u64, identity: &Identity) -> Result<&'a Value> {
     let matches = array(jobs, "jobs")?
@@ -267,12 +270,16 @@ fn observations(directory: &Path, cell: Cell, status: &Value) -> Result<Value> {
     let config = std::fs::read_to_string(artifact.join("native-config.txt"))
         .map_err(|error| format!("captured native config: {error}"))?;
     commit_backpressure::check_native_no_progress(&config)?;
-    commit_backpressure::qualify(
+    let window = load(&directory.join("accounting-window.json"))?;
+    let backpressure = commit_backpressure::qualify(&observations, status, &window, cell)?;
+    let boundary = metadata_boundary::qualify(
         &observations,
         status,
-        &load(&directory.join("accounting-window.json"))?,
-        cell,
-    )
+        &window,
+        &load(&directory.join("accounting-before.json"))?,
+        &load(&directory.join("accounting-after.json"))?,
+    )?;
+    Ok(json!({"commit_backpressure":backpressure,"metadata_boundary":boundary}))
 }
 
 fn attempt(
@@ -323,7 +330,10 @@ fn attempt(
                 Err(error) => invalid.push(format!("accounting: {error}")),
             }
             match observations(internal, cell, &status) {
-                Ok(backpressure) => row["commit_backpressure"] = backpressure,
+                Ok(diagnostics) => {
+                    row["commit_backpressure"] = diagnostics["commit_backpressure"].clone();
+                    row["metadata_boundary"] = diagnostics["metadata_boundary"].clone();
+                }
                 Err(error) => invalid.push(error),
             }
             match native::match_receipt(

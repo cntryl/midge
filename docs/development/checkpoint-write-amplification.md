@@ -45,6 +45,18 @@ checks counter subtraction, completed-cycle arithmetic and the original
 60-second native no-progress configuration. Terminal errors and exhausted
 pressure remain unsuccessful construction, rather than passing zero work.
 
+Each metadata boundary uses one allowance capped at 30 seconds and the
+original cell deadline. A timed runtime query precedes the retained owner's
+accounting snapshot. Active Persistent metadata candidates are resampled
+after a requested pause of at most 1 ms; only an idle candidate before expiry
+is accepted. Actual pause duration is retained, including scheduling delays.
+Earlier warmup candidates and pauses stay outside measurement, while the
+accepted query starts the measured clock. All end-boundary queries and pauses
+stay inside that clock. Sampling advances no watchdog progress and establishes
+adjacent observations, rather than a global runtime barrier. Both raw endpoint
+snapshots and the final owner integrity checks still require zero active
+Persistent metadata operations.
+
 After ingestion, the workload verifies every acknowledged key/value and the
 complete ordered scan, shuts down, reopens the same path, verifies again and
 performs a second owned shutdown. The original counter handle survives both
@@ -92,6 +104,18 @@ readback are retained. [#729](https://github.com/cntryl/midge/issues/729)
 adds the bounded construction policy above; the corrected source requires
 a fresh smoke and all nine new attempts. This is a benchmark defect, not
 evidence of lost acknowledged rows or engine deadlock.
+
+The second campaign at source `32911805e5b10c01086e9270e71cc7990d36c168`,
+[run 37270845568](https://github.com/cntryl/midge/actions/runs/37270845568)
+attempt 1, retained six and nine actual rejected/cleared commit attempts in
+A/r1 and A/r2. Both completed all fixed writes, verification, reopen and two
+shutdowns, but captured their measured endpoint during active compaction
+metadata work. The zero-active gate correctly rejected both endpoints; the
+whole campaign remains invalid despite the seven other valid rows.
+[#731](https://github.com/cntryl/midge/issues/731) adds the bounded boundary
+capture above. Settled final-owner snapshots do not replace these invalid
+measured endpoints. The corrected source again requires its own smoke and
+all nine new attempts.
 
 ## Accounting boundary
 

@@ -1,6 +1,8 @@
 //! Release checkpoint measurement: one fixed cell per fresh process.
 //! Uses the private accounting bridge without changing checkpoint cadence.
 
+#[path = "./bench_support/checkpoint_boundary.rs"]
+mod checkpoint_boundary;
 #[path = "./bench_support/checkpoint_commit.rs"]
 mod checkpoint_commit;
 #[path = "./bench_support/checkpoint_gate.rs"]
@@ -8,10 +10,10 @@ mod checkpoint_gate;
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::__internal::checkpoint::{metrics_handle, Medium, MetricsHandle, Snapshot};
+use cntryl_midge::__internal::checkpoint::{metrics_handle, MetricsHandle, Snapshot};
 use cntryl_midge::{
     ColumnFamilyHandle, Engine, MemoryBudget, MidgeResult, OpenOptions, Query, RecoveryPolicy,
-    TransactionMode, WriteOptions,
+    RuntimeMetricsSnapshot, TransactionMode, WriteOptions,
 };
 use cntryl_stress::{
     stress, stress_main, LogicalUnit, OperationOutcome, ProgressHandle, StressContext,
@@ -102,6 +104,8 @@ struct Attempt {
     measured_elapsed: Duration,
     measured_acknowledged_rows: u64,
     commit_observations: checkpoint_commit::Observations,
+    boundary_before: checkpoint_boundary::Observation,
+    boundary_after: checkpoint_boundary::Observation,
 }
 
 impl Attempt {
@@ -125,7 +129,13 @@ impl Attempt {
             "commit_backpressure_policy":{"schema_version":"midge-checkpoint-commit-policy.v1",
                 "retry_error":"write_stall_only", "retry_budget_ns":30_000_000_000u64,
                 "wait_slice_ns":1_000_000_000u64, "cell_budget_ns":900_000_000_000u64,
-                "required_no_progress_timeout_ns":60_000_000_000u64}});
+                "required_no_progress_timeout_ns":60_000_000_000u64},
+            "metadata_boundary_policy":{"schema_version":"midge-checkpoint-boundary-policy.v1",
+                "metadata_scope":"persistent_only", "boundary_budget_ns":30_000_000_000u64,
+                "pause_slice_ns":1_000_000u64, "cell_budget_ns":900_000_000_000u64,
+                "sample_order":"runtime_metrics_then_metadata_snapshot", "zero_persistent_active_required":true,
+                "before_clock_scope":"warmup_wait_outside_measured_final_query_inside",
+                "after_clock_scope":"end_inside_measured", "progress_advanced":false}});
         atomic_json(&directory.join("workload-status.json"), &status)?;
         Ok(Self {
             directory,
@@ -136,12 +146,18 @@ impl Attempt {
             measured_elapsed: Duration::ZERO,
             measured_acknowledged_rows: 0,
             commit_observations: checkpoint_commit::Observations::default(),
+            boundary_before: checkpoint_boundary::Observation::default(),
+            boundary_after: checkpoint_boundary::Observation::default(),
         })
     }
 
     fn save(&mut self, force: bool) -> Result<(), String> {
         self.status["commit_backpressure"] =
             serde_json::to_value(&self.commit_observations).map_err(|error| error.to_string())?;
+        self.status["metadata_boundary_before"] =
+            serde_json::to_value(&self.boundary_before).map_err(|error| error.to_string())?;
+        self.status["metadata_boundary_after"] =
+            serde_json::to_value(&self.boundary_after).map_err(|error| error.to_string())?;
         if force || self.last_save.elapsed() >= Duration::from_secs(1) {
             atomic_json(&self.directory.join("workload-status.json"), &self.status)?;
             self.last_save = Instant::now();
@@ -275,33 +291,52 @@ struct Window {
     pressure_samples: Vec<Value>,
 }
 
+fn capture_boundary(
+    engine: &Engine,
+    handle: &MetricsHandle,
+    attempt: &mut Attempt,
+    before: bool,
+) -> Result<checkpoint_boundary::Boundary<RuntimeMetricsSnapshot>, String> {
+    let original_deadline = attempt.started + CELL_TIMEOUT;
+    let observation = if before {
+        &mut attempt.boundary_before
+    } else {
+        &mut attempt.boundary_after
+    };
+    checkpoint_boundary::capture_metadata_boundary(
+        original_deadline,
+        Duration::from_secs(30),
+        observation,
+        Instant::now,
+        |remaining| {
+            let runtime = engine
+                .metrics()
+                .get_runtime_metrics_with_timeout(remaining)?;
+            Ok((runtime, handle.snapshot()))
+        },
+        std::thread::sleep,
+    )
+    .map_err(|error| format!("metadata boundary capture: {error:?}"))
+}
+
 fn begin_window(
     engine: &Engine,
     handle: &MetricsHandle,
     cell: Cell,
     attempt: &mut Attempt,
 ) -> Result<Window, String> {
-    let before = handle.snapshot();
-    if before
-        .buckets
-        .iter()
-        .any(|bucket| bucket.medium == Medium::Persistent && bucket.active_operations > 0)
-    {
-        return Err("persistent metadata operation crosses warmup boundary".into());
-    }
+    let boundary = capture_boundary(engine, handle, attempt, true)?;
+    let before = boundary.snapshot;
+    let runtime_before = boundary.runtime;
+    // Earlier warmup active candidates and pauses are outside measurement.
+    // The accepted query/snapshot pair begins inside the measured clock.
+    attempt.measured_started = Some(boundary.query_started);
     atomic_json(
         &attempt.directory.join("accounting-before.json"),
         &serde_json::to_value(&before).map_err(|error| error.to_string())?,
     )?;
     attempt.status["phase"] = json!("measured_ingestion");
     attempt.save(true)?;
-    // Counter queries lie inside the clock: credited compaction completions
-    // cannot fall into an unmeasured start/end gap around the ingestion window.
-    attempt.measured_started = Some(Instant::now());
-    let runtime_before = engine
-        .metrics()
-        .get_runtime_metrics()
-        .map_err(|error| error.to_string())?;
     let before_compactions = runtime_before.compactions_run;
     atomic_json(
         &attempt.directory.join("runtime-before.json"),
@@ -343,13 +378,11 @@ fn finish_window(
     cell: Cell,
     attempt: &mut Attempt,
 ) -> Result<(Snapshot, u64), String> {
-    let runtime_after = engine
-        .metrics()
-        .get_runtime_metrics()
-        .map_err(|error| error.to_string())?;
-    // Include accounting for every completion credited by the runtime query.
-    // Forced-origin costs stay separate, but their failures cannot disappear.
-    let after = handle.snapshot();
+    // The whole end-boundary query/wait stays inside the measured clock.
+    // Sampling does not advance progress or require global runtime idleness.
+    let boundary = capture_boundary(engine, handle, attempt, false)?;
+    let runtime_after = boundary.runtime;
+    let after = boundary.snapshot;
     attempt.measured_elapsed = attempt
         .measured_started
         .ok_or("no measured interval")?
@@ -369,7 +402,7 @@ fn finish_window(
     )?;
     atomic_json(
         &attempt.directory.join("ingestion-observations.json"),
-        &json!({"flush_latencies_ns":window.flush_latencies_ns,"pressure_samples":window.pressure_samples, "commit_backpressure_before":window.before_commit_observations, "commit_backpressure_after":attempt.commit_observations}),
+        &json!({"flush_latencies_ns":window.flush_latencies_ns,"pressure_samples":window.pressure_samples, "commit_backpressure_before":window.before_commit_observations, "commit_backpressure_after":attempt.commit_observations, "metadata_boundary_before":attempt.boundary_before, "metadata_boundary_after":attempt.boundary_after}),
     )?;
     atomic_json(
         &attempt.directory.join("accounting-after.json"),

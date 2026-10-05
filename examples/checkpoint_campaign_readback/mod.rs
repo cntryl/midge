@@ -3,6 +3,7 @@
 pub mod accounting;
 pub mod campaign;
 pub mod commit_backpressure;
+pub mod metadata_boundary;
 pub mod native;
 pub mod provenance;
 
