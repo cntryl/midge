@@ -1866,7 +1866,7 @@
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
           "line": 737,
           "symbol": "should_replay_when_unreadable_interval_overlaps_verified_exact_sst",
-          "claim": "Actual checksummed remote SST is proved, then a second real overlapping authoritative SST is removed. The exact visitor still returns replay, counts both candidates and releases all budget; this is a bounded filesystem-backed coverage control, not public ACK or native-hour recovery.",
+          "claim": "The first real checksummed SST is verified while the second overlapping authoritative object was removed before the query. The exact visitor still returns replay, counts both candidates and releases all budget; this is a bounded filesystem-backed coverage control, not public ACK or native-hour recovery.",
           "scope": "actual seeded SST bytes/removed authoritative object; no public ACK or native provider/hour qualification",
           "assertions": [
             {
