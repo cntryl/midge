@@ -31,33 +31,110 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bench:
+  ordinary-selection:
     if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    outputs:
+      toolchain: ${{ steps.selection.outputs.toolchain }}
+      shards: ${{ steps.selection.outputs.shards }}
     steps:
       - uses: actions/checkout@v7
-      - run: rustup update stable
-      - name: Run ordinary registered Tier 4 targets
+        with:
+          ref: ${{ github.sha }}
+      - name: Select and partition ordinary registered Tier 4 targets
+        id: selection
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p target/tier4-selection
-          cargo metadata --no-deps --format-version=1 > target/tier4-selection/metadata.json
-          jq -r '.packages[] | select(.name == "cntryl-midge") | .targets[] | select(.kind | index("bench") != null) | select(.name | test("^tier4_[sy]")) | select(.name != "tier4_system_checkpoint_write_amplification") | .name' target/tier4-selection/metadata.json > target/tier4-selection/targets.txt
-          mapfile -t checkpoint_ordinary_targets < target/tier4-selection/targets.txt
-          test "${#checkpoint_ordinary_targets[@]}" -gt 0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          rustup update stable
+          rustup default stable
+          tier4_toolchain="$(rustc -V | awk '{print $2}')"
+          [[ "$tier4_toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'toolchain=%s\n' "$tier4_toolchain" >> "$GITHUB_OUTPUT"
+          rustc -Vv > target/tier4-selection/rustc.txt
+          cargo -V > target/tier4-selection/cargo-version.txt
+          cargo metadata --locked --no-deps --format-version=1 > target/tier4-selection/metadata.json
+          jq '[.packages[] | select(.name == "cntryl-midge") | .targets[] | select(.kind | index("bench") != null) | select(.name | test("^tier4_[sy]")) | select(.name != "tier4_system_checkpoint_write_amplification") | .name]' target/tier4-selection/metadata.json > target/tier4-selection/targets.json
+          jq -cn --slurpfile selected target/tier4-selection/targets.json '
+            [
+              {id:"systems-streaming", targets:["tier4_system_local_throughput_regression","tier4_system_strict_group_commit","tier4_system_compression_policy","tier4_system_compaction_backpressure","tier4_streaming_workload","tier4_system_recovery_throughput"]},
+              {id:"ycsb-ab", targets:["tier4_ycsb_workload_a","tier4_ycsb_workload_b"]},
+              {id:"ycsb-cd", targets:["tier4_ycsb_workload_c","tier4_ycsb_workload_d"]},
+              {id:"ycsb-ef", targets:["tier4_ycsb_workload_e","tier4_ycsb_workload_f"]}
+            ] as $shards |
+            [$shards[].targets[]] as $flat |
+            if ($selected | length) == 1 and ($selected[0] | length) > 0
+              and ($flat | length) == ($flat | unique | length)
+              and ($flat | sort) == ($selected[0] | sort)
+            then $shards else error("ordinary Tier 4 shards must exactly partition the registered selector") end
+          ' > target/tier4-selection/shards.json
+          printf 'shards=%s\n' "$(cat target/tier4-selection/shards.json)" >> "$GITHUB_OUTPUT"
+          jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg toolchain "$tier4_toolchain" --slurpfile shards target/tier4-selection/shards.json '{sha:$sha,run_id:$run,run_attempt:$attempt,toolchain:$toolchain,shards:$shards[0]}' > target/tier4-selection/selection-manifest.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-tier4-selection-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: target/tier4-selection/**
+          if-no-files-found: error
+
+  bench:
+    needs: ordinary-selection
+    if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
+    name: ordinary-${{ matrix.shard.id }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.ordinary-selection.outputs.shards) }}
+    env:
+      TIER4_TOOLCHAIN: ${{ needs.ordinary-selection.outputs.toolchain }}
+      TIER4_SHARD_ID: ${{ matrix.shard.id }}
+      TIER4_TARGETS_JSON: ${{ toJSON(matrix.shard.targets) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: bench-tier4-selection-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: target/tier4-selection
+      - name: Use the selected source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$TIER4_TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$TIER4_SHARD_ID" =~ ^[a-z0-9-]+$ ]]
+          jq -e --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg toolchain "$TIER4_TOOLCHAIN" --arg id "$TIER4_SHARD_ID" --argjson targets "$TIER4_TARGETS_JSON" '.sha == $sha and .run_id == $run and .run_attempt == $attempt and .toolchain == $toolchain and ([.shards[] | select(.id == $id and .targets == $targets)] | length) == 1' target/tier4-selection/selection-manifest.json
+          jq -n --arg id "$TIER4_SHARD_ID" --argjson targets "$TIER4_TARGETS_JSON" '{id:$id,targets:$targets}' > target/tier4-selection/current-shard.json
+          rustup toolchain install "$TIER4_TOOLCHAIN" --profile minimal
+          rustup default "$TIER4_TOOLCHAIN"
+          test "$(rustc -V | awk '{print $2}')" = "$TIER4_TOOLCHAIN"
+          rustc -Vv > target/tier4-selection/shard-rustc.txt
+          cargo -V > target/tier4-selection/shard-cargo-version.txt
+      - name: Run ordinary registered Tier 4 targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.targets | length > 0 and all(.[]; type == "string" and test("^tier4_[sy][a-z0-9_]+$"))' target/tier4-selection/current-shard.json
+          jq -r '.targets[]' target/tier4-selection/current-shard.json > target/tier4-selection/current-targets.txt
+          mapfile -t checkpoint_ordinary_targets < target/tier4-selection/current-targets.txt
           for checkpoint_ordinary_target in "${checkpoint_ordinary_targets[@]}"; do
-            cargo bench --bench "$checkpoint_ordinary_target"
+            cargo bench --locked --bench "$checkpoint_ordinary_target"
           done
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-tier4-${{ github.sha }}
+          name: bench-tier4-${{ matrix.shard.id }}-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
           path: |
             target/stress/**
             target/midge-stress/**
-          if-no-files-found: ignore
+            target/tier4-selection/**
+          if-no-files-found: error
 
   checkpoint-build:
     if: ${{ contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
