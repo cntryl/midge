@@ -415,7 +415,7 @@ mod ownership_tests {
         );
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(7, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(7, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let source = Arc::clone(&validity);
         storage

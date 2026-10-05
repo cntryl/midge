@@ -349,7 +349,7 @@ mod progress_tests {
         // Act
         let result = run_client_with(
             write_config(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             &control,
             ClientClock {
                 now: Instant::now,
@@ -365,7 +365,7 @@ mod progress_tests {
         );
         let peer = run_client_with(
             write_config(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             &control,
             ClientClock {
                 now: Instant::now,

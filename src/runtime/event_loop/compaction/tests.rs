@@ -667,7 +667,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         validity
             .activate(
                 epoch,
-                std::time::Instant::now() + std::time::Duration::from_secs(60),
+                std::time::Instant::now() + std::time::Duration::from_mins(1),
             )
             .unwrap();
         event_loop.fencing.lease_validity = Some(Arc::clone(&validity));

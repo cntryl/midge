@@ -1461,7 +1461,7 @@ fn fence_stalled_writer(fixture: &mut EventLoopFixture, expired: bool) {
     if expired {
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(1, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .expect("activate test writer authority");
         validity.expire_for_test();
         fixture.event_loop.fencing.writer_epoch = 1;
