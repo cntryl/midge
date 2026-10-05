@@ -535,6 +535,29 @@ impl RuntimeStorageMaterialization {
         )
     }
 
+    fn bootstrap_staging_fs() -> MidgeResult<Arc<dyn crate::io::Fs>> {
+        // In-memory staging keeps failed first opens retryable independently
+        // of temporary-directory permissions and local cache authority.
+        let staging_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        crate::io::staging::stage_bytes(
+            &staging_fs,
+            &crate::io::FsPath::new("FORMAT.tmp"),
+            &crate::io::FsPath::new(crate::metadata::files::FORMAT),
+            &crate::metadata::format::current_format_marker_bytes(),
+            MidgeError::RecoveryFailed,
+        )?;
+        crate::metadata::store::ManifestStore::new_with_accounting(
+            Arc::clone(&staging_fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::MemoryOnly,
+        )
+        .save_snapshot_for(
+            crate::metadata::accounting::Origin::Bootstrap,
+            &crate::metadata::Manifest::default(),
+        )?;
+        Ok(staging_fs)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn bootstrap_provider_metadata_scoped(
         metadata_storage: &crate::storage::cloud::CloudStorage,
@@ -617,19 +640,7 @@ impl RuntimeStorageMaterialization {
             ));
         }
 
-        // Scratch files are never local cache authority. In-memory staging
-        // also keeps a failed or interrupted first open retryable regardless
-        // of TMPDIR or parent-directory permissions.
-        let staging_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-        crate::io::staging::stage_bytes(
-            &staging_fs,
-            &crate::io::FsPath::new("FORMAT.tmp"),
-            &crate::io::FsPath::new(crate::metadata::files::FORMAT),
-            &crate::metadata::format::current_format_marker_bytes(),
-            MidgeError::RecoveryFailed,
-        )?;
-        crate::metadata::store::ManifestStore::new(Arc::clone(&staging_fs))
-            .save_snapshot(&crate::metadata::Manifest::default())?;
+        let staging_fs = Self::bootstrap_staging_fs()?;
         let publication_lock = crate::runtime::MetadataPublicationLock::default();
         crate::runtime::hybrid_persistence::mirror_control_metadata_within(
             crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {

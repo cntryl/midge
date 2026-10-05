@@ -138,6 +138,7 @@ impl EventLoop {
             &cloud_shutdown_deadline,
             &mut shutdown_error,
         );
+        self.state.invalidate_unsettled_flush_accounting();
 
         // Flush completion and other worker progress can restore a deferred
         // caller into `pending_msg` while shutdown drains. The run loop exits
@@ -331,7 +332,7 @@ impl EventLoop {
                     "cloud shutdown checkpoint exceeded the durability deadline".to_string(),
                 ));
             }
-            self.freeze_active_memtable(cf_id)?;
+            self.freeze_active_memtable_for(cf_id, crate::metadata::accounting::Origin::Shutdown)?;
         }
         self.drain_shutdown_flush_pipeline_within(deadline)
     }

@@ -100,6 +100,7 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 [dev-dependencies]
 proptest = "1.11"
 cntryl-stress = "0.5.1"
+sha2 = "0.11"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
 # without those modules being public API for downstream consumers.
@@ -120,6 +121,7 @@ telemetry = [
 ]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 stress-soak = ["cloud-all"]
+checkpoint-bench = ["internal-testing"]
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [
@@ -326,6 +328,12 @@ harness = false
 
 # Tier 4
 [[bench]]
+name = "tier4_system_checkpoint_write_amplification"
+path = "benches/tier4_system_checkpoint_write_amplification.rs"
+harness = false
+required-features = ["checkpoint-bench"]
+
+[[bench]]
 name = "tier4_system_local_throughput_regression"
 path = "benches/tier4_system_local_throughput_regression.rs"
 harness = false
@@ -404,3 +412,8 @@ name = "tier6_mixed_workload_soak"
 path = "benches/tier6_mixed_workload_soak.rs"
 harness = false
 required-features = ["stress-soak"]
+
+[[example]]
+name = "checkpoint_campaign_readback"
+path = "examples/checkpoint_campaign_readback.rs"
+required-features = ["internal-testing"]

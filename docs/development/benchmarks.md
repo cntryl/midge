@@ -50,6 +50,14 @@ arguments. It is excluded from plain `cargo bench` by its existing `failpoints`
 feature requirement; use the commands in
 [Bounded Compaction Qualification](bounded-compaction-qualification.md).
 
+The controlled checkpoint target requires the explicit `checkpoint-bench`
+feature and dedicated Tier 4 workflow modes. Run the actual same-SHA
+construction smoke before its nine fresh release processes, then retain the
+native diagnostic trust and all invalid attempts during readback. See
+[Checkpoint Write Amplification](checkpoint-write-amplification.md) for the
+fixed cells, commands, gate and filesystem-issued byte limits. Measurement is
+pending.
+
 The Tier 2 read amplification target opens a local Engine with three overlapping
 flushed SSTs. It records Engine point-read amplification and block-cache deltas
 alongside point-only and mixed point/short-scan throughput. The metrics are

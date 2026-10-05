@@ -662,7 +662,8 @@ fn should_bound_legacy_sst_backfill_work_when_persisting() {
 
     // Act
     let uses_worker = read_path.contains("midge-legacy-sst-bound-backfill");
-    let batches_edits = read_path.contains("manifest_store.append_batch(&edits)");
+    let batches_edits = read_path
+        .contains(".append_batch_for(crate::metadata::accounting::Origin::Administration, &edits)");
 
     // Assert
     assert!(uses_worker);

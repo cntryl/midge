@@ -220,6 +220,12 @@ impl RuntimeState {
             Self::manifest_compaction_output_generation_floor(&manifest)
                 .max(wal_recovery.recovered_sequence);
 
+        let accounting = crate::metadata::accounting::Owner::new();
+        let accounting_medium = if persistence.is_memory() {
+            crate::metadata::accounting::Medium::MemoryOnly
+        } else {
+            crate::metadata::accounting::Medium::Persistent
+        };
         let mut state = Self {
             db_path,
             wal_dir,
@@ -234,7 +240,11 @@ impl RuntimeState {
             manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
             startup_scope: scope.cloned(),
-            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(fs)),
+            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new_with_accounting(
+                fs,
+                accounting,
+                accounting_medium,
+            )),
             sst_names: super::SstNameAllocation::default(),
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),

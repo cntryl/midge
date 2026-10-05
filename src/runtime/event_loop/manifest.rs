@@ -66,12 +66,18 @@ impl ManifestCoordinator {
         HandleOutcome::Continue
     }
 
-    pub(super) fn persist(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
+    pub(super) fn persist(
+        event_loop: &mut EventLoop,
+        request_id: u64,
+        origin: crate::metadata::accounting::Origin,
+    ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
-        let result = crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)
-            .and_then(|()| {
-                event_loop.mirror_metadata_after_local_commit_within("manifest persist", &deadline)
-            });
+        let result =
+            crate::runtime::actors::ManifestActor::persist_for(&mut event_loop.state, origin)
+                .and_then(|()| {
+                    event_loop
+                        .mirror_metadata_after_local_commit_within("manifest persist", &deadline)
+                });
         if let Err(error) = &result {
             // Callers checkpoint after a change already committed through the
             // journal, so this failure cannot undo it; record it for health.

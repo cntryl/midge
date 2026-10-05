@@ -80,6 +80,8 @@ impl ColumnFamilyHandle {
 /// This is a thin façade over the runtime. All state and background work
 /// is managed by the runtime actors.
 pub struct Engine {
+    #[cfg(feature = "internal-testing")]
+    metadata_accounting: crate::metadata::accounting::MetricsHandle,
     /// Runtime (owns the event loop thread)
     runtime: Option<Runtime>,
     /// Handle to submit work to the runtime
@@ -127,6 +129,11 @@ impl Drop for Engine {
 type CloudSstRecoveryProof = crate::runtime::cloud_startup::CloudSstRecoveryProof;
 
 impl Engine {
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn checkpoint_metrics(&self) -> crate::metadata::accounting::MetricsHandle {
+        self.metadata_accounting.clone()
+    }
+
     #[cfg(test)]
     fn blocking_cloud_get(
         cloud: &crate::storage::cloud::CloudStorage,
@@ -584,7 +591,10 @@ impl Engine {
         }
         let outcome = next_request_id().and_then(|request_id| {
             self.runtime_handle
-                .send_and_wait(RuntimeMsg::ManifestPersist { request_id })
+                .send_and_wait(RuntimeMsg::ManifestPersist {
+                    request_id,
+                    origin: crate::metadata::accounting::Origin::Ddl,
+                })
         });
         match outcome {
             Ok(RuntimeResponse::Error { error, .. }) | Err(error) => {

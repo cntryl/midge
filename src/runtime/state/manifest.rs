@@ -1,6 +1,17 @@
 //! Manifest publication and compaction/flush intent transitions.
 
 use super::{MidgeResult, PublicationPhase, RuntimeState};
+use crate::metadata::accounting::Origin;
+
+#[derive(Clone, Copy)]
+pub(crate) struct FlushManifestPublication<'a> {
+    pub(crate) origin: Origin,
+    pub(crate) cf_id: crate::types::ColumnFamilyId,
+    pub(crate) sequence: u64,
+    pub(crate) file_meta: &'a crate::runtime::FileMeta,
+    pub(crate) next_sst_seq: u64,
+    pub(crate) require_snapshot: bool,
+}
 
 impl RuntimeState {
     #[cfg(test)]
@@ -241,6 +252,7 @@ impl RuntimeState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_flush_publication(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
@@ -249,6 +261,28 @@ impl RuntimeState {
         next_sst_seq: u64,
         require_snapshot: bool,
     ) -> MidgeResult<()> {
+        self.commit_flush_publication_for(FlushManifestPublication {
+            origin: Origin::Unclassified,
+            cf_id,
+            sequence,
+            file_meta,
+            next_sst_seq,
+            require_snapshot,
+        })
+    }
+
+    pub(crate) fn commit_flush_publication_for(
+        &mut self,
+        publication: FlushManifestPublication<'_>,
+    ) -> MidgeResult<()> {
+        let FlushManifestPublication {
+            origin,
+            cf_id,
+            sequence,
+            file_meta,
+            next_sst_seq,
+            require_snapshot,
+        } = publication;
         self.ensure_metadata_current()?;
         let manifest_meta: crate::metadata::FileMeta = file_meta.into();
         let next_sst_seq = self
@@ -273,13 +307,16 @@ impl RuntimeState {
             }
             None => {
                 crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
-                let edit_id = self.manifest_store.append_batch(&[
-                    crate::metadata::ManifestEdit::BumpNextSstSeq {
-                        cf_id,
-                        next_seq: next_sst_seq,
-                    },
-                    crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
-                ])?;
+                let edit_id = self.manifest_store.append_batch_for(
+                    origin,
+                    &[
+                        crate::metadata::ManifestEdit::BumpNextSstSeq {
+                            cf_id,
+                            next_seq: next_sst_seq,
+                        },
+                        crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
+                    ],
+                )?;
                 self.manifest.add_file(manifest_meta);
                 self.manifest.note_applied_journal_edit(edit_id);
                 crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
@@ -288,7 +325,10 @@ impl RuntimeState {
         self.manifest.advance_next_sst_seq(cf_id, next_sst_seq);
         self.manifest.advance_persisted_sequence(sequence);
         self.clear_flush_publication_intent(&file_meta.name)?;
-        match self.manifest_store.save_snapshot(&self.manifest) {
+        match self
+            .manifest_store
+            .save_snapshot_for(origin, &self.manifest)
+        {
             Ok(written) => self.manifest.adopt_checkpoint(written),
             Err(error) if !require_snapshot => {
                 self.mark_persistence_anomaly();
@@ -452,7 +492,10 @@ impl RuntimeState {
         }
 
         self.manifest_store
-            .append(&crate::metadata::ManifestEdit::AddSst(file_meta.into()))
+            .append_for(
+                Origin::Recovery,
+                &crate::metadata::ManifestEdit::AddSst(file_meta.into()),
+            )
             .map(|_| ())
     }
 
@@ -477,7 +520,9 @@ impl RuntimeState {
             return Ok(());
         }
 
-        self.manifest_store.append_batch(&edits).map(|_| ())
+        self.manifest_store
+            .append_batch_for(Origin::Recovery, &edits)
+            .map(|_| ())
     }
 
     pub(super) fn persist_manifest_checkpoint(&mut self) -> MidgeResult<()> {
@@ -486,7 +531,9 @@ impl RuntimeState {
         }
         self.retry_metadata_reload()?;
 
-        let checkpoint = self.manifest_store.save_snapshot(&self.manifest)?;
+        let checkpoint = self
+            .manifest_store
+            .save_snapshot_for(Origin::Recovery, &self.manifest)?;
         self.manifest.adopt_checkpoint(checkpoint);
         Ok(())
     }

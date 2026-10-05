@@ -75,25 +75,27 @@ fn should_abort_actual_prepared_runtime_when_owner_drops_without_acceptance() {
 
 #[test]
 fn should_admit_actual_prepared_runtime_when_scope_and_authority_are_healthy() {
-    // Arrange
-    let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
-        Duration::from_secs(5),
-    ));
-    let fixture = Fixture::prepare(scope.clone(), RuntimeConfig::default());
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ));
+        let fixture = Fixture::prepare(scope.clone(), RuntimeConfig::default());
 
-    // Act
-    let accepted = fixture.gate.accept();
-    let running = fixture.handle.lifecycle.running.load(Ordering::Acquire);
-    fixture.gate.cancel();
-    let completed_scope = !scope.deadline().is_bounded();
-    drop(fixture.runtime);
+        // Act
+        let accepted = fixture.gate.accept();
+        let running = fixture.handle.lifecycle.running.load(Ordering::Acquire);
+        fixture.gate.cancel();
+        let completed_scope = !scope.deadline().is_bounded();
+        drop(fixture.runtime);
 
-    // Assert: a losing cancellation cannot expire the accepted lifetime view.
-    accepted.unwrap();
-    assert!(running);
-    assert!(completed_scope);
-    assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 1);
-    assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 0);
+        // Assert: a losing cancellation cannot expire the accepted lifetime view.
+        accepted.unwrap();
+        assert!(running);
+        assert!(completed_scope);
+        assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 0);
+    });
 }
 
 #[test]
@@ -115,24 +117,26 @@ fn should_reject_actual_prepared_runtime_when_outer_owner_cancels_shared_scope()
 
 #[test]
 fn should_reject_actual_prepared_runtime_when_original_open_deadline_expires() {
-    // Arrange
-    let deadline = Instant::now() + Duration::from_millis(120);
-    let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
-        Duration::from_millis(120),
-    ));
-    let fixture = Fixture::prepare(scope, RuntimeConfig::default());
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let deadline = Instant::now() + Duration::from_millis(120);
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+            Duration::from_millis(120),
+        ));
+        let fixture = Fixture::prepare(scope, RuntimeConfig::default());
 
-    // Act
-    std::thread::sleep(
-        deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
-    );
-    let accepted = fixture.gate.accept();
-    drop(fixture.runtime);
+        // Act
+        std::thread::sleep(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+        );
+        let accepted = fixture.gate.accept();
+        drop(fixture.runtime);
 
-    // Assert
-    assert!(matches!(accepted, Err(MidgeError::Timeout(_))));
-    assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
-    assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+        // Assert
+        assert!(matches!(accepted, Err(MidgeError::Timeout(_))));
+        assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+    });
 }
 
 #[test]
@@ -160,29 +164,31 @@ fn should_fence_actual_prepared_runtime_when_heartbeat_health_is_lost_before_acc
 
 #[test]
 fn should_fence_actual_prepared_runtime_when_monotonic_validity_expires_without_watchdog() {
-    // Arrange
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
-    let until = Instant::now() + Duration::from_millis(120);
-    validity.activate(7, until).unwrap();
-    let fixture = Fixture::prepare(
-        unbounded_scope(),
-        RuntimeConfig {
-            writer_epoch: 7,
-            lease_validity: Some(validity),
-            lease_healthy: Some(Arc::new(AtomicBool::new(true))),
-            ..RuntimeConfig::default()
-        },
-    );
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let until = Instant::now() + Duration::from_millis(120);
+        validity.activate(7, until).unwrap();
+        let fixture = Fixture::prepare(
+            unbounded_scope(),
+            RuntimeConfig {
+                writer_epoch: 7,
+                lease_validity: Some(validity),
+                lease_healthy: Some(Arc::new(AtomicBool::new(true))),
+                ..RuntimeConfig::default()
+            },
+        );
 
-    // Act: no watchdog or heartbeat is installed; acceptance must check validity.
-    std::thread::sleep(until.saturating_duration_since(Instant::now()));
-    let accepted = fixture.gate.accept();
-    drop(fixture.runtime);
+        // Act: no watchdog or heartbeat is installed; acceptance must check validity.
+        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+        let accepted = fixture.gate.accept();
+        drop(fixture.runtime);
 
-    // Assert
-    assert!(matches!(accepted, Err(MidgeError::Fenced(_))));
-    assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
-    assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+        // Assert
+        assert!(matches!(accepted, Err(MidgeError::Fenced(_))));
+        assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+    });
 }
 
 #[test]
@@ -294,35 +300,37 @@ impl ActiveWalFixture {
 
 #[test]
 fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_larger_io_cap() {
-    // Arrange: genuine recovered active bytes require fsync and rotation at
-    // startup. Fast local I/O fits500ms, while the normal I/O cap remains30s.
-    let fixture = ActiveWalFixture::new();
-    let budget = Duration::from_millis(500);
-    assert!(fixture.config.storage_io_timeout > budget);
-    let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(budget));
-    let (runtime, _) = Runtime::new();
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: genuine recovered active bytes require fsync and rotation at
+        // startup. Fast local I/O fits500ms, while the normal I/O cap remains30s.
+        let fixture = ActiveWalFixture::new();
+        let budget = Duration::from_millis(500);
+        assert!(fixture.config.storage_io_timeout > budget);
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(budget));
+        let (runtime, _) = Runtime::new();
 
-    // Act: always release/join an actual prepared worker before asserting.
-    let result = runtime.prepare_with_config(fixture.state, fixture.config, scope);
-    let sealed_bytes = std::fs::read(
-        fixture
-            .directory
-            .path()
-            .join("database/wal")
-            .join(crate::wal::segment_file_name(1)),
-    )
-    .ok();
-    let prepared = result.map(|(runtime, _, gate)| {
-        drop(runtime);
-        drop(gate);
+        // Act: always release/join an actual prepared worker before asserting.
+        let result = runtime.prepare_with_config(fixture.state, fixture.config, scope);
+        let sealed_bytes = std::fs::read(
+            fixture
+                .directory
+                .path()
+                .join("database/wal")
+                .join(crate::wal::segment_file_name(1)),
+        )
+        .ok();
+        let prepared = result.map(|(runtime, _, gate)| {
+            drop(runtime);
+            drop(gate);
+        });
+
+        // Assert: a larger I/O cap must not reject individually fast mandatory work.
+        prepared.unwrap();
+        assert_eq!(sealed_bytes, Some(fixture.bytes));
+        assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
     });
-
-    // Assert: a larger I/O cap must not reject individually fast mandatory work.
-    prepared.unwrap();
-    assert_eq!(sealed_bytes, Some(fixture.bytes));
-    assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 1);
-    assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
-    assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
 }
 
 struct HeldStartupAuthority(Arc<AtomicUsize>);
@@ -361,50 +369,53 @@ impl crate::lease::LeaderStore for HeldStartupAuthority {
 
 #[test]
 fn should_retain_actual_recovered_active_wal_when_startup_authority_budget_expires() {
-    // Arrange: hold the actual startup sealing authority call. The timeout
-    // occurs before fsync/rotation; the same acknowledged bytes remain recoverable.
-    let mut fixture = ActiveWalFixture::new();
-    let validations = Arc::new(AtomicUsize::new(0));
-    fixture.config.leader_store = Some(Arc::new(HeldStartupAuthority(Arc::clone(&validations))));
-    fixture.config.leader_holder_id = Some("startup-owner".into());
-    let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
-        Duration::from_millis(80),
-    ));
-    let (runtime, _) = Runtime::new();
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: hold the actual startup sealing authority call. The timeout
+        // occurs before fsync/rotation; the same acknowledged bytes remain recoverable.
+        let mut fixture = ActiveWalFixture::new();
+        let validations = Arc::new(AtomicUsize::new(0));
+        fixture.config.leader_store =
+            Some(Arc::new(HeldStartupAuthority(Arc::clone(&validations))));
+        fixture.config.leader_holder_id = Some("startup-owner".into());
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+            Duration::from_millis(80),
+        ));
+        let (runtime, _) = Runtime::new();
 
-    // Act: failed preparation drops/joins its real runtime worker before return.
-    let result = runtime.prepare_with_config(fixture.state, fixture.config, scope);
-    let timeout = match result {
-        Ok((runtime, _, gate)) => {
-            drop(runtime);
-            drop(gate);
-            false
-        }
-        Err(MidgeError::Timeout(_)) => true,
-        Err(error) => panic!("startup authority timeout lost its type: {error}"),
-    };
+        // Act: failed preparation drops/joins its real runtime worker before return.
+        let result = runtime.prepare_with_config(fixture.state, fixture.config, scope);
+        let timeout = match result {
+            Ok((runtime, _, gate)) => {
+                drop(runtime);
+                drop(gate);
+                false
+            }
+            Err(MidgeError::Timeout(_)) => true,
+            Err(error) => panic!("startup authority timeout lost its type: {error}"),
+        };
 
-    // Assert: no admission, no identity rotation and no loss of acknowledged bytes.
-    assert!(timeout);
-    assert_eq!(validations.load(Ordering::Acquire), 1);
-    assert_eq!(
-        std::fs::read(
-            fixture
-                .directory
-                .path()
-                .join("database/wal")
-                .join(crate::wal::ACTIVE_FILE_NAME)
-        )
-        .unwrap(),
-        fixture.bytes
-    );
-    assert!(!fixture
-        .directory
-        .path()
-        .join("database/wal")
-        .join(crate::wal::segment_file_name(1))
-        .exists());
-    assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 0);
-    assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
-    assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+        // Assert: no admission, no identity rotation and no loss of acknowledged bytes.
+        assert!(timeout);
+        assert_eq!(validations.load(Ordering::Acquire), 1);
+        assert_eq!(
+            std::fs::read(
+                fixture
+                    .directory
+                    .path()
+                    .join("database/wal")
+                    .join(crate::wal::ACTIVE_FILE_NAME)
+            )
+            .unwrap(),
+            fixture.bytes
+        );
+        assert!(!fixture
+            .directory
+            .path()
+            .join("database/wal")
+            .join(crate::wal::segment_file_name(1))
+            .exists());
+        assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
+    });
 }

@@ -49,6 +49,8 @@ struct RuntimeRecoveryMaterialization {
 }
 
 struct StartedRuntime {
+    #[cfg(feature = "internal-testing")]
+    metadata_accounting: crate::metadata::accounting::MetricsHandle,
     runtime: Runtime,
     runtime_handle: crate::runtime::RuntimeHandle,
     recovered_sequence: u64,

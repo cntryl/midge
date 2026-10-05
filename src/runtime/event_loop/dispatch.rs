@@ -72,8 +72,8 @@ impl RuntimeDispatcher {
             RuntimeMsg::CompactAll { request_id } => {
                 CompactionCoordinator::compact_all(event_loop, request_id)
             }
-            RuntimeMsg::ManifestPersist { request_id } => {
-                ManifestCoordinator::persist(event_loop, request_id)
+            RuntimeMsg::ManifestPersist { request_id, origin } => {
+                ManifestCoordinator::persist(event_loop, request_id, origin)
             }
             #[cfg(test)]
             msg @ RuntimeMsg::SetRuntimeConfig { .. } => Self::set_runtime_config(event_loop, &msg),

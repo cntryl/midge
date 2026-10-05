@@ -90,6 +90,12 @@ Hybrid:
 
 ## Benchmark Ownership
 
+- `tier4_system_checkpoint_write_amplification` owns the preregistered local
+  checkpoint campaign: three cells, three fresh release repeats and a separate
+  conditional policy gate. See
+  [Checkpoint Write Amplification](checkpoint-write-amplification.md) for the
+  5% byte or 20%-plus-5ms time predicate and accounting limits. The recorded
+  outcome is below; this campaign does not change the general regression budgets.
 - `tier4_system_local_throughput_regression` owns the local buffered throughput
   guard against memory mode and end-to-end local batch throughput.
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
@@ -131,3 +137,15 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 git diff --check
 ```
+
+### Recorded checkpoint campaign
+
+The unchanged checkpoint cadence misses the preregistered filesystem-issued
+snapshot payload target in cells B and C of [run 37274074026](https://github.com/cntryl/midge/actions/runs/37274074026),
+attempt 1, measured source `c8f0de80de7925c4e3fe92b665639e4615e53281`. All nine fresh release
+attempts passed construction and source/native/owner readback; B and C each
+miss in all three repeats. A has one time miss across three repeats.
+[The checkpoint guide](checkpoint-write-amplification.md#recorded-hosted-outcome)
+retains every row, exact target, immutable receipt and the separate final-hour
+acceptance boundary. This result measures engine-Fs payload and publication
+time; it does not approve a cadence change or a physical-device cost claim.

@@ -171,6 +171,8 @@ impl RetryFixture {
             storage.remote_sst_backend(),
             options.storage_io_timeout(),
         )));
+        #[cfg(feature = "internal-testing")]
+        let metadata_accounting = state.checkpoint_metrics();
         let (runtime, _) = Runtime::new();
         let (runtime, handle) = runtime.start_with_config(state, config)?;
         let mut heartbeat = LeaseHeartbeat::new_with_healthy_and_validity(
@@ -185,6 +187,8 @@ impl RetryFixture {
             runtime,
             handle,
             LeaseState::new(created.lease, guard, heartbeat, Some(storage)),
+            #[cfg(feature = "internal-testing")]
+            metadata_accounting,
         );
         Ok(Self {
             engine,
@@ -302,12 +306,16 @@ fn fixture_engine(
     runtime: Runtime,
     runtime_handle: RuntimeHandle,
     lease_state: LeaseState,
+    #[cfg(feature = "internal-testing")]
+    metadata_accounting: crate::metadata::accounting::MetricsHandle,
 ) -> Engine {
     let column_families = dashmap::DashMap::new();
     column_families.insert(0, ColumnFamilyHandle::new(0, "default".into()));
     let ingest_coordinators = dashmap::DashMap::new();
     ingest_coordinators.insert(0, Arc::new(ingest::IngestCoordinator::new(0)));
     Engine {
+        #[cfg(feature = "internal-testing")]
+        metadata_accounting,
         runtime: Some(runtime),
         runtime_handle,
         db_path: directory.to_path_buf(),

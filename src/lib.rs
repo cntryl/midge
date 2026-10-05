@@ -95,6 +95,16 @@ pub mod __internal {
     // Each module lists the items its tests, benches and fuzz targets use.
     // Glob re-exports would make every `pub` item reachable from outside the
     // crate and so hide dead code from the compiler.
+    pub mod checkpoint {
+        pub use crate::metadata::accounting::{
+            Bucket, Counters, LatencyHistogram, Medium, MetricsHandle, Origin, Snapshot,
+        };
+
+        #[must_use]
+        pub fn metrics_handle(engine: &crate::Engine) -> MetricsHandle {
+            engine.checkpoint_metrics()
+        }
+    }
     pub mod codec {
         pub use crate::codec::{
             compress_block, compress_block_with_trailer, compress_wal_value, decompress_block,

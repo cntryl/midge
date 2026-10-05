@@ -384,7 +384,10 @@ pub enum RuntimeMsg {
 
     // === Manifest Actor ===
     /// Persist manifest to disk.
-    ManifestPersist { request_id: u64 },
+    ManifestPersist {
+        request_id: u64,
+        origin: crate::metadata::accounting::Origin,
+    },
 
     // === Column Family Lifecycle ===
     /// Create a new column family.
@@ -690,7 +693,7 @@ impl RuntimeMsg {
             | RuntimeMsg::FlushMemtable { request_id, .. }
             | RuntimeMsg::WalSync { request_id }
             | RuntimeMsg::SealWalForCloud { request_id, .. }
-            | RuntimeMsg::ManifestPersist { request_id }
+            | RuntimeMsg::ManifestPersist { request_id, .. }
             | RuntimeMsg::ManifestCreateColumnFamily { request_id, .. }
             | RuntimeMsg::ManifestDropColumnFamily { request_id, .. }
             | RuntimeMsg::CompactAll { request_id } => VerificationBarrierAction::Reject {
@@ -717,7 +720,7 @@ impl RuntimeMsg {
             | RuntimeMsg::ApplySpilledTransaction { request_id, .. }
             | RuntimeMsg::WalSync { request_id }
             | RuntimeMsg::SealWalForCloud { request_id, .. }
-            | RuntimeMsg::ManifestPersist { request_id }
+            | RuntimeMsg::ManifestPersist { request_id, .. }
             | RuntimeMsg::ManifestCreateColumnFamily { request_id, .. }
             | RuntimeMsg::ManifestDropColumnFamily { request_id, .. }
             | RuntimeMsg::GetReadAmpMetrics { request_id }

@@ -1,4 +1,5 @@
 use super::EventLoop;
+use crate::metadata::accounting::Origin;
 
 /// SST names one journal append and mirror reserve at a time.
 const SST_NAME_RESERVATION_BLOCK: u64 = 16;
@@ -21,7 +22,7 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         sst_seq: u64,
     ) -> crate::common::MidgeResult<()> {
-        self.reserve_sst_name_with_origin(cf_id, sst_seq, None)
+        self.reserve_sst_name_with_origin(cf_id, sst_seq, None, Origin::CompactionBeforeGc)
     }
 
     pub(super) fn reserve_sst_name_durably_within(
@@ -30,7 +31,21 @@ impl EventLoop {
         sst_seq: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        self.reserve_sst_name_with_origin(cf_id, sst_seq, Some(deadline))
+        self.reserve_sst_name_with_origin(
+            cf_id,
+            sst_seq,
+            Some(deadline),
+            Origin::CompactionBeforeGc,
+        )
+    }
+
+    pub(super) fn reserve_sst_name_durably_for(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_seq: u64,
+        origin: Origin,
+    ) -> crate::common::MidgeResult<()> {
+        self.reserve_sst_name_with_origin(cf_id, sst_seq, None, origin)
     }
 
     fn reserve_sst_name_with_origin(
@@ -38,6 +53,7 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         sst_seq: u64,
         deadline: Option<&crate::common::OperationDeadline>,
+        origin: Origin,
     ) -> crate::common::MidgeResult<()> {
         check_reservation_deadline(deadline)?;
         let reserved_through = self
@@ -70,10 +86,10 @@ impl EventLoop {
                 crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
             })?
             .max(durable_next);
-        let edit_id = self
-            .state
-            .manifest_store
-            .append(&crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq })?;
+        let edit_id = self.state.manifest_store.append_for(
+            origin,
+            &crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq },
+        )?;
         self.state.manifest.set_next_sst_seq(cf_id, next_seq);
         self.state.manifest.note_applied_journal_edit(edit_id);
         if let Some(deadline) = deadline {

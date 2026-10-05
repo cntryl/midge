@@ -2,9 +2,29 @@ name: Benchmark Tier 4
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [all, checkpoint-smoke, checkpoint]
+        default: all
+      expected_sha:
+        type: string
+        required: false
+        description: Exact 40-character SHA required for either checkpoint mode
+
+      transport_smoke_run_id:
+        type: string
+        required: false
+        description: Completed checkpoint-smoke run at this same SHA; required for checkpoint
+      transport_smoke_attempt:
+        type: string
+        required: false
+        default: "1"
+        description: Exact attempt of the completed transport smoke
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: bench-tier4-${{ github.ref }}
@@ -12,26 +32,218 @@ concurrency:
 
 jobs:
   bench:
+    if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Update Rust to stable
-        run: rustup update stable
-
-      - name: Run registered Tier 4 targets
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - name: Run ordinary registered Tier 4 targets
         shell: bash
-        run: cargo bench --bench 'tier4_[sy]*'
-
-      - name: Upload benchmark reports
+        run: |
+          set -euo pipefail
+          mkdir -p target/tier4-selection
+          cargo metadata --no-deps --format-version=1 > target/tier4-selection/metadata.json
+          jq -r '.packages[] | select(.name == "cntryl-midge") | .targets[] | select(.kind | index("bench") != null) | select(.name | test("^tier4_[sy]")) | select(.name != "tier4_system_checkpoint_write_amplification") | .name' target/tier4-selection/metadata.json > target/tier4-selection/targets.txt
+          mapfile -t checkpoint_ordinary_targets < target/tier4-selection/targets.txt
+          test "${#checkpoint_ordinary_targets[@]}" -gt 0
+          for checkpoint_ordinary_target in "${checkpoint_ordinary_targets[@]}"; do
+            cargo bench --bench "$checkpoint_ordinary_target"
+          done
+      - uses: actions/upload-artifact@v7
         if: always()
-        uses: actions/upload-artifact@v7
         with:
           name: bench-tier4-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**
           if-no-files-found: ignore
+
+  checkpoint-build:
+    if: ${{ contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      toolchain: ${{ steps.toolchain.outputs.version }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify immutable checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/checkpoint-build
+          [[ "$EXPECTED_SHA" =~ ^[[:xdigit:]]{40}$ ]]
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          git diff --cached --quiet
+      - name: Resolve one toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup default stable
+          version="$(rustc -V | awk '{print $2}')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          rustc -Vv > target/checkpoint-build/rustc.txt
+          cargo -V > target/checkpoint-build/cargo-version.txt
+      - name: Compile target outside measurement runners
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo bench --locked --no-run --bench tier4_system_checkpoint_write_amplification --features checkpoint-bench --message-format=json > target/checkpoint-build/cargo.jsonl 2> target/checkpoint-build/cargo.stderr
+      - name: Compile Rust readback outside measurement runners
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --example checkpoint_campaign_readback --features internal-testing --message-format=json > target/checkpoint-build/reader-cargo.jsonl 2> target/checkpoint-build/reader-cargo.stderr
+          jq -s '[.[] | select(.reason == "compiler-artifact" and .target.name == "checkpoint_campaign_readback" and (.target.kind | index("example") != null) and .executable != null)] | unique_by(.executable) | if length == 1 then .[0] else error("not exactly one readback executable") end' target/checkpoint-build/reader-cargo.jsonl > target/checkpoint-build/reader-compiler-artifact.json
+          jq -e '.profile.opt_level == "3" and .profile.debug_assertions == false and (.features | index("internal-testing") != null)' target/checkpoint-build/reader-compiler-artifact.json
+          checkpoint_reader="$(jq -r .executable target/checkpoint-build/reader-compiler-artifact.json)"
+          test -x "$checkpoint_reader"
+          case "$checkpoint_reader" in "$GITHUB_WORKSPACE"/target/release/examples/*) ;; *) exit 1 ;; esac
+          cp "$checkpoint_reader" target/checkpoint-build/checkpoint_campaign_readback
+          (cd target/checkpoint-build && sha256sum checkpoint_campaign_readback > reader-executable.sha256)
+      - name: Bind the actual release executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=target/checkpoint-build
+          jq -s '[.[] | select(.reason == "compiler-artifact" and .target.name == "tier4_system_checkpoint_write_amplification" and (.target.kind | index("bench") != null) and .executable != null)] | unique_by(.executable) | if length == 1 then .[0] else error("not exactly one benchmark executable") end' "$root/cargo.jsonl" > "$root/compiler-artifact.json"
+          jq -e '.profile.opt_level == "3" and .profile.debug_assertions == false and (.features | index("internal-testing") != null) and (.features | index("checkpoint-bench") != null)' "$root/compiler-artifact.json"
+          executable="$(jq -r .executable "$root/compiler-artifact.json")"
+          test -x "$executable"
+          case "$executable" in "$GITHUB_WORKSPACE"/target/release/*) ;; *) exit 1 ;; esac
+          cp "$executable" "$root/tier4_system_checkpoint_write_amplification"
+          (cd "$root" && sha256sum tier4_system_checkpoint_write_amplification > executable.sha256)
+          ldd "$executable" > "$root/ldd.txt"
+          jq -n --arg sha "$GITHUB_SHA" --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg lock "$(sha256sum Cargo.lock | awk '{print $1}')" --arg toolchain "${{ steps.toolchain.outputs.version }}" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg binary_hash "$(sha256sum "$executable" | awk '{print $1}')" --arg reader_hash "$(sha256sum "$root/checkpoint_campaign_readback" | awk '{print $1}')" '{schema_version:"midge-checkpoint-build.v1",sha:$sha,tree:$tree,cargo_lock_sha256:$lock,toolchain:$toolchain,run_id:$run,run_attempt:$attempt,executable_sha256:$binary_hash,reader_executable_sha256:$reader_hash,reader:"checkpoint_campaign_readback",features:["checkpoint-bench"],reader_features:["internal-testing"],profile:"bench/release",binary:"tier4_system_checkpoint_write_amplification"}' > "$root/build-manifest.json"
+          tar -C "$root" -czf "$root/executable.tar.gz" tier4_system_checkpoint_write_amplification executable.sha256
+      - name: Require actual same-source transport smoke before full campaign
+        if: inputs.mode == 'checkpoint'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKPOINT_SMOKE_RUN: ${{ inputs.transport_smoke_run_id }}
+          CHECKPOINT_SMOKE_ATTEMPT: ${{ inputs.transport_smoke_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$CHECKPOINT_SMOKE_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CHECKPOINT_SMOKE_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          test "$CHECKPOINT_SMOKE_RUN" != "$GITHUB_RUN_ID"
+          bash examples/checkpoint_campaign_readback/capture-and-readback.sh construction-smoke "$GITHUB_REPOSITORY" "$CHECKPOINT_SMOKE_RUN" "$CHECKPOINT_SMOKE_ATTEMPT" "$GITHUB_SHA" "$RUNNER_TEMP/checkpoint-prerequisite" "$GITHUB_WORKSPACE/target/checkpoint-build/checkpoint_campaign_readback" "$GITHUB_WORKSPACE/target/checkpoint-build/transport-smoke-readback.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: checkpoint-build-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: target/checkpoint-build/**
+          if-no-files-found: error
+          retention-days: 180
+
+  checkpoint-measure:
+    name: checkpoint-${{ matrix.cell.id }}-r${{ matrix.repeat }}
+    needs: checkpoint-build
+    if: ${{ contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        cell: ${{ fromJSON(inputs.mode == 'checkpoint-smoke' && '[{"id":"A","workload":"checkpoint_local_256x1mib_1cf","cycles":256,"rows":1024,"families":1}]' || '[{"id":"A","workload":"checkpoint_local_256x1mib_1cf","cycles":256,"rows":1024,"families":1},{"id":"B","workload":"checkpoint_local_512x256kib_16cf","cycles":512,"rows":256,"families":16},{"id":"C","workload":"checkpoint_local_1024x64kib_1cf","cycles":1024,"rows":64,"families":1}]') }}
+        repeat: ${{ fromJSON(inputs.mode == 'checkpoint-smoke' && '[1]' || '[1,2,3]') }}
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      SELECTED_WORKLOAD: ${{ matrix.cell.workload }}
+      MIDGE_CHECKPOINT_REPEAT: ${{ matrix.repeat }}
+      STRESS_PROFILE: smoke
+      STRESS_SAMPLES: "1"
+      STRESS_WARMUP_SAMPLES: "0"
+      STRESS_COOLDOWN_SAMPLES: "0"
+      STRESS_CONFIRM_REGRESSIONS: "0"
+      STRESS_TIMEOUT_SECS: "900"
+      STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+      STRESS_GIT_SHA: ${{ github.sha }}
+      STRESS_RUN_ID: midge715-${{ github.run_id }}-a${{ github.run_attempt }}-${{ matrix.cell.id }}-r${{ matrix.repeat }}
+      STRESS_OUTPUT_DIR: /dev/shm/midge715-${{ github.run_id }}-a${{ github.run_attempt }}-${{ matrix.cell.id }}-r${{ matrix.repeat }}/native
+      MIDGE_STRESS_ARTIFACT_DIR: /dev/shm/midge715-${{ github.run_id }}-a${{ github.run_attempt }}-${{ matrix.cell.id }}-r${{ matrix.repeat }}/midge
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: checkpoint-build-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: target/checkpoint-executable
+      - name: Validate source, build and executable before measurement
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/checkpoint-attempt
+          [[ "$EXPECTED_SHA" =~ ^[[:xdigit:]]{40}$ ]]
+          test "$EXPECTED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          git diff --cached --quiet
+          jq -e --arg sha "$GITHUB_SHA" --arg tree "$(git rev-parse 'HEAD^{tree}')" --arg lock "$(sha256sum Cargo.lock | awk '{print $1}')" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '.sha == $sha and .tree == $tree and .cargo_lock_sha256 == $lock and .run_id == $run and .run_attempt == $attempt and .profile == "bench/release"' target/checkpoint-executable/build-manifest.json
+          tar -xzf target/checkpoint-executable/executable.tar.gz -C target/checkpoint-executable
+          (cd target/checkpoint-executable && sha256sum --check executable.sha256)
+          jq -e --arg hash "$(sha256sum target/checkpoint-executable/tier4_system_checkpoint_write_amplification | awk '{print $1}')" '.executable_sha256 == $hash' target/checkpoint-executable/build-manifest.json
+          chmod +x target/checkpoint-executable/tier4_system_checkpoint_write_amplification
+          toolchain="${{ needs.checkpoint-build.outputs.toolchain }}"
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup default "$toolchain"
+          test "$(rustc -V | awk '{print $2}')" = "$toolchain"
+          # Companion diagnostics use memory; the database remains a real disk TempDir.
+          test "$(stat -f -c %T /dev/shm)" = tmpfs
+          test "$(df -B1 --output=avail /dev/shm | tail -1 | tr -d ' ')" -ge 16777216
+          mkdir -p "$STRESS_OUTPUT_DIR" "$MIDGE_STRESS_ARTIFACT_DIR"
+          cp target/checkpoint-executable/build-manifest.json target/checkpoint-attempt/
+          jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg cell "${{ matrix.cell.id }}" --arg repeat "$MIDGE_CHECKPOINT_REPEAT" --arg workload "$SELECTED_WORKLOAD" --arg job "$GITHUB_JOB" --arg image "$ImageOS/$ImageVersion" '{schema_version:"midge-checkpoint-attempt.v1",sha:$sha,run_id:$run,run_attempt:$attempt,cell:$cell,repeat:$repeat,workload:$workload,job:$job,runner_image:$image,device_write_amplification_measured:false}' > target/checkpoint-attempt/job-manifest.json
+          uname -a > target/checkpoint-attempt/kernel.txt
+          rustc -Vv > target/checkpoint-attempt/rustc.txt
+          lscpu > target/checkpoint-attempt/cpu.txt
+          findmnt -T "$RUNNER_TEMP" > target/checkpoint-attempt/database-mount.txt
+          df -B1 "$RUNNER_TEMP" /dev/shm > target/checkpoint-attempt/free-space.txt
+          cat /proc/loadavg /proc/stat > target/checkpoint-attempt/host-before.txt
+          target/checkpoint-executable/tier4_system_checkpoint_write_amplification --list --workload "$SELECTED_WORKLOAD" > target/checkpoint-attempt/workload-list.txt
+          target/checkpoint-executable/tier4_system_checkpoint_write_amplification --print-config --workload "$SELECTED_WORKLOAD" > target/checkpoint-attempt/native-config.txt
+          target/checkpoint-executable/tier4_system_checkpoint_write_amplification --__cntryl-stress-selection-probe --workload "$SELECTED_WORKLOAD" > target/checkpoint-attempt/selection.json
+          jq -e --arg workload "$SELECTED_WORKLOAD" '.workload == $workload and (.registered | length) == 3 and (.selected | length) == 1 and .selected[0].function_name == $workload and .selected[0].tier == 4 and .selected[0].ignored == false' target/checkpoint-attempt/selection.json
+          sync
+      - name: Run one native fixed workload in fresh process
+        id: workload
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          # This step has no Cargo/build/test/container/sampler command.
+          target/checkpoint-executable/tier4_system_checkpoint_write_amplification --workload "$SELECTED_WORKLOAD" --bench 2>&1 | tee target/checkpoint-attempt/workload.log
+      - name: Preserve every outcome and canonical receipt after process exit
+        if: always()
+        shell: bash
+        env:
+          WORKLOAD_OUTCOME: ${{ steps.workload.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/checkpoint-attempt/native target/checkpoint-attempt/midge
+          if test -d "$STRESS_OUTPUT_DIR"; then cp -a "$STRESS_OUTPUT_DIR/." target/checkpoint-attempt/native/; fi
+          if test -d "$MIDGE_STRESS_ARTIFACT_DIR"; then cp -a "$MIDGE_STRESS_ARTIFACT_DIR/." target/checkpoint-attempt/midge/; fi
+          jq -n --arg outcome "${WORKLOAD_OUTCOME:-skipped}" '{workload_step_outcome:$outcome}' > target/checkpoint-attempt/exit-outcome.json
+          cat /proc/loadavg /proc/stat > target/checkpoint-attempt/host-after.txt
+          python3 tools/finalize_stress_artifacts.py --stress-root target/checkpoint-attempt/native --artifact-root target/checkpoint-attempt/midge --workload "$SELECTED_WORKLOAD" --suite tier4-system-checkpoint-write-amplification --sha "$GITHUB_SHA" --outcome "${WORKLOAD_OUTCOME:-skipped}" > target/checkpoint-attempt/finalization.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-tier4-checkpoint-${{ matrix.cell.id }}-r${{ matrix.repeat }}-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: target/checkpoint-attempt/**
+          if-no-files-found: error
+          retention-days: 180

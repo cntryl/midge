@@ -1,5 +1,8 @@
 use crate::{Engine, OpenOptions, TransactionMode};
 
+#[cfg(feature = "internal-testing")]
+mod checkpoint_accounting;
+
 #[cfg(all(feature = "failpoints", feature = "internal-testing"))]
 mod deadline_checkpoint;
 

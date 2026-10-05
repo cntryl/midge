@@ -1,10 +1,11 @@
 use super::EventLoop;
 use crate::io::FsError;
+use crate::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
     FlushBuildCompletion, FlushBuildOutput, FlushIdentity, FlushMirrorCompletion, FlushMirrorTask,
     FlushPublicationDelta, FlushPublishCompletion, FlushPublishTask, FlushWorkerResult,
 };
-use crate::runtime::state::{ImmutableFlush, ImmutableFlushPhase};
+use crate::runtime::state::{FlushManifestPublication, ImmutableFlush, ImmutableFlushPhase};
 use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,9 +34,26 @@ impl EventLoop {
             || !self.state.compaction.compacting_ssts.is_empty()
     }
 
+    pub(super) fn ordinary_flush_origin(&self) -> Origin {
+        if self.cloud_coordinator.hybrid_storage.is_some() {
+            Origin::CloudFlush
+        } else {
+            Origin::OrdinaryLocalFlush
+        }
+    }
+
     pub(super) fn freeze_active_memtable(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
+    ) -> crate::common::MidgeResult<Option<u64>> {
+        let origin = self.ordinary_flush_origin();
+        self.freeze_active_memtable_for(cf_id, origin)
+    }
+
+    pub(super) fn freeze_active_memtable_for(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        origin: Origin,
     ) -> crate::common::MidgeResult<Option<u64>> {
         let active_size = self
             .state
@@ -74,7 +92,7 @@ impl EventLoop {
         };
         let flush = self
             .state
-            .track_new_immutable_flush(cf_id, Arc::clone(&frozen), sequence)
+            .track_new_immutable_flush_for(cf_id, Arc::clone(&frozen), sequence, origin)
             .ok_or_else(|| {
                 crate::common::MidgeError::ResourceLimit(
                     "flush identity space exhausted".to_string(),
@@ -234,9 +252,21 @@ impl EventLoop {
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),
         };
-        if let Err(error) = self.flush_actor.submit_publish(task) {
-            self.publication_gate.release(&publication_owner);
-            self.fail_flush_pipeline(flush.flush_id, None, &error);
+        let submitted_at = std::time::Instant::now();
+        match self.flush_actor.submit_publish(task) {
+            Ok(()) => self
+                .state
+                .accept_flush_publication_attempt(flush.flush_id, submitted_at),
+            Err(error) => {
+                self.state.metadata_accounting().publication_attempt(
+                    flush.accounting.origin,
+                    self.state.metadata_medium(),
+                    submitted_at.elapsed(),
+                    true,
+                );
+                self.publication_gate.release(&publication_owner);
+                self.fail_flush_pipeline(flush.flush_id, None, &error);
+            }
         }
     }
 
@@ -347,9 +377,18 @@ impl EventLoop {
 
     /// Picks the SST sequence for a flush output and, when the output can
     /// reach remote storage before it is published, makes the name durable.
+    #[cfg(test)]
     fn reserve_flush_sst_seq(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
+    ) -> crate::common::MidgeResult<u64> {
+        self.reserve_flush_sst_seq_for(cf_id, Origin::Unclassified)
+    }
+
+    fn reserve_flush_sst_seq_for(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        origin: Origin,
     ) -> crate::common::MidgeResult<u64> {
         let durable_next = self
             .state
@@ -375,7 +414,7 @@ impl EventLoop {
             *cursor = sst_seq.checked_add(1).ok_or_else(|| {
                 crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
             })?;
-            self.reserve_sst_name_durably(cf_id, sst_seq)?;
+            self.reserve_sst_name_durably_for(cf_id, sst_seq, origin)?;
             return Ok(sst_seq);
         }
         let sst_seq = durable_next;
@@ -426,7 +465,8 @@ impl EventLoop {
         // Reserve while this event-loop turn owns metadata, before build can
         // overlap compute. A later publisher may park the build without a new
         // journal append or mirror. Retries retain this canonical identity.
-        let sst_seq = self.reserve_flush_sst_seq(cf_id)?;
+        let origin = flush.accounting.origin;
+        let sst_seq = self.reserve_flush_sst_seq_for(cf_id, origin)?;
         let sst_name = crate::cloud_layout::file_name(cf_id, 0, sst_seq);
         let (_, flush) = self
             .state
@@ -525,6 +565,8 @@ impl EventLoop {
                 );
                 return true;
             }
+            self.state
+                .finish_flush_publication_attempt(completion.identity.flush_id, true);
             self.settle_stale_publish_reservation(&completion);
             self.flush_actor.finish_pipeline();
             self.publication_gate.release(
@@ -574,6 +616,13 @@ impl EventLoop {
         delta: &FlushPublicationDelta,
     ) -> crate::common::MidgeResult<()> {
         self.validate_flush_completion(delta.identity)?;
+        let origin = self
+            .state
+            .immutable_flush_by_id(delta.identity.flush_id)
+            .expect("validated flush immutable exists")
+            .1
+            .accounting
+            .origin;
         self.state.record_flush_publication_intent(
             delta.identity.cf_id,
             delta.identity.sequence,
@@ -581,13 +630,15 @@ impl EventLoop {
         )?;
         crate::failpoints::fail_point!("midge::flush::after_publication_intent_before_manifest");
         self.check_lease_health()?;
-        self.state.commit_flush_publication(
-            delta.identity.cf_id,
-            delta.identity.sequence,
-            &delta.file_meta,
-            delta.next_sst_seq,
-            self.cloud_coordinator.hybrid_storage.is_some(),
-        )?;
+        self.state
+            .commit_flush_publication_for(FlushManifestPublication {
+                origin,
+                cf_id: delta.identity.cf_id,
+                sequence: delta.identity.sequence,
+                file_meta: &delta.file_meta,
+                next_sst_seq: delta.next_sst_seq,
+                require_snapshot: self.cloud_coordinator.hybrid_storage.is_some(),
+            })?;
         Ok(())
     }
 
@@ -701,10 +752,35 @@ impl EventLoop {
             self.flush_actor.finish_pipeline();
             return;
         };
+        let accounting = flush.accounting;
         let frozen = Arc::clone(&flush.memtable);
+        let observed_attempt = self
+            .state
+            .finish_flush_publication_attempt(delta.identity.flush_id, false);
         if let Some(removed_size) = self.state.complete_immutable_flush(cf_id, &frozen) {
+            if let Some(started) = accounting.started {
+                self.state.metadata_accounting().flush_committed(
+                    accounting.origin,
+                    self.state.metadata_medium(),
+                    delta.file_meta.size_bytes,
+                    started.elapsed(),
+                );
+            } else {
+                self.state
+                    .metadata_accounting()
+                    .invalidate_missing_publication_start();
+            }
+            if !observed_attempt {
+                self.state
+                    .metadata_accounting()
+                    .invalidate_missing_publication_start();
+            }
             self.state.total_memtable_bytes =
                 self.state.total_memtable_bytes.saturating_sub(removed_size);
+        } else {
+            self.state
+                .metadata_accounting()
+                .invalidate_missing_publication_start();
         }
         if let Err(error) = self.refresh_cloud_flush_headroom() {
             tracing::warn!(%error, "flush staging headroom awaits output retirement");
@@ -796,6 +872,7 @@ impl EventLoop {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
         error: &crate::common::MidgeError,
     ) {
+        self.state.finish_flush_publication_attempt(flush_id, true);
         let identity = self
             .state
             .immutable_flush_by_id(flush_id)
@@ -2962,3 +3039,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "flush_pipeline/accounting_tests.rs"]
+mod accounting_tests;

@@ -3,6 +3,9 @@ use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
 #[cfg(feature = "internal-testing")]
+mod checkpoint_origins;
+
+#[cfg(feature = "internal-testing")]
 mod flush_retry;
 
 fn install_underfull_overlap_fixture(

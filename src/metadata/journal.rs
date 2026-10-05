@@ -419,10 +419,20 @@ fn append_validated_edit_with_fs(
 
 /// Appends a validated edit under `edit_id`. The caller holds the manifest
 /// writer lock and has chosen an id above every durable one.
+#[cfg(test)]
 pub(crate) fn append_validated_edit_with_id(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
     edit_id: u64,
+) -> MidgeResult<u64> {
+    append_validated_edit_with_id_observed(fs, edit, edit_id, None)
+}
+
+pub(crate) fn append_validated_edit_with_id_observed(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edit: &ManifestEdit,
+    edit_id: u64,
+    observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<u64> {
     let record = encode_journal_record(
         edit.record_type(),
@@ -437,7 +447,7 @@ pub(crate) fn append_validated_edit_with_id(
             "failpoint: no space on manifest journal append".to_string()
         )
     ));
-    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id)?;
+    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id, observation)?;
     tracing::info!(
         write_ns,
         fsync_ns,
@@ -450,6 +460,7 @@ fn append_record_and_marker_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     record: Vec<u8>,
     edit_id: u64,
+    observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<(u128, u128)> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
@@ -461,6 +472,9 @@ fn append_record_and_marker_with_fs(
         },
     )?;
 
+    let framed_bytes = u64::try_from(record.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(marker.len()).unwrap_or(u64::MAX));
     let journal_path = FsPath::new(JOURNAL_FILE);
     // A missing or still-empty journal has never had its directory entry
     // made durable, whether this append creates it or a crash left it empty.
@@ -508,6 +522,9 @@ fn append_record_and_marker_with_fs(
             .map_err(FsError::into_midge)?;
     }
     let fsync_ns = fsync_start.elapsed().as_nanos();
+    if let Some(observation) = observation {
+        observation.journal_durable(framed_bytes);
+    }
 
     Ok((write_ns, fsync_ns))
 }
@@ -1056,11 +1073,21 @@ fn append_validated_edit_batch_with_fs(
 }
 
 /// Appends a validated batch under `edit_id`; see
-/// [`append_validated_edit_with_id`].
+/// [`append_validated_edit_with_id_observed`].
+#[cfg(test)]
 pub(crate) fn append_validated_edit_batch_with_id(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
     edit_id: u64,
+) -> MidgeResult<u64> {
+    append_validated_edit_batch_with_id_observed(fs, batch, edit_id, None)
+}
+
+pub(crate) fn append_validated_edit_batch_with_id_observed(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    batch: &[ManifestEdit],
+    edit_id: u64,
+    observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<u64> {
     let record = encode_journal_record(
         BATCH_RECORD_TYPE,
@@ -1092,7 +1119,7 @@ pub(crate) fn append_validated_edit_batch_with_id(
             "failpoint: no space on manifest journal batch append".to_string()
         ))
     );
-    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id)?;
+    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id, observation)?;
     tracing::info!(
         batch_size = batch.len(),
         write_ns,
