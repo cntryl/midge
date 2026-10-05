@@ -2,7 +2,7 @@
 
 ## Is Midge production-ready?
 
-Midge `0.3.0` is pre-1.0. The API, operational procedures, and cloud support
+Midge `0.3.1` is pre-1.0. The API, operational procedures, and cloud support
 boundaries can change. Cloud-backed storage is supported and continuously
 qualified through Sqrzl; deployment-specific credentials, IAM, networking,
 provider configuration, quotas, and capacity remain the adopter's responsibility.

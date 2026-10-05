@@ -1,6 +1,6 @@
 # Midge documentation
 
-This documentation describes Midge `0.3.0`, an embedded Rust LSM key-value
+This documentation describes Midge `0.3.1`, an embedded Rust LSM key-value
 engine with MSRV Rust `1.97`. It is the current 0.x contract, not a promise of
 long-term API or persisted-format stability. Cloud-backed storage is supported
 pre-1.0 and uses self-contained Sqrzl qualification.

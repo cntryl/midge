@@ -1,5 +1,7 @@
 # Midge 0.3.1 Bughunt and Roadmap
 
+Historical status record: superseded by the [final release qualification](#final-release-qualification-2026-10-02).
+
 This roadmap records a repository-wide correctness and performance review of Midge 0.3.0 at `c484ea3d`. The review used Jev to prioritize bounded questions and challenge conclusions. Jev results are triage signals; every committed item below is supported by source analysis plus a focused failing probe or measured scaling evidence.
 
 ## Release decision
@@ -303,6 +305,8 @@ Verify peeled `v0.3.1`, qualified SHA, and current `main` match. Explicitly disp
 
 ## Backup/restore repair evidence (in progress)
 
+Historical status record: superseded by the [final release qualification](#final-release-qualification-2026-10-02).
+
 The current batch repairs #664 and #665 together. Four public API regressions
 failed before runtime changes: direct backup overlap, restore overlap, symlink
 alias overlap, and deterministic foreign-stage blockage. Actual restore-process
@@ -327,6 +331,8 @@ Hosted exact-head and post-merge qualification remain pending.
   remain gates before promotion and publication.
 
 ## 0.3.1 release preparation (2026-10-02)
+
+Historical status record: superseded by the [final release qualification](#final-release-qualification-2026-10-02).
 
 All twelve milestone issues are closed. Repairs merged through PRs #675
 (backup/restore), #676 (authority and salvage), #679 (spill-fixture validity),
