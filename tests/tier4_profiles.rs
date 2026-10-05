@@ -12,9 +12,10 @@ fn should_keep_original_short_window_when_smoke_profile_is_selected() {
     // Arrange: different scenarios retain their existing smoke windows.
     let windows = [5, 8, 12, 15, 16, 20];
 
-    // Act and Assert: smoke has no replacement fixed-duration window.
+    // Act: resolve each original smoke window using the shared policy.
     for seconds in windows {
         let original = Duration::from_secs(seconds);
+        // Assert: smoke has no replacement fixed-duration window.
         assert_eq!(
             stress_config::tier4_profile_window(Some("smoke")).unwrap(),
             None
@@ -75,8 +76,9 @@ fn should_reject_unknown_profile_when_ui_value_is_invalid() {
     // Arrange: a typo must not silently use the short smoke window.
     let invalid = ["", "default", "lab", "standard\n", "FULL"];
 
-    // Act and Assert: only the explicit UI contract is accepted.
+    // Act: resolve each invalid profile using the shared policy.
     for profile in invalid {
+        // Assert: only the explicit UI contract is accepted.
         assert!(matches!(
             stress_config::tier4_duration_for_profile(Some(profile), Duration::from_secs(5)),
             Err(MidgeError::InvalidArgument(_))
