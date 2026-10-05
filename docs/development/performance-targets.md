@@ -94,8 +94,8 @@ Hybrid:
   checkpoint campaign: three cells, three fresh release repeats and a separate
   conditional policy gate. See
   [Checkpoint Write Amplification](checkpoint-write-amplification.md) for the
-  5% byte or 20%-plus-5ms time predicate and accounting limits. Measurement is
-  pending; this campaign does not change the general regression budgets.
+  5% byte or 20%-plus-5ms time predicate and accounting limits. The recorded
+  outcome is below; this campaign does not change the general regression budgets.
 - `tier4_system_local_throughput_regression` owns the local buffered throughput
   guard against memory mode and end-to-end local batch throughput.
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
