@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
+#[cfg(test)]
+#[path = "telemetry/tests.rs"]
+mod tests;
+
 #[derive(Clone, Default)]
 pub(super) struct Recorder(Arc<Mutex<Snapshot>>);
 
@@ -20,6 +24,8 @@ struct Fields {
     method: String,
     phase: String,
     range: bool,
+    started: bool,
+    completed: bool,
     values: BTreeMap<String, u64>,
 }
 
@@ -29,10 +35,13 @@ impl Visit for Fields {
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        if field.name() == "range" {
-            self.range = value;
-        } else {
-            self.values.insert(field.name().into(), u64::from(value));
+        match field.name() {
+            "range" => self.range = value,
+            "started" => self.started = value,
+            "completed" => self.completed = value,
+            _ => {
+                self.values.insert(field.name().into(), u64::from(value));
+            }
         }
     }
 
@@ -69,11 +78,19 @@ impl<S: tracing::Subscriber> Layer<S> for Recorder {
             fields
                 .values
                 .insert("http_errors".into(), u64::from(status >= 400));
+            fields.values.insert("count".into(), 1);
             snapshot.http.entry(method).or_default()
         } else {
+            if fields.started {
+                fields.values.insert("started_count".into(), 1);
+            }
+            // Count a completed measurement once, while single-event coverage
+            // and reservation probes retain their existing event count.
+            if fields.completed || !fields.started {
+                fields.values.insert("count".into(), 1);
+            }
             snapshot.recovery_phases.entry(fields.phase).or_default()
         };
-        fields.values.insert("count".into(), 1);
         for (name, value) in fields.values {
             let current = totals.entry(name).or_default();
             *current = current.saturating_add(value);
