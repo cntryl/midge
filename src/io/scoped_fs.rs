@@ -298,28 +298,38 @@ mod tests {
 
     #[test]
     fn should_disarm_retained_local_file_when_startup_owner_completes_transfer() {
-        // Arrange
+        // Arrange: complete real filesystem creation before capturing the clock.
         let directory = tempfile::tempdir().unwrap();
-        let started = std::time::Instant::now();
-        let budget = std::time::Duration::from_millis(20);
-        let scope = DeadlineScope::new(OperationDeadline::from_start(started, budget));
         let inner: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let path = FsPath::new("accepted.wal");
+        drop(inner.open_persistent_handle(&path, read_write()).unwrap());
+        let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let scope = DeadlineScope::new(deadline);
         let view = scope_fs(inner, scope.clone());
-        let mut file = view
-            .open_persistent_handle(&FsPath::new("accepted.wal"), read_write())
-            .unwrap();
+        let mut file = view.open_persistent_handle(&path, read_write()).unwrap();
         scope.complete().unwrap();
+        drop(view);
 
         // Act: normal runtime writes outlive the original startup budget.
-        std::thread::sleep(budget.saturating_sub(started.elapsed()));
-        scope.cancel();
+        while !deadline.is_expired() {
+            std::thread::sleep(deadline.remaining());
+        }
+        let ambiguous = scope.cancel();
         let result = file.append(Bytes::from_static(b"normal runtime"));
+        file.sync(Durability::Durable).unwrap();
 
-        // Assert
+        // Assert: completed transfer disarms even the retained persistent file.
+        assert!(deadline.is_expired());
+        assert!(!ambiguous);
+        assert!(!scope.deadline().is_bounded());
         assert_eq!(result.unwrap(), 0);
         assert_eq!(
             file.read_at(0, 14).unwrap(),
             Bytes::from_static(b"normal runtime")
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("accepted.wal")).unwrap(),
+            b"normal runtime"
         );
     }
 

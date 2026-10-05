@@ -354,20 +354,29 @@ fn assert_acknowledged_rows(engine: &Engine, cf: &ColumnFamilyHandle) -> MidgeRe
 }
 
 fn abandon_accepted_flush(fixture: &RetryFixture, cf: &ColumnFamilyHandle) {
-    let result = fixture.engine.flush_cf_with_timeout(cf, CALLER_WAIT);
-    let returned = Instant::now();
+    // Seed the real pipeline without assuming scheduling and SST construction
+    // finish inside a short caller wait under a parallel runner.
+    let submitted = fixture.engine.flush_cf_with_timeout(cf, CALLER_WAIT);
     assert!(
         fixture.gate.wait_for_start(),
         "real SST publication never entered"
     );
+    // This caller starts only after the actual worker owns a held publication.
+    let caller_started = Instant::now();
+    let result = fixture.engine.flush_cf_with_timeout(cf, CALLER_WAIT);
+    let returned = Instant::now();
     let publications = fixture.gate.publications();
     assert!(
-        publications[0].started <= returned,
-        "caller expired before publication acceptance"
+        publications[0].started <= caller_started && caller_started <= returned,
+        "short barrier began before actual publication acceptance"
     );
     assert!(
         !publications[0].completed,
         "held publication completed without release"
+    );
+    assert!(
+        matches!(submitted, Err(MidgeError::Timeout(_))),
+        "held pipeline's initial caller unexpectedly settled: {submitted:?}"
     );
     assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
 }

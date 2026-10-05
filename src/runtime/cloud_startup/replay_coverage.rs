@@ -443,20 +443,26 @@ mod tests {
         );
     }
 
-    struct SlowSuccessfulRange {
+    struct ExpiringSuccessfulRange {
         completed: std::sync::atomic::AtomicUsize,
+        completed_bytes: std::sync::atomic::AtomicU64,
+        deadline: crate::common::OperationDeadline,
     }
 
-    impl crate::io::traits::ReadObserver for SlowSuccessfulRange {
+    impl crate::io::traits::ReadObserver for ExpiringSuccessfulRange {
         fn remote_range_started(&self) {}
 
         fn remote_range_completed(&self, bytes: u64, _elapsed: std::time::Duration, failed: bool) {
             if !failed && bytes > 0 {
                 self.completed
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.completed_bytes
+                    .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel);
                 // Delay delivery after an actual successful range. This is a
                 // controlled adapter timing test, not a provider timeout claim.
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                while !self.deadline.is_expired() {
+                    std::thread::sleep(self.deadline.remaining());
+                }
             }
         }
     }
@@ -471,26 +477,35 @@ mod tests {
             .join("cloud/sst")
             .join(&coverage.manifest.files[0].name);
         let before = std::fs::read(path.clone()).unwrap();
-        let observer = Arc::new(SlowSuccessfulRange {
+        let record = put(7, None);
+        let deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let scope = crate::common::DeadlineScope::new(deadline);
+        let observer = Arc::new(ExpiringSuccessfulRange {
             completed: std::sync::atomic::AtomicUsize::new(0),
+            completed_bytes: std::sync::atomic::AtomicU64::new(0),
+            deadline,
         });
         let delayed_fs = original_fs.with_read_observer(observer.clone()).unwrap();
-        let scope = crate::common::DeadlineScope::new(
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(10)),
-        );
         coverage.fs = crate::io::scope_fs(delayed_fs, scope.clone());
-        let record = put(7, None);
 
         // Act: a completed range arrives after the shared budget expires.
         let result = coverage.contains_within(&record, &scope);
 
         // Assert: the typed error escapes rather than becoming cached false.
         assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
-        assert!(
+        assert!(deadline.is_expired());
+        assert_eq!(
             observer
                 .completed
-                .load(std::sync::atomic::Ordering::Acquire)
-                > 0
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            observer
+                .completed_bytes
+                .load(std::sync::atomic::Ordering::Acquire),
+            u64::try_from(before.len()).unwrap()
         );
         assert!(coverage.verified.borrow().is_empty());
         assert_eq!(std::fs::read(path).unwrap(), before);
