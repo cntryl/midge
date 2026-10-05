@@ -2,9 +2,10 @@
 
 Every catalog ID maps to production symbols, exact assertions, fixture
 assumptions and untested boundaries. This is source/reference evidence;
-the preparer ran no Rust tests. References now bind #733 runtime/test commit
-a15bf5fc48992d476985af4bccca64e60468dac6 before this documentation commit;
-the unchanged measured c8 source and original report remain explicit. Historical 32911805 A/r1 smoke 37270512400
+the preparer ran no Rust tests. References bind mechanical compatibility test commit
+af0dfd2ea4da587c013a2aa99a4a9bf522153fb9 before this documentation commit;
+18 minute/hour fixture duration spellings and one exact assertion line wrap change;
+the historical measured c8 source and original report remain explicit. Historical 32911805 A/r1 smoke 37270512400
 is transport-valid only; its later nine-run 37270845568 remains invalid
 after selected active metadata endpoints. Eight shared commit controls,
 nine boundary controls and 33 reader contracts retain explicit scripted
@@ -13,7 +14,7 @@ attempts of 37274074026 passed retained original-archive readback: B/C have
 three payload misses each; A has one time miss and does not qualify. This
 meets only the conditional policy-investigation predicate; cadence remains
 unchanged, physical/device bytes are not measured and native confidence is
-not upgraded. Documentation references bind the actual #733 runtime commit above. The
+not upgraded. Documentation references bind the mechanical compatibility commit above; #733 controls retain their original scopes. The
 recorded c8f0de80 campaign and byte-identical original report remain historical
 measurement evidence; this change supplies no new native-hour qualification. Full-hour acceptance uses the final merged
 catalog source; run identities and artifact readbacks are tracked on

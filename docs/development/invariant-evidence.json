@@ -1,7 +1,7 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "a15bf5fc48992d476985af4bccca64e60468dac6",
-  "source_revision_status": "References bind the actual #733 runtime/test commit before this documentation commit; source hashes verify each referenced file. This source-reference refresh claims no new Rust execution, merge or native/full-hour qualification.",
+  "source_revision": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
+  "source_revision_status": "References bind the actual mechanical compatibility test commit before this documentation commit. The only source changes are 18 equivalent minute/hour duration spellings in 12 fixture files and one exact assertion line collapse; hashes bind every referenced source. Historical scopes, #733 controls and c8 measurement remain unchanged. This rebind claims no new Rust execution, merge or native/full-hour acceptance.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
   "qualification": {
@@ -8904,5 +8904,41 @@
       "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale"
     ],
     "scope": "bounded candidate selection/resource/actual seeded-SST and framed streaming replay controls; one scale fixture referenced by three rows, no public ACK or new native-hour qualification"
+  },
+  "mechanical_compatibility_refresh": {
+    "previous_source_revision": "a15bf5fc48992d476985af4bccca64e60468dac6",
+    "runtime_commit_before_docs": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
+    "source_substitutions": {
+      "Duration::from_secs(60)": "Duration::from_mins(1)",
+      "Duration::from_secs(120)": "Duration::from_mins(2)",
+      "Duration::from_secs(3600)": "Duration::from_hours(1)"
+    },
+    "replacement_count": 18,
+    "before_literal_commit": "b8237117d7d14c8c0fefba49c1a09dbd798a3cd4",
+    "exact_line_collapse_function": "should_apply_profile_timeout_to_long_running_engine_requests",
+    "changed_paths": [
+      "benches/bench_support/stress_scenarios/client_progress.rs",
+      "src/runtime/actors/compaction/publication_budget_tests.rs",
+      "src/runtime/actors/wal/tests.rs",
+      "src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs",
+      "src/runtime/event_loop/compaction/tests.rs",
+      "src/runtime/event_loop/write_batch/tests.rs",
+      "src/storage/hybrid/backend/control_io.rs",
+      "tests/checkpoint_boundary.rs",
+      "tests/checkpoint_commit.rs",
+      "tests/cloud_provider_engine_qualification/operational.rs",
+      "tests/cloud_provider_engine_qualification/operational/fixture.rs",
+      "tests/cloud_provider_engine_qualification/operational/workload.rs"
+    ],
+    "hash_bound_changed_paths": [
+      "src/runtime/event_loop/write_batch/tests.rs",
+      "tests/checkpoint_boundary.rs",
+      "tests/checkpoint_commit.rs",
+      "tests/cloud_provider_engine_qualification/operational.rs"
+    ],
+    "preserved_ids": 63,
+    "preserved_test_references": 229,
+    "preserved_assertion_markers": 1068,
+    "scope": "exact equivalent duration substitutions and one approved assertion line collapse within original named functions; source/reference lint only, no new native/full-hour qualification"
   }
 }
