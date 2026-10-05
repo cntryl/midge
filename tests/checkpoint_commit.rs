@@ -139,7 +139,7 @@ fn should_end_permanent_stall_when_original_logical_budget_expires() {
 
     // Act
     let result = commit_with_backpressure(
-        start + Duration::from_secs(60),
+        start + Duration::from_mins(1),
         Duration::from_secs(3),
         &mut observations,
         || clock.get(),
@@ -175,7 +175,7 @@ fn should_preserve_original_allowance_when_clear_signals_lead_to_more_stalls() {
 
     // Act: clear signals are scripted; every commit remains rejected.
     let result = commit_with_backpressure(
-        start + Duration::from_secs(60),
+        start + Duration::from_mins(1),
         Duration::from_secs(2),
         &mut observations,
         || clock.get(),
@@ -206,7 +206,7 @@ fn should_cap_stall_allowance_when_requested_budget_exceeds_thirty_seconds() {
     // Act
     let result = commit_with_backpressure(
         start + Duration::from_secs(90),
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         &mut observations,
         || clock.get(),
         || Err(MidgeError::WriteStall("pressure".into())),

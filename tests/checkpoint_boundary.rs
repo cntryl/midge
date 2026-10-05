@@ -191,7 +191,7 @@ fn should_cap_sampling_allowance_when_requested_boundary_budget_exceeds_thirty_s
     // Act.
     let result = capture_metadata_boundary(
         started + Duration::from_mins(15),
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         &mut observation,
         || clock.get(),
         |remaining| {

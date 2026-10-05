@@ -2566,7 +2566,7 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                 crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             )?;
             let validity = Arc::new(crate::lease::LeaseValidity::new());
-            validity.activate(1, Instant::now() + Duration::from_secs(60))?;
+            validity.activate(1, Instant::now() + Duration::from_mins(1))?;
             actor.set_lease_validity(Some(Arc::clone(&validity)));
             let trigger = if spilled {
                 "midge::wal::after_spilled_preparation"
@@ -2683,7 +2683,7 @@ fn should_preserve_active_wal_when_validity_expires_before_rotation_rename() -> 
     )?;
     let validity = Arc::new(crate::lease::LeaseValidity::new());
     validity
-        .activate(1, Instant::now() + Duration::from_secs(60))
+        .activate(1, Instant::now() + Duration::from_mins(1))
         .unwrap();
     actor.set_lease_validity(Some(Arc::clone(&validity)));
     let ticket = seal_ticket_for_test(&actor, &state);

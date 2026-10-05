@@ -179,7 +179,7 @@ impl PublicationFixture {
     ) -> MidgeResult<publication::CompactionPublishCompletion> {
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(7, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(7, std::time::Instant::now() + Duration::from_mins(1))
             .map_err(|error| error.into_validation_error("fixture validity"))?;
         let (tx, rx) = crossbeam::channel::unbounded();
         let mut actor = publication::CompactionPublishActor::new(tx, false)?;
