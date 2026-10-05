@@ -1777,6 +1777,20 @@ fn drain_prune_completion_for_test(el: &mut EventLoop) {
     );
 }
 
+fn register_manual_compaction_waiter_for_test(
+    el: &mut EventLoop,
+    request_id: u64,
+) -> crossbeam::channel::Receiver<RuntimeResponse> {
+    let response = el.router.register(request_id, "CompactAll");
+    el.state.pending_compaction_waits.insert(
+        request_id,
+        el.router
+            .request_deadline(request_id, el.runtime_response_timeout)
+            .expect("registered manual compaction caller deadline"),
+    );
+    response
+}
+
 fn put_cloud_metadata_for_test(
     cloud: &crate::storage::cloud::CloudStorage,
     file_name: &str,
@@ -3698,7 +3712,7 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4141;
-    let response_rx = el.router.register(request_id, "TestRequest");
+    let response_rx = register_manual_compaction_waiter_for_test(&mut el, 4142);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -3759,7 +3773,7 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4242;
-    let response_rx = el.router.register(request_id, "TestRequest");
+    let response_rx = register_manual_compaction_waiter_for_test(&mut el, 4243);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -3826,15 +3840,9 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let completion_request_id = 4343;
-    let completion_rx = el.router.register(completion_request_id, "TestRequest");
+    let completion_rx = register_manual_compaction_waiter_for_test(&mut el, 4345);
     let waiter_request_id = 4344;
-    let waiter_rx = el.router.register(waiter_request_id, "TestRequest");
-    el.state.pending_compaction_waits.insert(
-        waiter_request_id,
-        el.router
-            .request_deadline(waiter_request_id, el.runtime_response_timeout)
-            .unwrap(),
-    );
+    let waiter_rx = register_manual_compaction_waiter_for_test(&mut el, waiter_request_id);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -3940,7 +3948,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4545;
-    let response_rx = el.router.register(request_id, "TestRequest");
+    let response_rx = register_manual_compaction_waiter_for_test(&mut el, 4546);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -9309,7 +9317,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
         },
     );
     let request_id = 5252;
-    let response_rx = el.router.register(request_id, "TestRequest");
+    let response_rx = register_manual_compaction_waiter_for_test(&mut el, 5253);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
