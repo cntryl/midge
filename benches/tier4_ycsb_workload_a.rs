@@ -107,7 +107,7 @@ fn run_workload_a_measured(
                 Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
             }
         };
-        let measured = ycsb::run_multi_client_for_duration_with_stats(
+        let measured = ycsb::run_multi_client_for_duration_observed_with_stats(
             engine,
             clients,
             window.duration,
@@ -139,16 +139,17 @@ fn run_workload_a_measured(
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                             .expect("measured begin");
                         let _ = tx.get(&k[..]).expect("measured get");
+                        true
                     } else {
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("measured put");
                             tx.commit(write_opts)
                         })
-                        .expect("measured commit");
+                        .expect("measured commit")
                     }
                 }
             },

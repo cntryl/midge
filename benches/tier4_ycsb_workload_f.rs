@@ -105,7 +105,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
         let measured = {
             let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
             let write_opts = measured_write_opts;
-            ycsb::run_multi_client_for_duration_with_stats(
+            ycsb::run_multi_client_for_duration_observed_with_stats(
                 &engine,
                 clients,
                 measured_duration,
@@ -127,14 +127,14 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                         let _old = tx.get(&k[..]).expect("measured get");
                         drop(tx);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("measured put");
                             tx.commit(write_opts)
                         })
-                        .expect("measured commit");
+                        .expect("measured commit")
                     }
                 },
             )

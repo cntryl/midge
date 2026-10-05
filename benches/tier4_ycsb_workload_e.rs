@@ -98,7 +98,7 @@ fn run_workload_e_measured(
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_e_{profile}_{clients}_{client_suffix}");
     stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
-        let measured = ycsb::run_multi_client_for_duration_with_stats(
+        let measured = ycsb::run_multi_client_for_duration_observed_with_stats(
             engine,
             clients,
             duration,
@@ -112,7 +112,7 @@ fn run_workload_e_measured(
                         let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        return ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
@@ -121,7 +121,6 @@ fn run_workload_e_measured(
                             tx.commit(write_opts)
                         })
                         .expect("measured commit");
-                        return;
                     }
 
                     let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
@@ -143,6 +142,7 @@ fn run_workload_e_measured(
                         count += 1;
                     }
                     std::hint::black_box(count);
+                    true
                 }
             },
         );

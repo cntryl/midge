@@ -966,8 +966,9 @@ where
     }
 }
 
-/// Retry write stalls and report whether the logical operation completed
-/// before the workload stop signal was observed.
+/// Retry write stalls and report whether the logical operation completed.
+/// Cancellation before success returns `false`; an actual success remains
+/// completed when the stop signal arrives before the callback returns.
 ///
 /// # Errors
 /// Returns any non-`WriteStall` engine error from `op`, or any error returned
@@ -1042,6 +1043,35 @@ where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
     Step: FnMut(&Engine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
+    run_multi_client_for_duration_observed_with_stats(
+        engine,
+        clients,
+        duration,
+        |client_id, stop| {
+            let mut step = make_client(client_id, stop);
+            move |engine, cf, op_index| {
+                step(engine, cf, op_index);
+                true
+            }
+        },
+    )
+}
+
+/// Run concurrent clients and meter callbacks that report actual completion.
+/// A `false` result cancels that client without recording a completion or latency.
+///
+/// # Panics
+/// Panics under the same conditions as [`run_multi_client_for_duration`].
+pub fn run_multi_client_for_duration_observed_with_stats<MakeClient, Step>(
+    engine: &Arc<Engine>,
+    clients: usize,
+    duration: Duration,
+    make_client: MakeClient,
+) -> MultiClientRunStats
+where
+    MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) -> bool + Send + 'static,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));
     let mut handles = Vec::with_capacity(clients);
@@ -1060,7 +1090,7 @@ where
         let engine = Arc::clone(engine);
         let stop = Arc::clone(&stop);
         let barrier = Arc::clone(&barrier);
-        let mut client_step = make_client(client_id, Arc::clone(&stop));
+        let client_step = make_client(client_id, Arc::clone(&stop));
         let last_op_ts = Arc::clone(&last_op_ts);
 
         // Get the CF (it was created in load phase)
@@ -1081,36 +1111,14 @@ where
                 std::thread::sleep(Duration::from_micros(usize_to_u64(client_id) * 50));
             }
 
-            let mut stats = ClientRunStats::empty();
-            let mut op_index: u64 = 0;
-            // Optional slow-op threshold (enable with MIDGE_YCSB_SLOW_OP_MS)
-            let slow_op_ms = std::env::var("MIDGE_YCSB_SLOW_OP_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok());
-
-            while !stop.load(Ordering::Acquire) {
-                let start = Instant::now();
-                client_step(engine.as_ref(), &cf, op_index);
-                let elapsed = start.elapsed();
-
-                // Update heartbeat timestamp after each logical operation.
-                let now_ms = millis_since_epoch();
-                last_op_ts.store(now_ms, Ordering::Release);
-
-                if let Some(threshold) = slow_op_ms {
-                    let el_ms = u128_to_u64(elapsed.as_millis());
-                    if el_ms >= threshold {
-                        eprintln!(
-                            "[midge][ycsb][slow_op] client={client_id} op_index={op_index} elapsed_ms={el_ms} threshold_ms={threshold}"
-                        );
-                    }
-                }
-
-                stats.record_latency(elapsed);
-                stats.operations = stats.operations.wrapping_add(1);
-                op_index = op_index.wrapping_add(1);
-            }
-            stats
+            run_observed_client_loop(
+                engine.as_ref(),
+                &cf,
+                stop.as_ref(),
+                last_op_ts.as_ref(),
+                client_id,
+                client_step,
+            )
         }));
     }
 
@@ -1165,6 +1173,52 @@ where
         latency_max_us: latency_us.max(),
         latency_quantiles_us: latency_quantiles_us(&latency_us),
     }
+}
+
+fn run_observed_client_loop<Step>(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    stop: &AtomicBool,
+    last_op_ts: &AtomicU64,
+    client_id: usize,
+    mut client_step: Step,
+) -> ClientRunStats
+where
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) -> bool,
+{
+    let mut stats = ClientRunStats::empty();
+    let mut op_index: u64 = 0;
+    // Optional slow-op threshold (enable with MIDGE_YCSB_SLOW_OP_MS)
+    let slow_op_ms = std::env::var("MIDGE_YCSB_SLOW_OP_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+
+    while !stop.load(Ordering::Acquire) {
+        let start = Instant::now();
+        let completed = client_step(engine, cf, op_index);
+        if !completed {
+            break;
+        }
+        let elapsed = start.elapsed();
+
+        // Update heartbeat timestamp after each logical operation.
+        let now_ms = millis_since_epoch();
+        last_op_ts.store(now_ms, Ordering::Release);
+
+        if let Some(threshold) = slow_op_ms {
+            let el_ms = u128_to_u64(elapsed.as_millis());
+            if el_ms >= threshold {
+                eprintln!(
+                    "[midge][ycsb][slow_op] client={client_id} op_index={op_index} elapsed_ms={el_ms} threshold_ms={threshold}"
+                );
+            }
+        }
+
+        stats.record_latency(elapsed);
+        stats.operations = stats.operations.wrapping_add(1);
+        op_index = op_index.wrapping_add(1);
+    }
+    stats
 }
 
 /// Run concurrent client loops for a fixed number of operations per client.
@@ -1273,3 +1327,7 @@ fn millis_since_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| u128_to_u64(duration.as_millis()))
 }
+
+#[cfg(test)]
+#[path = "ycsb/cancelled_completion_tests.rs"]
+mod cancelled_completion_tests;

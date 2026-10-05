@@ -55,7 +55,7 @@ fn measure_duration(
     stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let measured = {
             let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-            ycsb::run_multi_client_for_duration_with_stats(
+            ycsb::run_multi_client_for_duration_observed_with_stats(
                 engine,
                 clients,
                 measured_duration,
@@ -67,6 +67,7 @@ fn measure_duration(
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                             .expect("begin");
                         let _ = tx.get(&k[..]).expect("measured get");
+                        true
                     }
                 },
             )
