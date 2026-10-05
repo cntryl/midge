@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "fault_injection/compaction_deadline.rs"]
+mod compaction_deadline;
+
 mod crash_validation {
     use crate::common::crash;
 

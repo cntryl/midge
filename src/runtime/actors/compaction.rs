@@ -6,7 +6,7 @@
 //! - Merging SST files across levels
 
 use super::super::state::RuntimeState;
-use crate::common::{MidgeError, MidgeResult};
+use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
 use crate::io::FsError;
 use crate::runtime::{next_request_id, RuntimeMsg};
@@ -20,6 +20,14 @@ use std::thread::JoinHandle;
 #[cfg(test)]
 #[path = "compaction/publication_tests.rs"]
 mod publication_tests;
+
+#[cfg(test)]
+#[path = "compaction/publication_budget_tests.rs"]
+mod publication_budget_tests;
+
+#[cfg(test)]
+#[path = "compaction/publication_error_tests.rs"]
+mod publication_error_tests;
 
 #[path = "compaction/publication.rs"]
 pub(crate) mod publication;
@@ -39,6 +47,54 @@ pub(crate) struct PreparedCompactionOutput {
 
 type PreparedCompactionOutputs =
     Arc<parking_lot::Mutex<std::collections::HashMap<String, PreparedCompactionOutput>>>;
+
+#[derive(Clone, Copy)]
+pub(crate) struct CompactionOutputAdmission<'a> {
+    budget: &'a crate::common::resource_budget::ResourceBudget,
+    manual_deadline: Option<OperationDeadline>,
+}
+
+#[derive(Clone, Copy)]
+struct CompactionOutputWork<'a> {
+    prepared: &'a PreparedCompactionOutputs,
+    manual_deadline: Option<OperationDeadline>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompactionAbortCause {
+    Shutdown,
+    ManualDeadline,
+}
+
+fn combined_compaction_abort<'a>(
+    shutdown: Option<&'a dyn Fn() -> bool>,
+    deadline: Option<OperationDeadline>,
+    observed: &'a std::cell::Cell<Option<CompactionAbortCause>>,
+) -> impl Fn() -> bool + 'a {
+    move || {
+        if observed.get().is_some() {
+            return true;
+        }
+        let cause = if shutdown.is_some_and(|check| check()) {
+            Some(CompactionAbortCause::Shutdown)
+        } else if deadline.is_some_and(|deadline| deadline.is_expired()) {
+            Some(CompactionAbortCause::ManualDeadline)
+        } else {
+            None
+        };
+        observed.set(cause);
+        cause.is_some()
+    }
+}
+
+fn check_manual_deadline(deadline: Option<OperationDeadline>, context: &str) -> MidgeResult<()> {
+    if deadline.is_some_and(|deadline| deadline.is_expired()) {
+        return Err(MidgeError::Timeout(format!(
+            "manual compaction deadline exhausted {context}"
+        )));
+    }
+    Ok(())
+}
 
 /// Storage capabilities required by compaction. Keeping this contract beside
 /// the consumer prevents the actor from depending on the complete hybrid
@@ -69,7 +125,7 @@ pub(crate) trait CompactionStorage: Send + Sync {
         level: u32,
         name: &str,
         path: &std::path::Path,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        admission: CompactionOutputAdmission<'_>,
     ) -> MidgeResult<PreparedCompactionOutput>;
 }
 
@@ -123,18 +179,25 @@ impl CompactionStorage for crate::storage::HybridStorage {
         level: u32,
         name: &str,
         path: &std::path::Path,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        admission: CompactionOutputAdmission<'_>,
     ) -> MidgeResult<PreparedCompactionOutput> {
         let (metadata, size, crc) =
-            summarize_output_partition(fs, cf_id, level, name, path, budget)?;
-        let proof = crate::storage::HybridStorage::publish_immutable_file(
-            self,
-            &crate::cloud_layout::object_key(name),
-            path,
-            size,
-            crc,
-            budget,
-        )?;
+            summarize_output_partition(fs, cf_id, level, name, path, admission)?;
+        let key = crate::cloud_layout::object_key(name);
+        let proof = if let Some(deadline) = admission.manual_deadline {
+            self.publish_immutable_file_within(
+                crate::storage::hybrid::backend::ImmutableFileSource {
+                    key: &key,
+                    path,
+                    size,
+                    checksum: crc,
+                },
+                admission.budget,
+                &deadline,
+            )?
+        } else {
+            self.publish_immutable_file(&key, path, size, crc, admission.budget)?
+        };
         // Input authority has not changed. If the job fails, the completion
         // path deletes this unreferenced object; it cannot lose an input.
         if self.ephemeral_sst_cache_enabled() {
@@ -158,15 +221,18 @@ fn summarize_output_partition(
     level: u32,
     name: &str,
     path: &std::path::Path,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    admission: CompactionOutputAdmission<'_>,
 ) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
+    check_manual_deadline(admission.manual_deadline, "before output summary")?;
     let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
     let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
         &fs_path.0,
         Arc::clone(fs),
-        budget.clone(),
+        admission.budget.clone(),
     )?;
+    check_manual_deadline(admission.manual_deadline, "after output summary")?;
     let (size, crc) = crate::sst::fs::file_identity_with_fs(fs, path)?;
+    check_manual_deadline(admission.manual_deadline, "after output checksum")?;
     if size != summary.size_bytes {
         return Err(MidgeError::Corruption(
             "compaction partition changed before upload".into(),
@@ -196,9 +262,10 @@ fn stage_local_output_partition(
     level: u32,
     name: &str,
     path: &std::path::Path,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    admission: CompactionOutputAdmission<'_>,
 ) -> MidgeResult<PreparedCompactionOutput> {
-    let (metadata, _size, _crc) = summarize_output_partition(fs, cf_id, level, name, path, budget)?;
+    let (metadata, _size, _crc) =
+        summarize_output_partition(fs, cf_id, level, name, path, admission)?;
     Ok(PreparedCompactionOutput {
         metadata,
         proof: None,
@@ -217,14 +284,14 @@ fn record_staged_output_partition(
     level: u32,
     name: &str,
     path: &std::path::Path,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    admission: CompactionOutputAdmission<'_>,
 ) -> MidgeResult<()> {
     let Some(storage) = storage else {
-        let output = stage_local_output_partition(fs, cf_id, level, name, path, budget)?;
+        let output = stage_local_output_partition(fs, cf_id, level, name, path, admission)?;
         prepared.lock().insert(name.to_string(), output);
         return Ok(());
     };
-    let output = storage.stage_output_partition(fs, cf_id, level, name, path, budget)?;
+    let output = storage.stage_output_partition(fs, cf_id, level, name, path, admission)?;
     prepared.lock().insert(name.to_string(), output);
     crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
         Err(MidgeError::Internal(
@@ -258,6 +325,9 @@ pub struct CompactionActor {
     active_same_level_repair: bool,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
+    /// Captured only by the initiating manual generation; joining waiters
+    /// never change an accepted worker's origin or callerless ownership.
+    active_manual_deadline: Option<OperationDeadline>,
     /// Cooperative cancellation flag for the active background worker.
     worker_cancel: Arc<AtomicBool>,
     /// Active background worker, joined before runtime shutdown completes.
@@ -292,6 +362,7 @@ impl CompactionActor {
             active_input_metadata: Vec::new(),
             active_same_level_repair: false,
             active_output_generation: None,
+            active_manual_deadline: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
             worker_error: Arc::new(std::sync::Mutex::new(None)),
@@ -485,7 +556,9 @@ impl CompactionActor {
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&Arc<dyn CompactionStorage>>,
         worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
+        manual_deadline: Option<OperationDeadline>,
     ) -> MidgeResult<Vec<String>> {
+        check_manual_deadline(manual_deadline, "before actor preparation")?;
         let mut plan = plan.clone();
         if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
             let target_limit = usize::try_from(hybrid.max_local_bytes() / 8).unwrap_or(usize::MAX);
@@ -497,6 +570,11 @@ impl CompactionActor {
             plan.target_sst_size = plan.target_sst_size.min(target_limit);
         }
         self.prepare_compaction(state, &plan, sba)?;
+        self.active_manual_deadline = manual_deadline;
+        if let Err(error) = check_manual_deadline(manual_deadline, "after actor preparation") {
+            self.abort_compaction(state, &plan, sba, Some(&error));
+            return Err(error);
+        }
         if let Some(tx) = worker_msg_tx {
             let result = self.run_async_compaction(state, tx, &plan, sba.cloned());
             if result.is_err() {
@@ -601,6 +679,54 @@ impl CompactionActor {
 
     pub(crate) fn captured_input_metadata(&self) -> &[crate::metadata::FileMeta] {
         &self.active_input_metadata
+    }
+
+    pub(crate) fn accepted_output_generation(
+        &self,
+        cf_id: u32,
+        target_level: u32,
+    ) -> MidgeResult<u64> {
+        match self.active_output_generation {
+            Some((cf, level, generation))
+                if self.compaction_running && cf == cf_id && level == target_level =>
+            {
+                Ok(generation)
+            }
+            _ => Err(MidgeError::Fenced(
+                "compaction publication does not match the accepted output owner".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn manual_deadline_for_generation(
+        &self,
+        cf_id: u32,
+        target_level: u32,
+        generation: u64,
+    ) -> MidgeResult<Option<OperationDeadline>> {
+        if self.accepted_output_generation(cf_id, target_level)? != generation {
+            return Err(MidgeError::Fenced(
+                "compaction deadline does not match the accepted output generation".into(),
+            ));
+        }
+        Ok(self.active_manual_deadline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_publication_generation_for_test(
+        &mut self,
+        cf_id: u32,
+        target_level: u32,
+        generation: u64,
+    ) -> MidgeResult<()> {
+        let accepted = self.accepted_output_generation(cf_id, target_level)?;
+        if accepted != 0 && accepted != generation {
+            return Err(MidgeError::Fenced(
+                "test publication cannot replace a known accepted generation".into(),
+            ));
+        }
+        self.active_output_generation = Some((cf_id, target_level, generation));
+        Ok(())
     }
 
     pub(crate) fn active_same_level_repair(&self) -> bool {
@@ -783,6 +909,7 @@ impl CompactionActor {
         self.active_input_ssts.clear();
         self.active_input_metadata.clear();
         self.active_same_level_repair = false;
+        self.active_manual_deadline = None;
         self.compaction_running = false;
     }
 
@@ -815,6 +942,7 @@ impl CompactionActor {
             };
 
         self.compaction_running = true;
+        self.active_manual_deadline = None;
         self.active_output_generation = Some((plan.cf_id, plan.target_level, plan.output_seq));
         self.active_input_ssts.clone_from(&plan.input_files);
         self.active_input_metadata = state
@@ -905,7 +1033,10 @@ impl CompactionActor {
             &state.sst_dir,
             None,
             sba,
-            &self.prepared_outputs,
+            CompactionOutputWork {
+                prepared: &self.prepared_outputs,
+                manual_deadline: self.active_manual_deadline,
+            },
         )?;
 
         tracing::info!(
@@ -923,8 +1054,9 @@ impl CompactionActor {
         output_dir: &std::path::Path,
         abort_check: Option<&dyn Fn() -> bool>,
         storage: Option<&Arc<dyn CompactionStorage>>,
-        prepared: &PreparedCompactionOutputs,
+        work: CompactionOutputWork<'_>,
     ) -> MidgeResult<Vec<String>> {
+        check_manual_deadline(work.manual_deadline, "before compute")?;
         let output_fs = factory.output_fs();
         let sink = |name: &str,
                     path: &std::path::Path,
@@ -932,12 +1064,15 @@ impl CompactionActor {
             record_staged_output_partition(
                 storage.map(Arc::as_ref),
                 &output_fs,
-                prepared,
+                work.prepared,
                 plan.cf_id,
                 plan.target_level,
                 name,
                 path,
-                budget,
+                CompactionOutputAdmission {
+                    budget,
+                    manual_deadline: work.manual_deadline,
+                },
             )
         };
         // Installed even without cloud storage: summarizing on the worker is
@@ -948,7 +1083,12 @@ impl CompactionActor {
             plan.target_sst_size
                 .min(storage.immutable_file_partition_target(plan.compaction_memory_limit))
         });
-        crate::compaction::execute_compaction_at_target(
+        let abort_cause = std::cell::Cell::new(None);
+        let combined_abort =
+            combined_compaction_abort(abort_check, work.manual_deadline, &abort_cause);
+        let compute_abort = (abort_check.is_some() || work.manual_deadline.is_some())
+            .then_some(&combined_abort as &dyn Fn() -> bool);
+        let output_ssts = crate::compaction::execute_compaction_at_target(
             plan,
             crate::compaction::CompactionResources {
                 target_sst_size: target,
@@ -963,12 +1103,22 @@ impl CompactionActor {
             },
             factory,
             output_dir,
-            abort_check,
+            compute_abort,
             output_sink,
             storage
                 .filter(|hybrid| hybrid.ephemeral_sst_cache_enabled())
                 .map(|hybrid| usize::try_from(hybrid.max_local_bytes() / 4).unwrap_or(usize::MAX)),
         )
+        .map_err(|error| match error {
+            MidgeError::Aborted(_)
+                if abort_cause.get() == Some(CompactionAbortCause::ManualDeadline) =>
+            {
+                MidgeError::Timeout("manual compaction deadline expired during compute".into())
+            }
+            error => error,
+        })?;
+        check_manual_deadline(work.manual_deadline, "after compute")?;
+        Ok(output_ssts)
     }
 
     fn run_async_compaction(
@@ -986,6 +1136,7 @@ impl CompactionActor {
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
+        let manual_deadline = self.active_manual_deadline;
         let source_fan_in = self.compactor.config.max_compaction_input_files;
         store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
@@ -1002,7 +1153,7 @@ impl CompactionActor {
                     &sst_dir,
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
-                    &prepared_outputs,
+                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline },
                 );
 
                 let (output_ssts, error) = match result {
@@ -1162,7 +1313,10 @@ impl CompactionActor {
                 target_level,
                 name,
                 &sst_dir.join(name),
-                &budget,
+                CompactionOutputAdmission {
+                    budget: &budget,
+                    manual_deadline: None,
+                },
             )?;
             prepared.insert(name.clone(), output);
         }
@@ -1951,6 +2105,7 @@ mod tests {
                 &plan,
                 Some(&compaction_storage),
                 Some(completion_tx),
+                None,
             )
             .expect("launch actual async compaction");
         assert_eq!(state.active_compactions.load(Ordering::SeqCst), 1);

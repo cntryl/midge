@@ -19,6 +19,7 @@ pub(crate) struct Response {
     pub(crate) status: u16,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
+    delivery: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 impl Response {
@@ -27,11 +28,17 @@ impl Response {
             status,
             headers: Vec::new(),
             body: body.into(),
+            delivery: None,
         }
     }
 
     pub(crate) fn with_etag(mut self, version: usize) -> Self {
         self.headers.push(("ETag".into(), format!("\"{version}\"")));
+        self
+    }
+
+    pub(crate) fn with_delivery_receipt(mut self, delivery: std::sync::mpsc::Sender<bool>) -> Self {
+        self.delivery = Some(delivery);
         self
     }
 }
@@ -146,8 +153,13 @@ fn write_response(stream: &mut TcpStream, response: Response) {
         write!(headers, "{name}: {value}\r\n").expect("format native HTTP response header");
     }
     headers.push_str("\r\n");
-    let _ = stream.write_all(headers.as_bytes());
-    let _ = stream.write_all(&response.body);
+    let delivered = stream
+        .write_all(headers.as_bytes())
+        .and_then(|()| stream.write_all(&response.body))
+        .is_ok();
+    if let Some(delivery) = response.delivery {
+        let _ = delivery.send(delivered);
+    }
 }
 
 /// Observe socket cancellation without sending the held response first.

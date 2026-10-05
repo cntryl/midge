@@ -122,9 +122,17 @@ sealed WAL is already a durability obligation and must still close its inflight
 frontier gap; this keeps later strict waits from stalling, but also means a
 caller timeout remains outcome-ambiguous.
 
-Compaction publication does not yet share one aggregate caller deadline across
-its provider operations. On a degraded provider, an explicit compaction request
-can therefore reach `runtime_response_timeout` while its accepted work continues.
+Explicit `compact_all()` work shares one caller deadline across queueing,
+filename reservation, compute, output uploads, and all publication phases and
+column families. Expiry returns `MidgeError::Timeout` and refuses new publication
+work for that caller. Compute observes expiry at its safe stop points.
+Accepted workers retain their inputs, payloads, reservations, and
+lease until safe settlement; an uncertain remote publication keeps both data
+generations and its reconciliation intent. A timeout does not cancel a local
+syscall or prove that a submitted remote mutation did not commit. Recovery and
+shutdown reconciliation remain separately owned obligations. A caller joining
+accepted background compaction has its own bounded wait and leaves that job's
+original ownership and operation caps intact.
 
 If a remote DDL compare-exchange times out or disconnects after submission,
 Midge retains its durable prepare and returns `MidgeError::Fenced` unless the

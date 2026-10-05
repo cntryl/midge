@@ -93,7 +93,7 @@ fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::com
     assert!(event_loop
         .state
         .pending_compaction_waits
-        .contains(&request_id));
+        .contains_key(&request_id));
     Ok(())
 }
 
@@ -361,7 +361,13 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
             frontier: 1,
         }],
     );
-    event_loop.state.pending_compaction_waits.insert(8105);
+    event_loop.state.pending_compaction_waits.insert(
+        8105,
+        event_loop
+            .router
+            .request_deadline(8105, event_loop.runtime_response_timeout)
+            .unwrap(),
+    );
     event_loop.write_stall_waiters.register(8106, 0);
     event_loop.durability.queue_waiter_for_key(
         0,
@@ -2483,10 +2489,13 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
     let compact_all_rx = event_loop
         .router
         .register(compact_all_request_id, "CompactAll");
-    event_loop
-        .state
-        .pending_compaction_waits
-        .insert(compact_all_request_id);
+    event_loop.state.pending_compaction_waits.insert(
+        compact_all_request_id,
+        event_loop
+            .router
+            .request_deadline(compact_all_request_id, event_loop.runtime_response_timeout)
+            .unwrap(),
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2556,10 +2565,13 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
     let response_rx = event_loop
         .router
         .register(compact_all_request_id, "CompactAll");
-    event_loop
-        .state
-        .pending_compaction_waits
-        .insert(compact_all_request_id);
+    event_loop.state.pending_compaction_waits.insert(
+        compact_all_request_id,
+        event_loop
+            .router
+            .request_deadline(compact_all_request_id, event_loop.runtime_response_timeout)
+            .unwrap(),
+    );
     event_loop.compaction_actor.set_worker_error_for_test(
         crate::common::MidgeError::ResourceLimit("compaction pool exhausted".to_string()),
     );

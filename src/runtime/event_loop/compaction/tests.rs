@@ -576,6 +576,9 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
             largest_key: Some(b"z".to_vec()),
             ..Default::default()
         });
+    event_loop
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input))?;
 
     // Act
     CompactionCoordinator::start_publication(
@@ -669,6 +672,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
             .unwrap();
         event_loop.fencing.lease_validity = Some(Arc::clone(&validity));
         let pending = PendingCompactionPublication {
+            manual_deadline: None,
             token: CompactionPublicationToken {
                 request_id: 1,
                 writer_epoch: epoch,

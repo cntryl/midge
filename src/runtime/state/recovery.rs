@@ -281,7 +281,7 @@ impl RuntimeState {
                 intent_log_entries_replayed: 0,
             },
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            pending_compaction_waits: std::collections::HashSet::new(),
+            pending_compaction_waits: std::collections::BTreeMap::new(),
         };
         check_scope(scope, "recovery state construction")?;
         state.record_recovery_metrics();
