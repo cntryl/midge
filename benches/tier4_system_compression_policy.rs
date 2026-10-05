@@ -5,13 +5,13 @@
 //! explicit flushes, compaction after every four flushes, and a clean shutdown. Phase
 //! timings and the final SST footprint are recorded separately.
 
+#[path = "./stress_config.rs"]
+mod stress_config;
+
 use cntryl_midge::{
     Engine, Goal, OpenOptions, RecoveryPolicy, TransactionMode, WorkloadProfile, WriteOptions,
 };
-use cntryl_stress::{
-    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
-    StressContext,
-};
+use cntryl_stress::{stress, stress_main, ObservationDirection, ObservationUnit, StressContext};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -43,11 +43,21 @@ impl RecordShape {
     }
 }
 
+#[derive(Default)]
 struct WorkloadOutcome {
     ingest: Duration,
     flush_compaction: Duration,
     total: Duration,
     final_sst_bytes: u64,
+}
+
+impl WorkloadOutcome {
+    fn add(&mut self, cycle: &Self) {
+        self.ingest += cycle.ingest;
+        self.flush_compaction += cycle.flush_compaction;
+        self.total += cycle.total;
+        self.final_sst_bytes += cycle.final_sst_bytes;
+    }
 }
 
 fn lcg_bytes(size: usize, seed: u32) -> Vec<u8> {
@@ -240,7 +250,7 @@ fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
 
 #[allow(clippy::cast_precision_loss)]
 fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
-    let outcome = execute_workload(shape, goal);
+    let mut outcome = WorkloadOutcome::default();
     let completed = u64::try_from(LOGICAL_BYTES).expect("logical bytes fit in u64");
     ctx.parameter("record_shape", shape.name());
     ctx.parameter("engine_goal_policy", goal_name(goal));
@@ -250,16 +260,22 @@ fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
     ctx.parameter("flushes_per_compaction", FLUSHES_PER_COMPACTION);
     ctx.parameter("background_compaction", false);
     ctx.parameter("logical_bytes", LOGICAL_BYTES);
-    assert!(
-        outcome.final_sst_bytes > 0,
-        "compression workload must leave a non-empty SST footprint"
-    );
-    ctx.record_external_outcome(
+    ctx.parameter("footprint_scope", "sum_of_completed_cycle_final_footprints");
+    let cycles = stress_config::measure_tier4_cycles(
+        ctx,
         format!("engine_policy_{}_total_{}", goal_name(goal), shape.name()),
-        outcome.total,
-        LogicalUnit::new("record_value_byte"),
-        OperationOutcome::success(completed),
+        "record_value_byte",
+        || {
+            let cycle = execute_workload(shape, goal);
+            assert!(
+                cycle.final_sst_bytes > 0,
+                "compression workload must leave a non-empty SST footprint"
+            );
+            outcome.add(&cycle);
+            (completed, cycle.total)
+        },
     );
+    let completed = completed * cycles;
     ctx.record_observation(
         "ingest_ns",
         outcome.ingest.as_nanos() as f64,

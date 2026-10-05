@@ -3,12 +3,12 @@ name: Benchmark Tier 5
 on:
   workflow_dispatch:
     inputs:
-      duration_seconds:
-        description: Workload seconds (600 quick, 3600 full)
+      profile:
+        description: Workload profile (60s smoke, 600s standard, 3600s full)
         type: choice
         required: true
-        default: "600"
-        options: ["600", "3600"]
+        default: standard
+        options: [smoke, standard, full]
   schedule:
     - cron: "17 5 * * 2"
 
@@ -38,13 +38,25 @@ jobs:
           - tier5_write_pressure_gcs_json
     env:
       CARGO_INCREMENTAL: 0
-      MIDGE_TIER5_DURATION_SECS: ${{ github.event_name == 'workflow_dispatch' && (inputs.duration_seconds || '600') || '3600' }}
+      MIDGE_BENCH_PROFILE: ${{ github.event_name == 'workflow_dispatch' && (inputs.profile || 'standard') || 'full' }}
       STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
       STRESS_PROFILE: smoke
-      STRESS_TIMEOUT_SECS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds != '3600' && '1500' || '4500' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Resolve benchmark profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$MIDGE_BENCH_PROFILE" in
+            smoke) workload_seconds=60 ;;
+            standard) workload_seconds=600 ;;
+            full) workload_seconds=3600 ;;
+            *) printf 'Unknown benchmark profile: %s\n' "$MIDGE_BENCH_PROFILE" >&2; exit 1 ;;
+          esac
+          printf 'MIDGE_TIER5_DURATION_SECS=%s\n' "$workload_seconds" >> "$GITHUB_ENV"
+          printf 'STRESS_TIMEOUT_SECS=%s\n' "$((workload_seconds + 900))" >> "$GITHUB_ENV"
 
       - name: Update Rust to stable
         run: rustup update stable

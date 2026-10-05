@@ -18,6 +18,12 @@ const DEFAULT_INITIAL_KEYS: usize = 50_000;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy)]
+struct MeasuredWindow {
+    initial_keys: usize,
+    duration: Duration,
+}
+
 const ZIPFIAN_THETA: f64 = 0.99;
 
 #[derive(Clone, Copy)]
@@ -87,11 +93,12 @@ fn run_workload_a_measured(
     ctx: &mut StressContext,
     engine: &Arc<cntryl_midge::Engine>,
     clients: usize,
-    initial_keys: usize,
+    window: MeasuredWindow,
     profile: &str,
     distribution: KeyDistribution,
     write_opts: cntryl_midge::WriteOptions,
 ) -> ycsb::MultiClientRunStats {
+    let initial_keys = window.initial_keys;
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_a_{profile}_{clients}_{client_suffix}");
     stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
@@ -103,7 +110,7 @@ fn run_workload_a_measured(
         let measured = ycsb::run_multi_client_for_duration_with_stats(
             engine,
             clients,
-            MEASURED,
+            window.duration,
             |client_id, stop| {
                 let zipf = zipf.clone();
                 move |e, cf, op_index| {
@@ -158,7 +165,9 @@ fn run_workload_a_with_distribution(
     clients: usize,
     distribution: KeyDistribution,
 ) {
-    ycsb::configure_workload_parameters(ctx, profile, clients, MEASURED);
+    let measured_duration = stress_config::tier4_measured_duration(MEASURED);
+    ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -194,7 +203,10 @@ fn run_workload_a_with_distribution(
         ctx,
         &engine,
         clients,
-        initial_keys,
+        MeasuredWindow {
+            initial_keys,
+            duration: measured_duration,
+        },
         profile,
         distribution,
         measured_write_opts,

@@ -63,7 +63,9 @@ fn run_workload_f_warmup(
 }
 
 fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
-    ycsb::configure_workload_parameters(ctx, profile, clients, MEASURED);
+    let measured_duration = stress_config::tier4_measured_duration(MEASURED);
+    ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -106,7 +108,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
             ycsb::run_multi_client_for_duration_with_stats(
                 &engine,
                 clients,
-                MEASURED,
+                measured_duration,
                 |client_id, stop| {
                     let zipf = Arc::clone(&zipf);
                     move |e, cf, op_index| {

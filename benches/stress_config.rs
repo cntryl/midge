@@ -142,3 +142,104 @@ pub fn mark_duration_plateau_probe(ctx: &mut StressContext, cap_source: &'static
 pub fn logical_bytes(ctx: &mut StressContext, bytes: u64) {
     ctx.parameter("logical_bytes", bytes);
 }
+
+/// Resolve the Tier 4 UI profile without changing native harness sample counts.
+///
+/// Smoke keeps each scenario's original short window or single complete cycle.
+/// Standard and full require the workflow to pass the same native sample duration.
+///
+/// # Errors
+///
+/// Returns an invalid argument for an unrecognized profile.
+pub fn tier4_profile_window(
+    profile: Option<&str>,
+) -> cntryl_midge::MidgeResult<Option<std::time::Duration>> {
+    use cntryl_midge::MidgeError;
+    use std::time::Duration;
+
+    match profile.unwrap_or("smoke") {
+        "smoke" => Ok(None),
+        "standard" => Ok(Some(Duration::from_mins(10))),
+        "full" => Ok(Some(Duration::from_hours(1))),
+        unknown => Err(MidgeError::InvalidArgument(format!(
+            "unknown Tier 4 profile: {unknown}"
+        ))),
+    }
+}
+
+/// Keep a continuous workload on its existing engine for the selected window.
+///
+/// # Errors
+///
+/// Returns an invalid argument for an unrecognized profile.
+pub fn tier4_duration_for_profile(
+    profile: Option<&str>,
+    smoke_duration: std::time::Duration,
+) -> cntryl_midge::MidgeResult<std::time::Duration> {
+    Ok(tier4_profile_window(profile)?.unwrap_or(smoke_duration))
+}
+
+/// Resolve the UI duration from the benchmark process environment.
+///
+/// # Panics
+///
+/// Panics when `MIDGE_BENCH_PROFILE` is not a recognized profile.
+#[must_use]
+pub fn tier4_measured_duration(smoke_duration: std::time::Duration) -> std::time::Duration {
+    let profile = std::env::var("MIDGE_BENCH_PROFILE").ok();
+    tier4_duration_for_profile(profile.as_deref(), smoke_duration)
+        .expect("valid Tier 4 workload profile")
+}
+
+/// Repeat bounded complete cycles for long Tier 4 profiles using the native harness.
+///
+/// Smoke records one cycle's existing internal elapsed time. Long profiles measure
+/// the complete callback, including cycle setup and teardown, and aggregate only
+/// the logical operations supplied after each actual cycle completes.
+///
+/// # Panics
+///
+/// Panics when the UI profile is unknown or the supplied cycle fails its checks.
+pub fn measure_tier4_cycles(
+    ctx: &mut StressContext,
+    name: impl Into<String>,
+    logical_unit: &'static str,
+    mut cycle: impl FnMut() -> (u64, std::time::Duration),
+) -> u64 {
+    let profile = std::env::var("MIDGE_BENCH_PROFILE").ok();
+    let window = tier4_profile_window(profile.as_deref()).expect("valid Tier 4 workload profile");
+    ctx.parameter(
+        "selected_measured_secs",
+        window.map_or(0, |duration| duration.as_secs()),
+    );
+    let mut cycles = 0_u64;
+    if let Some(duration) = window {
+        ctx.parameter(
+            "measurement_window_shape",
+            "complete_cycles_including_setup_teardown",
+        );
+        let started_at = Instant::now();
+        ctx.measure_outcome(name, LogicalUnit::new(logical_unit), || {
+            let (completed, _) = cycle();
+            cycles += 1;
+            OperationOutcome::success(completed)
+        });
+        assert!(
+            started_at.elapsed() >= duration,
+            "Tier 4 native sample duration must cover the selected profile window; pass matching --sample-duration-ms"
+        );
+    } else {
+        ctx.parameter("measurement_window_shape", "one_cycle_original_clock");
+        let (completed, elapsed) = cycle();
+        cycles = 1;
+        ctx.record_external_outcome(
+            name,
+            elapsed,
+            LogicalUnit::new(logical_unit),
+            OperationOutcome::success(completed),
+        );
+    }
+    ctx.parameter("completed_cycles", cycles);
+    ctx.parameter("cycle_cardinality_scope", "per_completed_cycle");
+    cycles
+}

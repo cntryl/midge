@@ -83,7 +83,9 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     } else {
         MEASURED_DEFAULT
     };
+    let measured_duration = stress_config::tier4_measured_duration(measured_duration);
     ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),

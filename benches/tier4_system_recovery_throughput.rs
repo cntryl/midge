@@ -66,13 +66,15 @@ fn measure_reopens(
     failure_context: &'static str,
 ) {
     stress_config::mark_capped_probe(ctx, "ten_reopen_recovery_throughput_probe");
-    stress_config::measure_external(ctx, scenario, "engine_reopen", REOPENS_PER_SAMPLE, || {
+    stress_config::measure_tier4_cycles(ctx, scenario, "engine_reopen", || {
+        let started_at = std::time::Instant::now();
         for _ in 0..REOPENS_PER_SAMPLE {
             let mut engine = setup_engine(opts.clone());
             engine
                 .shutdown(Duration::from_secs(10))
                 .expect(failure_context);
         }
+        (REOPENS_PER_SAMPLE, started_at.elapsed())
     });
 }
 

@@ -161,8 +161,9 @@ fn measured_duration(profile: &str, clients: usize) -> Duration {
 }
 
 fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
-    let measured = measured_duration(profile, clients);
+    let measured = stress_config::tier4_measured_duration(measured_duration(profile, clients));
     ycsb::configure_workload_parameters(ctx, profile, clients, measured);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter("scan_length", SCAN_LEN);
     ctx.parameter("key_size_bytes", ycsb::KEY_SIZE);
     ctx.parameter("value_size_bytes", ycsb::DEFAULT_VALUE_SIZE);

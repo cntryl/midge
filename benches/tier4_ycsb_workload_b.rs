@@ -29,16 +29,18 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
 
 fn measured_duration(profile: &str, clients: usize) -> Duration {
-    match (profile, clients) {
+    let smoke_duration = match (profile, clients) {
         ("local", CLIENTS_16) => LOCAL_16_MEASURED,
         ("cloud", CLIENTS_16) => CLOUD_16_MEASURED,
         _ => MEASURED,
-    }
+    };
+    stress_config::tier4_measured_duration(smoke_duration)
 }
 
 fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     let measured_window = measured_duration(profile, clients);
     ycsb::configure_workload_parameters(ctx, profile, clients, measured_window);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
