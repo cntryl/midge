@@ -1,10 +1,11 @@
 #[cfg(test)]
+use super::control::RuntimeConfigUpdate;
+#[cfg(test)]
 use super::gc::GcCoordinator;
 #[cfg(test)]
 use super::wal::AppendRequest;
 use super::{
     compaction::{CompactionCompleteRequest, CompactionCoordinator},
-    control::RuntimeConfigUpdate,
     flush::FlushCoordinator,
     manifest::ManifestCoordinator,
     snapshot::SnapshotCoordinator,
@@ -74,6 +75,7 @@ impl RuntimeDispatcher {
             RuntimeMsg::ManifestPersist { request_id } => {
                 ManifestCoordinator::persist(event_loop, request_id)
             }
+            #[cfg(test)]
             msg @ RuntimeMsg::SetRuntimeConfig { .. } => Self::set_runtime_config(event_loop, &msg),
             RuntimeMsg::BeginTransaction { request_id, cf_id } => {
                 SnapshotCoordinator::begin_transaction(event_loop, request_id, cf_id)
@@ -134,6 +136,7 @@ impl RuntimeDispatcher {
         }
     }
 
+    #[cfg(test)]
     fn set_runtime_config(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
         let &RuntimeMsg::SetRuntimeConfig {
             request_id,

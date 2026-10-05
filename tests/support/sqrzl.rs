@@ -59,7 +59,16 @@ fn sqrzl_secret_key() -> String {
 }
 
 pub(super) fn ensure_sqrzl_s3_bucket(bucket: &str) -> Result<(), String> {
-    signed_s3_request("PUT", &format!("/{bucket}"), b"").map(|_| ())
+    ensure_sqrzl_s3_bucket_at(bucket, SQRZL_ENDPOINT)
+}
+
+pub(super) fn ensure_sqrzl_s3_bucket_at(bucket: &str, endpoint: &str) -> Result<(), String> {
+    let path = format!("/{bucket}");
+    if endpoint == SQRZL_ENDPOINT {
+        signed_s3_request("PUT", &path, b"").map(|_| ())
+    } else {
+        signed_s3_request_at("PUT", &path, b"", endpoint).map(|_| ())
+    }
 }
 
 pub(super) fn hmac_sha256(key: &[u8], data: &str) -> Vec<u8> {
@@ -72,9 +81,18 @@ pub(super) fn hmac_sha256(key: &[u8], data: &str) -> Vec<u8> {
 }
 
 pub(super) fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    signed_s3_request_at(method, path, body, SQRZL_ENDPOINT)
+}
+
+fn signed_s3_request_at(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    endpoint: &str,
+) -> Result<Vec<u8>, String> {
     use sha2::{Digest, Sha256};
 
-    let host = "127.0.0.1:9000";
+    let host = sqrzl_host(endpoint)?;
     let region = "us-east-1";
     let now = chrono::Utc::now();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -121,7 +139,7 @@ pub(super) fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result
     let response = client
         .request(
             reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| error.to_string())?,
-            format!("{SQRZL_ENDPOINT}{path}"),
+            format!("http://{host}{path}"),
         )
         .header("host", host)
         .header("x-amz-content-sha256", payload_hash)
@@ -150,6 +168,20 @@ pub(super) fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result
             String::from_utf8_lossy(&response_body)
         ))
     }
+}
+
+fn sqrzl_host(endpoint: &str) -> Result<&str, String> {
+    let host = endpoint
+        .strip_prefix("http://")
+        .ok_or_else(|| "Sqrzl endpoint must use plain HTTP".to_string())?
+        .trim_end_matches('/');
+    let socket = host
+        .parse::<SocketAddr>()
+        .map_err(|error| error.to_string())?;
+    if !socket.ip().is_loopback() {
+        return Err("Sqrzl endpoint must use a loopback socket".to_string());
+    }
+    Ok(host)
 }
 
 pub(super) fn ensure_sqrzl_gcs_bucket(bucket: &str) -> Result<(), String> {

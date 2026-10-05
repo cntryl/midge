@@ -2,7 +2,7 @@
 
 use super::streaming_wal_fs::{validate_wal_source, wal_sources_equal, StreamingWalFs};
 use super::{CloudStartupRecovery, CloudWalRecoveryPlan};
-use crate::common::{MidgeError, MidgeResult};
+use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::RecoveryPolicy;
 use crate::io::FsError;
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
@@ -47,9 +47,33 @@ impl StreamingCloudWalRecovery {
         read_window: usize,
         limits: StreamingReplayLimits,
     ) -> MidgeResult<Self> {
+        Self::build_within(
+            db_path,
+            remote,
+            catalog,
+            policy,
+            timeout,
+            read_window,
+            limits,
+            &DeadlineScope::new(OperationDeadline::unbounded()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_within(
+        db_path: &Path,
+        remote: &Arc<dyn StorageBackend>,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        policy: RecoveryPolicy,
+        timeout: Duration,
+        read_window: usize,
+        limits: StreamingReplayLimits,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Self> {
+        scope.check("cloud WAL planning")?;
         let local: Arc<dyn Fs> =
             Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
-        Self::build_with_local_fs(
+        Self::build_with_local_fs_within(
             db_path,
             &local,
             remote,
@@ -58,6 +82,7 @@ impl StreamingCloudWalRecovery {
             timeout,
             read_window,
             limits,
+            scope,
         )
     }
 
@@ -65,6 +90,7 @@ impl StreamingCloudWalRecovery {
     /// WAL mutation (rename, removal, retained copy, truncation) goes through
     /// `local`, so fault injection reaches the destructive salvage steps.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn build_with_local_fs(
         db_path: &Path,
         local: &Arc<dyn Fs>,
@@ -75,6 +101,33 @@ impl StreamingCloudWalRecovery {
         read_window: usize,
         limits: StreamingReplayLimits,
     ) -> MidgeResult<Self> {
+        Self::build_with_local_fs_within(
+            db_path,
+            local,
+            remote,
+            catalog,
+            policy,
+            timeout,
+            read_window,
+            limits,
+            &DeadlineScope::new(OperationDeadline::unbounded()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_with_local_fs_within(
+        db_path: &Path,
+        local: &Arc<dyn Fs>,
+        remote: &Arc<dyn StorageBackend>,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        policy: RecoveryPolicy,
+        timeout: Duration,
+        read_window: usize,
+        limits: StreamingReplayLimits,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Self> {
+        scope.check("cloud WAL planning")?;
+        let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
         let next_remote_id = next_segment_id(catalog.segments.keys().copied().max())?;
         let mut replay_fs = StreamingWalFs::new(read_window)?;
         let mut plan = CloudWalRecoveryPlan {
@@ -89,6 +142,7 @@ impl StreamingCloudWalRecovery {
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
         for (segment_id, publication) in &catalog.segments {
+            scope.check("cloud WAL catalog segment")?;
             validate_publication_identity(*segment_id, publication, catalog.fencing_epoch)?;
             let result = remote_source(
                 Arc::clone(local),
@@ -97,6 +151,7 @@ impl StreamingCloudWalRecovery {
                 timeout,
                 read_window,
                 limits,
+                scope,
             );
             let Some(source) =
                 recover_or_salvage(result, policy, &mut plan.opened_in_salvage_mode)?
@@ -113,19 +168,19 @@ impl StreamingCloudWalRecovery {
                 },
             );
         }
+        let context = WalPlanningContext {
+            db_path,
+            local,
+            policy,
+            read_window,
+            limits,
+            scope,
+        };
         let LocalSources {
             active: mut active_source,
             next_segment_id: next_local_id,
             skipped: skipped_local,
-        } = merge_local_sources(
-            db_path,
-            local,
-            &mut plan,
-            &mut sources,
-            policy,
-            read_window,
-            limits,
-        )?;
+        } = merge_local_sources(&context, &mut plan, &mut sources)?;
         skipped.extend(skipped_local);
         enforce_epoch_order(
             db_path,
@@ -134,32 +189,44 @@ impl StreamingCloudWalRecovery {
             &mut active_source,
             policy,
             &mut skipped,
+            scope,
         )?;
         stop_at_first_hole(
-            db_path,
+            &context,
             catalog,
             &skipped,
             &mut plan,
             &mut sources,
             &mut active_source,
-            limits,
         )?;
-        for (segment_id, source) in sources {
-            replay_fs.insert(
-                crate::wal::segment_file_name(segment_id),
-                source.fs,
-                source.path,
-            )?;
-        }
-        if let Some(source) = active_source {
-            replay_fs.insert(crate::wal::ACTIVE_FILE_NAME.into(), source.fs, source.path)?;
-        }
+        assemble_planned_sources(&mut replay_fs, sources, active_source, scope)?;
+        scope.check("cloud WAL planning completion")?;
         Ok(Self {
-            fs: Arc::new(replay_fs),
+            fs: crate::io::scope_fs(Arc::new(replay_fs), scope.clone()),
             plan,
             next_segment_id: next_remote_id.max(next_local_id),
         })
     }
+}
+
+fn assemble_planned_sources(
+    replay_fs: &mut StreamingWalFs,
+    sources: BTreeMap<u64, ReplaySource>,
+    active_source: Option<ReplaySource>,
+    scope: &DeadlineScope,
+) -> MidgeResult<()> {
+    for (segment_id, source) in sources {
+        scope.check("cloud WAL source assembly")?;
+        replay_fs.insert(
+            crate::wal::segment_file_name(segment_id),
+            source.fs,
+            source.path,
+        )?;
+    }
+    if let Some(source) = active_source {
+        replay_fs.insert(crate::wal::ACTIVE_FILE_NAME.into(), source.fs, source.path)?;
+    }
+    Ok(())
 }
 
 fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {
@@ -167,6 +234,15 @@ fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| MidgeError::ResourceLimit("WAL segment identity space exhausted".into()))
+}
+
+struct WalPlanningContext<'a> {
+    db_path: &'a Path,
+    local: &'a Arc<dyn Fs>,
+    policy: RecoveryPolicy,
+    read_window: usize,
+    limits: StreamingReplayLimits,
+    scope: &'a DeadlineScope,
 }
 
 struct LocalSources {
@@ -177,14 +253,19 @@ struct LocalSources {
 }
 
 fn merge_local_sources(
-    db_path: &Path,
-    local: &Arc<dyn Fs>,
+    context: &WalPlanningContext<'_>,
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
-    policy: RecoveryPolicy,
-    read_window: usize,
-    limits: StreamingReplayLimits,
 ) -> MidgeResult<LocalSources> {
+    let WalPlanningContext {
+        db_path,
+        local,
+        policy,
+        read_window,
+        limits,
+        scope,
+    } = *context;
+    scope.check("local WAL source discovery")?;
     let paths = CloudStartupRecovery::collect_local_wal_paths(
         &db_path.join("wal"),
         policy,
@@ -202,6 +283,7 @@ fn merge_local_sources(
     // exhaustion before normalization can rename any source files.
     let next_local_id = next_segment_id(segments.keys().copied().max())?;
     for (segment_id, paths) in segments {
+        scope.check("local WAL source selection")?;
         let selected = select_local_segment(
             local,
             segment_id,
@@ -273,7 +355,10 @@ fn recover_or_salvage<T>(
 ) -> MidgeResult<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(error @ (MidgeError::ResourceLimit(_) | MidgeError::NoSpace(_))) => Err(error),
+        Err(
+            error
+            @ (MidgeError::ResourceLimit(_) | MidgeError::NoSpace(_) | MidgeError::Timeout(_)),
+        ) => Err(error),
         Err(error) if policy == RecoveryPolicy::Salvage && error.is_salvageable() => {
             *salvaged = true;
             tracing::warn!(%error, "skipping invalid WAL source during salvage recovery");
@@ -292,17 +377,21 @@ fn remote_source(
     timeout: Duration,
     read_window: usize,
     limits: StreamingReplayLimits,
+    scope: &DeadlineScope,
 ) -> MidgeResult<ReplaySource> {
+    scope.check("cloud WAL HEAD submission")?;
+    let deadline = if scope.deadline().is_bounded() {
+        scope.deadline()
+    } else {
+        OperationDeadline::from_budget(timeout)
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     remote.submit_range_head_request(
-        crate::storage::StorageRequest::new(
-            &publication.object_key,
-            crate::common::OperationDeadline::from_budget(timeout),
-            timeout,
-        ),
+        crate::storage::StorageRequest::new(&publication.object_key, deadline, timeout),
         tx,
     );
-    let metadata = match rx.recv_timeout(timeout) {
+    scope.check("cloud WAL HEAD wait")?;
+    let metadata = match rx.recv_timeout(deadline.clamp(timeout)) {
         Ok(StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(metadata),
             ..
@@ -314,11 +403,15 @@ fn remote_source(
             let message = format!("cloud WAL {} HEAD: {error}", publication.object_key);
             // A cataloged segment that no longer exists is lost data, not a
             // transient failure, so salvage may skip it.
-            return Err(if error.is_not_found() {
-                MidgeError::Corruption(message)
-            } else {
-                MidgeError::RecoveryFailed(message)
-            });
+            return Err(
+                if error.kind() == crate::storage::StorageErrorKind::Timeout {
+                    MidgeError::Timeout(error.message().to_string())
+                } else if error.is_not_found() {
+                    MidgeError::Corruption(message)
+                } else {
+                    MidgeError::RecoveryFailed(message)
+                },
+            );
         }
         Ok(other) => {
             return Err(MidgeError::RecoveryFailed(format!(
@@ -334,14 +427,19 @@ fn remote_source(
             )))
         }
     };
-    let fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::for_object(
-        local,
-        remote,
-        publication.object_key.clone(),
-        metadata,
-        timeout,
-    ));
-    let fs = crate::telemetry::recovery_progress::observe_reads(fs);
+    scope.check("cloud WAL HEAD completion")?;
+    let fs: Arc<dyn Fs> = Arc::new(
+        crate::storage::remote_sst::RemoteSstFs::for_object(
+            local,
+            remote,
+            publication.object_key.clone(),
+            metadata,
+            timeout,
+        )
+        .with_deadline(scope.deadline()),
+    );
+    let fs =
+        crate::telemetry::recovery_progress::observe_reads(crate::io::scope_fs(fs, scope.clone()));
     let path = FsPath::new(publication.object_key.clone());
     validate_wal_source(
         fs.as_ref(),
@@ -474,8 +572,10 @@ fn canonicalize_aliases(
         if alias == canonical || !fs.exists(&alias_path).map_err(FsError::into_midge)? {
             continue;
         }
-        let equal = wal_sources_equal((fs, &canonical_path), (fs, &alias_path), read_window)
-            .unwrap_or(false);
+        let equal = match wal_sources_equal((fs, &canonical_path), (fs, &alias_path), read_window) {
+            Err(error @ MidgeError::Timeout(_)) => return Err(error),
+            result => result.unwrap_or(false),
+        };
         if equal {
             fs.remove_file(&alias_path).map_err(FsError::into_midge)?;
         } else {
@@ -598,10 +698,12 @@ fn enforce_epoch_order(
     active: &mut Option<ReplaySource>,
     policy: RecoveryPolicy,
     skipped: &mut BTreeSet<u64>,
+    scope: &DeadlineScope,
 ) -> MidgeResult<()> {
     let mut highest_epoch = 0;
     let mut stale = Vec::new();
     for segment_id in sources.keys() {
+        scope.check("WAL epoch order")?;
         let segment = plan
             .remote_segments
             .get(segment_id)
@@ -670,6 +772,9 @@ fn verified_max_sequence(
     match inspect_wal_file(file.as_ref(), &wal_path, limits) {
         Ok(prefix) => Ok(prefix.max_sequence),
         Err(failure) => {
+            if matches!(failure.error(), MidgeError::Timeout(_)) {
+                return Err(failure.error().replay());
+            }
             let prefix = failure.verified_prefix();
             let suffix = max_verified_suffix_sequence(
                 file.as_ref(),
@@ -688,14 +793,19 @@ fn verified_max_sequence(
 /// (local files renamed, cloud objects kept) and the sequence floor is
 /// lifted above them.
 fn stop_at_first_hole(
-    db_path: &Path,
+    context: &WalPlanningContext<'_>,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     skipped: &BTreeSet<u64>,
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
     active: &mut Option<ReplaySource>,
-    limits: StreamingReplayLimits,
 ) -> MidgeResult<()> {
+    let WalPlanningContext {
+        db_path,
+        limits,
+        scope,
+        ..
+    } = *context;
     // Segments upload and retire in id order, so a local file below the
     // oldest cataloged segment was already retired, meaning SSTs cover it.
     // A leaked, corrupt copy of it is not a hole.
@@ -721,6 +831,7 @@ fn stop_at_first_hole(
         Err(error) => return Err(error.into()),
     };
     for entry in entries {
+        scope.check("WAL salvage discovery")?;
         if entry
             .file_name()
             .to_str()
@@ -730,11 +841,15 @@ fn stop_at_first_hole(
             local_paths.push(entry.path());
         }
     }
-    let local = crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?;
+    let local = crate::io::scope_fs(
+        Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?),
+        scope.clone(),
+    );
     for path in &local_paths {
+        scope.check("WAL salvage frontier")?;
         // A corrupt local-only file is in neither the catalog nor the plan;
         // its verified prefix is the best record of what it held.
-        max_sequence = max_sequence.max(verified_max_sequence(&local, path, limits)?);
+        max_sequence = max_sequence.max(verified_max_sequence(local.as_ref(), path, limits)?);
     }
     let dropped: Vec<u64> = sources.range(hole..).map(|(id, _)| *id).collect();
     for segment_id in dropped {

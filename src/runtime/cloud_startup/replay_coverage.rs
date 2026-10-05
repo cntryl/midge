@@ -97,6 +97,18 @@ fn observe_budgeted(
     true
 }
 
+fn check_scope(scope: Option<&crate::common::DeadlineScope>) -> crate::common::MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check("WAL SST coverage"))
+}
+
+fn conservative<T>(result: crate::common::MidgeResult<T>) -> crate::common::MidgeResult<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error @ crate::common::MidgeError::Timeout(_)) => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
 impl ReplayCoverage {
     pub(crate) fn new(
         manifest: crate::metadata::Manifest,
@@ -130,31 +142,49 @@ impl ReplayCoverage {
     }
 
     pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {
+        self.contains_core(record, None).unwrap_or(false)
+    }
+
+    pub(crate) fn contains_within(
+        &self,
+        record: &crate::wal::WalRecord,
+        scope: &crate::common::DeadlineScope,
+    ) -> crate::common::MidgeResult<bool> {
+        self.contains_core(record, Some(scope))
+    }
+
+    fn contains_core(
+        &self,
+        record: &crate::wal::WalRecord,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> crate::common::MidgeResult<bool> {
         let started = std::time::Instant::now();
+        check_scope(scope)?;
         self.probes.set(self.probes.get().saturating_add(1));
-        let result = self.contains_record(record);
+        let result = self.contains_record(record, scope)?;
+        check_scope(scope)?;
         self.elapsed_ns.set(
             self.elapsed_ns
                 .get()
                 .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
         );
-        // Completing a conservative replay decision is work even when no SST
-        // supplies an exact coverage proof. It does not claim that proof held.
         self.progress.borrow_mut().completed_operation();
-        result
+        Ok(result)
     }
 
-    fn contains_record(&self, record: &crate::wal::WalRecord) -> bool {
+    fn contains_record(
+        &self,
+        record: &crate::wal::WalRecord,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> crate::common::MidgeResult<bool> {
         use crate::runtime::hybrid_persistence::{
             file_covers_wal_point_record, ExactCoverageState,
         };
         use crate::wal::types::WalOpRole;
-        // Keep the existing conservative rule: tombstones are always replayed.
         if !matches!(record.op.role(), WalOpRole::ValueWrite) {
-            return false;
+            return Ok(false);
         }
         let mut retained_value = None;
-        // Drop the proof's copied bytes before their reservation on every exit.
         let mut proof = ExactCoverageState::default();
         self.manifest_scanned.set(
             self.manifest_scanned
@@ -162,50 +192,97 @@ impl ReplayCoverage {
                 .saturating_add(self.manifest.files.len() as u64),
         );
         for file in &self.manifest.files {
+            check_scope(scope)?;
             if !file_covers_wal_point_record(file, record) {
                 self.progress.borrow_mut().completed_operation();
                 continue;
             }
             self.manifest_candidates
                 .set(self.manifest_candidates.get().saturating_add(1));
-            let Some(observed) = self.file_state(file, record.key.as_ref()) else {
-                return false;
+            let Some(observed) = self.file_state(file, record.key.as_ref(), scope)? else {
+                return Ok(false);
             };
             if !observe_budgeted(&mut proof, &mut retained_value, observed, &self.read_budget) {
-                return false;
+                return Ok(false);
             }
+            check_scope(scope)?;
             self.progress.borrow_mut().completed_operation();
         }
-        proof.exactly_covers_wal_point(record)
+        Ok(proof.exactly_covers_wal_point(record))
     }
 
     fn file_state(
         &self,
         file: &crate::metadata::FileMeta,
         key: &[u8],
-    ) -> Option<crate::types::KeyState> {
-        let observed = self.try_file_state(file, key);
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> crate::common::MidgeResult<Option<crate::types::KeyState>> {
+        check_scope(scope)?;
+        let observed = self.try_file_state(file, key)?;
+        check_scope(scope)?;
         if observed.is_none() && !self.readers.borrow().is_empty() {
-            // Retained locality is only an optimization. If a probe failed
-            // (possibly for budget), drop every retained reader and retry once
-            // from the single-reader footprint before conceding to replay.
             self.release_cached_all();
-            return self.try_file_state(file, key);
+            let result = self.try_file_state(file, key)?;
+            check_scope(scope)?;
+            return Ok(result);
         }
-        observed
+        Ok(observed)
+    }
+
+    fn proof_fs(
+        &self,
+        file: &crate::metadata::FileMeta,
+        path: &FsPath,
+    ) -> crate::common::MidgeResult<Option<Arc<dyn Fs>>> {
+        let Some(crc) = file.content_crc32c else {
+            return Ok(None);
+        };
+        let Some(pinned) = conservative(
+            self.fs
+                .immutable_read_view(path)
+                .map_err(crate::io::FsError::into_midge),
+        )?
+        .flatten() else {
+            return Ok(None);
+        };
+        let window = self
+            .read_budget
+            .limit()
+            .saturating_sub(self.read_budget.used())
+            .min(usize::try_from(file.size_bytes).unwrap_or(usize::MAX));
+        let Ok(_verification) = self
+            .read_budget
+            .reserve(window, "recovery SST verification")
+        else {
+            return Ok(None);
+        };
+        if conservative(super::streaming_wal_fs::validate_wal_source(
+            pinned.as_ref(),
+            path,
+            file.size_bytes,
+            crc,
+            window,
+        ))?
+        .is_none()
+        {
+            return Ok(None);
+        }
+        self.verified_bytes
+            .set(self.verified_bytes.get().saturating_add(file.size_bytes));
+        Ok(Some(pinned))
     }
 
     fn try_file_state(
         &self,
         file: &crate::metadata::FileMeta,
         key: &[u8],
-    ) -> Option<crate::types::KeyState> {
+    ) -> crate::common::MidgeResult<Option<crate::types::KeyState>> {
         let mut readers = self.readers.borrow_mut();
         if let Some(position) = readers.iter().position(|cached| cached.name == file.name) {
             let cached = readers.remove(position);
             self.reader_hits
                 .set(self.reader_hits.get().saturating_add(1));
-            let result = cached.reader.get_state_at_with_time(key, u64::MAX, 0).ok();
+            let result = conservative(cached.reader.get_state_at_with_time(key, u64::MAX, 0));
             readers.push(cached);
             return result;
         }
@@ -218,37 +295,14 @@ impl ReplayCoverage {
         let path = FsPath::new(crate::cloud_layout::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
         if !verified.contains_key(&file.name) {
-            let reservation = self
-                .read_budget
-                .reserve(
-                    proof_metadata_bytes(&file.name),
-                    "recovery immutable proof metadata",
-                )
-                .ok()?;
-            let fs = (|| {
-                let crc = file.content_crc32c?;
-                let pinned = self.fs.immutable_read_view(&path).ok()??;
-                let window = self
-                    .read_budget
-                    .limit()
-                    .saturating_sub(self.read_budget.used())
-                    .min(usize::try_from(file.size_bytes).unwrap_or(usize::MAX));
-                let _verification = self
-                    .read_budget
-                    .reserve(window, "recovery SST verification")
-                    .ok()?;
-                super::streaming_wal_fs::validate_wal_source(
-                    pinned.as_ref(),
-                    &path,
-                    file.size_bytes,
-                    crc,
-                    window,
-                )
-                .ok()?;
-                self.verified_bytes
-                    .set(self.verified_bytes.get().saturating_add(file.size_bytes));
-                Some(pinned)
-            })();
+            let Ok(reservation) = self.read_budget.reserve(
+                proof_metadata_bytes(&file.name),
+                "recovery immutable proof metadata",
+            ) else {
+                return Ok(None);
+            };
+            // A timed proof is not cached as a negative; cancellation must escape.
+            let fs = self.proof_fs(file, &path)?;
             verified.insert(
                 file.name.clone(),
                 VerifiedProof {
@@ -257,22 +311,22 @@ impl ReplayCoverage {
                 },
             );
         }
-        let fs = verified.get(&file.name)?.fs.as_ref()?;
-        let budget = self.read_budget.clone();
+        let Some(fs) = verified.get(&file.name).and_then(|proof| proof.fs.as_ref()) else {
+            return Ok(None);
+        };
         self.reader_opens
             .set(self.reader_opens.get().saturating_add(1));
-        let reader = crate::sst::fs::SstFileIo::open_for_recovery(
+        let Some(reader) = conservative(crate::sst::fs::SstFileIo::open_for_recovery(
             &path.0,
             Arc::clone(fs),
-            budget,
+            self.read_budget.clone(),
             MAX_BLOCKS_PER_READER,
             self.block_cap_per_reader,
-        )
-        .ok()?;
-        // Recovery compares persisted expiration metadata. A forward wall-clock
-        // jump must not turn an unrelated expired value into tombstone proof.
-        // Expiration zero remains conservatively replayed at equal sequence.
-        let result = reader.get_state_at_with_time(key, u64::MAX, 0).ok();
+        ))?
+        else {
+            return Ok(None);
+        };
+        let result = conservative(reader.get_state_at_with_time(key, u64::MAX, 0));
         readers.push(CachedReader {
             name: file.name.clone(),
             reader,
@@ -353,6 +407,113 @@ mod tests {
             _failed: bool,
         ) {
         }
+    }
+
+    #[test]
+    fn should_reject_cancelled_startup_scope_when_exact_coverage_is_cached() {
+        // Arrange: warm real remote bytes, CRC proof and the exact SST reader.
+        let (directory, coverage) = fixture(&[(Some(b"value"), 7, None)]);
+        let record = put(7, None);
+        let healthy =
+            crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+        assert!(coverage.contains_within(&record, &healthy).unwrap());
+        let reads_before = coverage.reader_opens.get();
+        let verified_before = coverage.verified_bytes.get();
+        let names_before: Vec<_> = std::fs::read_dir(directory.path().join("cloud/sst"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let scope =
+            crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+        scope.cancel();
+
+        // Act: cancellation must be checked even when no filesystem call occurs.
+        let result = coverage.contains_within(&record, &scope);
+
+        // Assert: a cached true proof cannot swallow Timeout or trigger fallback.
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert_eq!(coverage.reader_opens.get(), reads_before);
+        assert_eq!(coverage.verified_bytes.get(), verified_before);
+        assert!(coverage.contains_within(&record, &healthy).unwrap());
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("cloud/sst"))
+                .unwrap()
+                .count(),
+            names_before.len()
+        );
+    }
+
+    struct ExpiringSuccessfulRange {
+        completed: std::sync::atomic::AtomicUsize,
+        completed_bytes: std::sync::atomic::AtomicU64,
+        deadline: crate::common::OperationDeadline,
+    }
+
+    impl crate::io::traits::ReadObserver for ExpiringSuccessfulRange {
+        fn remote_range_started(&self) {}
+
+        fn remote_range_completed(&self, bytes: u64, _elapsed: std::time::Duration, failed: bool) {
+            if !failed && bytes > 0 {
+                self.completed
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.completed_bytes
+                    .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel);
+                // Delay delivery after an actual successful range. This is a
+                // controlled adapter timing test, not a provider timeout claim.
+                while !self.deadline.is_expired() {
+                    std::thread::sleep(self.deadline.remaining());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn should_preserve_typed_coverage_timeout_without_caching_a_negative_proof() {
+        // Arrange: the genuine remote SST remains available and unchanged.
+        let (directory, mut coverage) = fixture(&[(Some(b"value"), 7, None)]);
+        let original_fs = Arc::clone(&coverage.fs);
+        let path = directory
+            .path()
+            .join("cloud/sst")
+            .join(&coverage.manifest.files[0].name);
+        let before = std::fs::read(path.clone()).unwrap();
+        let record = put(7, None);
+        let deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let scope = crate::common::DeadlineScope::new(deadline);
+        let observer = Arc::new(ExpiringSuccessfulRange {
+            completed: std::sync::atomic::AtomicUsize::new(0),
+            completed_bytes: std::sync::atomic::AtomicU64::new(0),
+            deadline,
+        });
+        let delayed_fs = original_fs.with_read_observer(observer.clone()).unwrap();
+        coverage.fs = crate::io::scope_fs(delayed_fs, scope.clone());
+
+        // Act: a completed range arrives after the shared budget expires.
+        let result = coverage.contains_within(&record, &scope);
+
+        // Assert: the typed error escapes rather than becoming cached false.
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert!(deadline.is_expired());
+        assert_eq!(
+            observer
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            observer
+                .completed_bytes
+                .load(std::sync::atomic::Ordering::Acquire),
+            u64::try_from(before.len()).unwrap()
+        );
+        assert!(coverage.verified.borrow().is_empty());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        coverage.fs = original_fs;
+        let healthy =
+            crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+        assert!(coverage.contains_within(&record, &healthy).unwrap());
+        assert!(coverage.verified_bytes.get() > 0);
     }
 
     #[test]

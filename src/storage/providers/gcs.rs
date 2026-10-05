@@ -1498,10 +1498,11 @@ impl CloudBackend for GcsBackend {
                 mode: self.mode,
             },
         );
-        self.executor.spawn_request_loop(
+        self.executor.spawn_request_loop_with_timeout(
             state,
             prefix,
             callback,
+            request_timeout,
             move |state| {
                 let mut request =
                     Self::bodyless_request(state.provider.mode, Method::GET, state.url());

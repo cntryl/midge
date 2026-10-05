@@ -1164,3 +1164,223 @@ proptest::proptest! {
 
 #[cfg(feature = "failpoints")]
 mod crashes;
+
+#[derive(Default)]
+struct PlannerEvidence {
+    successful_heads: std::sync::atomic::AtomicUsize,
+    deliveries_before_expiry: std::sync::atomic::AtomicUsize,
+    deliveries_after_expiry: std::sync::atomic::AtomicUsize,
+    mutations: std::sync::atomic::AtomicUsize,
+}
+
+struct DelayedPlannerBackend {
+    inner: Arc<dyn StorageBackend>,
+    evidence: Arc<PlannerEvidence>,
+    deadline: OperationDeadline,
+}
+
+impl StorageBackend for DelayedPlannerBackend {
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.inner.submit_range_head_request(request, tx);
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual filesystem HEAD");
+        assert!(matches!(
+            &event,
+            crate::storage::StorageEvent::HeadComplete {
+                result: crate::storage::StorageOutcome::Ok(_),
+                ..
+            }
+        ));
+        let completed = self
+            .evidence
+            .successful_heads
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        if completed == 2 {
+            // Admission of this second real HEAD proves the first segment's
+            // checksum and inspection finished. Expire the original budget
+            // here, rather than assuming two calibrated sleeps fit the runner.
+            while !self.deadline.is_expired() {
+                std::thread::sleep(self.deadline.remaining());
+            }
+        }
+        let deliveries = if self.deadline.is_expired() {
+            &self.evidence.deliveries_after_expiry
+        } else {
+            &self.evidence.deliveries_before_expiry
+        };
+        deliveries.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let _ = callback.send(event);
+    }
+
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        self.inner
+            .submit_range_read_request(request, range, callback);
+    }
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        self.inner.submit_metadata_read_request(request, callback);
+    }
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.inner.submit_head_request(request, callback);
+    }
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.evidence
+            .mutations
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.inner.submit_delete_request(request, callback);
+    }
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        self.evidence
+            .mutations
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.inner.submit_write_request(request, data, callback);
+    }
+}
+
+fn run_planner_with_expiring_second_head(
+    fixture: &Fixture,
+    policy: RecoveryPolicy,
+) -> (
+    MidgeResult<StreamingCloudWalRecovery>,
+    Arc<PlannerEvidence>,
+    OperationDeadline,
+) {
+    crate::failpoints::with_read_gate(|| {
+        let db_path = fixture.directory.path().join("local");
+        let local: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&db_path).unwrap());
+        let evidence = Arc::new(PlannerEvidence::default());
+        // Setup and failpoint-gate admission precede this real immutable clock.
+        // The second completed HEAD forces expiry, independent of runner speed.
+        let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+        let scope = crate::common::DeadlineScope::new(deadline);
+        let remote: Arc<dyn StorageBackend> = Arc::new(DelayedPlannerBackend {
+            inner: Arc::clone(&fixture.cloud),
+            evidence: Arc::clone(&evidence),
+            deadline,
+        });
+        let result = StreamingCloudWalRecovery::build_with_local_fs_within(
+            &db_path,
+            &local,
+            &remote,
+            &fixture.catalog,
+            policy,
+            Duration::from_secs(5),
+            127,
+            limits(),
+            &scope,
+        );
+        (result, evidence, deadline)
+    })
+}
+
+fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
+    // Arrange: a real catalog names four genuine sealed WAL objects. The
+    // second successful HEAD is held until the same captured budget expires.
+    let mut fixture = Fixture::new().expect("actual planner fixture");
+    let mut objects = Vec::new();
+    for id in 1..=4 {
+        let bytes = framed_wal(id, 7, b"acknowledged value");
+        fixture.publish(id, id, 7, &bytes).unwrap();
+        objects.push((fixture.catalog.segments[&id].object_key.clone(), bytes));
+    }
+    let local_name = crate::wal::segment_file_name(4);
+    let local_bytes = framed_wal(4, 7, b"acknowledged value");
+    let local_path = fixture.local(&local_name, &local_bytes).unwrap();
+    let catalog_before = fixture.catalog.encode().unwrap();
+    // Act: the real planner owns checksum/inspection and receives real HEADs;
+    // a completed successful submission is not free aggregate time.
+    let (result, evidence, deadline) = run_planner_with_expiring_second_head(&fixture, policy);
+
+    // Assert: Timeout is typed under both policies and stops before later
+    // segment admission, alias quarantine, remote deletion, or catalog changes.
+    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert!(deadline.is_expired());
+    assert_eq!(
+        evidence
+            .successful_heads
+            .load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+    assert_eq!(
+        evidence
+            .deliveries_before_expiry
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        evidence
+            .deliveries_after_expiry
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        evidence
+            .mutations
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert_eq!(fixture.catalog.encode().unwrap(), catalog_before);
+    assert_eq!(std::fs::read(local_path).unwrap(), local_bytes);
+    assert_eq!(
+        std::fs::read_dir(fixture.directory.path().join("local/wal"))
+            .unwrap()
+            .count(),
+        1
+    );
+    for (key, bytes) in objects {
+        assert_eq!(
+            std::fs::read(fixture.directory.path().join("cloud").join(key)).unwrap(),
+            bytes
+        );
+    }
+    assert!(!fixture
+        .directory
+        .path()
+        .join("local/cloud_recovery")
+        .exists());
+
+    // A fresh healthy compatibility attempt still verifies the exact history.
+    let recovered = fixture
+        .plan_only(policy, limits())
+        .expect("healthy planner after timeout");
+    assert_eq!(recovered.plan.remote_segments.len(), 4);
+    assert!(!recovered.plan.opened_in_salvage_mode);
+}
+
+#[test]
+fn should_preserve_recovery_inputs_when_strict_planner_exhausts_aggregate_head_budget() {
+    assert_planner_aggregate_timeout(RecoveryPolicy::Strict);
+}
+
+#[test]
+fn should_preserve_recovery_inputs_when_salvage_planner_exhausts_aggregate_head_budget() {
+    assert_planner_aggregate_timeout(RecoveryPolicy::Salvage);
+}

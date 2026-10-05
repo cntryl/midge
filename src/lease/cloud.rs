@@ -168,55 +168,41 @@ impl ProviderLeaderStore {
     }
 }
 
-impl LeaderStore for ProviderLeaderStore {
-    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        self.acquire_leadership_with_minimum_epoch(holder_id, 0)
-    }
-
-    fn acquire_leadership_with_minimum_epoch(
+impl ProviderLeaderStore {
+    fn read_acquisition_state(
         &self,
-        holder_id: &str,
-        minimum_epoch: u64,
-    ) -> Result<LeaderRecord, LeaseError> {
-        let current = provider_read_doc_with_metadata(&self.cloud, self.cloud.callback_timeout())?;
+        cloud: &CloudStorage,
+    ) -> Result<(Option<LeaseDocument>, Option<ObjectMetadata>), LeaseError> {
+        let current = provider_read_doc_with_metadata(cloud, cloud.callback_timeout())?;
         let (existing, metadata) = match current {
             Some((document, metadata)) => (Some(document), Some(metadata)),
             None => (None, None),
         };
-
         if existing
             .as_ref()
             .is_some_and(|document| document.version == LeaseDocumentVersion::Legacy)
         {
             return Err(legacy_metadata_migration_error());
         }
-
-        let sentinel =
-            provider_read_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
+        let sentinel = provider_read_authority_sentinel(cloud, cloud.callback_timeout())?;
         match (existing.as_ref(), sentinel) {
             (None, AuthoritySentinelState::Missing) => {
-                // A pending marker survives a failed first lease create. It
-                // becomes active only after the lease CAS has succeeded.
-                provider_create_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
+                provider_create_authority_sentinel(cloud, cloud.callback_timeout())?;
             }
             (None, AuthoritySentinelState::Pending) | (Some(_), AuthoritySentinelState::Active) => {
             }
-            (None, AuthoritySentinelState::Active) => {
-                return Err(missing_initialized_lease_error());
-            }
+            (None, AuthoritySentinelState::Active) => return Err(missing_initialized_lease_error()),
             (Some(document), AuthoritySentinelState::Pending)
                 if document.committed_metadata.is_none() => {}
             (Some(_), AuthoritySentinelState::Missing) => {
-                return Err(missing_authority_sentinel_error());
+                return Err(missing_authority_sentinel_error())
             }
             (Some(_), AuthoritySentinelState::Pending) => {
                 return Err(LeaseError::Indeterminate(
-                    "pending cloud metadata authority marker accompanies committed metadata"
-                        .to_string(),
-                ));
+                    "pending cloud metadata authority marker accompanies committed metadata".into(),
+                ))
             }
         }
-
         if let Some(existing) = existing.as_ref() {
             if !existing.is_expired_with_tolerance(self.clock_skew_tolerance())? {
                 return Err(LeaseError::AcquisitionFailed(format!(
@@ -225,12 +211,22 @@ impl LeaderStore for ProviderLeaderStore {
                 )));
             }
         }
+        Ok((existing, metadata))
+    }
 
-        let previous_epoch = existing
+    fn acquire_with_cloud(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        cloud: &CloudStorage,
+        scope: Option<&crate::common::DeadlineScope>,
+        on_cleanup_epoch: &mut dyn FnMut(u64),
+    ) -> Result<LeaderRecord, LeaseError> {
+        let (existing, metadata) = self.read_acquisition_state(cloud)?;
+        let epoch = existing
             .as_ref()
             .and_then(|document| document.epoch)
-            .unwrap_or(0);
-        let epoch = previous_epoch
+            .unwrap_or(0)
             .max(minimum_epoch)
             .checked_add(1)
             .ok_or(LeaseError::EpochExhausted)?;
@@ -248,29 +244,116 @@ impl LeaderStore for ProviderLeaderStore {
         };
         let headers = match metadata {
             Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
-                LeaseError::IoError(
-                    "existing cloud lease has no conditional update token".to_string(),
-                )
+                LeaseError::IoError("existing cloud lease has no conditional update token".into())
             })?,
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };
-        provider_write_doc(&self.cloud, &document, headers)?;
-        provider_activate_authority_sentinel(&self.cloud, self.cloud.callback_timeout())?;
-        if provider_read_doc_with_timeout(&self.cloud, self.cloud.callback_timeout())?.as_ref()
-            != Some(&document)
-        {
-            return Err(LeaseError::RenewalFailed(
-                "cloud lease changed before metadata authority marker activation completed"
-                    .to_string(),
-            ));
+        if let Some(scope) = scope {
+            scope
+                .begin_ambiguous_mutation("cloud lease conditional acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+            // A committed request can lose its response. Retain only an exact
+            // cleanup candidate before submit; release must still read and
+            // match holder, owner token and epoch before conditional expiration.
+            on_cleanup_epoch(epoch);
         }
-        self.validity.activate(epoch, valid_until)?;
-
+        if let Err(error) = provider_write_doc(cloud, &document, headers) {
+            if let Some(scope) = scope {
+                if matches!(error, LeaseError::AcquisitionFailed(_)) {
+                    scope.resolve_ambiguous_mutation();
+                    return Err(error);
+                }
+                return Err(LeaseError::Indeterminate(format!(
+                    "cloud lease acquisition CAS is unresolved: {error}"
+                )));
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.finish_acquisition(cloud, &document, epoch, valid_until, scope) {
+            return Err(if scope.is_some() {
+                LeaseError::Indeterminate(format!(
+                    "cloud lease CAS committed but acquisition did not finish: {error}"
+                ))
+            } else {
+                error
+            });
+        }
         Ok(LeaderRecord {
             epoch,
             holder_id: document.holder_id,
             acquired_at: document.acquired_at,
         })
+    }
+
+    fn finish_acquisition(
+        &self,
+        cloud: &CloudStorage,
+        document: &LeaseDocument,
+        epoch: u64,
+        valid_until: Instant,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> Result<(), LeaseError> {
+        provider_activate_authority_sentinel(cloud, cloud.callback_timeout())?;
+        if provider_read_doc_with_timeout(cloud, cloud.callback_timeout())?.as_ref()
+            != Some(document)
+        {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease changed before metadata authority marker activation completed".into(),
+            ));
+        }
+        if let Some(scope) = scope {
+            scope
+                .check("cloud lease authority acceptance")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        self.validity.activate(epoch, valid_until)
+    }
+}
+
+impl LeaderStore for ProviderLeaderStore {
+    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_leadership_with_minimum_epoch(holder_id, 0)
+    }
+
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_with_cloud(holder_id, minimum_epoch, &self.cloud, None, &mut |_| {})
+    }
+
+    fn acquire_leadership_with_minimum_epoch_within(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+        on_cleanup_epoch: &mut dyn FnMut(u64),
+    ) -> Result<LeaderRecord, LeaseError> {
+        scope
+            .check("cloud lease acquisition")
+            .map_err(super::traits::scope_lease_error)?;
+        let cloud = self.cloud.with_startup_scope(scope.clone());
+        self.acquire_with_cloud(
+            holder_id,
+            minimum_epoch,
+            &cloud,
+            Some(scope),
+            on_cleanup_epoch,
+        )
+    }
+
+    fn read_current_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<LeaderRecord>, LeaseError> {
+        Ok(
+            provider_read_doc_with_timeout(&self.cloud, timeout)?.map(|document| LeaderRecord {
+                epoch: document.epoch.unwrap_or(0),
+                holder_id: document.holder_id,
+                acquired_at: document.acquired_at,
+            }),
+        )
     }
 
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
@@ -1181,52 +1264,80 @@ impl CloudStorageLease {
     }
 }
 
+impl CloudStorageLease {
+    fn acquire_in_scope(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> Result<LeaseGuard, LeaseError> {
+        if let Some(scope) = scope {
+            scope
+                .check("cloud primary lease acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        let mut pending_release = self
+            .pending_release_epoch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending_release.is_some() {
+            return Err(LeaseError::AlreadyAcquired(
+                "prior cloud lease release is still pending".into(),
+            ));
+        }
+        if self.acquired.load(Ordering::Acquire) {
+            return Err(LeaseError::AlreadyAcquired(
+                "lease already acquired by this instance".into(),
+            ));
+        }
+        let record = if let Some(scope) = scope {
+            self.leader_store
+                .acquire_leadership_with_minimum_epoch_within(
+                    &self.holder_id,
+                    minimum_epoch,
+                    scope,
+                    &mut |epoch| {
+                        *pending_release = Some(epoch);
+                    },
+                )?
+        } else {
+            self.leader_store
+                .acquire_leadership_with_minimum_epoch(&self.holder_id, minimum_epoch)?
+        };
+        self.acquired_epoch.store(record.epoch, Ordering::Release);
+        self.acquired.store(true, Ordering::Release);
+        *pending_release = None;
+        if let Some(scope) = scope {
+            // The successful result and cleanup epoch are fully tracked before
+            // cancellation can classify the remaining recovery as ordinary timeout.
+            scope.resolve_ambiguous_mutation();
+            scope
+                .check("confirmed cloud primary lease acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        tracing::info!(holder_id = %self.holder_id, bucket = %self.config.bucket,
+            lease_key = %self.lease_key(), "cloud storage lease acquired");
+        Ok(LeaseGuard::token())
+    }
+}
+
 impl PrimaryLease for CloudStorageLease {
     fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError> {
         self.try_acquire_with_minimum_epoch(0)
     }
 
     fn try_acquire_with_minimum_epoch(
-        self: std::sync::Arc<Self>,
+        self: Arc<Self>,
         minimum_epoch: u64,
     ) -> Result<LeaseGuard, LeaseError> {
-        // Borrow the inner value for field access (auto-deref handles Arc -> &T)
-        let inner: &Self = &self;
-        let pending_release = inner
-            .pending_release_epoch
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.acquire_in_scope(minimum_epoch, None)
+    }
 
-        if pending_release.is_some() {
-            return Err(LeaseError::AlreadyAcquired(
-                "prior cloud lease release is still pending".to_string(),
-            ));
-        }
-
-        if inner.acquired.load(Ordering::Acquire) {
-            return Err(LeaseError::AlreadyAcquired(
-                "lease already acquired by this instance".to_string(),
-            ));
-        }
-
-        let epoch = inner
-            .leader_store
-            .acquire_leadership_with_minimum_epoch(&inner.holder_id, minimum_epoch)?
-            .epoch;
-        inner
-            .acquired_epoch
-            .store(epoch, std::sync::atomic::Ordering::Release);
-
-        inner.acquired.store(true, Ordering::Release);
-        tracing::info!(
-            holder_id = %inner.holder_id,
-            bucket = %inner.config.bucket,
-            lease_key = %inner.lease_key(),
-            "cloud storage lease acquired"
-        );
-
-        // Token-style guard: dropping the guard does NOT release the lease.
-        Ok(LeaseGuard::token())
+    fn try_acquire_with_minimum_epoch_within(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+    ) -> Result<LeaseGuard, LeaseError> {
+        self.acquire_in_scope(minimum_epoch, Some(scope))
     }
 
     fn renew(&self) -> Result<(), LeaseError> {
@@ -1666,8 +1777,14 @@ fn provider_create_authority_sentinel(
     cloud: &CloudStorage,
     timeout: Duration,
 ) -> Result<(), LeaseError> {
+    let deadline = crate::common::OperationDeadline::from_budget(timeout);
+    let request_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            LeaseError::Timeout("cloud metadata authority sentinel create has no budget".into())
+        })?;
     let mut headers = vec![("If-None-Match".to_string(), "*".to_string())];
-    crate::storage::cloud::set_request_timeout_header(&mut headers, timeout);
+    crate::storage::cloud::set_request_timeout_header(&mut headers, request_timeout);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
         AUTHORITY_SENTINEL_KEY,
@@ -1675,7 +1792,14 @@ fn provider_create_authority_sentinel(
         headers,
         tx,
     );
-    match rx.recv_timeout(timeout) {
+    let wait_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            LeaseError::Timeout(
+                "cloud metadata authority sentinel create exceeded its submit budget".into(),
+            )
+        })?;
+    match rx.recv_timeout(wait_timeout) {
         Ok(CloudEvent::Put {
             result: CloudOutcome::Ok(()),
             ..
@@ -1707,6 +1831,7 @@ fn provider_activate_authority_sentinel(
     timeout: Duration,
 ) -> Result<(), LeaseError> {
     let started = Instant::now();
+    let deadline = crate::common::OperationDeadline::from_start(started, timeout);
     let Some((state, metadata)) = provider_read_authority_sentinel_with_metadata(cloud, timeout)?
     else {
         return Err(missing_authority_sentinel_error());
@@ -1734,7 +1859,14 @@ fn provider_activate_authority_sentinel(
         headers,
         tx,
     );
-    let result = match rx.recv_timeout(remaining) {
+    let wait_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            LeaseError::Timeout(
+                "cloud metadata authority sentinel activation exceeded its submit budget".into(),
+            )
+        })?;
+    let result = match rx.recv_timeout(wait_timeout) {
         Ok(CloudEvent::Put {
             result: CloudOutcome::Ok(()),
             ..
@@ -1867,7 +1999,11 @@ fn provider_write_doc_with_timeout(
     timeout: Duration,
 ) -> Result<(), LeaseError> {
     let started = Instant::now();
-    crate::storage::cloud::set_request_timeout_header(&mut headers, timeout);
+    let deadline = crate::common::OperationDeadline::from_start(started, timeout);
+    let request_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| LeaseError::Timeout("cloud lease PUT has no remaining budget".into()))?;
+    crate::storage::cloud::set_request_timeout_header(&mut headers, request_timeout);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
         LEASE_OBJECT_KEY,
@@ -1875,7 +2011,15 @@ fn provider_write_doc_with_timeout(
         headers,
         tx,
     );
-    match rx.recv_timeout(timeout) {
+    let Some(wait_timeout) = deadline.clamp_nonzero(cloud.callback_timeout()) else {
+        return reconcile_ambiguous_lease_write(
+            cloud,
+            document,
+            "cloud lease PUT exhausted its submission budget".into(),
+            Duration::ZERO,
+        );
+    };
+    match rx.recv_timeout(wait_timeout) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
             // These typed responses establish that this PUT did not commit.

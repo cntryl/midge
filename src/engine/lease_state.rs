@@ -120,6 +120,17 @@ impl LeaseState {
         }
     }
 
+    /// Startup owns this wait off the timed caller, before any runtime admission.
+    pub(super) fn release_owned_synchronously(&mut self) -> MidgeResult<()> {
+        let FencingResources {
+            heartbeat,
+            lease,
+            guard,
+            storage,
+        } = self.take_resources();
+        Self::release_fencing_parts(heartbeat, lease, guard, storage)
+    }
+
     pub(super) fn restore_resources(&mut self, resources: FencingResources) {
         self.heartbeat = resources.heartbeat;
         self.lease = resources.lease;
@@ -250,7 +261,7 @@ impl LeaseState {
         &mut self,
         runtime: Runtime,
         runtime_handle: RuntimeHandle,
-    ) -> Result<(), (MidgeError, Runtime)> {
+    ) -> Result<(), (MidgeError, Box<Runtime>)> {
         debug_assert!(self.pending_cleanup.is_none());
         let resources = self.take_resources();
         let (completion_tx, completion_rx) = crossbeam::channel::bounded(1);
@@ -286,7 +297,7 @@ impl LeaseState {
                     MidgeError::ResourceLimit(format!(
                         "failed to spawn runtime fencing cleanup reaper: {error}"
                     )),
-                    runtime,
+                    Box::new(runtime),
                 ))
             }
         }

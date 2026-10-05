@@ -648,6 +648,7 @@ impl WalActor {
         Ok(actor)
     }
 
+    #[cfg(test)]
     pub fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
     }
@@ -749,11 +750,13 @@ impl WalActor {
         self.leader_holder_id = holder_id;
     }
 
+    #[cfg(test)]
     pub fn batch_config(&self) -> crate::wal::policy::BatchConfig {
         self.batch_config
     }
 
     /// Set durability policy and optional batch config at runtime
+    #[cfg(test)]
     pub fn set_durability(
         &mut self,
         policy: DurabilityPolicy,

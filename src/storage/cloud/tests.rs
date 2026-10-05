@@ -8,6 +8,10 @@ use std::sync::{
 #[path = "tests/native_metadata_deadline.rs"]
 mod native_metadata_deadline;
 
+#[cfg(feature = "cloud-all")]
+#[path = "tests/native_startup_deadline.rs"]
+mod native_startup_deadline;
+
 #[path = "tests/read_deadline.rs"]
 mod read_deadline;
 
@@ -771,13 +775,17 @@ fn should_report_storage_callback_timeout_when_cloud_backend_is_slow() {
     let event = receiver.recv().expect("receive bounded adapter result");
 
     // Assert
-    assert!(matches!(
-        event,
-        StorageEvent::HeadComplete {
-            result: StorageOutcome::Err(message),
-            ..
-        } if message.to_string().contains("timed out")
-    ));
+    assert!(
+        matches!(
+            &event,
+            StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(error),
+            } if key == "metadata/manifest.json"
+                && error.kind() == crate::storage::StorageErrorKind::Timeout
+        ),
+        "slow HEAD must preserve the typed callback timeout for its object: {event:?}"
+    );
 }
 
 #[test]
@@ -805,13 +813,17 @@ fn should_apply_operation_timeout_to_cloud_head_adapter_when_shorter_than_config
 
     // Assert
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
-    assert!(matches!(
-        event,
-        StorageEvent::HeadComplete {
-            result: StorageOutcome::Err(message),
-            ..
-        } if message.to_string().contains("timed out")
-    ));
+    assert!(
+        matches!(
+            &event,
+            StorageEvent::HeadComplete {
+                key,
+                result: StorageOutcome::Err(error),
+            } if key == "metadata/manifest.json"
+                && error.kind() == crate::storage::StorageErrorKind::Timeout
+        ),
+        "HEAD caller budget must return a typed timeout for its object: {event:?}"
+    );
 }
 
 #[test]
@@ -841,13 +853,17 @@ fn should_apply_operation_timeout_to_cloud_cas_adapter_when_shorter_than_configu
 
     // Assert
     assert!(started.elapsed() < std::time::Duration::from_millis(500));
-    assert!(matches!(
-        event,
-        StorageEvent::WriteComplete {
-            result: StorageOutcome::Err(message),
-            ..
-        } if message.to_string().contains("timed out")
-    ));
+    assert!(
+        matches!(
+            &event,
+            StorageEvent::WriteComplete {
+                key,
+                result: StorageOutcome::Err(error),
+            } if key == "metadata/manifest.json"
+                && error.kind() == crate::storage::StorageErrorKind::Timeout
+        ),
+        "conditional PUT caller budget must return a typed timeout for its object: {event:?}"
+    );
 }
 
 #[test]

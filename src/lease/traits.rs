@@ -304,6 +304,22 @@ impl From<crate::io::traits::FsError> for LeaseError {
     }
 }
 
+pub(super) fn scope_lease_error(error: crate::common::MidgeError) -> LeaseError {
+    match error {
+        crate::common::MidgeError::Timeout(message) => LeaseError::Timeout(message),
+        other => LeaseError::Internal(other.to_string()),
+    }
+}
+
+fn definite_acquisition_rejection(error: &LeaseError) -> bool {
+    matches!(
+        error,
+        LeaseError::AcquisitionFailed(_)
+            | LeaseError::EpochExhausted
+            | LeaseError::AlreadyAcquired(_)
+    )
+}
+
 /// RAII guard for the primary lease.
 ///
 /// Executes the provided release function when dropped (if one was supplied).
@@ -407,6 +423,33 @@ pub trait PrimaryLease: Send + Sync {
         Err(LeaseError::Internal(format!(
             "lease cannot honor minimum epoch {minimum_epoch}"
         )))
+    }
+
+    /// Acquisition entrypoint carrying the caller's startup ownership scope.
+    fn try_acquire_with_minimum_epoch_within(
+        self: std::sync::Arc<Self>,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+    ) -> Result<LeaseGuard, LeaseError> {
+        scope
+            .begin_ambiguous_mutation("primary lease acquisition")
+            .map_err(scope_lease_error)?;
+        let result = self.try_acquire_with_minimum_epoch(minimum_epoch);
+        match result {
+            Ok(guard) => {
+                scope.resolve_ambiguous_mutation();
+                scope
+                    .check("confirmed primary lease acquisition")
+                    .map_err(scope_lease_error)?;
+                Ok(guard)
+            }
+            Err(error) => {
+                if definite_acquisition_rejection(&error) {
+                    scope.resolve_ambiguous_mutation();
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Renew the lease (extend TTL).
@@ -608,8 +651,46 @@ pub trait LeaderStore: Send + Sync {
         )))
     }
 
+    /// Acquisition scope with a conditional cleanup candidate observer.
+    ///
+    /// Native stores report the attempted epoch after mutation admission and
+    /// before submission. This does not confirm acquisition: cleanup must read
+    /// and match the exact holder, owner token and epoch before expiring it.
+    /// Compatibility implementations can report only a confirmed result.
+    fn acquire_leadership_with_minimum_epoch_within(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+        on_cleanup_epoch: &mut dyn FnMut(u64),
+    ) -> Result<LeaderRecord, LeaseError> {
+        scope
+            .begin_ambiguous_mutation("leader-store acquisition")
+            .map_err(scope_lease_error)?;
+        let result = self.acquire_leadership_with_minimum_epoch(holder_id, minimum_epoch);
+        match result {
+            Ok(record) => {
+                on_cleanup_epoch(record.epoch);
+                Ok(record)
+            }
+            Err(error) => {
+                if definite_acquisition_rejection(&error) {
+                    scope.resolve_ambiguous_mutation();
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Read the current leader record from storage (non-locking).
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError>;
+
+    fn read_current_with_timeout(
+        &self,
+        _timeout: Duration,
+    ) -> Result<Option<LeaderRecord>, LeaseError> {
+        self.read_current()
+    }
 
     /// Read the committed cloud control-metadata generation from the lease.
     ///

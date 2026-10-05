@@ -1,6 +1,9 @@
 //! Shared forwarding for test backends that override selected cloud operations.
 //! Fault-injecting methods stay explicit in each wrapper.
 
+#[cfg(all(test, feature = "cloud-all"))]
+pub(crate) mod native_http;
+
 /// Explicit delegate for test doubles that intentionally do not model a core
 /// provider operation. Production backends cannot opt into these fallbacks:
 /// every core operation remains required by [`CloudBackend`].

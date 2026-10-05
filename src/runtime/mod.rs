@@ -40,6 +40,8 @@ mod protocol;
 mod router;
 #[path = "runtime.rs"]
 mod runtime_worker;
+mod startup_gate;
+mod startup_observer;
 
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
@@ -68,6 +70,8 @@ pub(crate) use router::ResponseRouter;
 pub use runtime_worker::Runtime;
 #[cfg(test)]
 pub(crate) use runtime_worker::RUNTIME_QUEUE_CAPACITY;
+pub(crate) use startup_gate::StartupAdmission;
+pub use startup_observer::{StartupEvent, StartupObserver};
 
 #[cfg(test)]
 mod cardinality_proof_tests;

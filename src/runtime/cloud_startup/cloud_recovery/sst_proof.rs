@@ -72,6 +72,7 @@ impl CloudStartupRecovery {
         expected_crc32c.is_some() || reader.verify_all_blocks().is_ok()
     }
 
+    #[cfg(test)]
     pub(crate) fn local_sst_file_matches_manifest(
         path: &Path,
         file: &crate::metadata::FileMeta,
@@ -83,6 +84,88 @@ impl CloudStartupRecovery {
             &file.name,
             (file.size_bytes != 0).then_some(file.size_bytes),
             file.content_crc32c,
+        )
+    }
+
+    pub(crate) fn local_sst_file_matches_proof_within(
+        path: &Path,
+        sst_name: &str,
+        expected_size_bytes: Option<u64>,
+        expected_crc32c: Option<u32>,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> MidgeResult<bool> {
+        let Some(scope) = scope else {
+            return Ok(Self::local_sst_file_matches_proof(
+                path,
+                sst_name,
+                expected_size_bytes,
+                expected_crc32c,
+            ));
+        };
+        scope.check("local recovery SST proof")?;
+        let Some(parent) = path.parent() else {
+            return Ok(false);
+        };
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(false);
+        };
+        let fs: std::sync::Arc<dyn crate::io::Fs> = match crate::io::RealFs::open_existing(parent) {
+            Ok(fs) => std::sync::Arc::new(fs),
+            Err(crate::io::FsError::Timeout(message)) => return Err(MidgeError::Timeout(message)),
+            Err(_) => return Ok(false),
+        };
+        let fs = crate::io::scope_fs(fs, scope.clone());
+        let path = crate::io::FsPath::new(name);
+        let prove = || -> MidgeResult<bool> {
+            let file = fs
+                .open(
+                    &path,
+                    crate::io::OpenOptions {
+                        mode: crate::io::OpenMode::ReadOnly,
+                        create: false,
+                        create_new: false,
+                        truncate: false,
+                    },
+                )
+                .map_err(crate::io::FsError::into_midge)?;
+            let size = file.len().map_err(crate::io::FsError::into_midge)?;
+            let identity = SstIdentity::of_file(file.as_ref(), size, None)?;
+            if identity
+                .verify_against(
+                    expected_sst(sst_name, expected_size_bytes, expected_crc32c),
+                    None,
+                    ProofPolicy::Legacy,
+                )
+                .is_err()
+            {
+                return Ok(false);
+            }
+            scope.check("local recovery SST checksum")?;
+            let reader = crate::sst::fs::SstFileIo::open(&path.0, fs.clone())?;
+            if expected_crc32c.is_none() {
+                reader.verify_all_blocks()?;
+            }
+            scope.check("local recovery SST blocks")?;
+            Ok(true)
+        };
+        match prove() {
+            Err(error @ MidgeError::Timeout(_)) => Err(error),
+            Err(_) => Ok(false),
+            result => result,
+        }
+    }
+
+    pub(crate) fn local_sst_file_matches_manifest_within(
+        path: &Path,
+        file: &crate::metadata::FileMeta,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> MidgeResult<bool> {
+        Self::local_sst_file_matches_proof_within(
+            path,
+            &file.name,
+            (file.size_bytes != 0).then_some(file.size_bytes),
+            file.content_crc32c,
+            scope,
         )
     }
 }

@@ -357,6 +357,7 @@ fn replay_local(
             deadline,
             salvage_record_errors: true,
             spill_pending_txns: true,
+            ..streaming::ReplayOptions::default()
         },
         &mut |_, _| Ok(()),
     )
@@ -388,6 +389,7 @@ pub(crate) fn validate_wal_with_policy(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn replay_wal_with_manifest_filter(
     storage: &dyn Fs,
     wal_dir: &FsPath,
@@ -402,6 +404,32 @@ pub(crate) fn replay_wal_with_manifest_filter(
         replay_policy,
         Some(should_apply),
         None,
+    )
+}
+
+pub(crate) fn replay_wal_with_manifest_filter_within(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    replay_policy: ReplayPolicy,
+    should_apply: &dyn Fn(&WalRecord) -> MidgeResult<bool>,
+    scope: Option<&crate::common::DeadlineScope>,
+) -> MidgeResult<RecoveryStats> {
+    streaming::replay_wal_with_options(
+        storage,
+        wal_dir,
+        memtables,
+        replay_policy,
+        None,
+        streaming::StreamingReplayLimits::local(),
+        streaming::ReplayOptions {
+            scope,
+            fallible_should_apply: Some(should_apply),
+            salvage_record_errors: true,
+            spill_pending_txns: true,
+            ..streaming::ReplayOptions::default()
+        },
+        &mut |_, _| Ok(()),
     )
 }
 
@@ -533,7 +561,7 @@ pub(crate) fn max_writer_epoch(
         &replay_paths,
         replay_policy,
         streaming::StreamingReplayLimits::local(),
-        None,
+        streaming::ReplayOptions::default(),
     )?;
     Ok(frontiers.max_epoch_seen())
 }

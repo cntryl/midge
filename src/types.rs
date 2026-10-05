@@ -302,7 +302,7 @@ pub struct RuntimeMetricsSnapshot {
     pub sst_data_blocks_read_total: u64,
     /// Immutable flushes waiting for the single worker. Gauge.
     pub flush_queue_depth: usize,
-    /// Flush worker tasks currently executing. Gauge (zero or one).
+    /// Whether any immutable flush is building, built, or publishing. Gauge (zero or one).
     pub flush_inflight: usize,
     /// Immutable memtable generations enqueued since runtime startup. Counter.
     pub flush_enqueued_total: u64,

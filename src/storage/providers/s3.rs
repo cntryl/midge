@@ -1349,10 +1349,11 @@ impl CloudBackend for S3Backend {
         let prefix = prefix.to_string();
         let base_url = self.base_url();
         let state = PagedList::new(prefix.clone(), S3ListContext { base_url });
-        self.executor.spawn_request_loop(
+        self.executor.spawn_request_loop_with_timeout(
             state,
             prefix,
             callback,
+            request_timeout,
             move |state| {
                 let mut request = CloudRequest::new(Method::GET, state.url());
                 if let Some(timeout) = request_timeout {

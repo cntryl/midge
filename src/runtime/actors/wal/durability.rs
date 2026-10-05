@@ -328,7 +328,29 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         deadline: &crate::common::OperationDeadline,
+        ticket: &WalSealTicket,
+    ) -> MidgeResult<u64> {
+        self.flush_cloud_wal_within(state, deadline, ticket, false)
+    }
+
+    /// Startup owns and joins this writer before releasing its lease, so a
+    /// bounded recovery attempt may use its remaining fsync budget. A timed
+    /// out fsync fences the owned startup writer without admitting the runtime.
+    pub(crate) fn flush_recovered_cloud_wal_within(
+        &mut self,
+        state: &mut RuntimeState,
+        deadline: &crate::common::OperationDeadline,
+        ticket: &WalSealTicket,
+    ) -> MidgeResult<u64> {
+        self.flush_cloud_wal_within(state, deadline, ticket, true)
+    }
+
+    fn flush_cloud_wal_within(
+        &mut self,
+        state: &mut RuntimeState,
+        deadline: &crate::common::OperationDeadline,
         _ticket: &WalSealTicket,
+        recovered_startup: bool,
     ) -> MidgeResult<u64> {
         self.ensure_filesystem_wal_available(state)?;
         let pending = state.wal.pending_writes;
@@ -337,7 +359,10 @@ impl WalActor {
         self.begin_io_transition(WalTransitionOperation::CloudFlush)?;
 
         if self.writer().is_some() {
-            if deadline.is_bounded() && deadline.remaining() < self.storage_io_timeout {
+            if !recovered_startup
+                && deadline.is_bounded()
+                && deadline.remaining() < self.storage_io_timeout
+            {
                 self.finish_io_transition()?;
                 return Err(crate::common::MidgeError::Timeout(format!(
                     "insufficient operation budget for WAL flush: remaining={:?}, required={:?}",
@@ -349,7 +374,17 @@ impl WalActor {
             // cloud recovery treats a local sealed segment as complete. Fsync
             // here (one barrier per sealed segment, not per write) so power
             // loss cannot leave a torn sealed file.
-            let io_timeout = self.storage_io_timeout;
+            let io_timeout = if recovered_startup {
+                let Some(timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
+                    self.finish_io_transition()?;
+                    return Err(MidgeError::Timeout(
+                        "startup deadline exhausted before recovered WAL fsync".into(),
+                    ));
+                };
+                timeout
+            } else {
+                self.storage_io_timeout
+            };
             let sync_result = self
                 .writer_mut()
                 .ok_or_else(|| MidgeError::Internal("WAL writer disappeared during flush".into()))?
@@ -357,6 +392,12 @@ impl WalActor {
             if let Err(error) = sync_result {
                 self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
                 return Err(error);
+            }
+            if recovered_startup && deadline.is_expired() {
+                self.finish_io_transition()?;
+                return Err(MidgeError::Timeout(
+                    "startup deadline exhausted after recovered WAL fsync".into(),
+                ));
             }
             self.counters.record(|m| {
                 m.record_wal_flush();

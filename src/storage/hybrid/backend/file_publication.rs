@@ -188,6 +188,12 @@ impl HybridStorage {
                 key: actual,
                 result: StorageOutcome::Err(error),
             }) if actual == key && Self::storage_error_indicates_missing(&error) => Ok(None),
+            Ok(StorageEvent::HeadComplete {
+                key: actual,
+                result: StorageOutcome::Err(error),
+            }) if actual == key && error.is_timeout() => Err(MidgeError::Timeout(format!(
+                "immutable file identity lookup: {error}"
+            ))),
             Ok(event) => Err(MidgeError::Internal(format!(
                 "immutable file identity lookup failed: {event:?}"
             ))),
@@ -227,7 +233,13 @@ impl HybridStorage {
             let actual = rx
                 .recv_timeout(timeout)
                 .map_err(|error| MidgeError::Timeout(format!("immutable range readback: {error}")))?
-                .map_err(|error| MidgeError::Internal(error.to_string()))?;
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        MidgeError::Timeout(format!("immutable range readback: {error}"))
+                    } else {
+                        MidgeError::Internal(error.to_string())
+                    }
+                })?;
             if actual != expected {
                 return Err(MidgeError::Corruption(
                     "immutable object readback differs from publication".into(),

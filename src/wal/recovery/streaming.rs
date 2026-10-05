@@ -136,6 +136,8 @@ pub(crate) fn duplicate_rescans() -> usize {
 pub(crate) struct ReplayOptions<'a> {
     /// Stop with `Timeout` between frames once this expires.
     pub deadline: Option<&'a crate::common::OperationDeadline>,
+    pub scope: Option<&'a crate::common::DeadlineScope>,
+    pub fallible_should_apply: Option<&'a FallibleReplayFilter<'a>>,
     /// Under `SalvageValidPrefix`, stop at the start of a frame whose record
     /// fails to replay (a conflicting sequence, a corrupt batch payload) and
     /// keep the verified prefix, as for a corrupt frame, instead of failing.
@@ -146,6 +148,29 @@ pub(crate) struct ReplayOptions<'a> {
     /// unbounded memtable limits: a spooled transaction applies without
     /// checkpoint accounting.
     pub spill_pending_txns: bool,
+}
+
+type FallibleReplayFilter<'a> = dyn Fn(&WalRecord) -> MidgeResult<bool> + 'a;
+
+impl ReplayOptions<'_> {
+    fn check(self) -> MidgeResult<()> {
+        ensure_deadline(self.deadline)?;
+        self.scope.map_or(Ok(()), |scope| scope.check("WAL replay"))
+    }
+
+    fn should_apply(
+        self,
+        record: &WalRecord,
+        legacy: Option<&dyn Fn(&WalRecord) -> bool>,
+    ) -> MidgeResult<bool> {
+        self.check()?;
+        let result = match self.fallible_should_apply {
+            Some(filter) => filter(record)?,
+            None => legacy.is_none_or(|filter| filter(record)),
+        };
+        self.check()?;
+        Ok(result)
+    }
 }
 
 type Memtables = HashMap<u32, Arc<SkipListMemtable>>;
@@ -231,6 +256,7 @@ struct ReplayState<'a> {
 
 /// The caller must expose stable, immutable input views across both passes and
 /// publish checkpoints durably before removing entries from the memtable map.
+#[cfg(test)]
 pub(crate) fn replay_wal_with_checkpoint(
     storage: &dyn Fs,
     wal_dir: &FsPath,
@@ -265,6 +291,7 @@ pub(crate) fn replay_wal_with_options(
     checkpoint: &mut Checkpoint<'_>,
 ) -> MidgeResult<RecoveryStats> {
     limits.validate()?;
+    options.check()?;
     if options.spill_pending_txns && limits.target_memtable_encoded_bytes != usize::MAX {
         return Err(MidgeError::InvalidArgument(
             "spooled WAL transactions require unbounded replay memtable limits".into(),
@@ -272,8 +299,9 @@ pub(crate) fn replay_wal_with_options(
     }
     let started = std::time::Instant::now();
     let paths = collect_replay_paths(storage, wal_dir)?;
+    options.check()?;
     let (frontiers, had_corruption) =
-        discover_frontiers(storage, &paths, replay_policy, limits, options.deadline)?;
+        discover_frontiers(storage, &paths, replay_policy, limits, options)?;
     let mut state = ReplayState {
         stats: RecoveryStats {
             max_epoch_seen: frontiers.max_epoch_seen(),
@@ -293,6 +321,7 @@ pub(crate) fn replay_wal_with_options(
         ),
     };
     replay_paths(storage, &paths, replay_policy, &frontiers, &mut state)?;
+    options.check()?;
     state.operation_progress.finish();
     state.stats.total_replay_ns = started.elapsed().as_nanos();
     tracing::info!(
@@ -322,23 +351,35 @@ fn max_verified_sequence_from_offset(
     path: &FsPath,
     limits: StreamingReplayLimits,
     offset: u64,
-) -> Option<u64> {
+    options: ReplayOptions<'_>,
+) -> MidgeResult<Option<u64>> {
     let mut read_ns = 0;
-    let file = open_wal_replay_file(storage, path, &mut read_ns).ok()??;
+    options.check()?;
+    let file = match open_wal_replay_file(storage, path, &mut read_ns) {
+        Ok(Some(file)) => file,
+        Err(error @ MidgeError::Timeout(_)) => return Err(error),
+        _ => return Ok(None),
+    };
     let source = frame_reader::source(&*file, path, limits);
     let mut pos = offset;
     let mut max_sequence = None;
     let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("salvage_frontier");
-    while let Ok(NextWalFrame::Frame(frame)) =
-        frame_reader::next_frame(&source, path, pos, limits, &mut read_ns)
-    {
+    loop {
+        options.check()?;
+        let frame = match frame_reader::next_frame(&source, path, pos, limits, &mut read_ns) {
+            Ok(NextWalFrame::Frame(frame)) => frame,
+            Err(failure) if matches!(failure.error(), MidgeError::Timeout(_)) => {
+                return Err(failure.into_error())
+            }
+            _ => break,
+        };
         max_sequence = max_sequence.max(Some(frame.record.seq));
         let bytes = frame.next_pos.saturating_sub(pos);
         pos = frame.next_pos;
         progress.completed(bytes, 1);
     }
     progress.finish();
-    max_sequence
+    Ok(max_sequence)
 }
 
 /// Inspect one stable WAL file with the same tail and epoch contracts as the
@@ -529,7 +570,7 @@ pub(super) fn discover_frontiers(
     paths: &[ReplayFile],
     policy: ReplayPolicy,
     limits: StreamingReplayLimits,
-    deadline: Option<&crate::common::OperationDeadline>,
+    options: ReplayOptions<'_>,
 ) -> MidgeResult<(WriterEpochFrontiers, bool)> {
     let mut frontiers = WriterEpochFrontiers::default();
     let mut ordinal = 0_u64;
@@ -542,7 +583,7 @@ pub(super) fn discover_frontiers(
         let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
         loop {
-            ensure_deadline(deadline)?;
+            options.check()?;
             match frame_reader::next_frame(&source, &path.path, pos, limits, &mut read_ns) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
@@ -591,7 +632,7 @@ fn replay_paths(
         // End of the last frame this file replayed: the verified prefix.
         let mut pos = 0;
         loop {
-            ensure_deadline(state.options.deadline)?;
+            state.options.check()?;
             let frame = match frame_reader::next_frame(
                 &source,
                 &path.path,
@@ -630,7 +671,7 @@ fn replay_paths(
                     (&frame.record, record_ordinal),
                     frontiers,
                     state.limits,
-                    state.options.deadline,
+                    state.options,
                     &mut state.stats.wal_read_ns,
                 )
             } else {
@@ -703,12 +744,17 @@ impl ReplayState<'_> {
                     .iter()
                     .map(|file| file.path.clone())
                     .collect();
-                let mut max_unreplayed_sequence = unreplayed_paths
-                    .iter()
-                    .filter_map(|path| {
-                        max_verified_sequence_from_offset(storage, path, self.limits, 0)
-                    })
-                    .max();
+                let mut max_unreplayed_sequence = None;
+                for path in &unreplayed_paths {
+                    max_unreplayed_sequence =
+                        max_unreplayed_sequence.max(max_verified_sequence_from_offset(
+                            storage,
+                            path,
+                            self.limits,
+                            0,
+                            self.options,
+                        )?);
+                }
                 if failure.is_record_failure() {
                     // The failing record was decoded, so later frames in this
                     // file can still be read. Keep their sequence range above
@@ -719,7 +765,8 @@ impl ReplayState<'_> {
                             &path.path,
                             self.limits,
                             valid_bytes,
-                        ));
+                            self.options,
+                        )?);
                 }
                 self.stats.salvage_stop = Some(WalSalvageStop {
                     path: path.path.clone(),
@@ -745,7 +792,7 @@ fn duplicate_before(
     record_with_ordinal: (&WalRecord, u64),
     frontiers: &WriterEpochFrontiers,
     limits: StreamingReplayLimits,
-    deadline: Option<&crate::common::OperationDeadline>,
+    options: ReplayOptions<'_>,
     read_ns: &mut u128,
 ) -> MidgeResult<bool> {
     #[cfg(test)]
@@ -761,7 +808,7 @@ fn duplicate_before(
         let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
         while !current_file || pos < current_pos {
-            ensure_deadline(deadline)?;
+            options.check()?;
             let frame = match frame_reader::next_frame(&source, &path.path, pos, limits, read_ns)
                 .map_err(super::ReplayFailure::into_error)?
             {
@@ -923,11 +970,12 @@ impl ReplayState<'_> {
         let mut growth = HashMap::<u32, usize>::new();
         let should_apply = self.should_apply;
         let progress = &mut self.operation_progress;
-        for record in records.iter().filter(|record| {
-            let apply = should_apply.is_none_or(|filter| filter(record));
+        for record in records {
+            let apply = self.options.should_apply(record, should_apply)?;
             progress.completed_operation();
-            apply
-        }) {
+            if !apply {
+                continue;
+            }
             let bytes = match record.op.role() {
                 WalOpRole::RangeDelete => size_bound::range_bytes(
                     record.key.len(),
@@ -971,11 +1019,12 @@ impl ReplayState<'_> {
         }
         let started = std::time::Instant::now();
         let progress = &mut self.operation_progress;
-        for record in records.iter().filter(|record| {
-            let apply = should_apply.is_none_or(|filter| filter(record));
+        for record in records {
+            let apply = self.options.should_apply(record, should_apply)?;
             progress.completed_operation();
-            apply
-        }) {
+            if !apply {
+                continue;
+            }
             apply_record(record, self.memtables)?;
         }
         self.stats.apply_ns = self
@@ -989,11 +1038,12 @@ impl ReplayState<'_> {
         let started = std::time::Instant::now();
         let should_apply = self.should_apply;
         let progress = &mut self.operation_progress;
-        for record in records.iter().filter(|record| {
-            let apply = should_apply.is_none_or(|filter| filter(record));
+        for record in records {
+            let apply = self.options.should_apply(record, should_apply)?;
             progress.completed_operation();
-            apply
-        }) {
+            if !apply {
+                continue;
+            }
             apply_record(record, self.memtables)?;
         }
         self.stats.apply_ns = self
@@ -1011,7 +1061,7 @@ impl ReplayState<'_> {
         let memtables = &mut *self.memtables;
         let progress = &mut self.operation_progress;
         spool.replay(|record| {
-            if should_apply.is_none_or(|filter| filter(&record)) {
+            if self.options.should_apply(&record, should_apply)? {
                 apply_record(&record, memtables)?;
             }
             progress.completed_operation();

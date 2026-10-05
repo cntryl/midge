@@ -129,7 +129,10 @@ The opt-in `midge::cloud_io` tracing target emits these observations at DEBUG,
 without object keys, URLs, headers, credentials, or payload contents.
 
 `costs.recovery_phases` aggregates the `midge::recovery` tracing target. Phase
-times are inclusive: `coverage` and `recovery_checkpoint` are part of
+`count` records completed measurements; `started_count` records their start
+notifications separately. Single-event coverage and reservation probes retain
+their event counts. A started phase does not count as a completed measurement.
+Phase times are inclusive: `coverage` and `recovery_checkpoint` are part of
 `wal_replay`, which is part of `replay_and_repair` and `open`. Do not sum nested
 phase durations. Failed lease-acquisition/open attempts are included, while
 the campaign's sleep between acquisition attempts is only in `recovery_ms`.
