@@ -223,6 +223,10 @@ fn should_keep_actual_ready_engine_when_acceptance_wins_before_cancellation() {
 #[derive(Default)]
 struct PhaseFields {
     phase: Option<String>,
+    started: bool,
+    completed: bool,
+    failed: Option<bool>,
+    elapsed_ns: Option<u64>,
 }
 
 impl tracing::field::Visit for PhaseFields {
@@ -232,12 +236,32 @@ impl tracing::field::Visit for PhaseFields {
         }
     }
 
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        match field.name() {
+            "started" => self.started = value,
+            "completed" => self.completed = value,
+            "failed" => self.failed = Some(value),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "elapsed_ns" {
+            self.elapsed_ns = Some(value);
+        }
+    }
+
     fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
 }
 
+#[derive(Debug)]
 struct ObservedPhase {
     thread: std::thread::ThreadId,
     caller_parent: bool,
+    started: bool,
+    completed: bool,
+    failed: Option<bool>,
+    elapsed_ns: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -264,13 +288,71 @@ where
         self.0.lock().unwrap().push(ObservedPhase {
             thread: std::thread::current().id(),
             caller_parent,
+            started: fields.started,
+            completed: fields.completed,
+            failed: fields.failed,
+            elapsed_ns: fields.elapsed_ns,
         });
     }
 }
 
+const TRACING_CONTEXT_CHILD: &str = "MIDGE_TIMED_STARTUP_TRACING_CONTEXT_CHILD";
+const TRACING_CONTEXT_TEST: &str =
+    "engine::startup::deadline::tests::should_inherit_actual_caller_tracing_context_when_timed_startup_uses_worker";
+
+fn assert_tracing_context_in_fresh_process() {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().expect("actual unit-test binary"))
+        .args([
+            "--exact",
+            TRACING_CONTEXT_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(TRACING_CONTEXT_CHILD, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn isolated tracing fixture");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let timed_out = loop {
+        if child
+            .try_wait()
+            .expect("poll actual tracing child")
+            .is_some()
+        {
+            break false;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop timed-out tracing child");
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child.wait_with_output().expect("join actual tracing child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !timed_out && output.status.success(),
+        "actual tracing child timed_out={timed_out}, status={}:\n{stdout}\n{stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "child must execute the real inheritance assertion: {stdout}"
+    );
+}
+
 #[test]
 fn should_inherit_actual_caller_tracing_context_when_timed_startup_uses_worker() {
-    // Arrange: install only a scoped subscriber; no process default is changed.
+    // Arrange: tracing callsite interest is process-global, so isolate this
+    // scoped-subscriber fixture from parallel tests registering other dispatches.
+    if std::env::var_os(TRACING_CONTEXT_CHILD).is_none() {
+        assert_tracing_context_in_fresh_process();
+        return;
+    }
+    // Install only a scoped subscriber; no process default is changed.
     let directory = tempfile::tempdir().unwrap();
     let observations = Arc::new(Mutex::new(Vec::new()));
     let subscriber =
@@ -291,10 +373,15 @@ fn should_inherit_actual_caller_tracing_context_when_timed_startup_uses_worker()
 
     // Assert: positive phase evidence came from the worker through this caller.
     let observed = observations.lock().unwrap();
-    assert!(
-        observed.len() >= 2,
-        "actual phase start/end must reach the scoped subscriber"
-    );
+    assert_eq!(observed.len(), 2, "actual phase start/end: {observed:?}");
+    assert_eq!(observed.iter().filter(|phase| phase.started).count(), 1);
+    assert_eq!(observed.iter().filter(|phase| phase.completed).count(), 1);
+    assert!(observed
+        .iter()
+        .all(|phase| phase.started != phase.completed));
+    let completed = observed.iter().find(|phase| phase.completed).unwrap();
+    assert_eq!(completed.failed, Some(false));
+    assert!(completed.elapsed_ns.is_some());
     assert!(observed.iter().all(|phase| phase.thread != caller));
     assert!(observed.iter().all(|phase| phase.caller_parent));
 }
