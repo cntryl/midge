@@ -1,10 +1,9 @@
 # Checkpoint Write Amplification
 
-**Status: measurement pending.** The controlled hosted construction smoke,
-nine-repeat release campaign, and final fourteen one-hour workloads have not
-yet qualified this change. Local instrumentation and reader tests establish
-their tested contracts; they do not supply those measurements. Checkpoint
-cadence remains unchanged.
+**Status: measured; B and C miss the snapshot-payload target.** All nine
+release repeats pass construction and independent readback at the source
+recorded below. Checkpoint cadence remains unchanged. Catalog mapping and
+final one-hour correctness/recovery acceptance are tracked through #711.
 
 This campaign evaluates the conditional checkpoint investigation recorded in
 [#715](https://github.com/cntryl/midge/issues/715). It measures metadata payload
@@ -256,6 +255,63 @@ more than 10% stable-throughput or flush-p95 regression. Repeat matched release
 measurements and obtain final hour correctness evidence at that changed
 immutable SHA before accepting the policy.
 
-Add actual hosted run/attempt IDs, exact measured SHA, all nine row outcomes,
-raw readback links and final hour evidence here once available. Until then,
-the result remains **measurement pending**.
+## Recorded hosted outcome
+
+[Run 37274074026](https://github.com/cntryl/midge/actions/runs/37274074026),
+attempt **1**, measured source **`c8f0de80de7925c4e3fe92b665639e4615e53281`** on 2026-10-05.
+Its prerequisite [smoke 37273556125](https://github.com/cntryl/midge/actions/runs/37273556125)
+passed original-archive construction readback at that same source. All nine
+new attempts are valid; no row from either earlier invalid campaign was used.
+
+| Repeat | PID | Measured compactions | Snapshot / committed SST | Checkpoint / publication time | Checkpoint p95 bin (ms) | Miss |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| A/r1 | 2186 | 99 | 0.837% | 28.296% | [32.00, 64.00) | time |
+| A/r2 | 2199 | 100 | 0.819% | 12.729% | [2.00, 2.25) | none |
+| A/r3 | 2409 | 98 | 0.924% | 18.613% | [1.50, 1.75) | none |
+| B/r1 | 2432 | 151 | 13.534% | 19.519% | [1.00, 1.25) | payload |
+| B/r2 | 2181 | 144 | 13.023% | 24.916% | [2.00, 2.25) | payload |
+| B/r3 | 2420 | 150 | 13.401% | 21.733% | [1.25, 1.50) | payload |
+| C/r1 | 2391 | 351 | 80.261% | 22.334% | [1.25, 1.50) | payload |
+| C/r2 | 2461 | 351 | 80.261% | 21.416% | [1.00, 1.25) | payload |
+| C/r3 | 2388 | 351 | 80.262% | 21.676% | [1.25, 1.50) | payload |
+
+**The existing cadence misses the predeclared snapshot-payload target in B
+and C (three of three repeats each).** A has one time miss and does not satisfy
+the two-of-three rule. The complete campaign therefore meets the conditional
+policy-investigation predicate; `cadence_change_accepted` remains false and
+checkpoint cadence remains unchanged. This records the sustained measurement
+requested by [#715](https://github.com/cntryl/midge/issues/715) and replaces the
+APFS-only assurance boundary of [#670](https://github.com/cntryl/midge/issues/670).
+A later policy still needs the matched measurements and crash/frontier controls
+specified above.
+
+The nine processes completed **1,376,256 strict acknowledged rows**, exact
+point and full ordered-scan verification before and after same-path reopen,
+and two actual owned shutdowns each. Ordinary measured publications are
+230/460/921 per A/B/C repeat. Measured ingestion intervals span 4.70–10.61s.
+The fixed continuous-flush probes and the separate fourteen one-hour workloads
+serve different acceptance criteria. Native external rows retain their
+`TooFewSamples` / invalid / untrustworthy diagnostics; the declared operational
+repeat rule does not upgrade native statistical confidence.
+
+The new capture exercised real busy boundaries: A/r1 sampled an active end
+candidate, requested one 1ms pause (actual 1.060862ms), and captured idle on its
+second sample after 4.138791ms, all inside measured ingestion. B/r1 and B/r3
+sampled active warmup candidates and then idle; earlier warmup retries remain
+outside measurement while each selected final query is included. Every chosen
+Persistent endpoint and both final owners passed the unchanged integrity gate.
+
+The [original readback JSON](evidence/checkpoint-715-readback.json) is copied
+byte for byte, SHA256 **`443395a3c19159b8113b5da98762c5b65d4b8cc6a78fe73286470c0ae0563c92`**. It retains
+original identities, captured paths, native diagnostics and all nine records;
+its paths describe the originating capture. Original raw ZIPs and captures
+are also retained, including both invalid campaigns. All seven exact measured
+head [CI](https://github.com/cntryl/midge/actions/runs/37273523451) and
+[CodeQL](https://github.com/cntryl/midge/actions/runs/37273520361) checks passed.
+The results documentation was added after measurement; the measured source
+identity is preserved.
+
+Catalog mapping and final fourteen one-hour plus native cloud readback are
+tracked through [#711](https://github.com/cntryl/midge/issues/711). Their final
+acceptance uses the final merged source and remains separate from this local
+checkpoint cost result.

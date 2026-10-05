@@ -137,3 +137,15 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 git diff --check
 ```
+
+### Recorded checkpoint campaign
+
+The unchanged checkpoint cadence misses the preregistered filesystem-issued
+snapshot payload target in cells B and C of [run 37274074026](https://github.com/cntryl/midge/actions/runs/37274074026),
+attempt 1, measured source `c8f0de80de7925c4e3fe92b665639e4615e53281`. All nine fresh release
+attempts passed construction and source/native/owner readback; B and C each
+miss in all three repeats. A has one time miss across three repeats.
+[The checkpoint guide](checkpoint-write-amplification.md#recorded-hosted-outcome)
+retains every row, exact target, immutable receipt and the separate final-hour
+acceptance boundary. This result measures engine-Fs payload and publication
+time; it does not approve a cadence change or a physical-device cost claim.
