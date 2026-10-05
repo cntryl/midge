@@ -21,6 +21,8 @@ impl StartedRuntime {
         let (runtime_inst, _) = Runtime::new();
         recovered.state.limits.memtable_size_limit = opts.runtime_memtable_size_limit();
         recovered.state.limits.memtable_flush_threshold = opts.runtime_memtable_flush_threshold();
+        #[cfg(feature = "internal-testing")]
+        let metadata_accounting = recovered.state.checkpoint_metrics();
         let (runtime, runtime_handle, admission) = if let Some(scope) = scope {
             let (runtime, handle, admission) = runtime_inst.prepare_with_config(
                 recovered.state,
@@ -35,6 +37,8 @@ impl StartedRuntime {
         };
 
         Ok(Self {
+            #[cfg(feature = "internal-testing")]
+            metadata_accounting,
             runtime,
             runtime_handle,
             recovered_sequence,
@@ -86,6 +90,8 @@ impl FacadeAssembly {
         let hybrid_storage = started.runtime_handle.storage_budget.clone();
 
         Ok(Engine {
+            #[cfg(feature = "internal-testing")]
+            metadata_accounting: started.metadata_accounting,
             runtime: Some(started.runtime),
             runtime_handle: started.runtime_handle,
             db_path: storage_path.db_path,

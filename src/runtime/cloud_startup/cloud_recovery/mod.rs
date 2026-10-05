@@ -772,20 +772,27 @@ impl CloudStartupRecovery {
         state.check_startup_scope("manifest salvage removals")?;
         if definitively_lost.is_empty() {
             state.manifest.replace_files(retained_files);
-            state.manifest_store.save_snapshot(&state.manifest)?;
+            state.manifest_store.save_snapshot_for(
+                crate::metadata::accounting::Origin::Recovery,
+                &state.manifest,
+            )?;
             return Ok(());
         }
         let edits: Vec<crate::metadata::ManifestEdit> = definitively_lost
             .iter()
             .map(|name| crate::metadata::ManifestEdit::RemoveSst { name: name.clone() })
             .collect();
-        let edit_id = state.manifest_store.append_batch(&edits)?;
+        let edit_id = state
+            .manifest_store
+            .append_batch_for(crate::metadata::accounting::Origin::Recovery, &edits)?;
         let mut durable = state.manifest.clone();
         durable
             .files
             .retain(|file| !definitively_lost.contains(&file.name));
         durable.note_applied_journal_edit(edit_id);
-        state.manifest_store.save_snapshot(&durable)?;
+        state
+            .manifest_store
+            .save_snapshot_for(crate::metadata::accounting::Origin::Recovery, &durable)?;
         state.manifest.replace_files(retained_files);
         state.manifest.note_applied_journal_edit(edit_id);
         Ok(())

@@ -1379,7 +1379,10 @@ fn should_count_abandoned_request_given_routed_transaction_when_caller_times_out
 fn should_defer_layout_mutating_messages_when_publication_gate_classifies() {
     // Arrange
     let deferred = vec![
-        RuntimeMsg::ManifestPersist { request_id: 1 },
+        RuntimeMsg::ManifestPersist {
+            request_id: 1,
+            origin: crate::metadata::accounting::Origin::Unclassified,
+        },
         RuntimeMsg::ManifestCreateColumnFamily {
             request_id: 2,
             name: "cf".to_string(),
@@ -1490,7 +1493,10 @@ fn should_classify_messages_when_verification_barrier_is_active() {
             sequence: 1,
             wait_for_ack: false,
         },
-        RuntimeMsg::ManifestPersist { request_id: 5 },
+        RuntimeMsg::ManifestPersist {
+            request_id: 5,
+            origin: crate::metadata::accounting::Origin::Unclassified,
+        },
         RuntimeMsg::CompactAll { request_id: 6 },
     ];
     let deferred = vec![

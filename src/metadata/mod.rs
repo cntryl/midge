@@ -2,6 +2,8 @@
 //!
 //! Tracks SST files, levels, and version history
 
+pub(crate) mod accounted_fs;
+pub(crate) mod accounting;
 pub mod files;
 pub mod format;
 pub mod journal;

@@ -2,7 +2,8 @@
 
 use super::{
     append_generated_row, enable_phase_tracing, flush_acknowledged_data_with, shutdown_engine,
-    verify_database, write_atomic_json, WorkloadArtifacts, WorkloadCase, WRITE_BATCH_ROWS,
+    verify_database, write_atomic_json, CheckpointAccounting, WorkloadArtifacts, WorkloadCase,
+    WRITE_BATCH_ROWS,
 };
 use cntryl_midge::{
     ColumnFamilyHandle, Engine, MemoryBudget, MidgeError, OpenOptions, TransactionMode,
@@ -143,9 +144,12 @@ pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_pub
         LogicalUnit::new("flush"),
         OperationOutcome::success(1),
     );
+    let checkpoint_accounting =
+        CheckpointAccounting::attach(&engine, &artifacts, "final-flush-fixture", None);
     shutdown_engine(
         &mut engine,
         "shutdown-after-final-flush-fixture",
+        &checkpoint_accounting,
         &progress,
         &mut artifacts,
     );
@@ -299,9 +303,12 @@ pub(crate) fn run_final_flush_terminal_policy_fixture(ctx: &mut StressContext) {
     // All terminal results above were expected policy outcomes, preserved in
     // the control report. Orderly cleanup now uses the real Engine shutdown.
     artifacts.terminal_error = None;
+    let checkpoint_accounting =
+        CheckpointAccounting::attach(&engine, &artifacts, "retry-policy-fixture", None);
     shutdown_engine(
         &mut engine,
         "shutdown-after-retry-policy-controls",
+        &checkpoint_accounting,
         &progress,
         &mut artifacts,
     );

@@ -1072,7 +1072,10 @@ impl CompactionCoordinator {
         crate::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
-        crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
+        crate::runtime::actors::ManifestActor::persist_for(
+            &mut event_loop.state,
+            crate::metadata::accounting::Origin::CompactionBeforeGc,
+        )?;
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::ManifestPublished)
     }
 
@@ -1232,6 +1235,21 @@ impl CompactionCoordinator {
         pending: &PendingCompactionPublication,
     ) {
         Self::record_compaction_metrics(event_loop, &pending.token.output_ssts);
+        let output_bytes = pending
+            .added
+            .iter()
+            .try_fold(0_u64, |sum, file| sum.checked_add(file.size_bytes));
+        if let Some(bytes) = output_bytes {
+            event_loop
+                .state
+                .metadata_accounting()
+                .compaction_committed(event_loop.state.metadata_medium(), bytes);
+        } else {
+            event_loop
+                .state
+                .metadata_accounting()
+                .invalidate_missing_publication_start();
+        }
         event_loop.evict_published_sst_cache(&pending.token.output_ssts);
         event_loop.publish_snapshot();
         event_loop.respond(

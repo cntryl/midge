@@ -57,6 +57,9 @@ jobs:
       - name: Unit and binary tests
         run: cargo test --lib --bins --all-features -- --test-threads=1
 
+      - name: Test checkpoint readback contracts
+        run: cargo test --example checkpoint_campaign_readback --all-features -- --test-threads=1
+
       - name: Integration tests
         shell: bash
         run: |

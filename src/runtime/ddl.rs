@@ -582,6 +582,14 @@ fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEd
 /// candidate manifest is built first so a failed journal append cannot mutate
 /// in-memory visibility.
 pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) -> MidgeResult<()> {
+    apply_local_edit_for(state, edit, crate::metadata::accounting::Origin::Ddl)
+}
+
+fn apply_local_edit_for(
+    state: &mut RuntimeState,
+    edit: &ManifestEdit,
+    origin: crate::metadata::accounting::Origin,
+) -> MidgeResult<()> {
     if local_edit_matches(state, edit) {
         return Ok(());
     }
@@ -593,7 +601,7 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
     let journaled_id = if state.is_memory_mode() {
         None
     } else {
-        Some(state.manifest_store.append(edit)?)
+        Some(state.manifest_store.append_for(origin, edit)?)
     };
     crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
         MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
@@ -640,6 +648,12 @@ fn reconcile_prepared_with_resolution(
     deadline: &crate::common::OperationDeadline,
     resolution: AmbiguousPrepareResolution,
 ) -> MidgeResult<()> {
+    let origin = match resolution {
+        AmbiguousPrepareResolution::ObserveOnly => crate::metadata::accounting::Origin::Ddl,
+        AmbiguousPrepareResolution::RedriveOnceOnStartup => {
+            crate::metadata::accounting::Origin::Recovery
+        }
+    };
     let Some(prepare) = read_local_prepare(state)? else {
         return Ok(());
     };
@@ -663,7 +677,7 @@ fn reconcile_prepared_with_resolution(
         .as_ref()
         .is_some_and(|registry| registry.operation(&prepare.op_id).is_some())
     {
-        apply_local_edit(state, &prepare.edit)?;
+        apply_local_edit_for(state, &prepare.edit, origin)?;
         clear_local_prepare(state, Some(storage))?;
         return Ok(());
     }
@@ -749,7 +763,11 @@ fn redrive_ambiguous_prepare_within(
                             && authority.validate(deadline).is_ok()
                     }) =>
             {
-                apply_local_edit(state, &prepare.edit)?;
+                apply_local_edit_for(
+                    state,
+                    &prepare.edit,
+                    crate::metadata::accounting::Origin::Recovery,
+                )?;
                 clear_local_prepare(state, Some(storage))
             }
             Ok(_) => {
@@ -767,7 +785,11 @@ fn redrive_ambiguous_prepare_within(
         };
     }
 
-    apply_local_edit(state, &prepare.edit)?;
+    apply_local_edit_for(
+        state,
+        &prepare.edit,
+        crate::metadata::accounting::Origin::Recovery,
+    )?;
     clear_local_prepare(state, Some(storage))
 }
 
@@ -837,7 +859,11 @@ pub(crate) fn reconcile_startup_within(
     for operation in &remote.operations {
         scope.check("DDL startup operation")?;
         if !local_edit_matches(state, &operation.edit) {
-            apply_local_edit(state, &operation.edit)?;
+            apply_local_edit_for(
+                state,
+                &operation.edit,
+                crate::metadata::accounting::Origin::Recovery,
+            )?;
         }
     }
     for remote_cf in &remote.column_families {

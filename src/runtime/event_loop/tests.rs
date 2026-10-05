@@ -353,7 +353,10 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     event_loop
         .verification_barrier
         .deferred_messages
-        .push_back(RuntimeMsg::ManifestPersist { request_id: 8103 });
+        .push_back(RuntimeMsg::ManifestPersist {
+            request_id: 8103,
+            origin: crate::metadata::accounting::Origin::Unclassified,
+        });
     event_loop.flush_barrier_waiters.insert(
         0,
         vec![super::flush::FlushBarrierWaiter {
@@ -1341,6 +1344,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     let blocked_mutation =
         event_loop.gate_message_for_storage_verification(RuntimeMsg::ManifestPersist {
             request_id: mutation_request_id,
+            origin: crate::metadata::accounting::Origin::Unclassified,
         });
     let deferred_completion = event_loop.gate_message_for_storage_verification(completion);
     let deferred_gc = event_loop.gate_message_for_storage_verification(RuntimeMsg::RetryGc);

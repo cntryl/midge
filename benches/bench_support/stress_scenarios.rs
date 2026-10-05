@@ -29,6 +29,9 @@ use client_progress::{
 #[path = "stress_scenarios/recovery_progress.rs"]
 mod recovery_progress;
 use recovery_progress::{is_recovery_work, RecoveryProgressLayer, RecoveryScope};
+#[path = "stress_scenarios/checkpoint_accounting.rs"]
+mod checkpoint_accounting;
+use checkpoint_accounting::CheckpointAccounting;
 #[cfg(all(test, feature = "failpoints"))]
 #[path = "stress_scenarios/final_flush_watchdog.rs"]
 mod final_flush_watchdog;
@@ -635,6 +638,7 @@ impl Drop for ResourceSampler {
 
 struct OpenedCase {
     engine: Engine,
+    checkpoint_accounting: CheckpointAccounting,
     family: ColumnFamilyHandle,
     database: PathBuf,
     backend: &'static str,
@@ -714,6 +718,7 @@ fn open_case(
     )
     .expect("persist resolved stress options");
     let (engine, family) = open_family(options, true);
+    let checkpoint_accounting = CheckpointAccounting::attach(&engine, artifacts, "original", None);
     progress.advance();
     let has_reads = matches!(
         case.workload,
@@ -722,8 +727,10 @@ fn open_case(
     if has_reads {
         seed(&engine, &family, progress, cloud);
     }
+    checkpoint_accounting.capture("after-setup-and-seed", artifacts, None);
     OpenedCase {
         engine,
+        checkpoint_accounting,
         family,
         database,
         backend: case.backend,
@@ -742,6 +749,10 @@ fn run_stages(
     progress: &ProgressHandle,
     artifacts: &mut WorkloadArtifacts,
 ) -> BTreeMap<(usize, usize, usize), u64> {
+    let ingestion_before =
+        opened
+            .checkpoint_accounting
+            .capture("before-ingestion", artifacts, None);
     let mut expected = BTreeMap::new();
     let budgets = stage_budgets(duration, case.stages.len());
     for (stage_index, (&clients, budget)) in case.stages.iter().zip(budgets).enumerate() {
@@ -789,6 +800,9 @@ fn run_stages(
             },
         );
     }
+    opened
+        .checkpoint_accounting
+        .window("ingestion", &ingestion_before, artifacts, None);
     expected
 }
 
@@ -866,13 +880,17 @@ fn stage_expected_rows(
     }
 }
 
-fn finish_case(
-    mut opened: OpenedCase,
+fn flush_and_verify_original(
+    opened: &OpenedCase,
     expected: &BTreeMap<(usize, usize, usize), u64>,
     progress: &ProgressHandle,
     artifacts: &mut WorkloadArtifacts,
-) {
-    flush_acknowledged_data_with(
+) -> u64 {
+    let flush_before =
+        opened
+            .checkpoint_accounting
+            .capture("before-explicit-flush", artifacts, None);
+    let flush_result = flush_acknowledged_data_with(
         &opened.engine,
         &opened.family,
         opened.cloud,
@@ -890,8 +908,14 @@ fn finish_case(
                 engine.flush_cf(family)
             }
         },
-    )
-    .expect("flush acknowledged stress data");
+    );
+    opened.checkpoint_accounting.window(
+        "explicit-flush",
+        &flush_before,
+        artifacts,
+        Some(&flush_result),
+    );
+    flush_result.expect("flush acknowledged stress data");
     let expected_seed =
         u64::try_from(if opened.has_reads { SEED_ROWS } else { 0 }).expect("seed count fits u64");
     verify_database(
@@ -903,9 +927,20 @@ fn finish_case(
         artifacts,
         "flushed",
     );
+    expected_seed
+}
+
+fn finish_case(
+    mut opened: OpenedCase,
+    expected: &BTreeMap<(usize, usize, usize), u64>,
+    progress: &ProgressHandle,
+    artifacts: &mut WorkloadArtifacts,
+) {
+    let expected_seed = flush_and_verify_original(&opened, expected, progress, artifacts);
     shutdown_engine(
         &mut opened.engine,
         "shutdown-before-recovery",
+        &opened.checkpoint_accounting,
         progress,
         artifacts,
     );
@@ -921,49 +956,87 @@ fn finish_case(
             &opened.object_prefix,
         );
         artifacts.enter_phase("recovery", "open-cloud-from-empty-cache", progress);
-        let (mut recovered, family) = {
+        let (recovered, family) = {
             let _scope = RecoveryScope::enter(progress, &artifacts.resource_phase, artifacts.phase);
             open_family(options, false)
         };
-        progress.advance();
-        verify_database(
-            &recovered,
+        finish_recovered_engine(
+            recovered,
             &family,
             expected_seed,
             expected,
             progress,
             artifacts,
-            "cloud-recovered",
-        );
-        shutdown_engine(
-            &mut recovered,
-            "shutdown-recovered-cloud-engine",
-            progress,
-            artifacts,
+            RecoveryObservation {
+                predecessor: opened.checkpoint_accounting.owner_id(),
+                verification_phase: "cloud-recovered",
+                shutdown_phase: "shutdown-recovered-cloud-engine",
+            },
         );
     } else {
         artifacts.enter_phase("recovery", "reopen-local-engine", progress);
-        let (mut recovered, family) = {
+        let (recovered, family) = {
             let _scope = RecoveryScope::enter(progress, &artifacts.resource_phase, artifacts.phase);
             open_family(local_options(&opened.database), false)
         };
-        progress.advance();
-        verify_database(
-            &recovered,
+        finish_recovered_engine(
+            recovered,
             &family,
             expected_seed,
             expected,
             progress,
             artifacts,
-            "reopened",
-        );
-        shutdown_engine(
-            &mut recovered,
-            "shutdown-reopened-local-engine",
-            progress,
-            artifacts,
+            RecoveryObservation {
+                predecessor: opened.checkpoint_accounting.owner_id(),
+                verification_phase: "reopened",
+                shutdown_phase: "shutdown-reopened-local-engine",
+            },
         );
     }
+    opened
+        .checkpoint_accounting
+        .after_reopened_shutdown(artifacts);
+}
+
+#[derive(Clone, Copy)]
+struct RecoveryObservation {
+    predecessor: u64,
+    verification_phase: &'static str,
+    shutdown_phase: &'static str,
+}
+
+fn finish_recovered_engine(
+    mut recovered: Engine,
+    family: &ColumnFamilyHandle,
+    expected_seed: u64,
+    expected: &BTreeMap<(usize, usize, usize), u64>,
+    progress: &ProgressHandle,
+    artifacts: &mut WorkloadArtifacts,
+    observation: RecoveryObservation,
+) {
+    let recovered_accounting = CheckpointAccounting::attach(
+        &recovered,
+        artifacts,
+        "reopened",
+        Some(observation.predecessor),
+    );
+    progress.advance();
+    verify_database(
+        &recovered,
+        family,
+        expected_seed,
+        expected,
+        progress,
+        artifacts,
+        observation.verification_phase,
+    );
+    shutdown_engine(
+        &mut recovered,
+        observation.shutdown_phase,
+        &recovered_accounting,
+        progress,
+        artifacts,
+    );
 }
 
 fn flush_acknowledged_data_with(
@@ -1103,14 +1176,18 @@ fn append_final_flush_attempt(artifacts: &WorkloadArtifacts, attempt: &serde_jso
 fn shutdown_engine(
     engine: &mut Engine,
     stage: &str,
+    checkpoint_accounting: &CheckpointAccounting,
     progress: &ProgressHandle,
     artifacts: &mut WorkloadArtifacts,
 ) {
     artifacts.enter_phase("shutdown", stage, progress);
+    checkpoint_accounting.capture("before-shutdown", artifacts, None);
     let started = Instant::now();
     let result = engine.shutdown(SHUTDOWN_CALLER_BUDGET);
     artifacts.record_shutdown(stage, &result, started.elapsed());
+    checkpoint_accounting.capture("after-shutdown-caller-result", artifacts, Some(&result));
     result.unwrap_or_else(|error| panic!("{stage} failed: {error}"));
+    checkpoint_accounting.finalized(artifacts);
     progress.advance();
 }
 

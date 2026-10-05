@@ -7,11 +7,27 @@ use super::{
 };
 
 impl RuntimeState {
+    #[cfg(test)]
     pub(crate) fn track_new_immutable_flush(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
         memtable: Arc<SkipListMemtable>,
         sequence: u64,
+    ) -> Option<ImmutableFlush> {
+        self.track_new_immutable_flush_for(
+            cf_id,
+            memtable,
+            sequence,
+            crate::metadata::accounting::Origin::Unclassified,
+        )
+    }
+
+    pub(crate) fn track_new_immutable_flush_for(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        memtable: Arc<SkipListMemtable>,
+        sequence: u64,
+        origin: crate::metadata::accounting::Origin,
     ) -> Option<ImmutableFlush> {
         let flush_id = self.next_flush_id;
         self.next_flush_id = self.next_flush_id.checked_add(1)?;
@@ -19,6 +35,7 @@ impl RuntimeState {
         cf_state.immutable_memtables.push(Arc::clone(&memtable));
         let flush = ImmutableFlush {
             flush_id,
+            accounting: super::FlushPublicationAccounting::new(origin),
             writer_epoch: self.writer_epoch,
             first_wal_segment: Some(cf_state.active_memtable_started_in_segment)
                 .filter(|segment| *segment > 0 && *segment <= self.wal.current_segment_id),

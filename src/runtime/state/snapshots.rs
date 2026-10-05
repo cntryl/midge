@@ -86,11 +86,15 @@ impl RuntimeState {
                 },
             )
             .collect::<Vec<_>>();
-        let journaled_id = if !self.is_memory_mode() && !edits.is_empty() {
-            Some(self.manifest_store.append_batch(&edits)?)
-        } else {
-            None
-        };
+        let journaled_id =
+            if !self.is_memory_mode() && !edits.is_empty() {
+                Some(self.manifest_store.append_batch_for(
+                    crate::metadata::accounting::Origin::Administration,
+                    &edits,
+                )?)
+            } else {
+                None
+            };
         let mut reclaimed_names = Vec::new();
         for ((_, names), edit) in candidates.into_iter().zip(edits) {
             self.manifest.apply_edit(&edit);

@@ -446,10 +446,20 @@ impl ManifestPersistence {
     ///
     /// `known` is the journal position when the caller already knows it
     /// (`ManifestStore`); then a current caller costs no metadata reads at all.
+    #[cfg(test)]
     pub(crate) fn save_snapshot_unlocked(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
         known: Option<JournalPosition>,
+    ) -> crate::common::MidgeResult<WrittenCheckpoint> {
+        Self::save_snapshot_unlocked_observed(fs, manifest, known, None)
+    }
+
+    pub(crate) fn save_snapshot_unlocked_observed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+        known: Option<JournalPosition>,
+        observation: Option<&crate::metadata::accounting::Operation>,
     ) -> crate::common::MidgeResult<WrittenCheckpoint> {
         use crate::common::MidgeError;
         use crate::io::traits::FsPath;
@@ -513,6 +523,10 @@ impl ManifestPersistence {
             Ok(())
         })?;
 
+        if let Some(observation) = observation {
+            observation.snapshot_durable(u64::try_from(json.len()).unwrap_or(u64::MAX));
+        }
+
         crate::failpoints::fail_point!(
             "midge::manifest::after_snapshot_rename_before_journal_truncate",
             |_| Err(MidgeError::Internal(
@@ -521,6 +535,9 @@ impl ManifestPersistence {
         );
 
         crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
+        if let Some(observation) = observation {
+            observation.checkpoint_complete();
+        }
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 

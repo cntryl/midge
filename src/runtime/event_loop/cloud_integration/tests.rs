@@ -2423,7 +2423,13 @@ fn should_preserve_provider_timeout_from_manifest_metadata_mirror() -> crate::co
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
-    el.handle_runtime_msg(RuntimeMsg::ManifestPersist { request_id }, &msg_rx);
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestPersist {
+            request_id,
+            origin: crate::metadata::accounting::Origin::Unclassified,
+        },
+        &msg_rx,
+    );
 
     // Assert
     match response_rx

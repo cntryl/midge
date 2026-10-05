@@ -17,10 +17,14 @@ use std::time::{Duration, Instant};
 
 use crate::io::traits::{Fs, FsError, FsPath};
 
+mod accounting;
 mod flush;
 mod manifest;
 mod recovery;
 mod snapshots;
+
+pub(crate) use accounting::FlushPublicationAccounting;
+pub(crate) use manifest::FlushManifestPublication;
 
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
@@ -46,6 +50,7 @@ pub(crate) enum ImmutableFlushPhase {
 #[derive(Clone)]
 pub(crate) struct ImmutableFlush {
     pub flush_id: u64,
+    pub(crate) accounting: FlushPublicationAccounting,
     pub writer_epoch: u64,
     /// Earliest WAL segment that can contain this generation's records.
     /// Missing provenance must veto retirement until the generation publishes.

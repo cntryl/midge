@@ -4,10 +4,12 @@ use super::RuntimeStorageMaterialization;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
 use crate::memtable::SkipListMemtable;
+use crate::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
     FlushActor, FlushBuildOutput, FlushIdentity, FlushMirrorTask, FlushPublicationDelta,
     FlushPublishTask, FlushWorkerResult,
 };
+use crate::runtime::state::FlushManifestPublication;
 use crate::wal::recovery::streaming::{
     replay_wal_with_options, ReplayOptions, StreamingReplayLimits,
 };
@@ -257,15 +259,48 @@ fn checkpoint_family(
         sequence: file_meta.largest_seq.unwrap_or(0),
         ..identity
     };
-    let name = crate::cloud_layout::file_name(cf_id, 0, sst_seq);
+    let accounting = state.metadata_accounting().clone();
+    let medium = state.metadata_medium();
+    let started = std::time::Instant::now();
+    let result = publish_checkpoint_output(
+        materialized,
+        actor,
+        rx,
+        FlushBuildOutput {
+            identity,
+            staging_path: completion.staging_path,
+            file_meta,
+            reservation: completion.reservation,
+        },
+        sst_seq,
+    );
+    accounting.publication_attempt(Origin::Recovery, medium, started.elapsed(), result.is_err());
+    if let Ok(bytes) = &result {
+        accounting.flush_committed(Origin::Recovery, medium, *bytes, started.elapsed());
+    } else if actor.is_inflight() {
+        // A timed receive can return while accepted work remains owned.
+        // Do not claim this prefix is a complete publication observation.
+        accounting.invalidate_missing_publication_start();
+    }
+    result?;
+    crate::failpoints::fail_point!("midge::recovery::after_checkpoint");
+    Ok(())
+}
+
+fn publish_checkpoint_output(
+    materialized: &mut RuntimeStorageMaterialization,
+    actor: &mut FlushActor,
+    rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
+    build: FlushBuildOutput,
+    sst_seq: u64,
+) -> MidgeResult<u64> {
+    let state = &mut materialized.state;
+    let config = &materialized.runtime_config;
+    let identity = build.identity;
+    let name = crate::cloud_layout::file_name(identity.cf_id, 0, sst_seq);
     let completion = super::timing::measure("recovery_checkpoint_publication", || {
         actor.submit_publish(FlushPublishTask {
-            build: FlushBuildOutput {
-                identity,
-                staging_path: completion.staging_path,
-                file_meta,
-                reservation: completion.reservation,
-            },
+            build,
             sst_name: name.clone(),
             sst_seq,
             sst_dir: state.sst_dir.clone(),
@@ -300,8 +335,7 @@ fn checkpoint_family(
             cloud_metadata_published,
         )
     })?;
-    crate::failpoints::fail_point!("midge::recovery::after_checkpoint");
-    Ok(())
+    Ok(delta.file_meta.size_bytes)
 }
 
 fn commit_and_mirror_checkpoint(
@@ -321,13 +355,14 @@ fn commit_and_mirror_checkpoint(
     )?;
     state.check_startup_scope("recovery checkpoint manifest publication")?;
     validate_monotonic_lease(config)?;
-    state.commit_flush_publication(
-        delta.identity.cf_id,
-        delta.identity.sequence,
-        &delta.file_meta,
-        delta.next_sst_seq,
-        config.hybrid_storage.is_some(),
-    )?;
+    state.commit_flush_publication_for(FlushManifestPublication {
+        origin: Origin::Recovery,
+        cf_id: delta.identity.cf_id,
+        sequence: delta.identity.sequence,
+        file_meta: &delta.file_meta,
+        next_sst_seq: delta.next_sst_seq,
+        require_snapshot: config.hybrid_storage.is_some(),
+    })?;
     actor.submit_mirror(FlushMirrorTask {
         delta: delta.clone(),
         reservation,
@@ -385,7 +420,9 @@ fn reserve_sst_sequence(
     // must never reuse an orphan's name for a different replay partition.
     state.manifest.set_next_sst_seq(cf_id, next_seq);
     crate::failpoints::fail_point!("midge::recovery::before_name_reservation");
-    let checkpoint = state.manifest_store.save_snapshot(&state.manifest)?;
+    let checkpoint = state
+        .manifest_store
+        .save_snapshot_for(Origin::Recovery, &state.manifest)?;
     state.manifest.adopt_checkpoint(checkpoint);
     if let Some(cloud) = &materialized.cloud_metadata_storage_for_mirror {
         validate_lease(config)?;
