@@ -155,6 +155,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo test --lib --all-features compaction::repair::tests -- --test-threads=1
           cargo test --lib --all-features compaction_budget_tests:: -- --test-threads=1
           cargo test --lib --all-features publication_error_tests:: -- --test-threads=1
           cargo test --test fault_injection --all-features compaction_deadline:: -- --test-threads=1

@@ -31,9 +31,12 @@ impl RepairScratch {
         let disks = sysinfo::Disks::new_with_refreshed_list();
         let available = disks
             .iter()
-            .filter(|disk| addressing.root.starts_with(disk.mount_point()))
-            .max_by_key(|disk| disk.mount_point().as_os_str().len())
-            .map(sysinfo::Disk::available_space)
+            .filter_map(|disk| {
+                canonical_mount_depth(addressing.root, disk.mount_point())
+                    .map(|depth| (depth, disk.available_space()))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, available)| available)
             .ok_or_else(|| {
                 MidgeError::ResourceLimit(
                     "overlap repair cannot determine local scratch capacity".into(),
@@ -166,6 +169,17 @@ impl RepairScratch {
     }
 }
 
+/// Compare mounts in the canonical host-path frame exposed by the filesystem.
+/// Windows native drive mounts otherwise differ from verbatim canonical roots.
+/// Inaccessible mounts cannot establish a safe capacity allowance.
+fn canonical_mount_depth(root: &Path, mount: &Path) -> Option<usize> {
+    let mount = std::fs::canonicalize(mount).ok()?;
+    if !root.starts_with(&mount) {
+        return None;
+    }
+    Some(mount.components().count())
+}
+
 fn admitted_local_capacity(available_bytes: u64) -> MidgeResult<usize> {
     let admitted = usize::try_from(available_bytes / 8).unwrap_or(usize::MAX);
     if admitted == 0 {
@@ -211,5 +225,75 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    }
+
+    #[test]
+    fn should_find_native_capacity_when_real_filesystem_root_is_canonical() -> MidgeResult<()> {
+        // Arrange: real bytes and independently observed canonical native mounts.
+        let directory = tempfile::tempdir()?;
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+        let root = fs.host_addressing().expect("real host identity").root;
+        let retained = directory.path().join("retained");
+        std::fs::write(&retained, b"actual retained filesystem bytes")?;
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let native_matches: Vec<_> = disks
+            .iter()
+            .filter_map(|disk| {
+                let canonical = std::fs::canonicalize(disk.mount_point()).ok()?;
+                root.strip_prefix(&canonical).ok()?;
+                Some((canonical, disk.available_space()))
+            })
+            .collect();
+        assert!(
+            native_matches.iter().any(|(_, available)| *available >= 8),
+            "real positive native capacity prerequisite: root={root:?}, mounts={native_matches:?}"
+        );
+
+        // Act: run production selection and its conservative admission policy.
+        let admitted = RepairScratch::local_capacity(&factory)?;
+
+        // Assert: an actual matching volume yields capacity without changing bytes.
+        assert_ne!(admitted, 0);
+        assert_eq!(
+            std::fs::read(retained)?.as_slice(),
+            b"actual retained filesystem bytes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_refuse_capacity_when_filesystem_has_no_host_identity() {
+        // Arrange: this filesystem deliberately exposes no host path capability.
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+
+        // Act: native disk enumeration cannot establish this backend's identity.
+        let result = RepairScratch::local_capacity(&factory);
+
+        // Assert: preserve the exact conservative missing-identity classification.
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(message))
+            if message == "overlap repair cannot identify local scratch capacity"));
+    }
+
+    #[test]
+    fn should_reject_unusable_mount_when_local_root_is_real() -> MidgeResult<()> {
+        // Arrange: actual distinct directories and one path that does not exist.
+        let root_directory = tempfile::tempdir()?;
+        let unrelated = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(root_directory.path())?;
+        let absent = root_directory.path().join("absent-native-mount");
+        assert!(!absent.exists());
+
+        // Act: canonicalization failure and an unrelated identity are both refused.
+        let absent_depth = canonical_mount_depth(&root, &absent);
+        let unrelated_depth = canonical_mount_depth(&root, unrelated.path());
+        let matching_depth = canonical_mount_depth(&root, root_directory.path());
+
+        // Assert: only the actual canonical equivalent can establish membership.
+        assert_eq!(absent_depth, None);
+        assert_eq!(unrelated_depth, None);
+        assert_eq!(matching_depth, Some(root.components().count()));
+        Ok(())
     }
 }
