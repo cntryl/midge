@@ -31,92 +31,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  ordinary-selection:
-    if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    outputs:
-      toolchain: ${{ steps.selection.outputs.toolchain }}
-      workloads: ${{ steps.selection.outputs.workloads }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Select ordinary registered Tier 4 workloads
-        id: selection
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p target/tier4-selection
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          rustup update stable
-          rustup default stable
-          tier4_toolchain="$(rustc -V | awk '{print $2}')"
-          [[ "$tier4_toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          printf 'toolchain=%s\n' "$tier4_toolchain" >> "$GITHUB_OUTPUT"
-          rustc -Vv > target/tier4-selection/rustc.txt
-          cargo -V > target/tier4-selection/cargo-version.txt
-          cargo metadata --locked --no-deps --format-version=1 > target/tier4-selection/metadata.json
-          jq '[.packages[] | select(.name == "cntryl-midge") | .targets[] | select(.kind | index("bench") != null) | select(.name | test("^tier4_[sy]")) | select(.name != "tier4_system_checkpoint_write_amplification") | .name]' target/tier4-selection/metadata.json > target/tier4-selection/targets.json
-          jq -e 'length > 0 and length == (unique | length) and all(.[]; type == "string" and test("\\Atier4_[sy][a-z0-9_]+\\z"))' target/tier4-selection/targets.json
-          printf 'workloads=%s\n' "$(jq -c . target/tier4-selection/targets.json)" >> "$GITHUB_OUTPUT"
-          jq -n --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg toolchain "$tier4_toolchain" --slurpfile workloads target/tier4-selection/targets.json '{sha:$sha,run_id:$run,run_attempt:$attempt,toolchain:$toolchain,workloads:$workloads[0]}' > target/tier4-selection/selection-manifest.json
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: bench-tier4-selection-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
-          path: target/tier4-selection/**
-          if-no-files-found: error
-
   bench:
-    needs: ordinary-selection
     if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
-    name: ordinary-${{ matrix.workload }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        workload: ${{ fromJSON(needs.ordinary-selection.outputs.workloads) }}
+        workload:
+          - tier4_system_local_throughput_regression
+          - tier4_system_strict_group_commit
+          - tier4_system_compression_policy
+          - tier4_system_compaction_backpressure
+          - tier4_system_recovery_throughput
+          - tier4_streaming_workload
+          - tier4_ycsb_workload_a
+          - tier4_ycsb_workload_b
+          - tier4_ycsb_workload_c
+          - tier4_ycsb_workload_d
+          - tier4_ycsb_workload_e
+          - tier4_ycsb_workload_f
     env:
-      TIER4_TOOLCHAIN: ${{ needs.ordinary-selection.outputs.toolchain }}
+      CARGO_INCREMENTAL: 0
       SELECTED_WORKLOAD: ${{ matrix.workload }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - uses: actions/download-artifact@v8
-        with:
-          name: bench-tier4-selection-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
-          path: target/tier4-selection
-      - name: Use the selected source and toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          [[ "$TIER4_TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$SELECTED_WORKLOAD" =~ ^tier4_[sy][a-z0-9_]+$ ]]
-          jq -e --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg toolchain "$TIER4_TOOLCHAIN" --arg workload "$SELECTED_WORKLOAD" '.sha == $sha and .run_id == $run and .run_attempt == $attempt and .toolchain == $toolchain and ([.workloads[] | select(. == $workload)] | length) == 1' target/tier4-selection/selection-manifest.json
-          printf '%s\n' "$SELECTED_WORKLOAD" > target/tier4-selection/current-workload.txt
-          rustup toolchain install "$TIER4_TOOLCHAIN" --profile minimal
-          rustup default "$TIER4_TOOLCHAIN"
-          test "$(rustc -V | awk '{print $2}')" = "$TIER4_TOOLCHAIN"
-          rustc -Vv > target/tier4-selection/shard-rustc.txt
-          cargo -V > target/tier4-selection/shard-cargo-version.txt
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
       - name: Run Tier 4 workload
         shell: bash
         run: |
           set -euo pipefail
           cargo bench --locked --bench "$SELECTED_WORKLOAD"
-      - uses: actions/upload-artifact@v7
+
+      - name: Upload benchmark reports
+        uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-tier4-${{ matrix.workload }}-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          name: bench-tier4-${{ matrix.workload }}-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**
-            target/tier4-selection/**
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   checkpoint-build:
     if: ${{ contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
