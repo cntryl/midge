@@ -1,8 +1,8 @@
 //! Always retain the nine preregistered attempts; invalid evidence never counts as a miss.
 
 use super::{
-    accounting, array, json_files, load, native, number, provenance, require, string, Cell,
-    Identity, Result, CELLS, TARGET,
+    accounting, array, commit_backpressure, json_files, load, native, number, provenance, require,
+    string, Cell, Identity, Result, CELLS, TARGET,
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -227,7 +227,7 @@ fn check_job_manifest(
     )
 }
 
-fn observations(directory: &Path, cell: Cell) -> Result<()> {
+fn observations(directory: &Path, cell: Cell, status: &Value) -> Result<Value> {
     let options = load(&directory.join("resolved-options.json"))?;
     for (field, value) in [
         ("memory_budget_bytes", 512 * 1024 * 1024),
@@ -259,6 +259,19 @@ fn observations(directory: &Path, cell: Cell) -> Result<()> {
     require(
         !pressure.is_empty() && pressure.len() <= 5,
         "bounded runtime pressure samples missing",
+    )?;
+    let artifact = directory
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("workload directory lacks originating artifact root")?;
+    let config = std::fs::read_to_string(artifact.join("native-config.txt"))
+        .map_err(|error| format!("captured native config: {error}"))?;
+    commit_backpressure::check_native_no_progress(&config)?;
+    commit_backpressure::qualify(
+        &observations,
+        status,
+        &load(&directory.join("accounting-window.json"))?,
+        cell,
     )
 }
 
@@ -309,8 +322,9 @@ fn attempt(
                 Ok(accounting) => row["accounting"] = accounting,
                 Err(error) => invalid.push(format!("accounting: {error}")),
             }
-            if let Err(error) = observations(internal, cell) {
-                invalid.push(error);
+            match observations(internal, cell, &status) {
+                Ok(backpressure) => row["commit_backpressure"] = backpressure,
+                Err(error) => invalid.push(error),
             }
             match native::match_receipt(
                 &directory.join("native"),

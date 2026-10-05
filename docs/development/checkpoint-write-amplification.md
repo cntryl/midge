@@ -30,7 +30,20 @@ payloads; keys and encoding overhead are additional bytes. Families rotate in
 cell B. The first ceiling-rounded 10% of cycles is warmup. Compaction remains
 enabled and at least one genuine compaction must complete inside the measured
 ingestion window. Resolved options and actual completion counts are retained.
-No commit or flush error is hidden by this construction.
+Typed pre-admission `WriteStall` is retried by reconstructing the exact same
+transaction and using the public stall waiter. One allowance is captured
+before the first attempt: the earlier of 30 seconds and the original 15-minute
+cell deadline. Wait slices are at most one second. Other commit/wait errors,
+including unknown-outcome `Timeout`, remain terminal. Neither retries nor
+waiter clears advance progress or acknowledged-row counts.
+
+Cumulative attempt, strict-success, stall, waiter-result and wait-time counters
+are retained before and after the measured interval and in final status.
+Admission and wait costs stay inside the ingestion clock; they remain outside
+the publication clock's documented boundary below. The independent reader
+checks counter subtraction, completed-cycle arithmetic and the original
+60-second native no-progress configuration. Terminal errors and exhausted
+pressure remain unsuccessful construction, rather than passing zero work.
 
 After ingestion, the workload verifies every acknowledged key/value and the
 complete ordered scan, shuts down, reopens the same path, verifies again and
@@ -68,6 +81,17 @@ owned shutdown. Later forced costs stay outside the measured ratios.
 Every report retains all nine rows and their invalid reasons. A new workflow
 attempt preserves its own run/attempt identity; do not silently replace a
 failed repeat or select favorable repeats from different campaigns.
+
+The first campaign at source `c8983928ce285ea3889e1fa84d7ca0408802527d`,
+[run 37268459342](https://github.com/cntryl/midge/actions/runs/37268459342)
+attempt 1, failed construction when all three A repeats encountered ordinary
+L0 `WriteStall` after 119, 155 and 173 cycles. All six B/C repeats completed,
+but this incomplete campaign does not qualify a cell or permit policy
+investigation. Its original archives, native failures and invalid nine-row
+readback are retained. [#729](https://github.com/cntryl/midge/issues/729)
+adds the bounded construction policy above; the corrected source requires
+a fresh smoke and all nine new attempts. This is a benchmark defect, not
+evidence of lost acknowledged rows or engine deadlock.
 
 ## Accounting boundary
 

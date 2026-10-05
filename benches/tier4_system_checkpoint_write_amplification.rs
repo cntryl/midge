@@ -1,6 +1,8 @@
 //! Release checkpoint measurement: one fixed cell per fresh process.
 //! Uses the private accounting bridge without changing checkpoint cadence.
 
+#[path = "./bench_support/checkpoint_commit.rs"]
+mod checkpoint_commit;
 #[path = "./bench_support/checkpoint_gate.rs"]
 mod checkpoint_gate;
 #[path = "./stress_config.rs"]
@@ -99,6 +101,7 @@ struct Attempt {
     measured_started: Option<Instant>,
     measured_elapsed: Duration,
     measured_acknowledged_rows: u64,
+    commit_observations: checkpoint_commit::Observations,
 }
 
 impl Attempt {
@@ -118,7 +121,11 @@ impl Attempt {
             "status":"running", "phase":"setup", "stage_index":null, "terminal_error":null,
             "total_cycles":cell.cycles, "warmup_cycles":cell.warmup(), "measured_cycles":cell.measured(),
             "rows_per_cycle":cell.rows, "value_bytes":VALUE_BYTES, "families":cell.families,
-            "completed_cycles":0, "acknowledged_rows":0, "verified":false, "reopened_verified":false});
+            "completed_cycles":0, "acknowledged_rows":0, "verified":false, "reopened_verified":false,
+            "commit_backpressure_policy":{"schema_version":"midge-checkpoint-commit-policy.v1",
+                "retry_error":"write_stall_only", "retry_budget_ns":30_000_000_000u64,
+                "wait_slice_ns":1_000_000_000u64, "cell_budget_ns":900_000_000_000u64,
+                "required_no_progress_timeout_ns":60_000_000_000u64}});
         atomic_json(&directory.join("workload-status.json"), &status)?;
         Ok(Self {
             directory,
@@ -128,10 +135,13 @@ impl Attempt {
             measured_started: None,
             measured_elapsed: Duration::ZERO,
             measured_acknowledged_rows: 0,
+            commit_observations: checkpoint_commit::Observations::default(),
         })
     }
 
     fn save(&mut self, force: bool) -> Result<(), String> {
+        self.status["commit_backpressure"] =
+            serde_json::to_value(&self.commit_observations).map_err(|error| error.to_string())?;
         if force || self.last_save.elapsed() >= Duration::from_secs(1) {
             atomic_json(&self.directory.join("workload-status.json"), &self.status)?;
             self.last_save = Instant::now();
@@ -260,6 +270,7 @@ fn accounting(handle: &MetricsHandle, path: &Path) -> Result<Snapshot, String> {
 struct Window {
     before: Snapshot,
     before_compactions: u64,
+    before_commit_observations: checkpoint_commit::Observations,
     flush_latencies_ns: Vec<u64>,
     pressure_samples: Vec<Value>,
 }
@@ -299,6 +310,7 @@ fn begin_window(
     Ok(Window {
         before,
         before_compactions,
+        before_commit_observations: attempt.commit_observations.clone(),
         flush_latencies_ns: Vec::with_capacity(cell.measured()),
         pressure_samples: Vec::with_capacity(5),
     })
@@ -357,7 +369,7 @@ fn finish_window(
     )?;
     atomic_json(
         &attempt.directory.join("ingestion-observations.json"),
-        &json!({"flush_latencies_ns":window.flush_latencies_ns,"pressure_samples":window.pressure_samples}),
+        &json!({"flush_latencies_ns":window.flush_latencies_ns,"pressure_samples":window.pressure_samples, "commit_backpressure_before":window.before_commit_observations, "commit_backpressure_after":attempt.commit_observations}),
     )?;
     atomic_json(
         &attempt.directory.join("accounting-after.json"),
@@ -381,8 +393,17 @@ fn run_ingestion(
         if cycle == cell.warmup() {
             window = Some(begin_window(engine, handle, cell, attempt)?);
         }
-        commit_cycle(engine, &families[cycle % cell.families], cell, cycle)
-            .map_err(|error| format!("strict commit: {error:?}"))?;
+        checkpoint_commit::commit_with_backpressure(
+            attempt.started + CELL_TIMEOUT,
+            Duration::from_secs(30),
+            &mut attempt.commit_observations,
+            Instant::now,
+            || commit_cycle(engine, &families[cycle % cell.families], cell, cycle),
+            |timeout| {
+                engine.wait_for_write_stall_clear(families[cycle % cell.families].id(), timeout)
+            },
+        )
+        .map_err(|error| format!("strict commit: {error:?}"))?;
         progress.advance_by(u64::try_from(cell.rows).expect("fixed row count"));
         if window.is_some() {
             attempt.measured_acknowledged_rows +=
@@ -534,6 +555,8 @@ fn run_cell(ctx: &mut StressContext, cell: Cell) {
         .parameter("logical_payload_per_cycle", cell.rows * VALUE_BYTES)
         .parameter("background_compaction", true)
         .parameter("one_fresh_process", true)
+        .parameter("commit_stall_budget_ms", 30_000)
+        .parameter("commit_wait_slice_ms", 1_000)
         .parameter("device_write_amplification_measured", false);
     let outcome = OperationOutcome {
         attempted: attempt.measured_acknowledged_rows,
