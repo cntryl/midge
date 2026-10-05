@@ -720,26 +720,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
             .unwrap();
         // Assert
         assert_eq!(result.request_id(), waiter_request_id);
-        if before_gc {
-            assert!(
-                matches!(
-                    result,
-                    RuntimeResponse::Error {
-                        error: MidgeError::Fenced(_),
-                        ..
-                    }
-                ),
-                "pre-GC caller retains typed fencing error: {result:?}"
-            );
-        } else {
-            assert!(
-                matches!(&result, RuntimeResponse::Error {
-                    error: MidgeError::Internal(message), ..
-                } if message.contains("failed to mirror cleared compaction publication intent")
-                    && message.contains("Fenced")),
-                "settled publication retains contextual intent-clear error: {result:?}"
-            );
-        }
+        assert_fenced_publication_response(&result, before_gc);
         assert!(response.try_recv().is_err());
         assert!(event_loop.state.pending_compaction_waits.is_empty());
         assert_eq!(event_loop.router.late_responses_total(), 0);
@@ -751,4 +732,28 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         drop(scenario);
     }
     Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_fenced_publication_response(result: &RuntimeResponse, before_gc: bool) {
+    if before_gc {
+        assert!(
+            matches!(
+                result,
+                RuntimeResponse::Error {
+                    error: MidgeError::Fenced(_),
+                    ..
+                }
+            ),
+            "pre-GC caller retains typed fencing error: {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(result, RuntimeResponse::Error {
+                error: MidgeError::Internal(message), ..
+            } if message.contains("failed to mirror cleared compaction publication intent")
+                && message.contains("Fenced")),
+            "settled publication retains contextual intent-clear error: {result:?}"
+        );
+    }
 }
