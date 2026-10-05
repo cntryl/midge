@@ -17,7 +17,7 @@ pre-1.0 and uses self-contained Sqrzl qualification.
 ## By audience
 
 - Operations: [operator runbook](operations/operator-runbook.md), [storage verification](user-guides/verification.md), [cloud setup](operations/cloud-setup.md), [troubleshooting](user-guides/troubleshooting.md).
-- Storage contributors: [architecture](development/architecture.md), [recovery](development/recovery-internals.md), [invariants](development/storage-invariants.md), [testing](development/testing.md), [cloud qualification](development/cloud-qualification-policy.md).
+- Storage contributors: [architecture](development/architecture.md), [system invariant catalog and gap analysis](development/invariant-catalog.md), [storage invariants](development/storage-invariants.md), [recovery](development/recovery-internals.md), [testing](development/testing.md), [cloud qualification](development/cloud-qualification-policy.md).
 - Release evidence: [support matrix](development/support-matrix.md), [format compatibility](development/format-compatibility.md), [release policy](development/release-policy.md), [release checklist](operations/release-checklist.md).
 
 The root [README](../README.md) is the package-facing entry point. Rust API
