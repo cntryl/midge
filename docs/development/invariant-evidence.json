@@ -1,7 +1,7 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
-  "source_revision_status": "References bind the actual mechanical compatibility test commit before this documentation commit. The only source changes are 18 equivalent minute/hour duration spellings in 12 fixture files and one exact assertion line collapse; hashes bind every referenced source. Historical scopes, #733 controls and c8 measurement remain unchanged. This rebind claims no new Rust execution, merge or native/full-hour acceptance.",
+  "source_revision": "eab8dbd37671beb33d2beb60075056e33cd7b36e",
+  "source_revision_status": "References bind the actual #735 test-only assertion-helper source commit before this documentation commit. The mechanical extraction changes one unreferenced feature fixture; all 136 referenced source hashes, existing production/test/assertion locations and row evidence remain unchanged. All prior refresh and qualification objects and c8 measurement retain their original bytes, identity and scope. This rebind claims no new Rust execution, accepted hosted head, merge or native/full-hour acceptance.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
   "qualification": {
@@ -417,7 +417,7 @@
       "production": [
         {
           "path": "src/runtime/event_loop/compaction.rs",
-          "line": 572,
+          "line": 571,
           "symbol": "CompactionCoordinator::start_publication",
           "kind": "function",
           "marker": "fn start_publication("
@@ -1305,45 +1305,45 @@
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5759,
+          "line": 5767,
           "symbol": "should_not_advance_cloud_durability_across_unacked_segment_gap",
           "claim": "Cloud frontier stays zero for later ACK alone, retains local WAL and buffered ACK; preceding ACK advances contiguous frontier and drains covered WAL bookkeeping.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5780,
+              "line": 5788,
               "marker": "assert!(first_deferred, \"CloudAsync first append should defer\");"
             },
             {
-              "line": 5800,
+              "line": 5808,
               "marker": "assert!(second_deferred, \"CloudAsync second append should defer\");"
             },
             {
-              "line": 5807,
+              "line": 5815,
               "marker": "assert!(second_segment > first_segment);"
             },
             {
-              "line": 5818,
+              "line": 5826,
               "marker": "assert_eq!("
             },
             {
-              "line": 5823,
+              "line": 5831,
               "marker": "assert!("
             },
             {
-              "line": 5830,
+              "line": 5838,
               "marker": "assert!("
             },
             {
-              "line": 5840,
+              "line": 5848,
               "marker": "assert_eq!("
             },
             {
-              "line": 5845,
+              "line": 5853,
               "marker": "assert!("
             },
             {
-              "line": 5851,
+              "line": 5859,
               "marker": "assert!("
             }
           ]
@@ -2411,14 +2411,14 @@
       "production": [
         {
           "path": "src/runtime/event_loop/compaction.rs",
-          "line": 572,
+          "line": 571,
           "symbol": "start_publication",
           "kind": "function",
           "marker": "fn start_publication("
         },
         {
           "path": "src/runtime/event_loop/compaction.rs",
-          "line": 1082,
+          "line": 1081,
           "symbol": "begin_intent_clear_publication",
           "kind": "function",
           "marker": "fn begin_intent_clear_publication("
@@ -3075,70 +3075,70 @@
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5718,
+          "line": 5726,
           "symbol": "should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued",
           "claim": "Real sealed local WAL plus controlled fenced ACK leaves cloud frontier 0 and WAL present, marks anomaly.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5738,
+              "line": 5746,
               "marker": "assert_eq!(sequence, max_sequence);"
             },
             {
-              "line": 5752,
+              "line": 5760,
               "marker": "assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 0);"
             },
             {
-              "line": 5753,
+              "line": 5761,
               "marker": "assert!(local_path.exists(), \"fenced ACK must retain the local WAL\");"
             },
             {
-              "line": 5754,
+              "line": 5762,
               "marker": "assert!(event_loop.state.persistence_anomaly_detected());"
             }
           ]
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5759,
+          "line": 5767,
           "symbol": "should_not_advance_cloud_durability_across_unacked_segment_gap",
           "claim": "Out-of-order ACK stays buffered and WAL retained; earlier ACK permits exact contiguous cloud frontier and drains covered tracking.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5780,
+              "line": 5788,
               "marker": "assert!(first_deferred, \"CloudAsync first append should defer\");"
             },
             {
-              "line": 5800,
+              "line": 5808,
               "marker": "assert!(second_deferred, \"CloudAsync second append should defer\");"
             },
             {
-              "line": 5807,
+              "line": 5815,
               "marker": "assert!(second_segment > first_segment);"
             },
             {
-              "line": 5818,
+              "line": 5826,
               "marker": "assert_eq!("
             },
             {
-              "line": 5823,
+              "line": 5831,
               "marker": "assert!("
             },
             {
-              "line": 5830,
+              "line": 5838,
               "marker": "assert!("
             },
             {
-              "line": 5840,
+              "line": 5848,
               "marker": "assert_eq!("
             },
             {
-              "line": 5845,
+              "line": 5853,
               "marker": "assert!("
             },
             {
-              "line": 5851,
+              "line": 5859,
               "marker": "assert!("
             }
           ]
@@ -8940,5 +8940,54 @@
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
     "scope": "exact equivalent duration substitutions and one approved assertion line collapse within original named functions; source/reference lint only, no new native/full-hour qualification"
+  },
+  "notification_reference_refresh": {
+    "issue": 735,
+    "previous_source_revision": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
+    "runtime_commit_before_docs": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
+    "preview": false,
+    "hash_bound_changed_paths": [
+      "src/runtime/event_loop/cloud_integration/tests.rs",
+      "src/runtime/event_loop/compaction.rs"
+    ],
+    "preserved_ids": 63,
+    "preserved_test_references": 229,
+    "preserved_assertion_markers": 1068,
+    "scope": "existing named production declarations and byte-identical named test/helper bodies relocated; unchanged assertion text and all historical qualification; reference lint only"
+  },
+  "notification_fixture_reference_refresh": {
+    "issue": 735,
+    "previous_source_revision": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
+    "previous_documentation_head": "ee7dc29b2f739d2951f6f01f7a9f4cdbcecd95de",
+    "source_commit_before_docs": "40a32890b58a29f391b9b95c680b43c1b7514d20",
+    "preview": false,
+    "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
+    "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
+    "changed_hash_bound_paths": [
+
+    ],
+    "preserved_ids": 63,
+    "preserved_test_references": 229,
+    "preserved_assertion_markers": 1068,
+    "preserved_source_hashes": 136,
+    "scope": "current source binding after a test-only feature-fixture correction; unchanged existing reference evidence and historical qualification; source/reference lint only"
+  },
+  "notification_helper_reference_refresh": {
+    "issue": 735,
+    "previous_source_revision": "40a32890b58a29f391b9b95c680b43c1b7514d20",
+    "previous_documentation_head": "cfce2f9a68fa38e1c3201672f2d3d0aed133d5a1",
+    "source_commit_before_docs": "eab8dbd37671beb33d2beb60075056e33cd7b36e",
+    "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
+    "fixture_before_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
+    "fixture_after_sha256": "0ca5d2b7d855b258923486ab4306de0866c62156d5485c078fbb1cd77b4e468d",
+    "helper": "assert_fenced_publication_response",
+    "changed_hash_bound_paths": [
+
+    ],
+    "preserved_ids": 63,
+    "preserved_test_references": 229,
+    "preserved_assertion_markers": 1068,
+    "preserved_source_hashes": 136,
+    "scope": "mechanical extraction of the unchanged pre-GC Fenced and settled intent-clear contextual error assertions into one called helper in an unreferenced feature fixture; source/reference lint only, no historical qualification upgrade"
   }
 }

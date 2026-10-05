@@ -334,7 +334,8 @@ pub enum RuntimeMsg {
     },
 
     // === Compaction Actor ===
-    /// Compaction completed.
+    /// Internal worker completion. The ID correlates publication ownership;
+    /// it does not identify a caller waiting for a response.
     CompactionComplete {
         request_id: u64,
         input_ssts: Vec<String>,
@@ -715,7 +716,6 @@ impl RuntimeMsg {
     pub fn request_id(&self) -> Option<u64> {
         match self {
             RuntimeMsg::FlushMemtable { request_id, .. }
-            | RuntimeMsg::CompactionComplete { request_id, .. }
             | RuntimeMsg::ApplyTransaction { request_id, .. }
             | RuntimeMsg::ApplySpilledTransaction { request_id, .. }
             | RuntimeMsg::WalSync { request_id }
@@ -739,7 +739,8 @@ impl RuntimeMsg {
             #[cfg(test)]
             RuntimeMsg::SetRuntimeConfig { request_id, .. } => Some(*request_id),
 
-            RuntimeMsg::CancelWaitForWriteStallClear { .. }
+            RuntimeMsg::CompactionComplete { .. }
+            | RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::Shutdown
             | RuntimeMsg::RetryGc => None,
 

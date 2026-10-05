@@ -2336,7 +2336,15 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
         .expect("prepare active compaction fixture");
     let request_id = 8_156;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let waiter_request_id = 8_161;
+    let response_rx = event_loop.router.register(waiter_request_id, "CompactAll");
+    event_loop.state.pending_compaction_waits.insert(
+        waiter_request_id,
+        event_loop
+            .router
+            .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+            .expect("manual compaction caller deadline"),
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2403,7 +2411,15 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
     let request_id = 8_159;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let waiter_request_id = 8_162;
+    let response_rx = event_loop.router.register(waiter_request_id, "CompactAll");
+    event_loop.state.pending_compaction_waits.insert(
+        waiter_request_id,
+        event_loop
+            .router
+            .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+            .expect("manual compaction caller deadline"),
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2488,7 +2504,20 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, &captured_inputs)?;
     let request_id = 8_160;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let second_waiter_request_id = 8_164;
+    let response_rx = event_loop
+        .router
+        .register(second_waiter_request_id, "CompactAll");
+    event_loop.state.pending_compaction_waits.insert(
+        second_waiter_request_id,
+        event_loop
+            .router
+            .request_deadline(
+                second_waiter_request_id,
+                event_loop.runtime_response_timeout,
+            )
+            .expect("second manual compaction caller deadline"),
+    );
     let compact_all_request_id = 8_163;
     let compact_all_rx = event_loop
         .router

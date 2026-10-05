@@ -2,9 +2,9 @@
 
 Every catalog ID maps to production symbols, exact assertions, fixture
 assumptions and untested boundaries. This is source/reference evidence;
-the preparer ran no Rust tests. References bind mechanical compatibility test commit
-af0dfd2ea4da587c013a2aa99a4a9bf522153fb9 before this documentation commit;
-18 minute/hour fixture duration spellings and one exact assertion line wrap change;
+the preparer ran no Rust tests. References bind #735 test-only assertion-helper source commit
+eab8dbd37671beb33d2beb60075056e33cd7b36e before this documentation commit;
+all existing declaration/assertion locations and source hashes remain unchanged;
 the historical measured c8 source and original report remain explicit. Historical 32911805 A/r1 smoke 37270512400
 is transport-valid only; its later nine-run 37270845568 remains invalid
 after selected active metadata endpoints. Eight shared commit controls,
@@ -14,7 +14,7 @@ attempts of 37274074026 passed retained original-archive readback: B/C have
 three payload misses each; A has one time miss and does not qualify. This
 meets only the conditional policy-investigation predicate; cadence remains
 unchanged, physical/device bytes are not measured and native confidence is
-not upgraded. Documentation references bind the mechanical compatibility commit above; #733 controls retain their original scopes. The
+not upgraded. Documentation references bind the notification-routing source above; historical compatibility and #733 controls retain their original scopes. The
 recorded c8f0de80 campaign and byte-identical original report remain historical
 measurement evidence; this change supplies no new native-hour qualification. Full-hour acceptance uses the final merged
 catalog source; run identities and artifact readbacks are tracked on
@@ -60,7 +60,7 @@ Uncovered boundary: These assertions establish mutation-admission/error distinct
 
 ## AUTH-3
 
-Production: [src/runtime/event_loop/compaction.rs:572](../../src/runtime/event_loop/compaction.rs#L572) `CompactionCoordinator::start_publication`; [src/runtime/event_loop/flush_pipeline.rs:614](../../src/runtime/event_loop/flush_pipeline.rs#L614) `commit_flush_metadata`; [src/runtime/actors/compaction/publication.rs:39](../../src/runtime/actors/compaction/publication.rs#L39) `CompactionPublishTask`.
+Production: [src/runtime/event_loop/compaction.rs:571](../../src/runtime/event_loop/compaction.rs#L571) `CompactionCoordinator::start_publication`; [src/runtime/event_loop/flush_pipeline.rs:614](../../src/runtime/event_loop/flush_pipeline.rs#L614) `commit_flush_metadata`; [src/runtime/actors/compaction/publication.rs:39](../../src/runtime/actors/compaction/publication.rs#L39) `CompactionPublishTask`.
 
 Exact evidence and assertion markers:
 
@@ -203,7 +203,7 @@ Exact evidence and assertion markers:
 
 - [tests/durability_sync_count.rs:84](../../tests/durability_sync_count.rs#L84) `should_issue_one_physical_wal_sync_when_non_empty_sync_transaction_commits`: Actual nonempty sync transaction increases physical WAL fsync counter by exactly one. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 101.
 - [src/engine/api/write_options.rs:181](../../src/engine/api/write_options.rs#L181) `should_map_every_local_write_option_to_expected_wal_policy_given_local_storage_when_committing`: Local sync/buffered/best_effort map to Strict/Batched/BestEffort respectively. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 201.
-- [src/runtime/event_loop/cloud_integration/tests.rs:5759](../../src/runtime/event_loop/cloud_integration/tests.rs#L5759) `should_not_advance_cloud_durability_across_unacked_segment_gap`: Cloud frontier stays zero for later ACK alone, retains local WAL and buffered ACK; preceding ACK advances contiguous frontier and drains covered WAL bookkeeping. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 5780, 5800, 5807, 5818, 5823, 5830, 5840, 5845, 5851.
+- [src/runtime/event_loop/cloud_integration/tests.rs:5767](../../src/runtime/event_loop/cloud_integration/tests.rs#L5767) `should_not_advance_cloud_durability_across_unacked_segment_gap`: Cloud frontier stays zero for later ACK alone, retains local WAL and buffered ACK; preceding ACK advances contiguous frontier and drains covered WAL bookkeeping. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 5788, 5808, 5815, 5826, 5831, 5838, 5848, 5853, 5859.
 
 Preconditions: Physical sync count is actual local Fs I/O. Policy mapping is a unit predicate; cloud-gap test uses an actual cloud event-loop fixture with controlled ACK delivery.
 
@@ -348,7 +348,7 @@ Uncovered boundary: Two publication orders are bounded schedules. They do not li
 
 ## SST-5
 
-Production: [src/runtime/event_loop/compaction.rs:572](../../src/runtime/event_loop/compaction.rs#L572) `start_publication`; [src/runtime/event_loop/compaction.rs:1082](../../src/runtime/event_loop/compaction.rs#L1082) `begin_intent_clear_publication`; [src/runtime/actors/gc.rs:148](../../src/runtime/actors/gc.rs#L148) `GcActor::delete_ssts`.
+Production: [src/runtime/event_loop/compaction.rs:571](../../src/runtime/event_loop/compaction.rs#L571) `start_publication`; [src/runtime/event_loop/compaction.rs:1081](../../src/runtime/event_loop/compaction.rs#L1081) `begin_intent_clear_publication`; [src/runtime/actors/gc.rs:148](../../src/runtime/actors/gc.rs#L148) `GcActor::delete_ssts`.
 
 Exact evidence and assertion markers:
 
@@ -433,8 +433,8 @@ Production: [src/storage/hybrid/backend/uploads.rs:372](../../src/storage/hybrid
 Exact evidence and assertion markers:
 
 - [src/runtime/hybrid_persistence/tests.rs:2949](../../src/runtime/hybrid_persistence/tests.rs#L2949) `should_readback_remote_wal_before_upload_worker_emits_ack`: Actual upload worker emits ACK for segment 9/sequence 13 only with recorded GET download of exact epoch/segment key. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2979, 2989.
-- [src/runtime/event_loop/cloud_integration/tests.rs:5718](../../src/runtime/event_loop/cloud_integration/tests.rs#L5718) `should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued`: Real sealed local WAL plus controlled fenced ACK leaves cloud frontier 0 and WAL present, marks anomaly. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 5738, 5752, 5753, 5754.
-- [src/runtime/event_loop/cloud_integration/tests.rs:5759](../../src/runtime/event_loop/cloud_integration/tests.rs#L5759) `should_not_advance_cloud_durability_across_unacked_segment_gap`: Out-of-order ACK stays buffered and WAL retained; earlier ACK permits exact contiguous cloud frontier and drains covered tracking. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 5780, 5800, 5807, 5818, 5823, 5830, 5840, 5845, 5851.
+- [src/runtime/event_loop/cloud_integration/tests.rs:5726](../../src/runtime/event_loop/cloud_integration/tests.rs#L5726) `should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued`: Real sealed local WAL plus controlled fenced ACK leaves cloud frontier 0 and WAL present, marks anomaly. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 5746, 5760, 5761, 5762.
+- [src/runtime/event_loop/cloud_integration/tests.rs:5767](../../src/runtime/event_loop/cloud_integration/tests.rs#L5767) `should_not_advance_cloud_durability_across_unacked_segment_gap`: Out-of-order ACK stays buffered and WAL retained; earlier ACK permits exact contiguous cloud frontier and drains covered tracking. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 5788, 5808, 5815, 5826, 5831, 5838, 5848, 5853, 5859.
 
 Preconditions: Upload test has valid real local WAL and a conditional mock cloud backend; event-loop tests intentionally deliver ACK events after genuine append/seal.
 

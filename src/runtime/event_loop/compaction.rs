@@ -560,7 +560,6 @@ impl CompactionCoordinator {
                     );
             }
             let completion_error = error.replay();
-            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             Self::complete_pending_waits(event_loop, false, Some(&completion_error));
             event_loop.drain_auto_flush_memtables();
             event_loop.wake_write_stall_waiters();
@@ -1252,12 +1251,6 @@ impl CompactionCoordinator {
         }
         event_loop.evict_published_sst_cache(&pending.token.output_ssts);
         event_loop.publish_snapshot();
-        event_loop.respond(
-            pending.token.request_id,
-            RuntimeResponse::Ok {
-                request_id: pending.token.request_id,
-            },
-        );
         event_loop
             .compaction_publication
             .finish(&mut event_loop.publication_gate);
@@ -1298,7 +1291,7 @@ impl CompactionCoordinator {
         }
         Self::defer_failed_repair_retry(event_loop, repair, "publication start");
         let wait_error = error.replay();
-        Self::respond_publish_failure(event_loop, request_id, error);
+        Self::record_publish_failure(event_loop, request_id, error);
         Self::complete_pending_waits(event_loop, false, Some(&wait_error));
         event_loop.drain_auto_flush_memtables();
         event_loop.wake_write_stall_waiters();
@@ -1315,7 +1308,7 @@ impl CompactionCoordinator {
             return;
         };
         if pending.expected_phase == CompactionPublishPhase::IntentCleared {
-            Self::finish_failed_intent_clear(event_loop, &pending, error);
+            Self::finish_failed_intent_clear(event_loop, error);
             return;
         }
         let repair = event_loop.compaction_actor.active_same_level_repair();
@@ -1355,7 +1348,7 @@ impl CompactionCoordinator {
         }
         Self::defer_failed_repair_retry(event_loop, repair && !authoritative, "publication");
         let wait_error = error.replay();
-        Self::respond_publish_failure(event_loop, pending.token.request_id, error);
+        Self::record_publish_failure(event_loop, pending.token.request_id, error);
         Self::complete_pending_waits(event_loop, false, Some(&wait_error));
         event_loop.restore_publication_deferred_message();
         event_loop.schedule_next_flush_worker();
@@ -1381,11 +1374,7 @@ impl CompactionCoordinator {
     /// The manifest is published, inputs were handed to GC, and the local
     /// intent is cleared; only its mirror failed. Everything is settled except
     /// the remote record, so degrade instead of re-running the failure settle.
-    fn finish_failed_intent_clear(
-        event_loop: &mut EventLoop,
-        pending: &PendingCompactionPublication,
-        error: &crate::common::MidgeError,
-    ) {
+    fn finish_failed_intent_clear(event_loop: &mut EventLoop, error: &crate::common::MidgeError) {
         Self::record_compaction_failure(event_loop);
         tracing::error!(
             ?error,
@@ -1401,13 +1390,6 @@ impl CompactionCoordinator {
             ))
         };
         let wait_error = response_error.replay();
-        event_loop.respond(
-            pending.token.request_id,
-            RuntimeResponse::Error {
-                request_id: pending.token.request_id,
-                error: response_error,
-            },
-        );
         Self::complete_pending_waits(event_loop, false, Some(&wait_error));
         event_loop.restore_publication_deferred_message();
         event_loop.schedule_next_flush_worker();
@@ -1433,7 +1415,7 @@ impl CompactionCoordinator {
                 match Self::resident_output_sizes(&event_loop.state.sst_dir, output_ssts) {
                     Ok(sizes) => sizes,
                     Err(error) => {
-                        return Self::respond_publish_failure(event_loop, request_id, &error)
+                        return Self::record_publish_failure(event_loop, request_id, &error)
                     }
                 };
             hybrid.compaction_completed_with_token(token, &output_sizes);
@@ -1449,12 +1431,11 @@ impl CompactionCoordinator {
             .state
             .clear_compaction_publication_intent(input_ssts, output_ssts)
         {
-            return Self::respond_publish_failure(event_loop, request_id, &error);
+            return Self::record_publish_failure(event_loop, request_id, &error);
         }
         Self::record_compaction_metrics(event_loop, output_ssts);
         event_loop.evict_published_sst_cache(output_ssts);
         event_loop.publish_snapshot();
-        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         true
     }
 
@@ -1473,22 +1454,13 @@ impl CompactionCoordinator {
             .record(|m| m.record_compaction(bytes_rewritten));
     }
 
-    fn respond_publish_failure(
+    fn record_publish_failure(
         event_loop: &mut EventLoop,
         request_id: u64,
         error: &crate::common::MidgeError,
     ) -> bool {
         Self::record_compaction_failure(event_loop);
-        tracing::error!(error = ?error, "failed to apply compaction to manifest");
-        event_loop.respond(
-            request_id,
-            RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(format!(
-                    "failed to apply compaction to manifest: {error}"
-                )),
-            },
-        );
+        tracing::error!(notification_id = request_id, error = ?error, "failed to apply compaction to manifest");
         false
     }
 

@@ -703,20 +703,27 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         event_loop
             .compaction_publication
             .install(&event_loop.publication_gate, owner, pending)?;
-        let response = event_loop.router.register(1, "Compact");
+        let waiter_request_id = 2;
+        let response = event_loop.router.register(waiter_request_id, "CompactAll");
+        event_loop.state.pending_compaction_waits.insert(
+            waiter_request_id,
+            event_loop
+                .router
+                .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+                .expect("manual caller's original deadline"),
+        );
+        assert!(event_loop.router.registered_at(1).is_none());
         // Act
         CompactionCoordinator::handle_publication_completion(&mut event_loop, completion);
         let result = response
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         // Assert
-        assert!(matches!(
-            result,
-            RuntimeResponse::Error {
-                error: MidgeError::Internal(ref message),
-                ..
-            } if message.contains("Fenced")
-        ));
+        assert_eq!(result.request_id(), waiter_request_id);
+        assert_fenced_publication_response(&result, before_gc);
+        assert!(response.try_recv().is_err());
+        assert!(event_loop.state.pending_compaction_waits.is_empty());
+        assert_eq!(event_loop.router.late_responses_total(), 0);
         assert_eq!(std::fs::read(&intent_path)?, before);
         assert_eq!(input_path.exists(), before_gc);
         if before_gc {
@@ -725,4 +732,28 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         drop(scenario);
     }
     Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_fenced_publication_response(result: &RuntimeResponse, before_gc: bool) {
+    if before_gc {
+        assert!(
+            matches!(
+                result,
+                RuntimeResponse::Error {
+                    error: MidgeError::Fenced(_),
+                    ..
+                }
+            ),
+            "pre-GC caller retains typed fencing error: {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(result, RuntimeResponse::Error {
+                error: MidgeError::Internal(message), ..
+            } if message.contains("failed to mirror cleared compaction publication intent")
+                && message.contains("Fenced")),
+            "settled publication retains contextual intent-clear error: {result:?}"
+        );
+    }
 }
