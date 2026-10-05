@@ -6,6 +6,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod candidate_index;
+
 pub(crate) struct ReplayCoverage {
     manifest: crate::metadata::Manifest,
     fs: Arc<dyn Fs>,
@@ -20,6 +22,7 @@ pub(crate) struct ReplayCoverage {
     readers: RefCell<Vec<CachedReader>>,
     block_cap_per_reader: usize,
     read_budget: crate::common::resource_budget::ResourceBudget,
+    candidate_index: RefCell<Option<candidate_index::CandidateIndex>>,
     probes: Cell<u64>,
     reader_opens: Cell<u64>,
     verified_bytes: Cell<u64>,
@@ -124,6 +127,7 @@ impl ReplayCoverage {
             // in total, leaving room for indexes, proofs and verification.
             block_cap_per_reader: memory_bytes / 4 / MAX_READERS,
             read_budget: crate::common::resource_budget::ResourceBudget::new(memory_bytes),
+            candidate_index: RefCell::new(None),
             probes: Cell::new(0),
             reader_opens: Cell::new(0),
             verified_bytes: Cell::new(0),
@@ -186,16 +190,11 @@ impl ReplayCoverage {
         }
         let mut retained_value = None;
         let mut proof = ExactCoverageState::default();
-        self.manifest_scanned.set(
-            self.manifest_scanned
-                .get()
-                .saturating_add(self.manifest.files.len() as u64),
-        );
-        for file in &self.manifest.files {
+        let mut visit = |file: &crate::metadata::FileMeta| {
             check_scope(scope)?;
             if !file_covers_wal_point_record(file, record) {
                 self.progress.borrow_mut().completed_operation();
-                continue;
+                return Ok(true);
             }
             self.manifest_candidates
                 .set(self.manifest_candidates.get().saturating_add(1));
@@ -207,6 +206,36 @@ impl ReplayCoverage {
             }
             check_scope(scope)?;
             self.progress.borrow_mut().completed_operation();
+            Ok(true)
+        };
+        let mut index = self.candidate_index.borrow_mut();
+        if index.is_none() {
+            *index = candidate_index::CandidateIndex::new(
+                &self.manifest.files,
+                &self.read_budget,
+                scope,
+            )?;
+        }
+        if let Some(index) = index.as_ref() {
+            if !index.visit(
+                &self.manifest.files,
+                record,
+                scope,
+                &self.manifest_scanned,
+                &mut visit,
+            )? {
+                return Ok(false);
+            }
+        } else {
+            // Tight budgets retain the old exact proof, without an uncharged
+            // index or a newly inferred coverage decision.
+            for file in &self.manifest.files {
+                self.manifest_scanned
+                    .set(self.manifest_scanned.get().saturating_add(1));
+                if !visit(file)? {
+                    return Ok(false);
+                }
+            }
         }
         Ok(proof.exactly_covers_wal_point(record))
     }
@@ -351,6 +380,7 @@ impl ReplayCoverage {
     pub(crate) fn release_reader(&self) {
         self.release_cached_all();
         *self.verified.borrow_mut() = HashMap::new();
+        *self.candidate_index.borrow_mut() = None;
     }
 
     fn release_cached_all(&self) {
@@ -584,7 +614,12 @@ mod tests {
         // its five bytes are charged separately from either decoded block.
         let budget = one_reader_peak
             + b"value".len()
-            + proof_metadata_bytes(&coverage.manifest.files[1].name);
+            + proof_metadata_bytes(&coverage.manifest.files[1].name)
+            // The single-reader peak already includes its one-file index.
+            + candidate_index::CandidateIndex::allocation_bytes(coverage.manifest.files.len())
+                .expect("small fixture index")
+            - candidate_index::CandidateIndex::allocation_bytes(single.manifest.files.len())
+                .expect("single fixture index");
         coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(budget);
 
         // Act
@@ -694,6 +729,102 @@ mod tests {
         assert_eq!(misses, warm_misses, "every block stays resident");
         assert!(hits >= 200, "block hits must be counted: {hits}");
         assert!(coverage.read_budget.peak() <= coverage.read_budget.limit());
+    }
+
+    #[test]
+    fn should_replay_when_unreadable_interval_overlaps_verified_exact_sst() {
+        // Arrange: a valid first proof must not conceal a second overlapping
+        // manifest candidate whose authoritative object cannot be read.
+        let (directory, coverage) =
+            fixture(&[(Some(b"value"), 7, None), (Some(b"value"), 7, None)]);
+        std::fs::remove_file(
+            directory
+                .path()
+                .join("cloud/sst")
+                .join(&coverage.manifest.files[1].name),
+        )
+        .expect("remove overlapping authoritative SST");
+
+        // Act
+        let covered = coverage.contains(&put(7, None));
+
+        // Assert
+        assert!(!covered, "every candidate must supply an exact proof");
+        assert_eq!(coverage.reader_opens.get(), 1, "first SST was verified");
+        assert_eq!(coverage.manifest_candidates.get(), 2);
+        coverage.release_reader();
+        assert_eq!(coverage.read_budget.used(), 0);
+    }
+
+    #[test]
+    fn should_preserve_exact_proof_when_candidate_index_cannot_fit_read_budget() {
+        // Arrange: metadata indexing exceeds this budget, but one real SST
+        // proof fits. Disjoint intervals may not force a new replay decision.
+        let (_directory, mut coverage) = fixture(&[(Some(b"value"), 7, None)]);
+        let candidate = coverage.manifest.files[0].clone();
+        for index in 0..8192_u64 {
+            coverage.manifest.files.push(crate::metadata::FileMeta {
+                name: format!("irrelevant-{index}.sst"),
+                smallest_seq: Some(10 + index * 10),
+                largest_seq: Some(19 + index * 10),
+                ..candidate.clone()
+            });
+        }
+
+        // Act
+        let covered = coverage.contains(&put(7, None));
+
+        // Assert
+        assert!(covered);
+        assert!(coverage.candidate_index.borrow().is_none());
+        assert_eq!(coverage.manifest_scanned.get(), 8193);
+        assert_eq!(coverage.reader_opens.get(), 1);
+        assert!(coverage.read_budget.peak() <= coverage.read_budget.limit());
+        coverage.release_reader();
+        assert_eq!(coverage.read_budget.used(), 0);
+    }
+
+    #[test]
+    fn should_bound_manifest_work_when_replay_probes_sparse_sequence_intervals() {
+        // Arrange: the candidate is a real checksummed SST. The other entries
+        // describe disjoint later sequence intervals and must never be read.
+        let (_directory, mut coverage) = fixture(&[(Some(b"value"), 7, None)]);
+        let candidate = coverage.manifest.files[0].clone();
+        for index in 0..8192_u64 {
+            coverage.manifest.files.push(crate::metadata::FileMeta {
+                name: format!("irrelevant-{index}.sst"),
+                smallest_seq: Some(10 + index * 10),
+                largest_seq: Some(19 + index * 10),
+                ..candidate.clone()
+            });
+        }
+        let record = put(7, None);
+
+        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(512 * 1024);
+
+        // Act: count the production candidate-selection work, rather than
+        // asserting a machine-dependent elapsed time.
+        for _ in 0..100 {
+            assert!(coverage.contains(&record));
+        }
+
+        // Assert: exact coverage is retained without walking all 8193 entries
+        // for each record in a multi-million-row recovery backlog.
+        assert_eq!(coverage.probes.get(), 100);
+        assert_eq!(coverage.manifest_candidates.get(), 100);
+        assert!(
+            coverage.manifest_scanned.get() <= 64 * 100,
+            "sparse candidate lookup scanned {} entries for 100 probes",
+            coverage.manifest_scanned.get()
+        );
+        assert_eq!(coverage.reader_opens.get(), 1);
+        eprintln!(
+            "actual sparse coverage work: probes={}, scanned={}, candidates={}, reader_opens={}",
+            coverage.probes.get(),
+            coverage.manifest_scanned.get(),
+            coverage.manifest_candidates.get(),
+            coverage.reader_opens.get()
+        );
     }
 
     #[test]
