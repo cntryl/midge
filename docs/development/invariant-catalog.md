@@ -9,8 +9,10 @@ The initial inventory was recorded during the #707/#708 work. This update
 refreshes its row-level references against the delivered startup/flush and
 compaction deadline fixes, #723 native scratch-capacity repair, #724 version
 documentation, and #715 accounting/benchmark/reader source measured at
-c8f0de80. References bind merged PR #728 source 0076a02c; its runtime, benchmark,
-reader, Cargo, tools and workflows remain identical to the measured source.
+c8f0de80. References now bind actual #733 runtime/test commit
+a15bf5fc48992d476985af4bccca64e60468dac6 before this documentation commit.
+The measured c8 campaign and its original report stay unchanged; the new
+coverage index controls do not claim fresh native/full-hour qualification.
 The retained nine-cell outcome, original readback digest and #730/#731
 helper/reader limits are mapped below. Full-hour acceptance is separate and
 uses the final merged catalog source; its run identities and artifact

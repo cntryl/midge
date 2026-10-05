@@ -1,7 +1,7 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "0076a02cbeeb9eb4f48f4b4f698a74db098ed439",
-  "source_revision_status": "References bind the actual merged PR #728 source; source hashes verify each referenced file. The catalog delivery adds no Rust execution claim.",
+  "source_revision": "a15bf5fc48992d476985af4bccca64e60468dac6",
+  "source_revision_status": "References bind the actual #733 runtime/test commit before this documentation commit; source hashes verify each referenced file. This source-reference refresh claims no new Rust execution, merge or native/full-hour qualification.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
   "qualification": {
@@ -1776,7 +1776,7 @@
       "production": [
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 144,
+          "line": 148,
           "symbol": "ReplayCoverage::contains",
           "kind": "function",
           "marker": "pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {"
@@ -1794,39 +1794,53 @@
           "symbol": "prune_cloud_wal_segments_within",
           "kind": "function",
           "marker": "pub(crate) fn prune_cloud_wal_segments_within("
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 79,
+          "symbol": "CandidateIndex::visit",
+          "kind": "function",
+          "marker": "pub(super) fn visit("
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 90,
+          "symbol": "CandidateIndex::visit_nodes",
+          "kind": "function",
+          "marker": "fn visit_nodes("
         }
       ],
       "tests": [
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 929,
+          "line": 1062,
           "symbol": "should_replay_put_when_equal_sequence_sst_expiration_differs",
           "claim": "Actual SST fixture value/sequence equality with different TTL still returns covered=false.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 936,
+              "line": 1069,
               "marker": "assert!("
             }
           ]
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 1010,
+          "line": 1143,
           "symbol": "should_retain_wal_when_pinned_sst_identity_changes_before_block_reload",
           "claim": "Actual SST bytes change after initial proof; after reader/cache reload, contains=false.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1014,
+              "line": 1147,
               "marker": "assert!(coverage.contains(&record));"
             },
             {
-              "line": 1027,
+              "line": 1160,
               "marker": "assert!("
             },
             {
-              "line": 1031,
+              "line": 1164,
               "marker": "assert!("
             }
           ]
@@ -1845,6 +1859,213 @@
             {
               "line": 255,
               "marker": "assert!(!uncovered_result);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage.rs",
+          "line": 737,
+          "symbol": "should_replay_when_unreadable_interval_overlaps_verified_exact_sst",
+          "claim": "Actual checksummed remote SST is proved, then a second real overlapping authoritative SST is removed. The exact visitor still returns replay, counts both candidates and releases all budget; this is a bounded filesystem-backed coverage control, not public ACK or native-hour recovery.",
+          "scope": "actual seeded SST bytes/removed authoritative object; no public ACK or native provider/hour qualification",
+          "assertions": [
+            {
+              "line": 754,
+              "marker": "assert!(!covered, \"every candidate must supply an exact proof\");"
+            },
+            {
+              "line": 755,
+              "marker": "assert_eq!(coverage.reader_opens.get(), 1, \"first SST was verified\");"
+            },
+            {
+              "line": 756,
+              "marker": "assert_eq!(coverage.manifest_candidates.get(), 2);"
+            },
+            {
+              "line": 758,
+              "marker": "assert_eq!(coverage.read_budget.used(), 0);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 190,
+          "symbol": "should_preserve_all_linear_matches_when_intervals_overlap_across_families",
+          "claim": "Constructed unsorted multi-CF/nested/same-start/disjoint interval metadata is compared against the old linear candidate predicate across inclusive endpoints, empty keys and u64::MAX. This checks complete selection sets, not independent SST-body proof.",
+          "scope": "constructed metadata selection oracle against existing predicate; no SST/Engine/provider execution",
+          "assertions": [
+            {
+              "line": 228,
+              "marker": "assert_eq!(actual, expected, \"cf={cf_id}, seq={seq}, key={key:?}\");"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 235,
+          "symbol": "should_keep_unproved_candidates_when_metadata_cannot_establish_coverage",
+          "claim": "Constructed CRC-less and incomplete-bound candidates remain selectable when the old predicate selects them; only impossible missing/inverted bounds are excluded. Later exact proof remains mandatory.",
+          "scope": "constructed candidate metadata only; no immutable body proof",
+          "assertions": [
+            {
+              "line": 255,
+              "marker": "assert_eq!(actual, [files[0].name.clone(), files[1].name.clone()]);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 259,
+          "symbol": "should_stop_visiting_when_an_overlapping_candidate_rejects_proof",
+          "claim": "Constructed matching intervals and a false visitor result stop traversal conservatively after the actual third callback; no positive exact-coverage decision is fabricated.",
+          "scope": "actual selector callback traversal over constructed metadata; scripted proof result",
+          "assertions": [
+            {
+              "line": 282,
+              "marker": "assert!(!accepted);"
+            },
+            {
+              "line": 283,
+              "marker": "assert_eq!("
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/tests/streaming_scale.rs",
+          "line": 349,
+          "symbol": "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
+          "claim": "The actual strict streaming planner validates one published sealed WAL and replays 258 framed 32-operation transaction batches. Exact assertions prove all 8192 SST-covered rows stay absent from replay while the 64 interior uncovered keys retain their exact values/sequences, the encoded sequence/epoch frontier is unchanged, and original SST/WAL/catalog bytes remain identical.",
+          "scope": "one actual filesystem-seeded fixture: 64 checksummed SSTs hold 8192 rows and 64 interior holes are replayed from 258 framed transaction batches; no public ACK, native socket/hour, wall-time speed or physical-device amplification proof",
+          "assertions": [
+            {
+              "line": 354,
+              "marker": "assert_eq!(recovered.plan.remote_segments.len(), 1);"
+            },
+            {
+              "line": 355,
+              "marker": "assert!(recovered.plan.local_segments.is_empty());"
+            },
+            {
+              "line": 389,
+              "marker": "assert_frontier(&fixture, &stats);"
+            },
+            {
+              "line": 390,
+              "marker": "assert_rows(&fixture, &memtables);"
+            },
+            {
+              "line": 392,
+              "marker": "assert_eq!(checkpoints, 0);"
+            },
+            {
+              "line": 394,
+              "marker": "assert_eq!(coverage.probes.get(), probes);"
+            },
+            {
+              "line": 395,
+              "marker": "assert_eq!(coverage.manifest_candidates.get(), probes);"
+            },
+            {
+              "line": 396,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 400,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 409,
+              "marker": "assert_eq!(ranges.failed.load(Ordering::Relaxed), 0);"
+            },
+            {
+              "line": 410,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 414,
+              "marker": "assert!(ranges.completed.load(Ordering::Relaxed) > 0);"
+            },
+            {
+              "line": 415,
+              "marker": "assert!(budget.peak() > 0 && budget.peak() <= budget.limit());"
+            },
+            {
+              "line": 418,
+              "marker": "assert_eq!(budget.used(), 0);"
+            },
+            {
+              "line": 422,
+              "marker": "assert!("
+            },
+            {
+              "line": 313,
+              "marker": "assert_eq!(",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 317,
+              "marker": "assert_eq!(stats.max_sequence, Some(final_sequence(&fixture.records)));",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 318,
+              "marker": "assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 319,
+              "marker": "assert_eq!(stats.stale_records_skipped, 0);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 320,
+              "marker": "assert!(!stats.had_corruption);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 321,
+              "marker": "assert!(stats.tolerated_active_tail.is_none());",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 322,
+              "marker": "assert!(stats.salvage_stop.is_none());",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 296,
+              "marker": "assert_eq!(memtables.len(), 1);",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 298,
+              "marker": "assert_eq!(table.iter_all().len(), SST_COUNT);",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 302,
+              "marker": "assert!(",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 307,
+              "marker": "assert!(matches!(state, KeyState::Absent));",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 210,
+              "marker": "assert_eq!(std::fs::read(&object.path)?, object.bytes);",
+              "helper": "assert_preserved"
+            },
+            {
+              "line": 212,
+              "marker": "assert_eq!(",
+              "helper": "assert_preserved"
+            },
+            {
+              "line": 216,
+              "marker": "assert!(!self.directory.path().join(\"local/cloud_recovery\").exists());",
+              "helper": "assert_preserved"
             }
           ]
         }
@@ -1922,7 +2143,7 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 144,
+          "line": 148,
           "symbol": "ReplayCoverage::contains",
           "kind": "function",
           "marker": "pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {"
@@ -1956,21 +2177,21 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 1010,
+          "line": 1143,
           "symbol": "should_retain_wal_when_pinned_sst_identity_changes_before_block_reload",
           "claim": "Changed real SST identity invalidates coverage after reload.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1014,
+              "line": 1147,
               "marker": "assert!(coverage.contains(&record));"
             },
             {
-              "line": 1027,
+              "line": 1160,
               "marker": "assert!("
             },
             {
-              "line": 1031,
+              "line": 1164,
               "marker": "assert!("
             }
           ]
@@ -3253,13 +3474,13 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 929,
+          "line": 1062,
           "symbol": "should_replay_put_when_equal_sequence_sst_expiration_differs",
           "claim": "Equal value/sequence with different TTL is not sufficient coverage.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 936,
+              "line": 1069,
               "marker": "assert!("
             }
           ]
@@ -3902,10 +4123,24 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 113,
+          "line": 116,
           "symbol": "ReplayCoverage::new",
           "kind": "function",
           "marker": "pub(crate) fn new("
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 24,
+          "symbol": "CandidateIndex::new",
+          "kind": "function",
+          "marker": "pub(super) fn new("
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 20,
+          "symbol": "CandidateIndex::allocation_bytes",
+          "kind": "function",
+          "marker": "pub(super) fn allocation_bytes(file_count: usize) -> Option<usize> {"
         }
       ],
       "tests": [
@@ -3961,6 +4196,215 @@
             {
               "line": 12095,
               "marker": "assert!("
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage.rs",
+          "line": 762,
+          "symbol": "should_preserve_exact_proof_when_candidate_index_cannot_fit_read_budget",
+          "claim": "One actual checksummed SST fits the configured read budget while 8192 disjoint metadata descriptors make the index exceed it. The legacy full scan retains exact proof, leaves no index and releases all reservations.",
+          "scope": "actual seeded SST/legacy fallback; other descriptors are metadata-only, not 8193 actual SSTs",
+          "assertions": [
+            {
+              "line": 780,
+              "marker": "assert!(covered);"
+            },
+            {
+              "line": 781,
+              "marker": "assert!(coverage.candidate_index.borrow().is_none());"
+            },
+            {
+              "line": 782,
+              "marker": "assert_eq!(coverage.manifest_scanned.get(), 8193);"
+            },
+            {
+              "line": 783,
+              "marker": "assert_eq!(coverage.reader_opens.get(), 1);"
+            },
+            {
+              "line": 784,
+              "marker": "assert!(coverage.read_budget.peak() <= coverage.read_budget.limit());"
+            },
+            {
+              "line": 786,
+              "marker": "assert_eq!(coverage.read_budget.used(), 0);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 386,
+          "symbol": "should_preserve_exact_charge_when_index_is_dropped_or_admission_fails",
+          "claim": "Constructed descriptors exercise actual RAII denied/exact admission/drop and checked allocation overflow. Index bytes remain charged to the same pool and are fully released.",
+          "scope": "constructed index metadata plus actual bounded reservation lifecycle; no process-RSS or backend allocation proof",
+          "assertions": [
+            {
+              "line": 403,
+              "marker": "assert!(missing.is_none());"
+            },
+            {
+              "line": 404,
+              "marker": "assert_eq!(denied.used(), 0);"
+            },
+            {
+              "line": 405,
+              "marker": "assert_eq!(charged, bytes);"
+            },
+            {
+              "line": 406,
+              "marker": "assert_eq!(accepted.used(), 0);"
+            },
+            {
+              "line": 407,
+              "marker": "assert_eq!(accepted.peak(), bytes);"
+            },
+            {
+              "line": 408,
+              "marker": "assert_eq!(CandidateIndex::allocation_bytes(0), Some(0));"
+            },
+            {
+              "line": 409,
+              "marker": "assert_eq!(CandidateIndex::allocation_bytes(usize::MAX), None);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/tests/streaming_scale.rs",
+          "line": 349,
+          "symbol": "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
+          "claim": "The same actual planner/replay fixture admits index and exact SST proof under the existing 2MiB coverage budget. Positive observed peak remains within the configured limit, all remote read observations complete successfully, and releasing readers/index/proofs returns the pool to zero; this is bounded reservation accounting rather than process-RSS proof.",
+          "scope": "one actual filesystem-seeded fixture: 64 checksummed SSTs hold 8192 rows and 64 interior holes are replayed from 258 framed transaction batches; no public ACK, native socket/hour, wall-time speed or physical-device amplification proof",
+          "assertions": [
+            {
+              "line": 354,
+              "marker": "assert_eq!(recovered.plan.remote_segments.len(), 1);"
+            },
+            {
+              "line": 355,
+              "marker": "assert!(recovered.plan.local_segments.is_empty());"
+            },
+            {
+              "line": 389,
+              "marker": "assert_frontier(&fixture, &stats);"
+            },
+            {
+              "line": 390,
+              "marker": "assert_rows(&fixture, &memtables);"
+            },
+            {
+              "line": 392,
+              "marker": "assert_eq!(checkpoints, 0);"
+            },
+            {
+              "line": 394,
+              "marker": "assert_eq!(coverage.probes.get(), probes);"
+            },
+            {
+              "line": 395,
+              "marker": "assert_eq!(coverage.manifest_candidates.get(), probes);"
+            },
+            {
+              "line": 396,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 400,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 409,
+              "marker": "assert_eq!(ranges.failed.load(Ordering::Relaxed), 0);"
+            },
+            {
+              "line": 410,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 414,
+              "marker": "assert!(ranges.completed.load(Ordering::Relaxed) > 0);"
+            },
+            {
+              "line": 415,
+              "marker": "assert!(budget.peak() > 0 && budget.peak() <= budget.limit());"
+            },
+            {
+              "line": 418,
+              "marker": "assert_eq!(budget.used(), 0);"
+            },
+            {
+              "line": 422,
+              "marker": "assert!("
+            },
+            {
+              "line": 313,
+              "marker": "assert_eq!(",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 317,
+              "marker": "assert_eq!(stats.max_sequence, Some(final_sequence(&fixture.records)));",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 318,
+              "marker": "assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 319,
+              "marker": "assert_eq!(stats.stale_records_skipped, 0);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 320,
+              "marker": "assert!(!stats.had_corruption);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 321,
+              "marker": "assert!(stats.tolerated_active_tail.is_none());",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 322,
+              "marker": "assert!(stats.salvage_stop.is_none());",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 296,
+              "marker": "assert_eq!(memtables.len(), 1);",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 298,
+              "marker": "assert_eq!(table.iter_all().len(), SST_COUNT);",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 302,
+              "marker": "assert!(",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 307,
+              "marker": "assert!(matches!(state, KeyState::Absent));",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 210,
+              "marker": "assert_eq!(std::fs::read(&object.path)?, object.bytes);",
+              "helper": "assert_preserved"
+            },
+            {
+              "line": 212,
+              "marker": "assert_eq!(",
+              "helper": "assert_preserved"
+            },
+            {
+              "line": 216,
+              "marker": "assert!(!self.directory.path().join(\"local/cloud_recovery\").exists());",
+              "helper": "assert_preserved"
             }
           ]
         }
@@ -4547,6 +4991,13 @@
           "symbol": "EventLoop::launch_compaction",
           "kind": "function",
           "marker": "pub(super) fn launch_compaction("
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 79,
+          "symbol": "CandidateIndex::visit",
+          "kind": "function",
+          "marker": "pub(super) fn visit("
         }
       ],
       "tests": [
@@ -4923,6 +5374,70 @@
               "marker": "assert!(second_retained.iter().all(|retained| *retained));"
             }
           ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 293,
+          "symbol": "should_propagate_typed_timeout_when_candidate_visitor_fails",
+          "claim": "Actual traversal preserves a scripted typed visitor Timeout instead of returning a covered or conservative-negative answer.",
+          "scope": "constructed metadata/scripted visitor error; no native deadline execution",
+          "assertions": [
+            {
+              "line": 313,
+              "marker": "assert!(matches!(result, Err(MidgeError::Timeout(_))));"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 317,
+          "symbol": "should_reject_cancelled_lookup_when_index_is_already_built",
+          "claim": "A real cancelled DeadlineScope rejects the warmed metadata index before any visitor callback.",
+          "scope": "actual scope cancellation/index traversal with constructed metadata; no provider cancellation claim",
+          "assertions": [
+            {
+              "line": 339,
+              "marker": "assert!(matches!(result, Err(MidgeError::Timeout(_))));"
+            },
+            {
+              "line": 340,
+              "marker": "assert_eq!(visited, 0);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 344,
+          "symbol": "should_escape_timeout_when_scope_is_cancelled_during_candidate_traversal",
+          "claim": "The first actual candidate callback cancels the real scope; traversal escapes typed Timeout before completing every candidate.",
+          "scope": "actual scope/callback ordering over constructed metadata; no SST/Engine/native-hour execution",
+          "assertions": [
+            {
+              "line": 366,
+              "marker": "assert!(matches!(result, Err(MidgeError::Timeout(_))));"
+            },
+            {
+              "line": 367,
+              "marker": "assert!(visited > 0 && visited < files.len());"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 371,
+          "symbol": "should_release_index_charge_when_expired_construction_returns_timeout",
+          "claim": "An immediately expired real scope returns typed Timeout from index construction and unwinds its actual reservation to zero.",
+          "scope": "actual expired scope/RAII over constructed metadata; no syscall preemption",
+          "assertions": [
+            {
+              "line": 381,
+              "marker": "assert!(matches!(result, Err(MidgeError::Timeout(_))));"
+            },
+            {
+              "line": 382,
+              "marker": "assert_eq!(budget.used(), 0);"
+            }
+          ]
         }
       ],
       "preconditions": "The ignored native open case requires explicit sqrzl-tests prerequisites and --ignored execution. Compaction fixtures own a real conditional lease, genuine SST/input bytes and actual phase receipts; all setup/read-gate acquisition precedes the immutable deadline.",
@@ -5050,6 +5565,13 @@
           "symbol": "local_capacity",
           "kind": "function",
           "marker": "pub(crate) fn local_capacity(factory: &dyn SstFactory) -> MidgeResult<usize> {"
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/candidate_index.rs",
+          "line": 79,
+          "symbol": "CandidateIndex::visit",
+          "kind": "function",
+          "marker": "pub(super) fn visit("
         }
       ],
       "tests": [
@@ -5170,6 +5692,174 @@
             {
               "line": 670,
               "marker": "assert!(batches_edits);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage.rs",
+          "line": 790,
+          "symbol": "should_bound_manifest_work_when_replay_probes_sparse_sequence_intervals",
+          "claim": "100 genuine coverage probes read one real checksummed candidate SST amid 8192 disjoint metadata descriptors; query-node/candidate/open counters bound selection without a machine elapsed assertion. Construction is once per index and is outside the query-node metric.",
+          "scope": "actual seeded checksummed SST plus constructed disjoint descriptors; per-query selection-work bound, not elapsed/native-hour qualification",
+          "assertions": [
+            {
+              "line": 810,
+              "marker": "assert!(coverage.contains(&record));"
+            },
+            {
+              "line": 815,
+              "marker": "assert_eq!(coverage.probes.get(), 100);"
+            },
+            {
+              "line": 816,
+              "marker": "assert_eq!(coverage.manifest_candidates.get(), 100);"
+            },
+            {
+              "line": 817,
+              "marker": "assert!("
+            },
+            {
+              "line": 822,
+              "marker": "assert_eq!(coverage.reader_opens.get(), 1);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/replay_coverage/tests/streaming_scale.rs",
+          "line": 349,
+          "symbol": "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
+          "claim": "The actual strict streaming planner/replay pipeline issues 16512 coverage probes over 64 actual SSTs. All exact row/frontier/object/budget assertions precede a logarithmic query-node gate of 264192, with one reader open per SST and every SST byte checksum-verified. This counts query traversal, excluding one-time index construction; all-overlap manifests may still require linear matching work.",
+          "scope": "one actual filesystem-seeded fixture: 64 checksummed SSTs hold 8192 rows and 64 interior holes are replayed from 258 framed transaction batches; no public ACK, native socket/hour, wall-time speed or physical-device amplification proof",
+          "assertions": [
+            {
+              "line": 354,
+              "marker": "assert_eq!(recovered.plan.remote_segments.len(), 1);"
+            },
+            {
+              "line": 355,
+              "marker": "assert!(recovered.plan.local_segments.is_empty());"
+            },
+            {
+              "line": 389,
+              "marker": "assert_frontier(&fixture, &stats);"
+            },
+            {
+              "line": 390,
+              "marker": "assert_rows(&fixture, &memtables);"
+            },
+            {
+              "line": 392,
+              "marker": "assert_eq!(checkpoints, 0);"
+            },
+            {
+              "line": 394,
+              "marker": "assert_eq!(coverage.probes.get(), probes);"
+            },
+            {
+              "line": 395,
+              "marker": "assert_eq!(coverage.manifest_candidates.get(), probes);"
+            },
+            {
+              "line": 396,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 400,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 409,
+              "marker": "assert_eq!(ranges.failed.load(Ordering::Relaxed), 0);"
+            },
+            {
+              "line": 410,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 414,
+              "marker": "assert!(ranges.completed.load(Ordering::Relaxed) > 0);"
+            },
+            {
+              "line": 415,
+              "marker": "assert!(budget.peak() > 0 && budget.peak() <= budget.limit());"
+            },
+            {
+              "line": 418,
+              "marker": "assert_eq!(budget.used(), 0);"
+            },
+            {
+              "line": 422,
+              "marker": "assert!("
+            },
+            {
+              "line": 313,
+              "marker": "assert_eq!(",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 317,
+              "marker": "assert_eq!(stats.max_sequence, Some(final_sequence(&fixture.records)));",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 318,
+              "marker": "assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 319,
+              "marker": "assert_eq!(stats.stale_records_skipped, 0);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 320,
+              "marker": "assert!(!stats.had_corruption);",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 321,
+              "marker": "assert!(stats.tolerated_active_tail.is_none());",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 322,
+              "marker": "assert!(stats.salvage_stop.is_none());",
+              "helper": "assert_frontier"
+            },
+            {
+              "line": 296,
+              "marker": "assert_eq!(memtables.len(), 1);",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 298,
+              "marker": "assert_eq!(table.iter_all().len(), SST_COUNT);",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 302,
+              "marker": "assert!(",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 307,
+              "marker": "assert!(matches!(state, KeyState::Absent));",
+              "helper": "assert_rows"
+            },
+            {
+              "line": 210,
+              "marker": "assert_eq!(std::fs::read(&object.path)?, object.bytes);",
+              "helper": "assert_preserved"
+            },
+            {
+              "line": 212,
+              "marker": "assert_eq!(",
+              "helper": "assert_preserved"
+            },
+            {
+              "line": 216,
+              "marker": "assert!(!self.directory.path().join(\"local/cloud_recovery\").exists());",
+              "helper": "assert_preserved"
             }
           ]
         }
@@ -8190,5 +8880,29 @@
       "preconditions": "All 33 linked reader controls intentionally construct JSON evidence/counters and sometimes real temporary-file reads; they do not execute hosted A/B/C, waiter bodies, device I/O or full-hour qualification. The two #730 zero-rejection cases and #731 exact-expiry parser case are constructed reachability contracts. Shared commit controls at RES-3 and nine capture controls here separate scripted rejection/gauge plus actual local ACK/reopen from pure constructed clocks/errors. Before/end capture uses actual timed runtime query then same-owner snapshot; it requires only zero Persistent metadata activity, not global compute/GC/publication idleness. The actual workload separately requires strict ACK, flush, compaction, exact verification, reopen and both owned shutdowns.",
       "uncovered": "Initial campaign 37268459342 at c8983928 remains invalid after the three A repeats terminated on genuine L0 WriteStall; six other rows cannot qualify it. Historical smoke 37270512400 validates A/r1 transport/construction only at 32911805: 256 commits, 230 measured, 100 compactions, zero stalls/waits and retained too_few_samples diagnostics. Historical nine-run 37270845568 at 32911805 remains invalid: A/r1 and A/r2 verified all data but selected active CompactionBeforeGc metadata endpoints, despite later settled owners; seven other valid rows cannot repair it. Measured c8f0de80 smoke 37273556125 is transport/construction-valid; all nine fresh attempts of 37274074026 are valid, totaling 1,376,256 real strict ACK rows, exact point/ordered scans before and after reopen and two owned shutdowns per attempt. B/C each miss the snapshot-payload target in three repeats (13.023–13.534% / 80.261–80.262%); A has one time miss and does not qualify. A/r1 end and B/r1/B/r3 warmup captured real active candidates then selected idle, without weakening the gate. This satisfies only the conditional policy-investigation predicate. Cadence remains unchanged, pre-state costs are unknown/excluded, and no physical-device, native confidence or final fourteen-hour qualification follows. Adjacent samples are not global barriers and JSON cannot prove executed body/clock. Final fourteen hours use the final merged #711 source."
     }
-  ]
+  ],
+  "reference_refresh": {
+    "issue": 733,
+    "previous_source_revision": "0076a02cbeeb9eb4f48f4b4f698a74db098ed439",
+    "runtime_commit_before_docs": "a15bf5fc48992d476985af4bccca64e60468dac6",
+    "preserved_existing_test_references": 215,
+    "preserved_existing_assertion_markers": 948,
+    "new_test_symbols": [
+      "should_replay_when_unreadable_interval_overlaps_verified_exact_sst",
+      "should_preserve_all_linear_matches_when_intervals_overlap_across_families",
+      "should_keep_unproved_candidates_when_metadata_cannot_establish_coverage",
+      "should_stop_visiting_when_an_overlapping_candidate_rejects_proof",
+      "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
+      "should_preserve_exact_proof_when_candidate_index_cannot_fit_read_budget",
+      "should_preserve_exact_charge_when_index_is_dropped_or_admission_fails",
+      "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
+      "should_propagate_typed_timeout_when_candidate_visitor_fails",
+      "should_reject_cancelled_lookup_when_index_is_already_built",
+      "should_escape_timeout_when_scope_is_cancelled_during_candidate_traversal",
+      "should_release_index_charge_when_expired_construction_returns_timeout",
+      "should_bound_manifest_work_when_replay_probes_sparse_sequence_intervals",
+      "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale"
+    ],
+    "scope": "bounded candidate selection/resource/actual seeded-SST and framed streaming replay controls; one scale fixture referenced by three rows, no public ACK or new native-hour qualification"
+  }
 }
