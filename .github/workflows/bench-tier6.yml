@@ -2,6 +2,13 @@ name: Benchmark Tier 6
 
 on:
   workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Workload seconds (600 quick, 3600 full)
+        type: choice
+        required: true
+        default: "600"
+        options: ["600", "3600"]
   schedule:
     - cron: "23 5 1 * *"
 
@@ -14,7 +21,7 @@ concurrency:
 
 jobs:
   bench:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -27,10 +34,10 @@ jobs:
           - tier6_mixed_workload_gcs_json
     env:
       CARGO_INCREMENTAL: 0
-      MIDGE_TIER6_DURATION_SECS: "3600"
+      MIDGE_TIER6_DURATION_SECS: ${{ github.event_name == 'workflow_dispatch' && (inputs.duration_seconds || '600') || '3600' }}
       STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
       STRESS_PROFILE: smoke
-      STRESS_TIMEOUT_SECS: "4500"
+      STRESS_TIMEOUT_SECS: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_seconds != '3600' && '1500' || '4500' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -71,7 +78,6 @@ jobs:
             target/stress/**
             target/midge-stress/**
           if-no-files-found: ignore
-          retention-days: 180
 
       - name: Stop Sqrzl
         if: always() && matrix.workload != 'tier6_mixed_workload_local'
