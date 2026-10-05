@@ -2,8 +2,8 @@
 
 Every catalog ID maps to production symbols, exact assertions, fixture
 assumptions and untested boundaries. This is source/reference evidence;
-the preparer ran no Rust tests. References bind refined #735 feature-fixture source commit
-40a32890b58a29f391b9b95c680b43c1b7514d20 before this documentation commit;
+the preparer ran no Rust tests. References bind #735 test-only assertion-helper source commit
+eab8dbd37671beb33d2beb60075056e33cd7b36e before this documentation commit;
 all existing declaration/assertion locations and source hashes remain unchanged;
 the historical measured c8 source and original report remain explicit. Historical 32911805 A/r1 smoke 37270512400
 is transport-valid only; its later nine-run 37270845568 remains invalid
