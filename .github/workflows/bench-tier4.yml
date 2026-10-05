@@ -33,7 +33,7 @@ concurrency:
 jobs:
   bench:
     if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -61,7 +61,7 @@ jobs:
 
   checkpoint-build:
     if: ${{ contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     outputs:
       toolchain: ${{ steps.toolchain.outputs.version }}
@@ -145,13 +145,12 @@ jobs:
           name: checkpoint-build-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
           path: target/checkpoint-build/**
           if-no-files-found: error
-          retention-days: 180
 
   checkpoint-measure:
     name: checkpoint-${{ matrix.cell.id }}-r${{ matrix.repeat }}
     needs: checkpoint-build
     if: ${{ contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -246,4 +245,3 @@ jobs:
           name: bench-tier4-checkpoint-${{ matrix.cell.id }}-r${{ matrix.repeat }}-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
           path: target/checkpoint-attempt/**
           if-no-files-found: error
-          retention-days: 180
