@@ -9,10 +9,10 @@ The initial inventory was recorded during the #707/#708 work. This update
 refreshes its row-level references against the delivered startup/flush and
 compaction deadline fixes, #723 native scratch-capacity repair, #724 version
 documentation, and #715 accounting/benchmark/reader source measured at
-c8f0de80. References now bind #735 notification-routing source commit
-862485d5bbd56863e2bef149f30afd3dd8ea2ed9 before this documentation commit.
-Existing declaration/assertion locations and hashes are refreshed without adding
-invariant claims; historical compatibility and #733 fixture scopes stay unchanged.
+c8f0de80. References now bind refined #735 feature-fixture source commit
+40a32890b58a29f391b9b95c680b43c1b7514d20 before this documentation commit.
+All existing declaration/assertion locations and source hashes remain unchanged;
+historical compatibility, #733 and #735 reference scopes stay unchanged.
 The measured c8 campaign and its original report stay unchanged; the new
 coverage index controls do not claim fresh native/full-hour qualification.
 The retained nine-cell outcome, original readback digest and #730/#731

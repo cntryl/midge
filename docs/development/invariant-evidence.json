@@ -1,7 +1,7 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
-  "source_revision_status": "References bind the actual #735 notification-routing source commit before this documentation commit. Existing production/test/assertion locations and source hashes are refreshed without adding invariant claims or test references. Historical #733 and compatibility scopes and c8 measurement remain unchanged. This rebind claims no new Rust execution, merge or native/full-hour acceptance.",
+  "source_revision": "40a32890b58a29f391b9b95c680b43c1b7514d20",
+  "source_revision_status": "References bind the actual refined #735 feature-fixture source commit before this documentation commit. The correction changes one unreferenced feature fixture; all 136 referenced source hashes, existing production/test/assertion locations and row evidence remain unchanged. Historical qualification objects and c8 measurement retain their original identity and scope. This rebind claims no new Rust execution, accepted hosted head, merge or native/full-hour acceptance.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
   "qualification": {
@@ -8954,5 +8954,22 @@
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
     "scope": "existing named production declarations and byte-identical named test/helper bodies relocated; unchanged assertion text and all historical qualification; reference lint only"
+  },
+  "notification_fixture_reference_refresh": {
+    "issue": 735,
+    "previous_source_revision": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
+    "previous_documentation_head": "ee7dc29b2f739d2951f6f01f7a9f4cdbcecd95de",
+    "source_commit_before_docs": "40a32890b58a29f391b9b95c680b43c1b7514d20",
+    "preview": false,
+    "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
+    "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
+    "changed_hash_bound_paths": [
+
+    ],
+    "preserved_ids": 63,
+    "preserved_test_references": 229,
+    "preserved_assertion_markers": 1068,
+    "preserved_source_hashes": 136,
+    "scope": "current source binding after a test-only feature-fixture correction; unchanged existing reference evidence and historical qualification; source/reference lint only"
   }
 }
