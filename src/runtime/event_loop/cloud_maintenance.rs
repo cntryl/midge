@@ -76,6 +76,7 @@ impl EventLoop {
     /// Dispatch at most one ready worker. A missing or retry-delayed task does
     /// not hold the turn; a successful launch advances the preferred task.
     pub(super) fn schedule_cloud_maintenance(&mut self) -> Option<MaintenanceTask> {
+        super::compaction::CompactionCoordinator::expire_manual_compaction_waiters(self);
         let compute_owned = self.compaction_compute_owned();
         let blocked = self.cloud_maintenance_control_blocked()
             || (compute_owned

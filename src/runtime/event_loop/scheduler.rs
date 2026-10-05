@@ -7,6 +7,9 @@ use std::time::Duration;
 
 impl EventLoop {
     pub(super) fn has_actionable_work(&self) -> bool {
+        if CompactionCoordinator::manual_compaction_wait_timeout(self) == Some(Duration::ZERO) {
+            return true;
+        }
         if self.pending_msg.is_some() {
             return true;
         }
@@ -82,10 +85,14 @@ impl EventLoop {
             // retry deadlines here makes the run loop block for the release
             // message instead of repeatedly timing out at zero duration. The
             // batched WAL sync deadline still applies.
-            return [self.wal_actor.sync_deadline_timeout(), authority_poll]
-                .into_iter()
-                .flatten()
-                .min();
+            return [
+                self.wal_actor.sync_deadline_timeout(),
+                authority_poll,
+                CompactionCoordinator::manual_compaction_wait_timeout(self),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
         }
 
         [
@@ -111,6 +118,7 @@ impl EventLoop {
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
             authority_poll,
+            CompactionCoordinator::manual_compaction_wait_timeout(self),
         ]
         .into_iter()
         .flatten()
@@ -134,6 +142,7 @@ impl EventLoop {
     }
 
     pub(super) fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        CompactionCoordinator::expire_manual_compaction_waiters(self);
         if self.verification_barrier.token.is_some() {
             self.wake_write_stall_waiters();
             self.wake_flush_waiters_for_terminal_fencing();
@@ -153,6 +162,7 @@ impl EventLoop {
     /// writes into its batched sync; the fairness slot runs after dispatch
     /// and leaves the queue in order.
     pub(super) fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
+        CompactionCoordinator::expire_manual_compaction_waiters(self);
         self.wake_write_stall_waiters();
         self.wake_flush_waiters_for_terminal_fencing();
         CompactionCoordinator::drain_publish_results(self);
@@ -257,6 +267,7 @@ impl EventLoop {
     }
 
     pub(super) fn run_request_fairness_slot(&mut self) {
+        CompactionCoordinator::expire_manual_compaction_waiters(self);
         if self.verification_barrier.token.is_some() {
             // Allowed control traffic can keep the idle timer from firing.
             // Admission waiters still observe fencing while layout is frozen.

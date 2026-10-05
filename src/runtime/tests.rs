@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod compaction_deadline_tests;
+
 #[cfg(feature = "failpoints")]
 const RUNTIME_PANIC_CHILD: &str = "MIDGE_RUNTIME_PANIC_CHILD";
 

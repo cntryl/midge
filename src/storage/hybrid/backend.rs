@@ -57,6 +57,7 @@ use std::time::{Duration, Instant};
 mod control_io;
 pub(crate) use control_io::{ControlObject, ControlWriteFailure};
 mod file_publication;
+pub(crate) use file_publication::ImmutableFileSource;
 mod object_io;
 mod proofs;
 mod publication;

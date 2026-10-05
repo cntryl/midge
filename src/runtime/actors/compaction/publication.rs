@@ -52,6 +52,7 @@ pub(crate) struct CompactionPublishTask {
     pub metadata_sequence: u64,
     pub publication_memory_limit: usize,
     pub runtime_response_timeout: std::time::Duration,
+    pub manual_deadline: Option<OperationDeadline>,
 }
 
 pub(crate) struct CompactionPublishCompletion {
@@ -201,7 +202,9 @@ impl CompactionPublishActor {
 }
 
 fn run_task(task: &CompactionPublishTask) -> MidgeResult<()> {
-    let deadline = OperationDeadline::from_budget(task.runtime_response_timeout);
+    let deadline = task
+        .manual_deadline
+        .unwrap_or_else(|| OperationDeadline::from_budget(task.runtime_response_timeout));
     match task.phase {
         CompactionPublishPhase::OutputDurable => {
             validate_task_lease(task, &deadline)?;
@@ -224,6 +227,14 @@ fn run_task(task: &CompactionPublishTask) -> MidgeResult<()> {
             validate_task_lease(task, &deadline)?;
             mirror_control_metadata(task, &deadline)?;
         }
+    }
+    if task
+        .manual_deadline
+        .is_some_and(|deadline| deadline.is_expired())
+    {
+        return Err(MidgeError::Timeout(
+            "manual compaction deadline expired before publication worker completion".into(),
+        ));
     }
     Ok(())
 }
@@ -262,12 +273,15 @@ fn validate_task_lease(
     store
         .validate_epoch_with_timeout(holder_id, task.token.writer_epoch, deadline.remaining())
         .map_err(|error| {
-            let mapped = if deadline.is_expired() {
+            let mapped = error.into_validation_error("compaction lease validation failed");
+            let mapped = if matches!(mapped, MidgeError::Fenced(_)) {
+                mapped
+            } else if deadline.is_expired() {
                 MidgeError::Timeout(format!(
-                    "compaction lease validation exceeded the operation deadline: {error}"
+                    "compaction lease validation exceeded the operation deadline: {mapped}"
                 ))
             } else {
-                error.into_validation_error("compaction lease validation failed")
+                mapped
             };
             if matches!(mapped, MidgeError::Fenced(_)) {
                 if let Some(healthy) = &task.lease_healthy {
@@ -301,13 +315,28 @@ fn verify_or_stage_outputs(
             ))
         })?;
         validate_task_lease(task, deadline)?;
-        hybrid.publish_immutable_file(
-            &crate::cloud_layout::object_key(&output.metadata.name),
-            &task.sst_dir.join(&output.metadata.name),
-            output.metadata.size_bytes,
-            checksum,
-            &budget,
-        )?;
+        let key = crate::cloud_layout::object_key(&output.metadata.name);
+        let path = task.sst_dir.join(&output.metadata.name);
+        if task.manual_deadline.is_some() {
+            hybrid.publish_immutable_file_within(
+                crate::storage::hybrid::backend::ImmutableFileSource {
+                    key: &key,
+                    path: &path,
+                    size: output.metadata.size_bytes,
+                    checksum,
+                },
+                &budget,
+                deadline,
+            )?;
+        } else {
+            hybrid.publish_immutable_file(
+                &key,
+                &path,
+                output.metadata.size_bytes,
+                checksum,
+                &budget,
+            )?;
+        }
     }
     if !proofs.is_empty() {
         hybrid.verify_remote_object_guards_within(&proofs, deadline)?;
@@ -341,6 +370,17 @@ fn mirror_control_metadata(
         },
         |deadline| validate_task_lease(task, deadline),
     )
+    .map_err(|error| {
+        if matches!(error, MidgeError::Busy(_))
+            && task.manual_deadline.is_some_and(|deadline| deadline.is_expired())
+        {
+            MidgeError::Timeout(format!(
+                "manual compaction deadline exhausted with cloud metadata authority still uncertain: {error}"
+            ))
+        } else {
+            error
+        }
+    })
 }
 
 #[cfg(test)]
@@ -391,6 +431,7 @@ mod tests {
             metadata_sequence: 1,
             publication_memory_limit: 4096,
             runtime_response_timeout: std::time::Duration::from_secs(5),
+            manual_deadline: None,
         };
         validity.expire_for_test();
         // Act

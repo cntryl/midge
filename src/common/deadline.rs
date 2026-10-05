@@ -76,6 +76,18 @@ impl OperationDeadline {
         self.expires_at.is_some()
     }
 
+    /// Keep the earlier absolute expiration without rebuilding either budget.
+    #[must_use]
+    pub fn earlier(self, other: Self) -> Self {
+        match (self.expires_at, other.expires_at) {
+            (Some(left), Some(right)) => Self {
+                expires_at: Some(left.min(right)),
+            },
+            (Some(_), None) => self,
+            (None, _) => other,
+        }
+    }
+
     /// Clamp a per-operation timeout to what the shared budget still allows.
     #[must_use]
     pub fn clamp(&self, per_operation_timeout: Duration) -> Duration {

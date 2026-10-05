@@ -13,6 +13,14 @@ const READBACK_BYTES: usize = 64 * 1024;
 const COPY_FACTOR: usize = 4;
 const FIXED_WORKSPACE: usize = 256 * 1024;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ImmutableFileSource<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) path: &'a Path,
+    pub(crate) size: u64,
+    pub(crate) checksum: u32,
+}
+
 struct PublicationAdmission {
     memory: Arc<ResourceReservation>,
     deadline: OperationDeadline,
@@ -48,7 +56,39 @@ impl HybridStorage {
         checksum: u32,
         budget: &ResourceBudget,
     ) -> MidgeResult<super::GuardedObjectProof> {
-        let deadline = OperationDeadline::from_budget(self.callback_timeout);
+        self.publish_immutable_file_within(
+            ImmutableFileSource {
+                key,
+                path,
+                size,
+                checksum,
+            },
+            budget,
+            &OperationDeadline::unbounded(),
+        )
+    }
+
+    pub(crate) fn publish_immutable_file_within(
+        &self,
+        source: ImmutableFileSource<'_>,
+        budget: &ResourceBudget,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<super::GuardedObjectProof> {
+        let ImmutableFileSource {
+            key,
+            path,
+            size,
+            checksum,
+        } = source;
+        // Retain the existing whole-file attempt cap without refreshing the
+        // initiating manual obligation for a later output partition.
+        let deadline = deadline.earlier(OperationDeadline::from_budget(self.callback_timeout));
+        Self::deadline_timeout(
+            key,
+            "immutable file admission",
+            self.callback_timeout,
+            &deadline,
+        )?;
         let length = usize::try_from(size).map_err(|_| {
             MidgeError::ResourceLimit("immutable upload size exceeds address space".into())
         })?;
@@ -81,6 +121,7 @@ impl HybridStorage {
             ));
         }
         drop(source);
+        admission.timeout(self, key)?;
         let local_store = self.local_store_if_active();
         let local = if let Some(backend) = &local_store {
             let local = self.file_publication_head(backend, key, &admission)?;
@@ -118,7 +159,7 @@ impl HybridStorage {
             self.verify_publication_ranges(backend, key, bytes, &metadata, admission)?;
             return Ok(metadata);
         }
-        let timeout = admission.timeout(self, key)?;
+        admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
         backend.submit_write_request(
             crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout)
@@ -127,6 +168,7 @@ impl HybridStorage {
             bytes.to_vec(),
             tx,
         );
+        let timeout = admission.timeout(self, key)?;
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
@@ -169,25 +211,28 @@ impl HybridStorage {
         key: &str,
         admission: &PublicationAdmission,
     ) -> MidgeResult<Option<StorageObjectMetadata>> {
-        let timeout = admission.timeout(self, key)?;
+        admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
         backend.submit_range_head_request(
-            crate::storage::StorageRequest::new(
-                key,
-                crate::common::OperationDeadline::from_budget(timeout),
-                timeout,
-            ),
+            crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout),
             tx,
         );
+        let timeout = admission.timeout(self, key)?;
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
                 result: StorageOutcome::Ok(metadata),
-            }) if actual == key => Ok(Some(metadata)),
+            }) if actual == key => {
+                admission.timeout(self, key)?;
+                Ok(Some(metadata))
+            }
             Ok(StorageEvent::HeadComplete {
                 key: actual,
                 result: StorageOutcome::Err(error),
-            }) if actual == key && Self::storage_error_indicates_missing(&error) => Ok(None),
+            }) if actual == key && Self::storage_error_indicates_missing(&error) => {
+                admission.timeout(self, key)?;
+                Ok(None)
+            }
             Ok(StorageEvent::HeadComplete {
                 key: actual,
                 result: StorageOutcome::Err(error),
@@ -219,10 +264,10 @@ impl HybridStorage {
         for (index, expected) in bytes.chunks(READBACK_BYTES).enumerate() {
             let start = (index * READBACK_BYTES) as u64;
             let end = start + expected.len() as u64;
-            let timeout = admission.timeout(self, key)?;
+            admission.timeout(self, key)?;
             let (tx, rx) = mpsc::channel();
             backend.submit_range_read_request(
-                crate::storage::StorageRequest::new(key, admission.deadline, timeout)
+                crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout)
                     .with_precondition(crate::storage::StoragePrecondition::IfMatch(
                         metadata.clone(),
                     ))
@@ -230,6 +275,7 @@ impl HybridStorage {
                 start..end,
                 tx,
             );
+            let timeout = admission.timeout(self, key)?;
             let actual = rx
                 .recv_timeout(timeout)
                 .map_err(|error| MidgeError::Timeout(format!("immutable range readback: {error}")))?
@@ -240,6 +286,7 @@ impl HybridStorage {
                         MidgeError::Internal(error.to_string())
                     }
                 })?;
+            admission.timeout(self, key)?;
             if actual != expected {
                 return Err(MidgeError::Corruption(
                     "immutable object readback differs from publication".into(),

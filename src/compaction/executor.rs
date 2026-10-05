@@ -34,7 +34,9 @@ fn tombstone_is_obsolete(sequence: u64, snapshot_horizon: Option<u64>) -> bool {
     snapshot_horizon.is_none_or(|horizon| sequence <= horizon)
 }
 
-fn ensure_compaction_not_aborted(abort_check: Option<&dyn Fn() -> bool>) -> MidgeResult<()> {
+pub(super) fn ensure_compaction_not_aborted(
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<()> {
     if abort_check.is_some_and(|check| check()) {
         return Err(crate::common::MidgeError::Aborted(
             "compaction aborted due to ingest epoch change".to_string(),
@@ -183,12 +185,14 @@ struct EventMergeIterator<'a> {
     heap: BinaryHeap<VersionHeapItem>,
     budget: crate::common::resource_budget::ResourceBudget,
     _container_reservation: crate::common::resource_budget::ResourceReservation,
+    abort_check: Option<&'a dyn Fn() -> bool>,
 }
 
 impl<'a> EventMergeIterator<'a> {
     fn new(
         mut cursors: Vec<CompactionEventCursor<'a>>,
         budget: crate::common::resource_budget::ResourceBudget,
+        abort_check: Option<&'a dyn Fn() -> bool>,
     ) -> MidgeResult<Self> {
         let container_bytes = cursors.len().saturating_mul(
             std::mem::size_of::<EventMergeInput<'a>>()
@@ -200,6 +204,7 @@ impl<'a> EventMergeIterator<'a> {
         let mut heap = BinaryHeap::new();
 
         for (input_idx, mut cursor) in cursors.drain(..).enumerate() {
+            ensure_compaction_not_aborted(abort_check)?;
             let current = cursor
                 .next()
                 .transpose()?
@@ -221,6 +226,7 @@ impl<'a> EventMergeIterator<'a> {
             heap,
             budget,
             _container_reservation: container_reservation,
+            abort_check,
         })
     }
 
@@ -235,6 +241,7 @@ impl<'a> EventMergeIterator<'a> {
             crate::common::MidgeError::Internal("compaction merge head is missing".to_string())
         })?;
 
+        ensure_compaction_not_aborted(self.abort_check)?;
         if let Some(next) = input.cursor.next().transpose()? {
             let next = RetainedEvent::new(next, &self.budget)?;
             self.heap.push(VersionHeapItem {
@@ -509,11 +516,13 @@ pub(crate) fn merge_repair_inputs_to_run(
 ) -> MidgeResult<()> {
     let inputs =
         collect_compaction_stream_inputs(sst_factory, sources, &[], 1, true, budget, abort_check)?;
+    ensure_compaction_not_aborted(abort_check)?;
     let CompactionStreamInputs {
         cursors,
         _cursor_reservation,
     } = inputs;
-    let mut merged = EventMergeIterator::new(cursors, budget.clone())?;
+    let mut merged = EventMergeIterator::new(cursors, budget.clone(), abort_check)?;
+    ensure_compaction_not_aborted(abort_check)?;
     let mut writer = sst_factory.create_for_compaction(budget.clone())?;
     let mut seen = 0usize;
     while let Some(event) = merged.next_event()? {
@@ -573,6 +582,25 @@ impl OutputSetCleanup {
 
     fn record(&mut self, path: std::path::PathBuf) {
         self.paths.push(path);
+    }
+
+    fn record_finished_partition(
+        &mut self,
+        finished: Option<(String, std::path::PathBuf)>,
+        names: &mut Vec<String>,
+        budget: &crate::common::resource_budget::ResourceBudget,
+        sink: Option<&super::CompactionOutputSink<'_>>,
+    ) -> MidgeResult<()> {
+        if let Some((name, path)) = finished {
+            // Record cleanup ownership before a fallible sink can publish or
+            // reject this finalized non-authoritative partition.
+            self.record(path.clone());
+            if let Some(sink) = sink {
+                sink(&name, &path, budget)?;
+            }
+            names.push(name);
+        }
+        Ok(())
     }
 
     fn disarm(&mut self) {
@@ -1433,6 +1461,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
     output_sink: Option<&super::CompactionOutputSink<'_>>,
     output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
+    ensure_compaction_not_aborted(abort_check)?;
     let CompactionStreamInputs {
         cursors,
         _cursor_reservation,
@@ -1454,7 +1483,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
     let mut cleanup = OutputSetCleanup::new(sst_factory.output_fs());
     let mut tombstones = RangeTombstoneTracker::new();
 
-    let mut merged = EventMergeIterator::new(cursors, budget.clone())?;
+    let mut merged = EventMergeIterator::new(cursors, budget.clone(), abort_check)?;
     if merged.peek_event().is_none() {
         return Err(crate::common::MidgeError::Internal(
             "compaction produced no output; inputs were not replaced".to_string(),
@@ -1502,13 +1531,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
         if roller.should_roll(selected_version, starts.clone(), &tombstones, tombstone_gc)? {
             let (finished, boundary_reservation) =
                 roller.finish_for_roll(&event_key, &tombstones, abort_check)?;
-            if let Some((name, path)) = finished {
-                cleanup.record(path.clone());
-                if let Some(sink) = output_sink {
-                    sink(&name, &path, budget)?;
-                }
-                output_names.push(name);
-            }
+            cleanup.record_finished_partition(finished, &mut output_names, budget, output_sink)?;
             ensure_compaction_not_aborted(abort_check)?;
             roller.start_next_partition(
                 event_key.clone(),
@@ -1531,13 +1554,12 @@ pub(crate) fn write_partitioned_compaction_outputs(
     }
 
     ensure_compaction_not_aborted(abort_check)?;
-    if let Some((name, path)) = roller.finish(&tombstones, abort_check)? {
-        cleanup.record(path.clone());
-        if let Some(sink) = output_sink {
-            sink(&name, &path, budget)?;
-        }
-        output_names.push(name);
-    }
+    cleanup.record_finished_partition(
+        roller.finish(&tombstones, abort_check)?,
+        &mut output_names,
+        budget,
+        output_sink,
+    )?;
     ensure_compaction_not_aborted(abort_check)?;
     cleanup.disarm();
     Ok(output_names)
@@ -1559,7 +1581,7 @@ impl VersionMergeIterator<'_> {
                     as CompactionEventCursor<'static>
             })
             .collect();
-        EventMergeIterator::new(cursors, budget).map(Self)
+        EventMergeIterator::new(cursors, budget, None).map(Self)
     }
 
     fn next_version(&mut self) -> MidgeResult<Option<CompactionVersion>> {

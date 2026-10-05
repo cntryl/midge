@@ -2,6 +2,7 @@ use super::*;
 use crate::common::{MidgeError, MidgeResult};
 use crate::types::KeyState;
 
+mod compaction_budget_tests;
 mod controlled_storage;
 mod paused_compactor;
 mod publication_orders;

@@ -89,6 +89,7 @@ impl RepairScratch {
         while runs.len() > fan_in {
             let mut next = Vec::with_capacity(runs.len().div_ceil(fan_in));
             for batch in runs.chunks(fan_in) {
+                super::executor::ensure_compaction_not_aborted(abort_check)?;
                 if batch.len() == 1 {
                     next.push(batch[0].clone());
                     continue;

@@ -3823,7 +3823,12 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     let completion_rx = el.router.register(completion_request_id, "TestRequest");
     let waiter_request_id = 4344;
     let waiter_rx = el.router.register(waiter_request_id, "TestRequest");
-    el.state.pending_compaction_waits.insert(waiter_request_id);
+    el.state.pending_compaction_waits.insert(
+        waiter_request_id,
+        el.router
+            .request_deadline(waiter_request_id, el.runtime_response_timeout)
+            .unwrap(),
+    );
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -9274,6 +9279,8 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     // Seed after prepare_for_completion_test: preparing a compaction clears
     // the staged-output map.
+    el.compaction_actor
+        .prepare_publication_generation_for_test(0, 1, 10)?;
     el.compaction_actor.insert_prepared_output_for_test(
         &output_sst,
         crate::runtime::actors::compaction::PreparedCompactionOutput {

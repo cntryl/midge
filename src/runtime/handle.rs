@@ -244,6 +244,8 @@ impl RuntimeHandle {
         timeout: Duration,
         emit_debug_waits: bool,
     ) -> MidgeResult<Option<RuntimeResponse>> {
+        let started_at = std::time::Instant::now();
+        let deadline = OperationDeadline::from_start(started_at, timeout);
         let submission_guard = self.lifecycle.begin_submission()?;
         let request_id = msg.request_id().ok_or_else(|| {
             MidgeError::Internal(
@@ -253,7 +255,9 @@ impl RuntimeHandle {
         let msg_kind = msg.kind_name();
 
         // Register for the response before sending the request.
-        let rx = self.router.register(request_id, msg_kind);
+        let rx = self
+            .router
+            .register_with_deadline(request_id, msg_kind, started_at, deadline);
 
         // Deliberately non-blocking, unlike the shutdown and verification-barrier
         // paths which spend their deadline on the send. A full queue here means
@@ -266,10 +270,9 @@ impl RuntimeHandle {
         }
         drop(submission_guard);
 
-        let started_at = std::time::Instant::now();
         let debug_waits = emit_debug_waits && Self::debug_waits_enabled();
         loop {
-            let remaining = timeout.saturating_sub(started_at.elapsed());
+            let remaining = deadline.remaining();
             let wait_for = if debug_waits {
                 remaining.min(Duration::from_secs(2))
             } else {
@@ -277,9 +280,7 @@ impl RuntimeHandle {
             };
             match rx.recv_timeout(wait_for) {
                 Ok(resp) => return Ok(Some(resp)),
-                Err(crossbeam::channel::RecvTimeoutError::Timeout)
-                    if started_at.elapsed() >= timeout =>
-                {
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) if deadline.is_expired() => {
                     if self.router.abandon(request_id, timeout) {
                         return Ok(None);
                     }

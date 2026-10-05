@@ -12,6 +12,10 @@ mod native_metadata_deadline;
 #[path = "tests/native_startup_deadline.rs"]
 mod native_startup_deadline;
 
+#[cfg(feature = "cloud-all")]
+#[path = "tests/native_retry_deadline.rs"]
+mod native_retry_deadline;
+
 #[path = "tests/read_deadline.rs"]
 mod read_deadline;
 

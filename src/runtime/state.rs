@@ -528,7 +528,7 @@ pub struct RuntimeState {
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Manual compaction requests awaiting a completed worker or cloud turn.
-    pub pending_compaction_waits: std::collections::HashSet<u64>,
+    pub pending_compaction_waits: std::collections::BTreeMap<u64, crate::common::OperationDeadline>,
 }
 
 impl RuntimeState {

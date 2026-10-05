@@ -150,6 +150,15 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo test --lib salvage_removes_definitively_lost_ssts --all-features
 
+      - name: Test compaction deadlines and retained ownership on Windows
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --lib --all-features compaction_budget_tests:: -- --test-threads=1
+          cargo test --lib --all-features publication_error_tests:: -- --test-threads=1
+          cargo test --test fault_injection --all-features compaction_deadline:: -- --test-threads=1
+
       - name: Test consistent-cut backup and restore on Windows
         if: matrix.os == 'windows-latest'
         run: |
