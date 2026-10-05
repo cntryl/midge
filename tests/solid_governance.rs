@@ -140,7 +140,7 @@ fn should_keep_test_only_protocols_out_of_runtime() {
             assert!(!source.contains(forbidden), "{name} retains {forbidden}");
         }
     }
-    assert!(state.contains("HashSet<u64>"));
+    assert!(state.contains("BTreeMap<u64, crate::common::OperationDeadline>"));
     assert!(!state.contains("HashMap<u64, String>"));
 }
 
