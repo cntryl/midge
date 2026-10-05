@@ -422,6 +422,8 @@ mod tests {
     use crate::wal::{WalOpKind, WalRecord};
     use bytes::Bytes;
 
+    mod streaming_scale;
+
     #[derive(Default)]
     struct RangeCounter(std::sync::atomic::AtomicUsize);
 
