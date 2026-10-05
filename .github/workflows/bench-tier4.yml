@@ -3,6 +3,11 @@ name: Benchmark Tier 4
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        type: choice
+        options: [smoke, standard, full]
+        default: standard
+        description: Ordinary scenarios; smoke keeps short windows, standard measures 10 minutes, full 60 minutes
       mode:
         type: choice
         options: [all, checkpoint-smoke, checkpoint]
@@ -34,26 +39,193 @@ jobs:
   bench:
     if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: tier4_streaming_workload
+            workload: tier4_streaming_local
+          - bench: tier4_streaming_workload
+            workload: tier4_streaming_cloud
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_write_backpressure_local
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_repeated
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_structured
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_mixed
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_prefix_random_tail
+          - bench: tier4_system_compression_policy
+            workload: latency_policy_low_cardinality
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_repeated
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_structured
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_mixed
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_prefix_random_tail
+          - bench: tier4_system_compression_policy
+            workload: throughput_policy_low_cardinality
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_repeated
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_structured
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_mixed
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_prefix_random_tail
+          - bench: tier4_system_compression_policy
+            workload: economy_policy_low_cardinality
+          - bench: tier4_system_local_throughput_regression
+            workload: memory
+          - bench: tier4_system_local_throughput_regression
+            workload: local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_flush_local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_flush_cloud
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_compaction_local
+          - bench: tier4_system_recovery_throughput
+            workload: tier4_recovery_reopen_after_compaction_cloud
+          - bench: tier4_system_strict_group_commit
+            workload: tier4_complete_local_strict_group_commit
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_memory_1_client
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_memory_16_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_memory_64_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_local_64_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_cloud_64_clients
+          - bench: tier4_ycsb_workload_a
+            workload: tier4_ycsb_a_hybrid_16_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_local_1_client
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_local_16_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_local_64_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_cloud_1_client
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_cloud_16_clients
+          - bench: tier4_ycsb_workload_b
+            workload: tier4_ycsb_b_cloud_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_memory_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_memory_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_memory_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_local_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_local_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_local_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_cloud_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_cloud_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_cloud_64_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_hybrid_1_client
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_hybrid_16_clients
+          - bench: tier4_ycsb_workload_c
+            workload: tier4_ycsb_c_hybrid_64_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_local_1_client
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_local_16_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_local_64_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_cloud_1_client
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_cloud_16_clients
+          - bench: tier4_ycsb_workload_d
+            workload: tier4_ycsb_d_cloud_64_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_local_1_client
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_local_16_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_local_64_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_cloud_1_client
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_cloud_16_clients
+          - bench: tier4_ycsb_workload_e
+            workload: tier4_ycsb_e_cloud_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_memory_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_memory_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_memory_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_local_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_local_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_local_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_cloud_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_cloud_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_cloud_64_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_hybrid_1_client
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_hybrid_16_clients
+          - bench: tier4_ycsb_workload_f
+            workload: tier4_ycsb_f_hybrid_64_clients
+
+    env:
+      CARGO_INCREMENTAL: 0
+      SELECTED_BENCH: ${{ matrix.bench }}
+      SELECTED_WORKLOAD: ${{ matrix.workload }}
+      MIDGE_BENCH_PROFILE: ${{ inputs.profile || 'standard' }}
+      STRESS_PROFILE: smoke
+      STRESS_SAMPLES: "1"
+      STRESS_WARMUP_SAMPLES: "0"
+      STRESS_COOLDOWN_SAMPLES: "0"
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup update stable
-      - name: Run ordinary registered Tier 4 targets
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Run Tier 4 scenario
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p target/tier4-selection
-          cargo metadata --no-deps --format-version=1 > target/tier4-selection/metadata.json
-          jq -r '.packages[] | select(.name == "cntryl-midge") | .targets[] | select(.kind | index("bench") != null) | select(.name | test("^tier4_[sy]")) | select(.name != "tier4_system_checkpoint_write_amplification") | .name' target/tier4-selection/metadata.json > target/tier4-selection/targets.txt
-          mapfile -t checkpoint_ordinary_targets < target/tier4-selection/targets.txt
-          test "${#checkpoint_ordinary_targets[@]}" -gt 0
-          for checkpoint_ordinary_target in "${checkpoint_ordinary_targets[@]}"; do
-            cargo bench --bench "$checkpoint_ordinary_target"
-          done
-      - uses: actions/upload-artifact@v7
+          case "$MIDGE_BENCH_PROFILE" in
+            smoke) sample_duration_ms=10; timeout_seconds=900 ;;
+            standard) sample_duration_ms=600000; timeout_seconds=1500 ;;
+            full) sample_duration_ms=3600000; timeout_seconds=4500 ;;
+            *) printf 'Unknown Tier 4 profile: %s\n' "$MIDGE_BENCH_PROFILE" >&2; exit 1 ;;
+          esac
+          cargo bench --locked --bench "$SELECTED_BENCH" -- \
+            --workload "${SELECTED_BENCH}::${SELECTED_WORKLOAD}" --profile smoke \
+            --sample-duration-ms "$sample_duration_ms" --timeout-secs "$timeout_seconds"
+
+      - name: Upload benchmark reports
+        uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: bench-tier4-${{ github.sha }}
+          name: bench-tier4-${{ matrix.bench }}-${{ matrix.workload }}-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**

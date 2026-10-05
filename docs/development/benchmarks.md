@@ -72,6 +72,41 @@ Tier benchmarks run in separate manually dispatched workflows named
 3 targets on Ubuntu, Windows, and macOS; the repeated flush-cycle row enables
 compaction so L0 slots can be recycled.
 
+Tier 4, 5 and 6 workflows share a `profile` dropdown, defaulting to `standard`:
+
+| Profile | Tier 4 scenario | Tier 5/6 workload |
+| --- | --- | --- |
+| `smoke` | One original short window or complete system cycle | 60 seconds |
+| `standard` | 10 minutes | 10 minutes |
+| `full` | 60 minutes | 60 minutes |
+
+Each Tier 4 scenario has its own ARM matrix job. YCSB, streaming and backpressure
+keep one engine through the selected measured window. Fixed-count system cases
+repeat complete bounded cycles, retaining each cycle's checks; their long-run
+clock includes setup and teardown and can exceed the window by the final cycle.
+Their SST footprint observations sum the final footprints of completed cycles.
+Smoke keeps the original timing boundaries and workload warmups. Checkpoint
+workflow modes retain their separate fixed-cardinality campaign.
+
+These workflow profiles use one native harness sample without native warmups.
+They establish workload execution and correctness; a single sample does not
+establish a statistical performance baseline. Scheduled Tier 5/6 runs use `full`.
+Automation using their former `duration_seconds` input must switch to `profile`.
+
+For a direct Tier 4 standard run, supply both the workload profile and the
+matching native duration:
+
+```bash
+MIDGE_BENCH_PROFILE=standard cargo bench --bench tier4_ycsb_workload_a -- \
+  --workload 'tier4_ycsb_workload_a::tier4_ycsb_a_memory_1_client' \
+  --profile smoke --sample-duration-ms 600000 --timeout-secs 1500
+```
+
+Use `MIDGE_BENCH_PROFILE=full`, `--sample-duration-ms 3600000` and
+`--timeout-secs 4500` for an hour. Direct invocations without the workload profile
+keep their existing short Tier 4 windows. A fixed-cycle case rejects a native
+measurement shorter than its selected standard/full window.
+
 The old Destroyer scenarios now live in the opt-in `stress-soak` bench targets.
 The feature gates both Tier 5 and Tier 6, so a plain `cargo bench` cannot start
 an hours-long run. Local Tier 5 runs use one hour per workload/backend

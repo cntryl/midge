@@ -63,7 +63,9 @@ fn run_workload_f_warmup(
 }
 
 fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
-    ycsb::configure_workload_parameters(ctx, profile, clients, MEASURED);
+    let measured_duration = stress_config::tier4_measured_duration(MEASURED);
+    ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -103,10 +105,10 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
         let measured = {
             let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
             let write_opts = measured_write_opts;
-            ycsb::run_multi_client_for_duration_with_stats(
+            ycsb::run_multi_client_for_duration_observed_with_stats(
                 &engine,
                 clients,
-                MEASURED,
+                measured_duration,
                 |client_id, stop| {
                     let zipf = Arc::clone(&zipf);
                     move |e, cf, op_index| {
@@ -125,14 +127,14 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                         let _old = tx.get(&k[..]).expect("measured get");
                         drop(tx);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
                             tx.put(k.to_vec(), v.clone(), None).expect("measured put");
                             tx.commit(write_opts)
                         })
-                        .expect("measured commit");
+                        .expect("measured commit")
                     }
                 },
             )

@@ -81,7 +81,9 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     } else {
         MEASURED_DEFAULT
     };
+    let measured_duration = stress_config::tier4_measured_duration(measured_duration);
     ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -123,7 +125,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let measured = stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let measured = {
             let write_opts = measured_write_opts;
-            ycsb::run_multi_client_for_duration_with_stats(
+            ycsb::run_multi_client_for_duration_observed_with_stats(
                 &engine,
                 clients,
                 measured_duration,
@@ -135,22 +137,26 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                         let cf_id = cf.id();
 
                         if is_insert {
-                            inserts_so_far = inserts_so_far.wrapping_add(1);
+                            let next_insert = inserts_so_far.wrapping_add(1);
                             let key_id = (initial_keys as u64)
                                 .wrapping_add((client_id as u64) << 32)
-                                .wrapping_add(inserts_so_far);
+                                .wrapping_add(next_insert);
                             let k = ycsb::make_key(key_id);
                             let v = ycsb::make_value((op_index % 251) as u8);
-                            ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                                let mut tx = e
-                                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                    .expect("measured begin");
-                                tx.put(k.to_vec(), v.clone(), None)
-                                    .expect("measured insert");
-                                tx.commit(write_opts)
-                            })
-                            .expect("measured commit");
-                            return;
+                            let completed =
+                                ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
+                                    let mut tx = e
+                                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                                        .expect("measured begin");
+                                    tx.put(k.to_vec(), v.clone(), None)
+                                        .expect("measured insert");
+                                    tx.commit(write_opts)
+                                })
+                                .expect("measured commit");
+                            if completed {
+                                inserts_so_far = next_insert;
+                            }
+                            return completed;
                         }
 
                         let latest = (initial_keys as u64)
@@ -171,6 +177,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                             .expect("measured begin");
                         let _ = tx.get(&k[..]).expect("measured get");
+                        true
                     }
                 },
             )

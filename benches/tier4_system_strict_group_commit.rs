@@ -5,10 +5,7 @@
 //! final SST footprint capture.
 
 use cntryl_midge::{Engine, OpenOptions, Query, RecoveryPolicy, TransactionMode, WriteOptions};
-use cntryl_stress::{
-    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
-    StressContext,
-};
+use cntryl_stress::{stress, stress_main, ObservationDirection, ObservationUnit, StressContext};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
@@ -22,6 +19,7 @@ const MEMTABLE_SIZE: usize = 128 * 1024;
 const MAX_WRITE_STALL_RECOVERIES_PER_COMMIT: u64 = 1;
 const TOTAL_TRANSACTIONS: usize = WRITERS * FLUSH_WAVES * TRANSACTIONS_PER_WRITER_PER_WAVE;
 
+#[derive(Default)]
 struct SystemOutcome {
     strict_ingest: Duration,
     total: Duration,
@@ -32,6 +30,35 @@ struct SystemOutcome {
     write_stall_wait_ns: u64,
     final_sst_count: usize,
     final_sst_bytes: u64,
+}
+
+impl SystemOutcome {
+    fn add(&mut self, cycle: &Self) {
+        self.strict_ingest += cycle.strict_ingest;
+        self.total += cycle.total;
+        self.completed += cycle.completed;
+        self.wal_appends += cycle.wal_appends;
+        self.physical_fsyncs += cycle.physical_fsyncs;
+        self.write_stall_recoveries += cycle.write_stall_recoveries;
+        self.write_stall_wait_ns += cycle.write_stall_wait_ns;
+        self.final_sst_count += cycle.final_sst_count;
+        self.final_sst_bytes += cycle.final_sst_bytes;
+    }
+}
+
+fn validate_cycle(outcome: &SystemOutcome) {
+    assert!(
+        outcome.wal_appends > 0,
+        "strict commits must append to the WAL"
+    );
+    assert!(
+        outcome.physical_fsyncs > 0,
+        "strict commits must issue physical fsyncs"
+    );
+    assert!(
+        outcome.final_sst_count > 0 && outcome.final_sst_bytes > 0,
+        "compacted strict workload must leave a non-empty SST footprint"
+    );
 }
 
 fn record(ordinal: usize) -> (Vec<u8>, Vec<u8>) {
@@ -275,30 +302,24 @@ fn execute_system_workload() -> SystemOutcome {
 )]
 #[allow(clippy::cast_precision_loss)]
 fn tier4_complete_local_strict_group_commit(ctx: &mut StressContext) {
-    let outcome = execute_system_workload();
+    let mut outcome = SystemOutcome::default();
     ctx.parameter("background_compaction", true);
     ctx.parameter("writers", WRITERS);
     ctx.parameter("flush_count", FLUSH_WAVES);
     ctx.parameter("transactions", TOTAL_TRANSACTIONS);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("memtable_size_bytes", MEMTABLE_SIZE);
-    assert!(
-        outcome.wal_appends > 0,
-        "strict commits must append to the WAL"
-    );
-    assert!(
-        outcome.physical_fsyncs > 0,
-        "strict commits must issue physical fsyncs"
-    );
-    assert!(
-        outcome.final_sst_count > 0 && outcome.final_sst_bytes > 0,
-        "compacted strict workload must leave a non-empty SST footprint"
-    );
-    ctx.record_external_outcome(
+    ctx.parameter("footprint_scope", "sum_of_completed_cycle_final_footprints");
+    stress_config::measure_tier4_cycles(
+        ctx,
         "tier4_complete_local_strict_group_commit_total",
-        outcome.total,
-        LogicalUnit::new("transaction"),
-        OperationOutcome::success(outcome.completed),
+        "transaction",
+        || {
+            let cycle = execute_system_workload();
+            validate_cycle(&cycle);
+            outcome.add(&cycle);
+            (cycle.completed, cycle.total)
+        },
     );
     ctx.record_observation(
         "ingest_ns",

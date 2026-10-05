@@ -132,6 +132,7 @@ fn run_compaction_backpressure_case(
 ) {
     stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
 
+    let measured_duration = stress_config::tier4_measured_duration(MEASURED);
     let opts = stress_config::opts_for_mode(mode);
     let engine = Arc::new(open_compaction_engine(opts));
     let cf = engine
@@ -156,19 +157,20 @@ fn run_compaction_backpressure_case(
         write_options,
         &next_key,
         WRITERS,
-        MEASURED,
+        measured_duration,
         true,
     );
     let perf = ycsb::runtime_perf_report(&engine, start);
 
     ctx.parameter("storage_profile", mode);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter("writers", WRITERS);
     ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);
     ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
     ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
-    ctx.parameter("measured_secs", MEASURED.as_secs_f64());
+    ctx.parameter("measured_secs", measured_duration.as_secs_f64());
     assert_eq!(
         measured.writes,
         measured

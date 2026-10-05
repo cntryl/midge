@@ -98,7 +98,7 @@ fn run_workload_e_measured(
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_e_{profile}_{clients}_{client_suffix}");
     stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
-        let measured = ycsb::run_multi_client_for_duration_with_stats(
+        let measured = ycsb::run_multi_client_for_duration_observed_with_stats(
             engine,
             clients,
             duration,
@@ -112,7 +112,7 @@ fn run_workload_e_measured(
                         let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
                         let k = ycsb::make_key(key_id);
                         let v = ycsb::make_value((op_index % 251) as u8);
-                        ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                        return ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
                             let mut tx = e
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                 .expect("measured begin");
@@ -121,7 +121,6 @@ fn run_workload_e_measured(
                             tx.commit(write_opts)
                         })
                         .expect("measured commit");
-                        return;
                     }
 
                     let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
@@ -143,6 +142,7 @@ fn run_workload_e_measured(
                         count += 1;
                     }
                     std::hint::black_box(count);
+                    true
                 }
             },
         );
@@ -161,8 +161,9 @@ fn measured_duration(profile: &str, clients: usize) -> Duration {
 }
 
 fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
-    let measured = measured_duration(profile, clients);
+    let measured = stress_config::tier4_measured_duration(measured_duration(profile, clients));
     ycsb::configure_workload_parameters(ctx, profile, clients, measured);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter("scan_length", SCAN_LEN);
     ctx.parameter("key_size_bytes", ycsb::KEY_SIZE);
     ctx.parameter("value_size_bytes", ycsb::DEFAULT_VALUE_SIZE);

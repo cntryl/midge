@@ -225,10 +225,12 @@ fn run_streaming_phase(
 }
 
 fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
+    let measured_duration = stress_config::tier4_measured_duration(MEASURED);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter("writers", WRITERS);
     ctx.parameter("readers", READERS);
     ctx.parameter("warmup_secs", WARMUP.as_secs());
-    ctx.parameter("measured_secs", MEASURED.as_secs());
+    ctx.parameter("measured_secs", measured_duration.as_secs());
     ctx.parameter("tail_window_keys", TAIL_WINDOW);
     ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
 
@@ -250,7 +252,8 @@ fn run_streaming(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOpt
     // Measured phase
     // -------------------------------------------------------------------------
 
-    let measured_phase = run_streaming_phase(&engine, cf_id, write_opts, &head, MEASURED, true);
+    let measured_phase =
+        run_streaming_phase(&engine, cf_id, write_opts, &head, measured_duration, true);
 
     let PhaseResult {
         elapsed,

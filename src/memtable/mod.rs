@@ -27,6 +27,14 @@ pub(crate) struct MemtableConfigInput {
 #[doc(hidden)]
 pub mod bench {
     pub use super::skiplist::SkipList;
+
+    /// Conservative staging bound for a fresh transaction of uniform point writes.
+    #[must_use]
+    pub fn point_flush_staging_bytes(points: usize, key_len: usize, value_len: usize) -> u64 {
+        super::size_bound::flush_staging_bytes(super::size_bound::FIXED_SST_BYTES.saturating_add(
+            super::size_bound::point_bytes(key_len, value_len).saturating_mul(points),
+        ))
+    }
 }
 
 use crate::common::{MidgeError, MidgeResult};
