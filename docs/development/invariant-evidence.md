@@ -92,6 +92,8 @@ Uncovered boundary: The drop/recreate test asserts data isolation, not a direct 
 
 ## TX-1
 
+Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — Frozen old scans and point reads survive TTL expiry, sixteen acknowledged mixed-history compactions and actual spill saturation. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
+
 Production: [src/engine/mod.rs:337](../../src/engine/mod.rs#L337) `Engine::begin_tx`; [src/engine/mod.rs:412](../../src/engine/mod.rs#L412) `acquire_transaction_snapshot`; [src/runtime/snapshot_pins.rs:57](../../src/runtime/snapshot_pins.rs#L57) `SnapshotPinRegistry::register`; [src/runtime/snapshot_pins.rs:173](../../src/runtime/snapshot_pins.rs#L173) `begin_acquisition`.
 
 Exact evidence and assertion markers:
@@ -118,6 +120,8 @@ Preconditions: Oracle builds genuine memtables with deterministic generated vers
 Uncovered boundary: The oracle is bounded and covers active/immutable selection; it does not independently prove every SST version tie or heavily spilled intent lookup path.
 
 ## TX-3
+
+Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — A controlled clock expires only the first eight keys for a new reader before overwrites; the original snapshot retains all thirty-two original values through compaction. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
 Production: [src/runtime/read_snapshot.rs:807](../../src/runtime/read_snapshot.rs#L807) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot.rs:1021](../../src/runtime/read_snapshot.rs#L1021) `ReadSnapshot::range_scan`; [src/compaction/mod.rs:33](../../src/compaction/mod.rs#L33) `execute_compaction`; [src/engine/api/transaction.rs:510](../../src/engine/api/transaction.rs#L510) `Transaction::delete_range`.
 
@@ -160,6 +164,8 @@ Preconditions: Strict write-conflict test runs all common modes; explicit LastWr
 Uncovered boundary: These tests assert final values, typed conflicts and no assertion-only sequence allocation. They do not directly observe physical WAL append count for every rejected assertion; ordering before publication is source-backed.
 
 ## TX-6
+
+Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — Actual uncommitted spill keys and the capacity-rejected bounded write remain absent from other transactions; releasing the spill owner permits the same write without invalidating the old snapshot. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
 Production: [src/engine/api/transaction.rs:739](../../src/engine/api/transaction.rs#L739) `Transaction::rollback`; [src/engine/api/transaction.rs:744](../../src/engine/api/transaction.rs#L744) `unregister_snapshot`; [src/engine/api/transaction.rs:602](../../src/engine/api/transaction.rs#L602) `Transaction::commit`.
 
@@ -365,6 +371,8 @@ Preconditions: Process test uses real files and genuine abort failpoint; runtime
 Uncovered boundary: Prepublication crash is a strong old-set case; full old/new authority is sampled across the phase matrix. GC protects current manifest/compacting/snapshot-pinned names but this map proves no arbitrary forged completion is safe.
 
 ## SST-6
+
+Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — Actual retired snapshot input files remain physically present while pinned and all are physically reclaimed within ten seconds after release. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
 Production: [src/runtime/snapshot_pins.rs:190](../../src/runtime/snapshot_pins.rs#L190) `pinned_sst_names`; [src/runtime/actors/gc.rs:148](../../src/runtime/actors/gc.rs#L148) `delete_ssts`; [src/compaction/mod.rs:33](../../src/compaction/mod.rs#L33) `execute_compaction`.
 
@@ -627,6 +635,8 @@ Preconditions: Reservation units operate actual RAII budget ownership; public me
 Uncovered boundary: Representative charged ownership does not prove every allocator/backend/queue byte is included, nor that process RSS equals configured engine budget. Delivered ACCT-1 through ACCT-6 map owner-bound persistent attempted/returned/durable metadata accounting and post-shutdown integrity; that bounded ledger does not extend allocator or process RSS coverage.
 
 ## RES-2
+
+Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — More than 1.5 MiB of actual caller-owned spill files exhaust a 2 MiB local budget; rejected mutation preserves exact acknowledged state and the same write resumes after release. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
 Production: [src/runtime/transaction_spill/mod.rs:311](../../src/runtime/transaction_spill/mod.rs#L311) `TransactionWriteSet::push`; [src/runtime/actors/wal/transaction.rs:86](../../src/runtime/actors/wal/transaction.rs#L86) `prepare_transaction_append`; [src/runtime/event_loop/write_batch.rs:467](../../src/runtime/event_loop/write_batch.rs#L467) `prepare_transaction_for_coalescing`.
 

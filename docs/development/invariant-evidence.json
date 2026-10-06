@@ -739,9 +739,55 @@
               "marker": "assert!(pinned.contains(\"a.sst\"));"
             }
           ]
+        },
+        {
+          "path": "tests/snapshot_spill_pressure.rs",
+          "line": 60,
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
+          "claim": "Frozen old scans and point reads survive TTL expiry, sixteen acknowledged mixed-history compactions and actual spill saturation.",
+          "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
+          "assertions": [
+            {
+              "line": 109,
+              "marker": "assert_exact(&old, &initial);"
+            },
+            {
+              "line": 117,
+              "marker": "assert_exact(&expired, &expected);"
+            },
+            {
+              "line": 166,
+              "marker": "assert!(spill_boundary, \"must exhaust actual spill capacity\");"
+            },
+            {
+              "line": 172,
+              "marker": "spill_bytes > 1536 * 1024,"
+            },
+            {
+              "line": 190,
+              "marker": "\"capacity exhaustion must reject before acceptance: {blocked_result:?}\""
+            },
+            {
+              "line": 235,
+              "marker": "retired.iter().all(|file| file.exists()),"
+            },
+            {
+              "line": 243,
+              "marker": "\"all released snapshot inputs must be physically reclaimed\""
+            },
+            {
+              "line": 268,
+              "marker": "assert_exact(&read, &expected);"
+            },
+            {
+              "line": 38,
+              "marker": "assert_eq!(&inventory(tx), expected);",
+              "helper": "assert_exact"
+            }
+          ]
         }
       ],
-      "preconditions": "Public snapshot test runs common memory/local/CloudSimulated modes. Pin tests operate the real registry with supplied names; actual pinned compaction is separately mapped at SST-6.",
+      "preconditions": "Public snapshot test runs common memory/local/CloudSimulated modes. Pin tests operate the real registry with supplied names; actual pinned compaction is separately mapped at SST-6. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
       "uncovered": "Representative snapshots and the pin registry do not enumerate all snapshot-acquisition/GC interleavings. The API's single CF ID is a structural limit rather than cross-CF atomicity evidence."
     },
     {
@@ -907,9 +953,55 @@
               "marker": "assert_eq!("
             }
           ]
+        },
+        {
+          "path": "tests/snapshot_spill_pressure.rs",
+          "line": 60,
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
+          "claim": "A controlled clock expires only the first eight keys for a new reader before overwrites; the original snapshot retains all thirty-two original values through compaction.",
+          "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
+          "assertions": [
+            {
+              "line": 109,
+              "marker": "assert_exact(&old, &initial);"
+            },
+            {
+              "line": 117,
+              "marker": "assert_exact(&expired, &expected);"
+            },
+            {
+              "line": 166,
+              "marker": "assert!(spill_boundary, \"must exhaust actual spill capacity\");"
+            },
+            {
+              "line": 172,
+              "marker": "spill_bytes > 1536 * 1024,"
+            },
+            {
+              "line": 190,
+              "marker": "\"capacity exhaustion must reject before acceptance: {blocked_result:?}\""
+            },
+            {
+              "line": 235,
+              "marker": "retired.iter().all(|file| file.exists()),"
+            },
+            {
+              "line": 243,
+              "marker": "\"all released snapshot inputs must be physically reclaimed\""
+            },
+            {
+              "line": 268,
+              "marker": "assert_exact(&read, &expected);"
+            },
+            {
+              "line": 38,
+              "marker": "assert_eq!(&inventory(tx), expected);",
+              "helper": "assert_exact"
+            }
+          ]
         }
       ],
-      "preconditions": "The restart and TTL tests use real local Engine/files; TTL test uses elapsed wall time. Reverse API test runs common modes; compaction test writes/reads real SSTs.",
+      "preconditions": "The restart and TTL tests use real local Engine/files; TTL test uses elapsed wall time. Reverse API test runs common modes; compaction test writes/reads real SSTs. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
       "uncovered": "This is a representative combination of restart, TTL, compaction and direction evidence, not an exhaustive cross-product of every memtable/SST/tombstone/TTL state. Binary-prefix evidence is also mapped at TX-7."
     },
     {
@@ -1123,9 +1215,55 @@
               "marker": "wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))"
             }
           ]
+        },
+        {
+          "path": "tests/snapshot_spill_pressure.rs",
+          "line": 60,
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
+          "claim": "Actual uncommitted spill keys and the capacity-rejected bounded write remain absent from other transactions; releasing the spill owner permits the same write without invalidating the old snapshot.",
+          "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
+          "assertions": [
+            {
+              "line": 109,
+              "marker": "assert_exact(&old, &initial);"
+            },
+            {
+              "line": 117,
+              "marker": "assert_exact(&expired, &expected);"
+            },
+            {
+              "line": 166,
+              "marker": "assert!(spill_boundary, \"must exhaust actual spill capacity\");"
+            },
+            {
+              "line": 172,
+              "marker": "spill_bytes > 1536 * 1024,"
+            },
+            {
+              "line": 190,
+              "marker": "\"capacity exhaustion must reject before acceptance: {blocked_result:?}\""
+            },
+            {
+              "line": 235,
+              "marker": "retired.iter().all(|file| file.exists()),"
+            },
+            {
+              "line": 243,
+              "marker": "\"all released snapshot inputs must be physically reclaimed\""
+            },
+            {
+              "line": 268,
+              "marker": "assert_exact(&read, &expected);"
+            },
+            {
+              "line": 38,
+              "marker": "assert_eq!(&inventory(tx), expected);",
+              "helper": "assert_exact"
+            }
+          ]
         }
       ],
-      "preconditions": "Actual public transaction behavior in common modes; client-side intents never reach a commit call.",
+      "preconditions": "Actual public transaction behavior in common modes; client-side intents never reach a commit call. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
       "uncovered": "No claim that rolling back an already accepted/timed-out runtime commit cancels it. That is a different ownership contract (WAL-2/RES-5)."
     },
     {
@@ -2681,9 +2819,55 @@
               "marker": "assert!(pinned.contains(\"a.sst\"));"
             }
           ]
+        },
+        {
+          "path": "tests/snapshot_spill_pressure.rs",
+          "line": 60,
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
+          "claim": "Actual retired snapshot input files remain physically present while pinned and all are physically reclaimed within ten seconds after release.",
+          "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
+          "assertions": [
+            {
+              "line": 109,
+              "marker": "assert_exact(&old, &initial);"
+            },
+            {
+              "line": 117,
+              "marker": "assert_exact(&expired, &expected);"
+            },
+            {
+              "line": 166,
+              "marker": "assert!(spill_boundary, \"must exhaust actual spill capacity\");"
+            },
+            {
+              "line": 172,
+              "marker": "spill_bytes > 1536 * 1024,"
+            },
+            {
+              "line": 190,
+              "marker": "\"capacity exhaustion must reject before acceptance: {blocked_result:?}\""
+            },
+            {
+              "line": 235,
+              "marker": "retired.iter().all(|file| file.exists()),"
+            },
+            {
+              "line": 243,
+              "marker": "\"all released snapshot inputs must be physically reclaimed\""
+            },
+            {
+              "line": 268,
+              "marker": "assert_exact(&read, &expected);"
+            },
+            {
+              "line": 38,
+              "marker": "assert_eq!(&inventory(tx), expected);",
+              "helper": "assert_exact"
+            }
+          ]
         }
       ],
-      "preconditions": "Snapshot API test uses durable local/CloudSimulated modes with positive physical-compaction prerequisites; bottommost unit writes and reads real SSTs.",
+      "preconditions": "Snapshot API test uses durable local/CloudSimulated modes with positive physical-compaction prerequisites; bottommost unit writes and reads real SSTs. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
       "uncovered": "Bottommost eligibility is explicitly supplied in the unit; not every production overlap planner proof is independently tested here. Pin/GC schedules are bounded, not a universal concurrency proof."
     },
     {
@@ -4565,9 +4749,55 @@
               "marker": "assert_visible(&reopened, &reopened_cf, b\"batch-recovery\", b\"value\");"
             }
           ]
+        },
+        {
+          "path": "tests/snapshot_spill_pressure.rs",
+          "line": 60,
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
+          "claim": "More than 1.5 MiB of actual caller-owned spill files exhaust a 2 MiB local budget; rejected mutation preserves exact acknowledged state and the same write resumes after release.",
+          "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
+          "assertions": [
+            {
+              "line": 109,
+              "marker": "assert_exact(&old, &initial);"
+            },
+            {
+              "line": 117,
+              "marker": "assert_exact(&expired, &expected);"
+            },
+            {
+              "line": 166,
+              "marker": "assert!(spill_boundary, \"must exhaust actual spill capacity\");"
+            },
+            {
+              "line": 172,
+              "marker": "spill_bytes > 1536 * 1024,"
+            },
+            {
+              "line": 190,
+              "marker": "\"capacity exhaustion must reject before acceptance: {blocked_result:?}\""
+            },
+            {
+              "line": 235,
+              "marker": "retired.iter().all(|file| file.exists()),"
+            },
+            {
+              "line": 243,
+              "marker": "\"all released snapshot inputs must be physically reclaimed\""
+            },
+            {
+              "line": 268,
+              "marker": "assert_exact(&read, &expected);"
+            },
+            {
+              "line": 38,
+              "marker": "assert_eq!(&inventory(tx), expected);",
+              "helper": "assert_exact"
+            }
+          ]
         }
       ],
-      "preconditions": "Real local Engine and genuine admission/failpoint positions; previously accepted intents deliberately precede rejected operation.",
+      "preconditions": "Real local Engine and genuine admission/failpoint positions; previously accepted intents deliberately precede rejected operation. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
       "uncovered": "Before-publication rejection can be unapplied; once a write is submitted or partially persisted, error is not universally proof of no mutation. Partial-tail failure uses degradation/fencing instead (RES-3)."
     },
     {
