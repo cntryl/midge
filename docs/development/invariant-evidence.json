@@ -66,9 +66,7 @@
       "complete": true,
       "planned_attempts": 9,
       "valid_attempts": 9,
-      "qualification_errors": [
-
-      ],
+      "qualification_errors": [],
       "cells": [
         {
           "cell": "A",
@@ -9269,9 +9267,7 @@
     "preview": false,
     "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
     "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
-    "changed_hash_bound_paths": [
-
-    ],
+    "changed_hash_bound_paths": [],
     "preserved_ids": 63,
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
@@ -9287,9 +9283,7 @@
     "fixture_before_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
     "fixture_after_sha256": "0ca5d2b7d855b258923486ab4306de0866c62156d5485c078fbb1cd77b4e468d",
     "helper": "assert_fenced_publication_response",
-    "changed_hash_bound_paths": [
-
-    ],
+    "changed_hash_bound_paths": [],
     "preserved_ids": 63,
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
