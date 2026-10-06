@@ -30,6 +30,8 @@ pub(crate) struct ReplayCoverage {
     block_hits: Cell<u64>,
     block_misses: Cell<u64>,
     block_peak: Cell<usize>,
+    decode_steps: Cell<u64>,
+    reconstruction_allocations: Cell<u64>,
     reader_hits: Cell<u64>,
     reader_evictions: Cell<u64>,
     manifest_scanned: Cell<u64>,
@@ -135,6 +137,8 @@ impl ReplayCoverage {
             block_hits: Cell::new(0),
             block_misses: Cell::new(0),
             block_peak: Cell::new(0),
+            decode_steps: Cell::new(0),
+            reconstruction_allocations: Cell::new(0),
             reader_hits: Cell::new(0),
             reader_evictions: Cell::new(0),
             manifest_scanned: Cell::new(0),
@@ -391,6 +395,14 @@ impl ReplayCoverage {
     }
 
     fn record_reader(&self, cached: &CachedReader) {
+        let (steps, allocations) = cached.reader.recovery_decode_stats();
+        self.decode_steps
+            .set(self.decode_steps.get().saturating_add(steps));
+        self.reconstruction_allocations.set(
+            self.reconstruction_allocations
+                .get()
+                .saturating_add(allocations),
+        );
         let (hits, misses, peak) = cached.reader.recovery_block_stats();
         self.block_hits
             .set(self.block_hits.get().saturating_add(hits));
@@ -411,6 +423,8 @@ impl Drop for ReplayCoverage {
             manifest_candidates = self.manifest_candidates.get(),
             block_hits = self.block_hits.get(), block_misses = self.block_misses.get(),
             retained_block_bytes_peak = self.block_peak.get() as u64,
+            decoded_entries = self.decode_steps.get(),
+            key_reconstruction_allocations = self.reconstruction_allocations.get(),
             "recovery coverage work completed");
     }
 }
@@ -422,6 +436,7 @@ mod tests {
     use crate::wal::{WalOpKind, WalRecord};
     use bytes::Bytes;
 
+    mod block_decode_work;
     mod streaming_scale;
 
     #[derive(Default)]

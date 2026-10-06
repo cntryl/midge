@@ -18,6 +18,8 @@ use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
+mod recovery_index;
+
 /// Stable summary of the physical contents of a single SST file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstFileSummary {

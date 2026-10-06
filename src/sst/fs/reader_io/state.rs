@@ -52,7 +52,10 @@ impl SstFileIo {
         }
     }
 
-    fn state_from_entry_view(block_data: &Bytes, entry: encoding::EntryView<'_>) -> KeyState {
+    pub(super) fn state_from_entry_view(
+        block_data: &Bytes,
+        entry: encoding::EntryView<'_>,
+    ) -> KeyState {
         if matches!(entry.entry_type, EntryType::Delete) {
             return KeyState::Tombstone(entry.sequence);
         }
@@ -109,8 +112,12 @@ impl SstFileIo {
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<KeyState> {
+        if let Some(state) = self.indexed_recovery_state(block_data, key, snapshot_seq)? {
+            return Ok(state);
+        }
         let mut decoder = BlockEntryDecoder::default();
         let mut best_state = KeyState::Absent;
+        let mut steps = 0_u64;
 
         let budget = self
             .recovery_block
@@ -122,6 +129,7 @@ impl SstFileIo {
             budget,
             "recovery decoder key",
         )? {
+            steps += 1;
             match decoder.key().cmp(key) {
                 std::cmp::Ordering::Less => {}
                 std::cmp::Ordering::Greater => break,
@@ -134,6 +142,7 @@ impl SstFileIo {
             }
         }
 
+        self.record_recovery_decode_work(steps, if budget.is_some() { steps } else { 0 });
         Ok(best_state)
     }
 
