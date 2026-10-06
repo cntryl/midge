@@ -229,18 +229,21 @@ fn should_settle_completed_clear_when_actual_final_receipt_is_delivered_after_de
 fn final_clear_timeout_case() -> MidgeResult<(QueuedEvidence, Vec<ReadEvidence>, PhaseEvidence)> {
     let mut fixture = BudgetFixture::new()?;
     let (started, response) = fixture.start_manual();
-    fixture.backend.arm(
-        CompactionPublishPhase::OutputDurable,
-        started + Duration::from_secs(3),
-    );
+    // Only the final genuine read should consume the original clock. Keeping
+    // prior phases unheld leaves room for the coordinator's durable GC/clear.
     fixture.complete_actual_compute();
     let first = fixture.complete_actual_phase(None);
     assert!(first.error.is_none() && first.completed_at < started + CALLER_BUDGET);
+    let final_budget_bound = OperationDeadline::from_start(started, CALLER_BUDGET).remaining();
     let second = fixture.complete_actual_phase(Some(ReadHold {
         phase: CompactionPublishPhase::IntentCleared,
         until: started + CALLER_BUDGET + Duration::from_millis(500),
     }));
     assert!(second.error.is_none() && second.completed_at < started + CALLER_BUDGET);
+    assert!(
+        fixture.el.compaction_publish_actor.is_inflight(),
+        "the genuine final worker must be submitted before expiry"
+    );
     let completion = fixture
         .el
         .compaction_publish_result_rx
@@ -265,6 +268,12 @@ fn final_clear_timeout_case() -> MidgeResult<(QueuedEvidence, Vec<ReadEvidence>,
     CompactionCoordinator::handle_publication_completion(&mut fixture.el, completion);
     CompactionCoordinator::handle_publication_completion(&mut fixture.el, replay);
     let reads = fixture.backend.reads.lock().unwrap().clone();
+    assert_eq!(reads.len(), 1);
+    assert!(final_budget_bound < CALLER_BUDGET);
+    assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
+    assert!(reads[0]
+        .provider_budget
+        .is_some_and(|budget| !budget.is_zero() && budget <= final_budget_bound));
     let evidence = capture_queued_evidence(&mut fixture, &response, uploads_before)?;
     Ok((evidence, reads, phase))
 }
@@ -279,12 +288,11 @@ fn should_keep_typed_timeout_when_actual_final_clear_mirror_exhausts_original_bu
     // Assert: safe settled authority and exact row precede error classification.
     assert_common_queued_evidence(&evidence);
     assert!(
-        reads.len() == 2
+        reads.len() == 1
             && reads.iter().all(|read| read.genuine_success
                 && read.forwarded_at.duration_since(read.delegated_at) < PROVIDER_CAP)
     );
-    assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);
-    assert_eq!(reads[1].phase, CompactionPublishPhase::IntentCleared);
+    assert_eq!(reads[0].phase, CompactionPublishPhase::IntentCleared);
     assert!(!evidence.has_intent && evidence.retired_inputs.iter().all(|retired| *retired));
     assert_eq!(evidence.reservations, 0);
     assert_eq!(evidence.staging_reserved, 0);

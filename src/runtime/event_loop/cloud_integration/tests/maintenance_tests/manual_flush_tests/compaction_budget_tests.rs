@@ -24,7 +24,10 @@ mod deadline_owner_tests;
 mod queued_phase_tests;
 
 const CALLER_BUDGET: Duration = Duration::from_secs(5);
-const PROVIDER_CAP: Duration = Duration::from_secs(4);
+// Keep the ordinary provider cap above the aggregate caller allowance.
+// Target-phase expiry must not require wasting time in an unrelated earlier
+// phase just to make its remaining allowance smaller than the provider cap.
+const PROVIDER_CAP: Duration = Duration::from_secs(8);
 const FIXTURE_WAIT: Duration = Duration::from_secs(8);
 const MANUAL_REQUEST: u64 = 92_400;
 
