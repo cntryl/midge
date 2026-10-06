@@ -26,7 +26,7 @@ rows = statuses.map do |path|
   check(status.dig('final_flush', 'completed'), 'incomplete final flush')
   check(status['shutdown_results'].size == 2 && status['shutdown_results'].all? { |s| s['caller_result'] == 'ok' && s['error'].nil? }, 'shutdown mismatch')
   final = status.fetch('finalization')
-  check(final['sha'] == sha && final['step_outcome'] == 'success' && !final['failed'] && !final['correctness_failed'] && !final['benchmark_errors'], 'native finalization failure')
+  check(final['sha'] == sha && final['step_outcome'] == 'success' && final['receipt_selection'] == 'matched' && !final['failed'] && !final['correctness_failed'] && final.fetch('benchmark_errors').empty?, 'native finalization failure')
   verification = json(File.join(directory, 'verification-summary.json'))
   check(verification['passed'] && verification['checks'].size == 6 && verification['checks'].all? { |c| c['passed'] && c['actual_rows'] == c['expected_rows'] && c['value_mismatches'].zero? }, 'exact verification failed')
   # Artifacts are extracted into one directory per original ZIP. Locate its
@@ -44,6 +44,7 @@ rows = statuses.map do |path|
   csv = CSV.read(File.join(directory, 'stages.csv'), headers: true)
   check(samples.size == csv.size, 'native/CSV stage count mismatch')
   samples.each_with_index do |sample, index|
+    check(sample.fetch('operations_completed').positive?, 'no real successful completions')
     parameters = sample.fetch('parameters')
     values = csv[index]
     check(parameters['latency_accounting_valid'] == 'true' && values['valid'] == 'true', 'invalid latency accounting')

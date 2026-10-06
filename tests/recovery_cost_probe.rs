@@ -23,6 +23,15 @@ fn should_preserve_exact_fixture_when_probe_order_changes_reader_locality() {
     assert_eq!(grouped["charged_final_bytes"], 0);
     assert_eq!(interleaved["charged_final_bytes"], 0);
     assert_eq!(grouped["remote_range_failures"], 0);
+    assert!(grouped["remote_range_calls"].as_u64().unwrap() > 0);
+    assert_eq!(
+        grouped["remote_range_started"],
+        grouped["remote_range_calls"]
+    );
+    assert!(
+        grouped["remote_range_bytes"].as_u64().unwrap()
+            >= grouped["verified_sst_bytes"].as_u64().unwrap()
+    );
     assert_eq!(interleaved["all_exact_proofs_passed"], true);
 }
 

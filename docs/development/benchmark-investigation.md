@@ -142,3 +142,28 @@ gh workflow run bench-tier5.yml --ref BRANCH \
 `investigation=none` retains the original nine-case ramp. Investigation
 `profile=full` optionally measures each independent cell for 3,600 seconds;
 the ordinary Tier 5/6 full campaigns remain separate acceptance evidence.
+
+## Literal readback
+
+Retain each original uploaded ZIP, validate its CRC and extract into a separate
+artifact directory. Then run:
+
+```sh
+ruby tools/readback-investigation.rb EXTRACTED_ARTIFACT_ROOT SOURCE_SHA SECONDS
+```
+
+The tool requires real successful completions and checks all six exact-value
+controls, both shutdowns, actual measured duration, source identity and native
+finalization. It compares native observations and sample counts with CSV/status,
+and checks stage-local stall deltas against recorded runtime endpoints. Check
+that the receipt count equals the entire planned matrix; partial downloads do
+not establish a completed campaign. Stage wall time includes initial runtime
+and prestate capture, worker setup, and ending inventory/report work; it excludes
+the final flush/reopen verification. New measurement overhead is part of the new
+baseline and does not establish a speedup against older reports.
+
+Probe receipts are written after each completed row with `complete=false`
+until the planned matrix finishes. A later failure retains earlier results and
+job logs, but cannot qualify the whole matrix. Recovery range counters attach
+after `ReplayCoverage` installs its normal observer and forward normal progress;
+a regression requires actual nonzero completed ranges and bytes.

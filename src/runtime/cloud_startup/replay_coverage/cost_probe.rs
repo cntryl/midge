@@ -14,16 +14,28 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct Reads {
+    started: AtomicU64,
     calls: AtomicU64,
     bytes: AtomicU64,
     failed: AtomicU64,
 }
 impl crate::io::traits::ReadObserver for Reads {
-    fn remote_range_started(&self) {}
-    fn remote_range_completed(&self, bytes: u64, _elapsed: Duration, failed: bool) {
+    fn remote_range_started(&self) {
+        self.started.fetch_add(1, Ordering::Relaxed);
+        crate::io::traits::ReadObserver::remote_range_started(
+            &crate::telemetry::recovery_progress::RecoveryReadObserver,
+        );
+    }
+    fn remote_range_completed(&self, bytes: u64, elapsed: Duration, failed: bool) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
         self.failed.fetch_add(u64::from(failed), Ordering::Relaxed);
+        crate::io::traits::ReadObserver::remote_range_completed(
+            &crate::telemetry::recovery_progress::RecoveryReadObserver,
+            bytes,
+            elapsed,
+            failed,
+        );
     }
 }
 
@@ -60,10 +72,15 @@ pub fn run_recovery_cost_probe(
         cloud,
         Duration::from_secs(5),
     ));
-    let remote = remote.with_read_observer(reads.clone()).ok_or_else(|| {
-        MidgeError::Internal("remote adapter cannot retain counting observer".into())
-    })?;
-    let coverage = ReplayCoverage::new(manifest, remote, budget);
+    let mut coverage = ReplayCoverage::new(manifest, remote, budget);
+    // ReplayCoverage installs its standard progress observer during construction.
+    // Attach the counting observer afterward and forward progress above.
+    coverage.fs = coverage
+        .fs
+        .with_read_observer(reads.clone())
+        .ok_or_else(|| {
+            MidgeError::Internal("remote adapter cannot retain counting observer".into())
+        })?;
     let started = Instant::now();
     let mut releases = 0;
     for index in 0..files * entries {
@@ -109,6 +126,7 @@ pub fn run_recovery_cost_probe(
         "block_hits": coverage.block_hits.get(), "block_misses": coverage.block_misses.get(),
         "charged_peak_bytes": coverage.read_budget.peak(), "charged_final_bytes": coverage.read_budget.used(),
         "coverage_elapsed_ns": coverage.elapsed_ns.get(), "wall_elapsed_ns": elapsed,
+        "remote_range_started": reads.started.load(Ordering::Relaxed),
         "remote_range_calls": reads.calls.load(Ordering::Relaxed), "remote_range_bytes": reads.bytes.load(Ordering::Relaxed),
         "remote_range_failures": reads.failed.load(Ordering::Relaxed), "production_optimization_accepted": false,
     }))
