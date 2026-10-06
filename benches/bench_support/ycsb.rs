@@ -24,6 +24,9 @@ use super::config::{MidgeOptions, StorageMode};
 pub const KEY_SIZE: usize = 16;
 pub const DEFAULT_VALUE_SIZE: usize = 128;
 
+#[path = "ycsb/inventory.rs"]
+pub mod inventory;
+
 pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub const TIER4_MEMORY_MEMTABLE_SIZE_BYTES: usize = 512 * 1024 * 1024;
 

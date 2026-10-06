@@ -39,28 +39,27 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
 
-fn run_workload_e_warmup(engine: &Arc<cntryl_midge::Engine>, clients: usize, initial_keys: usize) {
+fn run_workload_e_warmup(
+    engine: &Arc<cntryl_midge::Engine>,
+    inventories: &[ycsb::inventory::InsertInventory],
+    initial_keys: usize,
+) {
     let write_opts = cntryl_midge::WriteOptions::best_effort();
-    let _warmup_ops =
-        ycsb::run_multi_client_for_duration(engine, clients, WARMUP, |client_id, stop| {
+    let _warmup_ops = ycsb::run_multi_client_for_duration_observed_with_stats(
+        engine,
+        inventories.len(),
+        WARMUP,
+        |client_id, stop| {
+            let inventory = inventories[client_id].clone();
             move |e, cf, op_index| {
                 let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                 let is_insert = (r0 % 100) >= 95;
                 let cf_id = cf.id();
 
                 if is_insert {
-                    let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
-                    let k = ycsb::make_key(key_id);
-                    let v = ycsb::make_value((op_index % 251) as u8);
-                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                        let mut tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                            .expect("begin");
-                        tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
-                        tx.commit(write_opts)
-                    })
-                    .expect("commit");
-                    return;
+                    return inventory
+                        .insert(e, cf_id, stop.as_ref(), op_index, write_opts)
+                        .expect("warmup E insert");
                 }
 
                 let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
@@ -82,19 +81,22 @@ fn run_workload_e_warmup(engine: &Arc<cntryl_midge::Engine>, clients: usize, ini
                     count += 1;
                 }
                 std::hint::black_box(count);
+                true
             }
-        });
+        },
+    );
 }
 
 fn run_workload_e_measured(
     ctx: &mut StressContext,
     engine: &Arc<cntryl_midge::Engine>,
-    clients: usize,
+    inventories: &[ycsb::inventory::InsertInventory],
     initial_keys: usize,
     profile: &str,
     duration: Duration,
     write_opts: cntryl_midge::WriteOptions,
 ) -> ycsb::MultiClientRunStats {
+    let clients = inventories.len();
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_e_{profile}_{clients}_{client_suffix}");
     stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
@@ -103,24 +105,16 @@ fn run_workload_e_measured(
             clients,
             duration,
             |client_id, stop| {
+                let inventory = inventories[client_id].clone();
                 move |e, cf, op_index| {
                     let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
                     let is_insert = (r0 % 100) >= 95;
                     let cf_id = cf.id();
 
                     if is_insert {
-                        let key_id = initial_keys as u64 + ((client_id as u64) << 32) + op_index;
-                        let k = ycsb::make_key(key_id);
-                        let v = ycsb::make_value((op_index % 251) as u8);
-                        return ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
-                            let mut tx = e
-                                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                .expect("measured begin");
-                            tx.put(k.to_vec(), v.clone(), None)
-                                .expect("measured insert");
-                            tx.commit(write_opts)
-                        })
-                        .expect("measured commit");
+                        return inventory
+                            .insert(e, cf_id, stop.as_ref(), op_index, write_opts)
+                            .expect("measured E insert");
                     }
 
                     let max_start = (initial_keys as u64).saturating_sub(SCAN_LEN + 1).max(1);
@@ -188,7 +182,14 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     ycsb::load_initial_dataset(engine.as_ref(), &cf, initial_keys);
 
     // Phase 2: Warm-up (not measured)
-    run_workload_e_warmup(&engine, clients, initial_keys);
+    let inventories: Vec<_> = (0..clients)
+        .map(|client| ycsb::inventory::InsertInventory::new(initial_keys, client))
+        .collect();
+    run_workload_e_warmup(&engine, &inventories, initial_keys);
+    let warmup_inserts: u64 = inventories
+        .iter()
+        .map(ycsb::inventory::InsertInventory::committed)
+        .sum();
 
     // Flush to ensure warmup data is durable before measured phase
     ycsb::flush_after_phase(engine.as_ref(), &cf).expect("flush warmup phase");
@@ -199,7 +200,7 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let measured = run_workload_e_measured(
         ctx,
         &engine,
-        clients,
+        &inventories,
         initial_keys,
         profile,
         measured,
@@ -209,6 +210,18 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     measured.record_latencies(ctx);
     let perf = ycsb::runtime_perf_report(engine.as_ref(), perf_start);
     ycsb::record_runtime_report(ctx, &perf);
+    let rows =
+        ycsb::inventory::verify_inventory(engine.as_ref(), cf.id(), initial_keys, &inventories)
+            .expect("E fresh insert cardinality");
+    ctx.parameter(
+        "verified_fresh_inserts",
+        rows - initial_keys as u64 - warmup_inserts,
+    );
+    ctx.parameter("verified_rows", rows);
+    let mut engine = Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("E workers must be joined"));
+    engine
+        .shutdown(Duration::from_secs(30))
+        .expect("E shutdown");
 }
 
 #[stress(tier = 4)]
