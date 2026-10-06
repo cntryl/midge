@@ -743,7 +743,7 @@
         {
           "path": "tests/snapshot_spill_pressure.rs",
           "line": 60,
-          "symbol": "should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted",
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
           "claim": "Frozen old scans and point reads survive TTL expiry, sixteen acknowledged mixed-history compactions and actual spill saturation.",
           "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
           "assertions": [
@@ -957,7 +957,7 @@
         {
           "path": "tests/snapshot_spill_pressure.rs",
           "line": 60,
-          "symbol": "should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted",
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
           "claim": "A controlled clock expires only the first eight keys for a new reader before overwrites; the original snapshot retains all thirty-two original values through compaction.",
           "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
           "assertions": [
@@ -1219,7 +1219,7 @@
         {
           "path": "tests/snapshot_spill_pressure.rs",
           "line": 60,
-          "symbol": "should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted",
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
           "claim": "Actual uncommitted spill keys and the capacity-rejected bounded write remain absent from other transactions; releasing the spill owner permits the same write without invalidating the old snapshot.",
           "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
           "assertions": [
@@ -2823,7 +2823,7 @@
         {
           "path": "tests/snapshot_spill_pressure.rs",
           "line": 60,
-          "symbol": "should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted",
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
           "claim": "Actual retired snapshot input files remain physically present while pinned and all are physically reclaimed within ten seconds after release.",
           "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
           "assertions": [
@@ -4753,7 +4753,7 @@
         {
           "path": "tests/snapshot_spill_pressure.rs",
           "line": 60,
-          "symbol": "should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted",
+          "symbol": "should_preserve_snapshot_isolation_when_spill_pressure_is_released",
           "claim": "More than 1.5 MiB of actual caller-owned spill files exhaust a 2 MiB local budget; rejected mutation preserves exact acknowledged state and the same write resumes after release.",
           "scope": "One deterministic public-API filesystem-backed CloudSimulated schedule; 16 MiB engine budget, 2 MiB local capacity, 128 KiB transaction pool, controlled TTL time, sixteen history rounds, actual spill saturation and exact clean reopen. No native-provider, crash, whole-process RSS or exhaustive-concurrency proof.",
           "assertions": [

@@ -130,7 +130,7 @@
   "tests/engine_api/startup_deadline.rs": "e192f5c60778289b3e7499c397f22ed09c79035a8f90d519fa0ffd069d51a110",
   "tests/fault_injection.rs": "a860cade5621c4af0017cf61c99e4e6a0e128f74a2eb56487b1dedb0dcebf323",
   "tests/fault_injection/compaction_deadline.rs": "34387412a95214b20dd6d3fd72a9dcbd2f9de28e0e56fde79f81f6f9653201ae",
-  "tests/snapshot_spill_pressure.rs": "8b08fff524019113ebe00a5edd8c74a58a986946cf09594de2e2419b03be9995",
+  "tests/snapshot_spill_pressure.rs": "431e25befad36db53b675974b0ecd6d781b8d01b549ed08f0f143a3f5a21d7f9",
   "tests/solid_governance.rs": "3671d8871241d65aeabf668885ded1364e5d1afa579053dfa14b297094d69bbb",
   "tests/storage_invariants.rs": "9ad483731fa102265b789680a0366de0aafab76e5b8fd9286484f571fe607c29",
   "tests/storage_layer.rs": "f41508a5fa5b58591f73a6406fbee370da09baa81c44e84e180e7b81de44a1e5",

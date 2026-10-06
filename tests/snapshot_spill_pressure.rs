@@ -57,7 +57,7 @@ fn assert_exact(tx: &cntryl_midge::Transaction, expected: &BTreeMap<Vec<u8>, Vec
 // Keep the pressure/release order visible beside its exact-state assertions.
 #[allow(clippy::too_many_lines)]
 #[test]
-fn should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted() {
+fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ControlledClock(AtomicU64::new(10_000)));
