@@ -140,12 +140,21 @@ Coverage also reports probe count, reader-open attempts, and successfully
 verified SST bytes. A hard process exit can leave a phase incomplete, so the
 interrupted report contains only observations emitted before that exit.
 
-Coverage retains at most one SST reader using its existing byte budget. It
-releases the reader before checking a different SST and before checkpoint
-construction. Full-object verification remains bound to an immutable read
-view, and each data probe retains conditional identity and block validation.
-This reduces repeated metadata reads without persisting a new proof format or
-expanding the cache with the SST inventory.
+Coverage retains at most four SST readers under one shared byte budget, with
+at most four decoded blocks per reader. Decoded blocks and their optional key
+seek metadata share a quarter-budget retention cap. Seek metadata reserves its
+complete key and entry buffers before allocation; insufficient space uses the
+original exact prefix decoder. Eviction and checkpoint construction release
+readers, blocks, seek metadata and immutable proofs. Full-object verification
+remains bound to an immutable read view, and each loaded block retains
+conditional identity and checksum validation. No proof format is persisted.
+
+Coverage receipts report `decoded_entries` (completed entry decodes while
+sizing/building seek metadata or evaluating point probes) and
+`key_reconstruction_allocations` (key-buffer allocations on those paths).
+These measure coverage work, excluding the separate immutable-object
+verification pass. Every duplicate version is still folded through the exact
+key/value/sequence/TTL/operation coverage rule.
 
 Sqrzl is the self-contained native-provider qualification environment described
 in [the cloud qualification policy](cloud-qualification-policy.md). Its

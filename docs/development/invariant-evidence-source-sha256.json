@@ -63,7 +63,7 @@
   "src/runtime/actors/wal/transaction.rs": "d9064d8688c4e04cda6acb6878abeb97dbd9e7a23db03ad8078b69d75d4baa4f",
   "src/runtime/cloud_startup/cloud_recovery/metadata.rs": "60d847ea8511246dae359a2b7e1425750a31d3f4b1d0e0c85f3f32d6c959389b",
   "src/runtime/cloud_startup/cloud_recovery/mod.rs": "1e9ab8bb3b5b88e95b258abff729849fa43d0d71f3e2a888bc7ddc1a08f44b96",
-  "src/runtime/cloud_startup/replay_coverage.rs": "cb979c3b3ecb440db3479f9444df474d64cc993e45fc1063a010fdc26d65837a",
+  "src/runtime/cloud_startup/replay_coverage.rs": "237acda42e706884127efac182e577f88bf10945d8af1b05956be6e54c3cc4b8",
   "src/runtime/cloud_startup/replay_coverage/candidate_index.rs": "c7de08a107f8809189277b9faef7d9c1e864c96594ab4467535650be47b57e9f",
   "src/runtime/cloud_startup/replay_coverage/tests/streaming_scale.rs": "a822bac2bf04af052e85bb925259e870fc2fb04b50eef1c1a4e44c1ca080032e",
   "src/runtime/cloud_startup/streaming_wal_plan.rs": "e5b7752afbd63633000204d87848d1dfc1fc1aa5bcbbcb5468be73c9fb7655da",

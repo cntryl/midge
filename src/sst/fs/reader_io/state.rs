@@ -52,7 +52,10 @@ impl SstFileIo {
         }
     }
 
-    fn state_from_entry_view(block_data: &Bytes, entry: encoding::EntryView<'_>) -> KeyState {
+    pub(super) fn state_from_entry_view(
+        block_data: &Bytes,
+        entry: encoding::EntryView<'_>,
+    ) -> KeyState {
         if matches!(entry.entry_type, EntryType::Delete) {
             return KeyState::Tombstone(entry.sequence);
         }
@@ -109,32 +112,41 @@ impl SstFileIo {
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<KeyState> {
+        if let Some(state) = self.indexed_recovery_state(block_data, key, snapshot_seq)? {
+            return Ok(state);
+        }
         let mut decoder = BlockEntryDecoder::default();
         let mut best_state = KeyState::Absent;
+        let mut steps = 0_u64;
 
         let budget = self
             .recovery_block
             .as_ref()
             .and(self.metadata_budget.as_ref());
-        while let Some(entry) = decoder.next(
-            block_data,
-            self.format_version,
-            budget,
-            "recovery decoder key",
-        )? {
-            match decoder.key().cmp(key) {
-                std::cmp::Ordering::Less => {}
-                std::cmp::Ordering::Greater => break,
-                std::cmp::Ordering::Equal => {
-                    if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
-                        let candidate = Self::state_from_entry_view(block_data, entry);
-                        Self::merge_newer_state(&mut best_state, candidate)?;
+        let result = (|| {
+            while let Some(entry) = decoder.next(
+                block_data,
+                self.format_version,
+                budget,
+                "recovery decoder key",
+            )? {
+                steps += 1;
+                match decoder.key().cmp(key) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Greater => break,
+                    std::cmp::Ordering::Equal => {
+                        if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
+                            let candidate = Self::state_from_entry_view(block_data, entry);
+                            Self::merge_newer_state(&mut best_state, candidate)?;
+                        }
                     }
                 }
             }
-        }
 
-        Ok(best_state)
+            Ok(best_state)
+        })();
+        self.record_recovery_decode_work(steps, if budget.is_some() { steps } else { 0 });
+        result
     }
 
     /// Check block bloom filter with proper metrics and failure-safe semantics

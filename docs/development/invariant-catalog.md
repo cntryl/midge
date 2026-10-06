@@ -9,10 +9,10 @@ The initial inventory was recorded during the #707/#708 work. This update
 refreshes its row-level references against the delivered startup/flush and
 compaction deadline fixes, #723 native scratch-capacity repair, #724 version
 documentation, and #715 accounting/benchmark/reader source measured at
-c8f0de80. References now bind #735 test-only assertion-helper source commit
-eab8dbd37671beb33d2beb60075056e33cd7b36e before this documentation commit.
-All existing declaration/assertion locations and source hashes remain unchanged;
-historical compatibility, #733 and #735 reference scopes stay unchanged.
+c8f0de80. References now bind recovery seek-index source commit
+c1e5709e376d29090bb331d37f27fa941d763b96 before this documentation commit.
+The changed replay-coverage locations and source hash are refreshed;
+existing invariant claims and historical qualification objects are retained.
 The measured c8 campaign and its original report stay unchanged; the new
 coverage index controls do not claim fresh native/full-hour qualification.
 The retained nine-cell outcome, original readback digest and #730/#731
