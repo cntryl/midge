@@ -19,7 +19,7 @@ pub enum IteratorState {
     Active,
     /// The iterator reached the end of its range normally.
     Exhausted,
-    /// A storage or decoding error terminated the scan.
+    /// A read, decoding or authority error terminated the scan.
     Failed,
 }
 
@@ -78,8 +78,8 @@ impl<'a> Iterator<'a> {
     ///
     /// # Errors
     ///
-    /// Returns a storage or corruption error encountered while advancing the
-    /// lazy scan.
+    /// Returns a read or corruption error encountered while advancing the
+    /// lazy scan, including `Fenced` when its cloud lease is lost.
     pub fn try_collect(mut self) -> MidgeResult<Vec<(Bytes, Bytes)>> {
         let mut rows = Vec::new();
         for row in self.by_ref() {

@@ -234,7 +234,13 @@ the old prefix, export it with a compatible binary, and import into a new prefix
 
 `on_lease_loss` registers a process-local notification for the transition to a
 fenced writer. Begin orderly shutdown from the callback without blocking it;
-the engine remains readable but rejects new writes. Shutdown timeouts bound the
+cloud transactions become invalid: new transactions, point reads and scans
+return `MidgeError::Fenced`, including the next advance of an iterator opened
+before lease loss. Reads also check monotonic lease expiry before notification
+and after blocking I/O. A successor may reclaim the predecessor's remote SSTs;
+process-local snapshot pins do not retain them across takeover. Diagnostics and
+shutdown remain available. Local and in-memory snapshot reads keep their existing
+behavior. Shutdown timeouts bound the
 caller's wait without releasing fencing ahead of still-running durability work.
 
 ## Errors and diagnostics

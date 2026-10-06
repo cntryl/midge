@@ -2,6 +2,8 @@ use super::*;
 use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
+mod cloud_read_fencing;
+
 #[cfg(feature = "internal-testing")]
 mod checkpoint_origins;
 
@@ -2516,12 +2518,19 @@ fn should_reject_commit_when_runtime_validity_expires_without_watchdog() -> Midg
                 matches!(result, Err(MidgeError::Fenced(_))),
                 "cloud={cloud}, outcome={result:?}"
             );
-            assert_eq!(
-                engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)?
-                    .get(b"expired")?,
-                None
-            );
+            if cloud {
+                assert!(matches!(
+                    engine.begin_tx(cf.id(), TransactionMode::ReadOnly),
+                    Err(MidgeError::Fenced(_))
+                ));
+            } else {
+                assert_eq!(
+                    engine
+                        .begin_tx(cf.id(), TransactionMode::ReadOnly)?
+                        .get(b"expired")?,
+                    None
+                );
+            }
         }
     }
     Ok(())

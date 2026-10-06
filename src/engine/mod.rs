@@ -332,7 +332,8 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when snapshot registration fails or the column family does
-    /// not exist.
+    /// not exist. Cloud engines return [`MidgeError::Fenced`] when their lease is
+    /// no longer valid; existing cloud transactions also reject reads.
     ///
     pub fn begin_tx(
         &self,

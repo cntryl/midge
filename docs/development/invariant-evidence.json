@@ -330,23 +330,23 @@
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 55,
+          "line": 57,
           "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
           "claim": "Native S3 predecessor loses real lease validity; a higher epoch successor publishes and reclaims WAL/SST state before held immutable WAL completion. Strict predecessor write is fenced and no subsequent control mutation is forwarded.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 277,
+              "line": 279,
               "marker": "assert!(",
               "helper": "run_schedule"
             },
             {
-              "line": 369,
+              "line": 371,
               "marker": "assert!(",
               "helper": "run_schedule"
             },
             {
-              "line": 402,
+              "line": 404,
               "marker": "assert!(predecessor_proxy.control.observations()[predecessor_release_index..]",
               "helper": "run_schedule"
             }
@@ -637,14 +637,14 @@
       "production": [
         {
           "path": "src/engine/mod.rs",
-          "line": 337,
+          "line": 338,
           "symbol": "Engine::begin_tx",
           "kind": "function",
           "marker": "pub fn begin_tx("
         },
         {
           "path": "src/engine/mod.rs",
-          "line": 412,
+          "line": 413,
           "symbol": "acquire_transaction_snapshot",
           "kind": "function",
           "marker": "fn acquire_transaction_snapshot("
@@ -662,6 +662,13 @@
           "symbol": "begin_acquisition",
           "kind": "function",
           "marker": "pub(crate) fn begin_acquisition(&self, sequence_floor: u64) -> SnapshotAcquisitionGuard<'_> {"
+        },
+        {
+          "path": "src/runtime/handle.rs",
+          "line": 145,
+          "symbol": "read_with_authority",
+          "kind": "function",
+          "marker": "pub(crate) fn read_with_authority<T>("
         }
       ],
       "tests": [
@@ -785,10 +792,168 @@
               "helper": "assert_exact"
             }
           ]
+        },
+        {
+          "path": "tests/cloud_provider_engine_qualification/authority_publication/read_fencing.rs",
+          "line": 9,
+          "symbol": "should_fence_predecessor_reads_when_successor_reclaims_remote_snapshot_files",
+          "claim": "Actual successor compaction deletes every original remote SST after real lease expiry. Existing predecessor point reads, scan creation and pre-created forward/reverse iterators return sticky Fenced; successor ordered rows and point values are exact before and after reopen.",
+          "scope": "Native S3, independent caches and real HTTP ACK/deletion observations against pinned Sqrzl. One takeover schedule and same-process successor reopen; not exhaustive simulation or independent-process recovery.",
+          "assertions": [
+            {
+              "line": 58,
+              "marker": "assert_ne!(original_objects.len(), 0);"
+            },
+            {
+              "line": 60,
+              "marker": "assert_ne!(signed_s3_request(\"GET\", path, &[]).unwrap().len(), 0);"
+            },
+            {
+              "line": 67,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 83,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 135,
+              "marker": "assert!("
+            },
+            {
+              "line": 145,
+              "marker": "assert!("
+            },
+            {
+              "line": 150,
+              "marker": "assert!(matches!(frozen.get(key), Err(MidgeError::Fenced(_))));"
+            },
+            {
+              "line": 152,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 158,
+              "marker": "assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));"
+            },
+            {
+              "line": 159,
+              "marker": "assert_eq!(scan.state(), IteratorState::Failed);"
+            },
+            {
+              "line": 163,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 191,
+              "marker": "assert_eq!(actual, expected);",
+              "helper": "assert_successor_rows"
+            },
+            {
+              "line": 193,
+              "marker": "assert_eq!(read.get(&key).unwrap(), Some(value));",
+              "helper": "assert_successor_rows"
+            },
+            {
+              "line": 195,
+              "marker": "assert_eq!(read.get(b\"rejected\").unwrap(), None);",
+              "helper": "assert_successor_rows"
+            }
+          ]
+        },
+        {
+          "path": "src/engine/tests/cloud_read_fencing.rs",
+          "line": 5,
+          "symbol": "should_invalidate_cloud_reads_when_monotonic_lease_expires_before_notification",
+          "claim": "Cloud cached/own-write/missing reads and pre-created lazy scans are fenced after monotonic expiry without a notification. Expired local snapshots remain readable; new cloud transactions are rejected.",
+          "scope": "Deterministic public Engine API over Local and CloudSimulated, stopped heartbeat and expired actual LeaseValidity; no native transport or cross-owner GC claim.",
+          "assertions": [
+            {
+              "line": 32,
+              "marker": "assert_eq!(frozen.get(b\"a\")?.as_deref(), Some(b\"one\".as_slice()));"
+            },
+            {
+              "line": 33,
+              "marker": "assert_eq!(forward.next().unwrap()?.0.as_ref(), b\"a\");"
+            },
+            {
+              "line": 45,
+              "marker": "assert!("
+            },
+            {
+              "line": 54,
+              "marker": "assert!(matches!(result, Err(MidgeError::Fenced(_))), \"{result:?}\");"
+            },
+            {
+              "line": 56,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 62,
+              "marker": "assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));"
+            },
+            {
+              "line": 63,
+              "marker": "assert_eq!(scan.state(), IteratorState::Failed);"
+            },
+            {
+              "line": 67,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 73,
+              "marker": "assert_eq!(frozen.get(b\"a\")?.as_deref(), Some(b\"one\".as_slice()));"
+            },
+            {
+              "line": 74,
+              "marker": "assert_eq!(frozen.get(b\"absent\")?, None);"
+            },
+            {
+              "line": 75,
+              "marker": "assert_eq!(own.get(b\"own\")?.as_deref(), Some(b\"uncommitted\".as_slice()));"
+            },
+            {
+              "line": 76,
+              "marker": "assert_eq!(forward.next().unwrap()?.0.as_ref(), b\"b\");"
+            },
+            {
+              "line": 77,
+              "marker": "assert_eq!(reverse.next().unwrap()?.0.as_ref(), b\"b\");"
+            },
+            {
+              "line": 78,
+              "marker": "assert!(empty.next().is_none());"
+            },
+            {
+              "line": 79,
+              "marker": "assert_eq!("
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/handle/read_authority_tests.rs",
+          "line": 24,
+          "symbol": "should_discard_read_outcomes_when_lease_expires_during_the_read",
+          "claim": "Read results, missing-file errors and end-of-range outcomes are replaced by Fenced if shared lease validity expires during the read closure.",
+          "scope": "Focused synchronous read-guard callback, not an actual SST I/O timing or native network cancellation fixture.",
+          "assertions": [
+            {
+              "line": 36,
+              "marker": "assert!(healthy.load(Ordering::Acquire));"
+            },
+            {
+              "line": 37,
+              "marker": "assert!(matches!(result, Err(MidgeError::Fenced(_))), \"{result:?}\");"
+            },
+            {
+              "line": 38,
+              "marker": "assert!(matches!("
+            }
+          ]
         }
       ],
-      "preconditions": "Public snapshot test runs common memory/local/CloudSimulated modes. Pin tests operate the real registry with supplied names; actual pinned compaction is separately mapped at SST-6. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
-      "uncovered": "Representative snapshots and the pin registry do not enumerate all snapshot-acquisition/GC interleavings. The API's single CF ID is a structural limit rather than cross-CF atomicity evidence."
+      "preconditions": "Public snapshot test runs common memory/local/CloudSimulated modes. Pin tests operate the real registry with supplied names; actual pinned compaction is separately mapped at SST-6. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md. Cloud snapshot retention is limited to the current lease holder; read-fencing regressions cover invalidation on authority loss.",
+      "uncovered": "Representative snapshots and the pin registry do not enumerate all snapshot-acquisition/GC interleavings. The API's single CF ID is a structural limit rather than cross-CF atomicity evidence. Remote reader retention across takeover is not provided; successor reclamation is permitted and predecessor cloud reads are invalidated."
     },
     {
       "id": "TX-2",
@@ -809,14 +974,14 @@
         },
         {
           "path": "src/engine/api/transaction.rs",
-          "line": 818,
+          "line": 819,
           "symbol": "Transaction::get",
           "kind": "function",
           "marker": "pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {"
         },
         {
           "path": "src/engine/api/transaction.rs",
-          "line": 848,
+          "line": 856,
           "symbol": "Transaction::scan",
           "kind": "function",
           "marker": "pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {"
@@ -1271,7 +1436,7 @@
       "production": [
         {
           "path": "src/engine/api/transaction.rs",
-          "line": 848,
+          "line": 856,
           "symbol": "Transaction::scan",
           "kind": "function",
           "marker": "pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {"
@@ -1517,7 +1682,7 @@
       "production": [
         {
           "path": "src/runtime/handle.rs",
-          "line": 241,
+          "line": 301,
           "symbol": "send_and_wait_with_timeout",
           "kind": "function",
           "marker": "fn send_and_wait_with_timeout("
@@ -2742,6 +2907,13 @@
           "symbol": "execute_compaction",
           "kind": "function",
           "marker": "pub fn execute_compaction("
+        },
+        {
+          "path": "src/runtime/handle.rs",
+          "line": 145,
+          "symbol": "read_with_authority",
+          "kind": "function",
+          "marker": "pub(crate) fn read_with_authority<T>("
         }
       ],
       "tests": [
@@ -2865,10 +3037,168 @@
               "helper": "assert_exact"
             }
           ]
+        },
+        {
+          "path": "tests/cloud_provider_engine_qualification/authority_publication/read_fencing.rs",
+          "line": 9,
+          "symbol": "should_fence_predecessor_reads_when_successor_reclaims_remote_snapshot_files",
+          "claim": "Actual successor compaction deletes every original remote SST after real lease expiry. Existing predecessor point reads, scan creation and pre-created forward/reverse iterators return sticky Fenced; successor ordered rows and point values are exact before and after reopen.",
+          "scope": "Native S3, independent caches and real HTTP ACK/deletion observations against pinned Sqrzl. One takeover schedule and same-process successor reopen; not exhaustive simulation or independent-process recovery.",
+          "assertions": [
+            {
+              "line": 58,
+              "marker": "assert_ne!(original_objects.len(), 0);"
+            },
+            {
+              "line": 60,
+              "marker": "assert_ne!(signed_s3_request(\"GET\", path, &[]).unwrap().len(), 0);"
+            },
+            {
+              "line": 67,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 83,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 135,
+              "marker": "assert!("
+            },
+            {
+              "line": 145,
+              "marker": "assert!("
+            },
+            {
+              "line": 150,
+              "marker": "assert!(matches!(frozen.get(key), Err(MidgeError::Fenced(_))));"
+            },
+            {
+              "line": 152,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 158,
+              "marker": "assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));"
+            },
+            {
+              "line": 159,
+              "marker": "assert_eq!(scan.state(), IteratorState::Failed);"
+            },
+            {
+              "line": 163,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 191,
+              "marker": "assert_eq!(actual, expected);",
+              "helper": "assert_successor_rows"
+            },
+            {
+              "line": 193,
+              "marker": "assert_eq!(read.get(&key).unwrap(), Some(value));",
+              "helper": "assert_successor_rows"
+            },
+            {
+              "line": 195,
+              "marker": "assert_eq!(read.get(b\"rejected\").unwrap(), None);",
+              "helper": "assert_successor_rows"
+            }
+          ]
+        },
+        {
+          "path": "src/engine/tests/cloud_read_fencing.rs",
+          "line": 5,
+          "symbol": "should_invalidate_cloud_reads_when_monotonic_lease_expires_before_notification",
+          "claim": "Cloud cached/own-write/missing reads and pre-created lazy scans are fenced after monotonic expiry without a notification. Expired local snapshots remain readable; new cloud transactions are rejected.",
+          "scope": "Deterministic public Engine API over Local and CloudSimulated, stopped heartbeat and expired actual LeaseValidity; no native transport or cross-owner GC claim.",
+          "assertions": [
+            {
+              "line": 32,
+              "marker": "assert_eq!(frozen.get(b\"a\")?.as_deref(), Some(b\"one\".as_slice()));"
+            },
+            {
+              "line": 33,
+              "marker": "assert_eq!(forward.next().unwrap()?.0.as_ref(), b\"a\");"
+            },
+            {
+              "line": 45,
+              "marker": "assert!("
+            },
+            {
+              "line": 54,
+              "marker": "assert!(matches!(result, Err(MidgeError::Fenced(_))), \"{result:?}\");"
+            },
+            {
+              "line": 56,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 62,
+              "marker": "assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));"
+            },
+            {
+              "line": 63,
+              "marker": "assert_eq!(scan.state(), IteratorState::Failed);"
+            },
+            {
+              "line": 67,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 73,
+              "marker": "assert_eq!(frozen.get(b\"a\")?.as_deref(), Some(b\"one\".as_slice()));"
+            },
+            {
+              "line": 74,
+              "marker": "assert_eq!(frozen.get(b\"absent\")?, None);"
+            },
+            {
+              "line": 75,
+              "marker": "assert_eq!(own.get(b\"own\")?.as_deref(), Some(b\"uncommitted\".as_slice()));"
+            },
+            {
+              "line": 76,
+              "marker": "assert_eq!(forward.next().unwrap()?.0.as_ref(), b\"b\");"
+            },
+            {
+              "line": 77,
+              "marker": "assert_eq!(reverse.next().unwrap()?.0.as_ref(), b\"b\");"
+            },
+            {
+              "line": 78,
+              "marker": "assert!(empty.next().is_none());"
+            },
+            {
+              "line": 79,
+              "marker": "assert_eq!("
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/handle/read_authority_tests.rs",
+          "line": 24,
+          "symbol": "should_discard_read_outcomes_when_lease_expires_during_the_read",
+          "claim": "Read results, missing-file errors and end-of-range outcomes are replaced by Fenced if shared lease validity expires during the read closure.",
+          "scope": "Focused synchronous read-guard callback, not an actual SST I/O timing or native network cancellation fixture.",
+          "assertions": [
+            {
+              "line": 36,
+              "marker": "assert!(healthy.load(Ordering::Acquire));"
+            },
+            {
+              "line": 37,
+              "marker": "assert!(matches!(result, Err(MidgeError::Fenced(_))), \"{result:?}\");"
+            },
+            {
+              "line": 38,
+              "marker": "assert!(matches!("
+            }
+          ]
         }
       ],
-      "preconditions": "Snapshot API test uses durable local/CloudSimulated modes with positive physical-compaction prerequisites; bottommost unit writes and reads real SSTs. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md.",
-      "uncovered": "Bottommost eligibility is explicitly supplied in the unit; not every production overlap planner proof is independently tested here. Pin/GC schedules are bounded, not a universal concurrency proof."
+      "preconditions": "Snapshot API test uses durable local/CloudSimulated modes with positive physical-compaction prerequisites; bottommost unit writes and reads real SSTs. The composed spill-pressure regression uses the controlled TTL clock and actual simulated-cloud spill/GC files described in snapshot-spill-pressure-fixture.md. Cloud snapshot retention is limited to the current lease holder; read-fencing regressions cover invalidation on authority loss.",
+      "uncovered": "Bottommost eligibility is explicitly supplied in the unit; not every production overlap planner proof is independently tested here. Pin/GC schedules are bounded, not a universal concurrency proof. Remote reader retention across takeover is not provided; successor reclamation is permitted and predecessor cloud reads are invalidated."
     },
     {
       "id": "SST-7",
@@ -3180,13 +3510,13 @@
       "tests": [
         {
           "path": "src/engine/tests.rs",
-          "line": 959,
+          "line": 961,
           "symbol": "should_reject_epoch_scoped_simulated_cloud_wal_without_catalog",
           "claim": "Actual orphan epoch-scoped valid WAL bytes are rejected without the publication catalog.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 977,
+              "line": 979,
               "marker": "assert!(matches!("
             }
           ]
@@ -3234,13 +3564,13 @@
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 55,
+          "line": 57,
           "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
           "claim": "Held native immutable WAL PUT succeeds, remains an uncatalogued orphan, and cannot alter the successor catalog. Two absent-cache fresh-process recoveries exclude its complete transaction.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 409,
+              "line": 411,
               "marker": "assert_eq!(",
               "helper": "run_schedule"
             }
@@ -3365,13 +3695,13 @@
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 55,
+          "line": 57,
           "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
           "claim": "Late native upload completion after real takeover leaves the predecessor cloud frontier unchanged. A deliberate early-frontier mutation is rejected by the fixture.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 385,
+              "line": 387,
               "marker": "assert_eq!(",
               "helper": "run_schedule"
             }
@@ -3416,17 +3746,17 @@
       "tests": [
         {
           "path": "src/engine/tests.rs",
-          "line": 1269,
+          "line": 1271,
           "symbol": "should_ignore_stale_manifest_json_during_strict_cloud_recovery",
           "claim": "Committed snapshot sequence 10 wins over a newer unpointed mutable manifest; loaded sequence remains 10 and legacy file is absent.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1303,
+              "line": 1305,
               "marker": "assert_eq!(recovered.last_persisted_sequence, 10);"
             },
             {
-              "line": 1304,
+              "line": 1306,
               "marker": "assert!(!temp_dir.path().join(\"manifest.json\").exists());"
             }
           ]
@@ -3513,21 +3843,21 @@
       "tests": [
         {
           "path": "src/engine/tests.rs",
-          "line": 1777,
+          "line": 1779,
           "symbol": "should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest",
           "claim": "Genuine different-size SST has positive unequal-size prerequisite; actual inventory validation fails and no local cache SST is installed.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1791,
+              "line": 1793,
               "marker": "assert_ne!("
             },
             {
-              "line": 1823,
+              "line": 1825,
               "marker": "assert!("
             },
             {
-              "line": 1827,
+              "line": 1829,
               "marker": "assert!("
             }
           ]
@@ -3654,23 +3984,23 @@
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 502,
+          "line": 504,
           "symbol": "should_verify_acknowledged_state_in_fresh_recovery_process",
           "claim": "Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 123,
+              "line": 125,
               "marker": "assert_eq!(",
               "helper": "assert_exact"
             },
             {
-              "line": 128,
+              "line": 130,
               "marker": "assert_eq!(",
               "helper": "assert_exact"
             },
             {
-              "line": 134,
+              "line": 136,
               "marker": "assert_eq!(",
               "helper": "assert_exact"
             }
@@ -3855,14 +4185,14 @@
         },
         {
           "path": "src/engine/mod.rs",
-          "line": 672,
+          "line": 673,
           "symbol": "Engine::drop_column_family",
           "kind": "function",
           "marker": "pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {"
         },
         {
           "path": "src/engine/mod.rs",
-          "line": 688,
+          "line": 689,
           "symbol": "Engine::drop_column_family_discarding_unflushed",
           "kind": "function",
           "marker": "pub fn drop_column_family_discarding_unflushed("
@@ -6366,7 +6696,7 @@
         },
         {
           "path": "src/engine/mod.rs",
-          "line": 527,
+          "line": 528,
           "symbol": "Engine::shutdown",
           "kind": "function",
           "marker": "pub fn shutdown(&mut self, timeout: Duration) -> MidgeResult<()> {"
