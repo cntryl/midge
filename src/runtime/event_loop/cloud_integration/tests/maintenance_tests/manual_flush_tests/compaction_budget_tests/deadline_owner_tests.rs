@@ -549,10 +549,8 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         let (started, response) = fixture.start_manual();
         let original = OperationDeadline::from_start(started, CALLER_BUDGET);
         let mut first = receive_generation(&mut fixture)?;
-        fixture.backend.arm(
-            CompactionPublishPhase::OutputDurable,
-            started + Duration::from_secs(3),
-        );
+        // Leave compute and CF1 publication live; only CF2's genuine reply
+        // crosses expiry. An unrelated first-phase hold can expire CF2 compute.
 
         // Act: complete the first CF, then forward a late actual response for CF2.
         dispatch_generation(&mut fixture, &mut first);
@@ -572,6 +570,7 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
                 "queued receipt must exhaust the original clock"
             );
         }
+        let second_budget_bound = original.remaining();
         dispatch_generation(&mut fixture, &mut second);
         let rejected_before_publication = original.is_expired()
             && !fixture.el.compaction_publish_actor.is_inflight()
@@ -622,15 +621,20 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
                 "{second_phase:?}"
             );
             assert!(second_intent);
-            assert_genuine_holds(&reads, 2);
-            assert!(reads[1].forwarded_at >= started + CALLER_BUDGET);
+            assert_genuine_holds(&reads, 1);
+            assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);
+            assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
+            assert!(second_budget_bound < CALLER_BUDGET);
+            assert!(reads[0]
+                .provider_budget
+                .is_some_and(|budget| budget <= second_budget_bound));
         } else {
             assert!(rejected_before_publication && original.is_expired());
             assert!(
                 !second_intent,
                 "no phase or intent was accepted after expiry"
             );
-            assert_genuine_holds(&reads, 1);
+            assert_genuine_holds(&reads, 0);
         }
         if queue_past_deadline {
             assert!(
@@ -639,7 +643,6 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
             );
         }
         assert!(no_later_phase && second_local_inputs);
-        assert!(reads[0].forwarded_at < started + CALLER_BUDGET);
         assert_route_timeout(&outcome, MANUAL_REQUEST);
         assert_one_exact_fixture_row(first_rows);
         assert_one_exact_fixture_row(second_rows);

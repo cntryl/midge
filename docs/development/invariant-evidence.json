@@ -5928,131 +5928,141 @@
           "path": "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests/deadline_owner_tests.rs",
           "line": 527,
           "symbol": "should_stop_second_family_when_original_manual_clock_expires",
-          "claim": "First CF commits; the second accepted generation retains the original origin and times out either before phase submission or after a genuine output-durability phase. Exact prior second-family authority/bytes remain intact; only an accepted publication phase owns a persisted intent.",
+          "claim": "First CF commits; the second accepted generation retains the original origin and times out either before phase submission or after a genuine output-durability phase. Exact prior second-family authority/bytes remain intact; only an accepted publication phase owns a persisted intent. Only the target CF2 response is held; its actual provider budget cannot exceed original remaining time sampled before submission.",
           "scope": "Real compute, conditional provider lease, seeded SST bytes and actual completion dispositions. No callback is fabricated for prepublication rejection. This is not native socket cancellation or public transaction ACK proof.",
           "assertions": [
             {
-              "line": 570,
+              "line": 568,
               "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 609,
+              "line": 608,
               "marker": "assert_ne!(first.cf_id, second.cf_id);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 610,
+              "line": 609,
               "marker": "assert_eq!(first.inputs.len(), 4);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 611,
+              "line": 610,
               "marker": "assert_eq!(second.inputs.len(), 4);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 612,
+              "line": 611,
               "marker": "assert_eq!(first.accepted_origin, Some(original));",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 613,
+              "line": 612,
               "marker": "assert_eq!(second.accepted_origin, Some(original));",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 614,
+              "line": 613,
               "marker": "assert_phases_succeeded(&first_phases);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 615,
+              "line": 614,
               "marker": "assert!(first_phases",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 619,
+              "line": 618,
               "marker": "assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 620,
+              "line": 619,
               "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 624,
+              "line": 623,
               "marker": "assert!(second_intent);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 625,
-              "marker": "assert_genuine_holds(&reads, 2);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 626,
-              "marker": "assert!(reads[1].forwarded_at >= started + CALLER_BUDGET);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 628,
-              "marker": "assert!(rejected_before_publication && original.is_expired());",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 629,
-              "marker": "assert!(",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 633,
+              "line": 624,
               "marker": "assert_genuine_holds(&reads, 1);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 636,
+              "line": 625,
+              "marker": "assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 626,
+              "marker": "assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 627,
+              "marker": "assert!(second_budget_bound < CALLER_BUDGET);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 628,
+              "marker": "assert!(reads[0]",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 632,
+              "marker": "assert!(rejected_before_publication && original.is_expired());",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 633,
               "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 641,
-              "marker": "assert!(no_later_phase && second_local_inputs);",
+              "line": 637,
+              "marker": "assert_genuine_holds(&reads, 0);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 642,
-              "marker": "assert!(reads[0].forwarded_at < started + CALLER_BUDGET);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 643,
-              "marker": "assert_route_timeout(&outcome, MANUAL_REQUEST);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 644,
-              "marker": "assert_one_exact_fixture_row(first_rows);",
+              "line": 640,
+              "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
               "line": 645,
+              "marker": "assert!(no_later_phase && second_local_inputs);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 646,
+              "marker": "assert_route_timeout(&outcome, MANUAL_REQUEST);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 647,
+              "marker": "assert_one_exact_fixture_row(first_rows);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 648,
               "marker": "assert_one_exact_fixture_row(second_rows);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 652,
+              "line": 655,
               "marker": "assert_eq!(manifest_names(&committed?), expected);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 653,
+              "line": 656,
               "marker": "assert!(first_retired.iter().all(|retired| *retired));",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 654,
+              "line": 657,
               "marker": "assert!(second_retained.iter().all(|retained| *retained));",
               "helper": "verify_second_family_expiry"
             }
@@ -6130,129 +6140,227 @@
           "scope": "Deterministic queued compute receipt over the actual coordinator/compute actor and conditional mock-backed storage; seeded SST rows, not public Engine ACKs or a native provider.",
           "assertions": [
             {
-              "line": 570,
+              "line": 568,
               "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 609,
+              "line": 608,
               "marker": "assert_ne!(first.cf_id, second.cf_id);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 610,
+              "line": 609,
               "marker": "assert_eq!(first.inputs.len(), 4);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 611,
+              "line": 610,
               "marker": "assert_eq!(second.inputs.len(), 4);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 612,
+              "line": 611,
               "marker": "assert_eq!(first.accepted_origin, Some(original));",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 613,
+              "line": 612,
               "marker": "assert_eq!(second.accepted_origin, Some(original));",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 614,
+              "line": 613,
               "marker": "assert_phases_succeeded(&first_phases);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 615,
+              "line": 614,
               "marker": "assert!(first_phases",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 619,
+              "line": 618,
               "marker": "assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 620,
+              "line": 619,
               "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 624,
+              "line": 623,
               "marker": "assert!(second_intent);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 625,
-              "marker": "assert_genuine_holds(&reads, 2);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 626,
-              "marker": "assert!(reads[1].forwarded_at >= started + CALLER_BUDGET);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 628,
-              "marker": "assert!(rejected_before_publication && original.is_expired());",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 629,
-              "marker": "assert!(",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 633,
+              "line": 624,
               "marker": "assert_genuine_holds(&reads, 1);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 636,
+              "line": 625,
+              "marker": "assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 626,
+              "marker": "assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 627,
+              "marker": "assert!(second_budget_bound < CALLER_BUDGET);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 628,
+              "marker": "assert!(reads[0]",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 632,
+              "marker": "assert!(rejected_before_publication && original.is_expired());",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 633,
               "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 641,
-              "marker": "assert!(no_later_phase && second_local_inputs);",
+              "line": 637,
+              "marker": "assert_genuine_holds(&reads, 0);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 642,
-              "marker": "assert!(reads[0].forwarded_at < started + CALLER_BUDGET);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 643,
-              "marker": "assert_route_timeout(&outcome, MANUAL_REQUEST);",
-              "helper": "verify_second_family_expiry"
-            },
-            {
-              "line": 644,
-              "marker": "assert_one_exact_fixture_row(first_rows);",
+              "line": 640,
+              "marker": "assert!(",
               "helper": "verify_second_family_expiry"
             },
             {
               "line": 645,
+              "marker": "assert!(no_later_phase && second_local_inputs);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 646,
+              "marker": "assert_route_timeout(&outcome, MANUAL_REQUEST);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 647,
+              "marker": "assert_one_exact_fixture_row(first_rows);",
+              "helper": "verify_second_family_expiry"
+            },
+            {
+              "line": 648,
               "marker": "assert_one_exact_fixture_row(second_rows);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 652,
+              "line": 655,
               "marker": "assert_eq!(manifest_names(&committed?), expected);",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 653,
+              "line": 656,
               "marker": "assert!(first_retired.iter().all(|retired| *retired));",
               "helper": "verify_second_family_expiry"
             },
             {
-              "line": 654,
+              "line": 657,
               "marker": "assert!(second_retained.iter().all(|retained| *retained));",
               "helper": "verify_second_family_expiry"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests/queued_phase_tests.rs",
+          "line": 282,
+          "symbol": "should_keep_typed_timeout_when_actual_final_clear_mirror_exhausts_original_budget",
+          "claim": "Unheld genuine output/manifest phases and real GC/intent-clear work precede accepted final-worker submission. Only its actual provider reply crosses the unchanged original caller deadline; the clamped provider budget is bounded by pre-submission original remaining time. Typed Timeout, exact committed output, safe GC, complete reservation release and replay settlement survive.",
+          "scope": "Actual compute/coordinator/non-inline publisher and conditional mock metadata; five-second original caller versus eight-second test provider cap. No production budget change, native transport or public ACK claim.",
+          "assertions": [
+            {
+              "line": 236,
+              "marker": "assert!(first.error.is_none() && first.completed_at < started + CALLER_BUDGET);",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 242,
+              "marker": "assert!(second.error.is_none() && second.completed_at < started + CALLER_BUDGET);",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 243,
+              "marker": "assert!(",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 271,
+              "marker": "assert_eq!(reads.len(), 1);",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 272,
+              "marker": "assert!(final_budget_bound < CALLER_BUDGET);",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 273,
+              "marker": "assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 274,
+              "marker": "assert!(reads[0]",
+              "helper": "final_clear_timeout_case"
+            },
+            {
+              "line": 289,
+              "marker": "assert_common_queued_evidence(&evidence);"
+            },
+            {
+              "line": 290,
+              "marker": "assert!("
+            },
+            {
+              "line": 295,
+              "marker": "assert_eq!(reads[0].phase, CompactionPublishPhase::IntentCleared);"
+            },
+            {
+              "line": 296,
+              "marker": "assert!(!evidence.has_intent && evidence.retired_inputs.iter().all(|retired| *retired));"
+            },
+            {
+              "line": 297,
+              "marker": "assert_eq!(evidence.reservations, 0);"
+            },
+            {
+              "line": 298,
+              "marker": "assert_eq!(evidence.staging_reserved, 0);"
+            },
+            {
+              "line": 300,
+              "marker": "assert_eq!(evidence.local_files, expected);"
+            },
+            {
+              "line": 301,
+              "marker": "assert_eq!(names(&evidence.committed?.files), expected);"
+            },
+            {
+              "line": 302,
+              "marker": "assert_one_exact_fixture_row(evidence.rows);"
+            },
+            {
+              "line": 303,
+              "marker": "assert_eq!(phase.phase, CompactionPublishPhase::IntentCleared);"
+            },
+            {
+              "line": 304,
+              "marker": "assert!("
             }
           ]
         }
