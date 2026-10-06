@@ -65,6 +65,7 @@ impl Runtime {
             diagnostics: Arc::clone(&diagnostics),
             storage_budget: None,
             sst_read_fs: None,
+            read_authority: None,
             lifecycle: Arc::clone(&lifecycle),
             runtime_response_timeout,
         };
@@ -136,6 +137,7 @@ impl Runtime {
             diagnostics: Arc::clone(&self.diagnostics),
             storage_budget: config.hybrid_storage.clone(),
             sst_read_fs: config.sst_read_fs.clone(),
+            read_authority: super::handle::CloudReadAuthority::from_config(&config),
             lifecycle,
             runtime_response_timeout,
         };

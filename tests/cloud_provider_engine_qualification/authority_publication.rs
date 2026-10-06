@@ -2,6 +2,8 @@
 //! These three explicit schedules are not an exhaustive simulation campaign.
 #[path = "authority_publication/proxy.rs"]
 mod proxy;
+#[path = "authority_publication/read_fencing.rs"]
+mod read_fencing;
 
 use super::*;
 use cntryl_midge::{MidgeError, Query};

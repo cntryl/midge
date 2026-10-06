@@ -92,9 +92,11 @@ Uncovered boundary: The drop/recreate test asserts data isolation, not a direct 
 
 ## TX-1
 
+Cloud authority boundary: [native successor reclamation regression](../../tests/cloud_provider_engine_qualification/authority_publication/read_fencing.rs) returns sticky Fenced for invalidated predecessor snapshots; [monotonic expiry and local controls](../../src/engine/tests/cloud_read_fencing.rs) and [in-flight read-guard outcomes](../../src/runtime/handle/read_authority_tests.rs) cover cache, own writes and notification-independent expiry. Scope: one native schedule, same-process reopen, controlled Local/CloudSimulated expiry and a guard callback; no coordinated remote reader retention or exhaustive interleaving claim.
+
 Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — Frozen old scans and point reads survive TTL expiry, sixteen acknowledged mixed-history compactions and actual spill saturation. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
-Production: [src/engine/mod.rs:337](../../src/engine/mod.rs#L337) `Engine::begin_tx`; [src/engine/mod.rs:412](../../src/engine/mod.rs#L412) `acquire_transaction_snapshot`; [src/runtime/snapshot_pins.rs:57](../../src/runtime/snapshot_pins.rs#L57) `SnapshotPinRegistry::register`; [src/runtime/snapshot_pins.rs:173](../../src/runtime/snapshot_pins.rs#L173) `begin_acquisition`.
+Production: [src/engine/mod.rs:338](../../src/engine/mod.rs#L338) `Engine::begin_tx`; [src/engine/mod.rs:413](../../src/engine/mod.rs#L413) `acquire_transaction_snapshot`; [src/runtime/snapshot_pins.rs:57](../../src/runtime/snapshot_pins.rs#L57) `SnapshotPinRegistry::register`; [src/runtime/snapshot_pins.rs:173](../../src/runtime/snapshot_pins.rs#L173) `begin_acquisition`.
 
 Exact evidence and assertion markers:
 
@@ -108,7 +110,7 @@ Uncovered boundary: Representative snapshots and the pin registry do not enumera
 
 ## TX-2
 
-Production: [src/runtime/read_snapshot.rs:807](../../src/runtime/read_snapshot.rs#L807) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot.rs:1021](../../src/runtime/read_snapshot.rs#L1021) `ReadSnapshot::range_scan`; [src/engine/api/transaction.rs:818](../../src/engine/api/transaction.rs#L818) `Transaction::get`; [src/engine/api/transaction.rs:848](../../src/engine/api/transaction.rs#L848) `Transaction::scan`.
+Production: [src/runtime/read_snapshot.rs:807](../../src/runtime/read_snapshot.rs#L807) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot.rs:1021](../../src/runtime/read_snapshot.rs#L1021) `ReadSnapshot::range_scan`; [src/engine/api/transaction.rs:819](../../src/engine/api/transaction.rs#L819) `Transaction::get`; [src/engine/api/transaction.rs:856](../../src/engine/api/transaction.rs#L856) `Transaction::scan`.
 
 Exact evidence and assertion markers:
 
@@ -180,7 +182,7 @@ Uncovered boundary: No claim that rolling back an already accepted/timed-out run
 
 ## TX-7
 
-Production: [src/engine/api/transaction.rs:848](../../src/engine/api/transaction.rs#L848) `Transaction::scan`; [src/runtime/read_snapshot.rs:1021](../../src/runtime/read_snapshot.rs#L1021) `ReadSnapshot::range_scan`; [src/engine/api/iterator.rs:83](../../src/engine/api/iterator.rs#L83) `try_collect`.
+Production: [src/engine/api/transaction.rs:856](../../src/engine/api/transaction.rs#L856) `Transaction::scan`; [src/runtime/read_snapshot.rs:1021](../../src/runtime/read_snapshot.rs#L1021) `ReadSnapshot::range_scan`; [src/engine/api/iterator.rs:83](../../src/engine/api/iterator.rs#L83) `try_collect`.
 
 Exact evidence and assertion markers:
 
@@ -221,7 +223,7 @@ Uncovered boundary: Mapping is not crash persistence proof for every mode. In-me
 
 ## WAL-2
 
-Production: [src/runtime/handle.rs:241](../../src/runtime/handle.rs#L241) `send_and_wait_with_timeout`; [src/runtime/router.rs:261](../../src/runtime/router.rs#L261) `ResponseRouter::abandon`; [src/runtime/event_loop/flush_pipeline.rs:138](../../src/runtime/event_loop/flush_pipeline.rs#L138) `schedule_next_flush_worker_with_shutdown`.
+Production: [src/runtime/handle.rs:301](../../src/runtime/handle.rs#L301) `send_and_wait_with_timeout`; [src/runtime/router.rs:261](../../src/runtime/router.rs#L261) `ResponseRouter::abandon`; [src/runtime/event_loop/flush_pipeline.rs:138](../../src/runtime/event_loop/flush_pipeline.rs#L138) `schedule_next_flush_worker_with_shutdown`.
 
 Exact evidence and assertion markers:
 
@@ -372,6 +374,8 @@ Uncovered boundary: Prepublication crash is a strong old-set case; full old/new 
 
 ## SST-6
 
+Cloud authority boundary: [native successor reclamation regression](../../tests/cloud_provider_engine_qualification/authority_publication/read_fencing.rs) returns sticky Fenced for invalidated predecessor snapshots; [monotonic expiry and local controls](../../src/engine/tests/cloud_read_fencing.rs) and [in-flight read-guard outcomes](../../src/runtime/handle/read_authority_tests.rs) cover cache, own writes and notification-independent expiry. Scope: one native schedule, same-process reopen, controlled Local/CloudSimulated expiry and a guard callback; no coordinated remote reader retention or exhaustive interleaving claim.
+
 Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — Actual retired snapshot input files remain physically present while pinned and all are physically reclaimed within ten seconds after release. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
 Production: [src/runtime/snapshot_pins.rs:190](../../src/runtime/snapshot_pins.rs#L190) `pinned_sst_names`; [src/runtime/actors/gc.rs:148](../../src/runtime/actors/gc.rs#L148) `delete_ssts`; [src/compaction/mod.rs:33](../../src/compaction/mod.rs#L33) `execute_compaction`.
@@ -433,7 +437,7 @@ Production: [src/wal/cloud_segment.rs:39](../../src/wal/cloud_segment.rs#L39) `o
 
 Exact evidence and assertion markers:
 
-- [src/engine/tests.rs:959](../../src/engine/tests.rs#L959) `should_reject_epoch_scoped_simulated_cloud_wal_without_catalog`: Actual orphan epoch-scoped valid WAL bytes are rejected without the publication catalog. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 977.
+- [src/engine/tests.rs:961](../../src/engine/tests.rs#L961) `should_reject_epoch_scoped_simulated_cloud_wal_without_catalog`: Actual orphan epoch-scoped valid WAL bytes are rejected without the publication catalog. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 977.
 - [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:321](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L321) `should_validate_catalog_authority_before_exposing_replay_sources`: Strict rejects regressed/checksum-invalid catalog history; salvage flags degraded and exposes only first validated segment, no active WAL. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 337, 343, 344, 353, 354, 362, 363, 368.
 
 Preconditions: Actual filesystem CloudSimulated object and real catalog planner; explicit epoch/checksum faults.
@@ -462,7 +466,7 @@ Production: [src/runtime/cloud_startup/cloud_recovery/metadata.rs:32](../../src/
 
 Exact evidence and assertion markers:
 
-- [src/engine/tests.rs:1269](../../src/engine/tests.rs#L1269) `should_ignore_stale_manifest_json_during_strict_cloud_recovery`: Committed snapshot sequence 10 wins over a newer unpointed mutable manifest; loaded sequence remains 10 and legacy file is absent. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1303, 1304.
+- [src/engine/tests.rs:1271](../../src/engine/tests.rs#L1271) `should_ignore_stale_manifest_json_during_strict_cloud_recovery`: Committed snapshot sequence 10 wins over a newer unpointed mutable manifest; loaded sequence remains 10 and legacy file is absent. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1303, 1304.
 - [src/lease/cloud/tests.rs:2446](../../src/lease/cloud/tests.rs#L2446) `should_reject_metadata_pointer_cas_that_lands_after_successor_acquires`: Held predecessor CAS loses to successor and exact committed winner pointer survives. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2509, 2513.
 - [src/lease/cloud/tests/startup_deadline/scoped_metadata.rs:407](../../src/lease/cloud/tests/startup_deadline/scoped_metadata.rs#L407) `should_preserve_native_mirror_operation_budget_when_startup_scope_is_unbounded`: Real native acquired lease and FORMAT/snapshot mirror succeeds through default/unbounded scope, retaining finite ordinary aggregate budget and exact remote descriptor bytes. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 415.
 - [src/lease/cloud/tests/startup_deadline/scoped_metadata.rs:419](../../src/lease/cloud/tests/startup_deadline/scoped_metadata.rs#L419) `should_publish_native_mirror_when_bounded_startup_scope_has_remaining_budget`: Actual native mirror succeeds while every observed bounded operation deadline equals the original captured scope. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 427.
@@ -477,7 +481,7 @@ Production: [src/runtime/cloud_startup/cloud_recovery/mod.rs:673](../../src/runt
 
 Exact evidence and assertion markers:
 
-- [src/engine/tests.rs:1777](../../src/engine/tests.rs#L1777) `should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest`: Genuine different-size SST has positive unequal-size prerequisite; actual inventory validation fails and no local cache SST is installed. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1791, 1823, 1827.
+- [src/engine/tests.rs:1779](../../src/engine/tests.rs#L1779) `should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest`: Genuine different-size SST has positive unequal-size prerequisite; actual inventory validation fails and no local cache SST is installed. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1791, 1823, 1827.
 - [tests/storage_layer.rs:1589](../../tests/storage_layer.rs#L1589) `should_reject_manifest_bounds_when_valid_sst_summary_disagrees`: Valid persisted SST bytes with conflicting authoritative bounds return Corruption. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1594, 1608, 1648.
 
 Preconditions: Actual real SST objects/metadata in filesystem/mock-cloud fixtures, not a forged length-only unit result.
@@ -528,7 +532,7 @@ Uncovered boundary: Header-wait cancellation is not proof no provider mutation c
 
 ## LIFE-1
 
-Production: [src/runtime/event_loop/manifest.rs:200](../../src/runtime/event_loop/manifest.rs#L200) `drop_column_family`; [src/engine/mod.rs:672](../../src/engine/mod.rs#L672) `Engine::drop_column_family`; [src/engine/mod.rs:688](../../src/engine/mod.rs#L688) `Engine::drop_column_family_discarding_unflushed`; [src/metadata/manifest.rs:311](../../src/metadata/manifest.rs#L311) `delete_column_family_with_reclamation`.
+Production: [src/runtime/event_loop/manifest.rs:200](../../src/runtime/event_loop/manifest.rs#L200) `drop_column_family`; [src/engine/mod.rs:673](../../src/engine/mod.rs#L673) `Engine::drop_column_family`; [src/engine/mod.rs:689](../../src/engine/mod.rs#L689) `Engine::drop_column_family_discarding_unflushed`; [src/metadata/manifest.rs:311](../../src/metadata/manifest.rs#L311) `delete_column_family_with_reclamation`.
 
 Exact evidence and assertion markers:
 
@@ -738,7 +742,7 @@ Uncovered boundary: Bounded merge heads and conservative canonical-mount scratch
 
 ## RES-8
 
-Production: [src/engine/mod.rs:115](../../src/engine/mod.rs#L115) `Engine::drop`; [src/engine/mod.rs:527](../../src/engine/mod.rs#L527) `Engine::shutdown`; [src/runtime/event_loop/shutdown.rs:18](../../src/runtime/event_loop/shutdown.rs#L18) `EventLoop::handle_shutdown`.
+Production: [src/engine/mod.rs:115](../../src/engine/mod.rs#L115) `Engine::drop`; [src/engine/mod.rs:528](../../src/engine/mod.rs#L528) `Engine::shutdown`; [src/runtime/event_loop/shutdown.rs:18](../../src/runtime/event_loop/shutdown.rs#L18) `EventLoop::handle_shutdown`.
 
 Exact evidence and assertion markers:
 

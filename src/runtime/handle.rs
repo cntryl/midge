@@ -13,6 +13,45 @@ use std::time::Duration;
 
 const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Remote SST retention ends when this cloud holder loses its lease. Local
+/// snapshot pins cannot retain files against a successor in another process.
+#[derive(Clone)]
+pub(super) struct CloudReadAuthority {
+    healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
+    validity: Option<Arc<crate::lease::LeaseValidity>>,
+    epoch: u64,
+}
+
+impl CloudReadAuthority {
+    pub(super) fn from_config(config: &super::RuntimeConfig) -> Option<Self> {
+        config.hybrid_storage.as_ref().map(|_| Self {
+            healthy: config.lease_healthy.clone(),
+            validity: config.lease_validity.clone(),
+            epoch: config.writer_epoch,
+        })
+    }
+
+    fn check(&self) -> MidgeResult<()> {
+        if self
+            .healthy
+            .as_ref()
+            .is_some_and(|healthy| !healthy.load(Ordering::Acquire))
+        {
+            return Err(MidgeError::Fenced("cloud read lease is unhealthy".into()));
+        }
+        if let Some(validity) = &self.validity {
+            validity
+                .remaining(self.epoch)
+                .map_err(|error| error.into_validation_error("cloud read lease validity lost"))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "handle/read_authority_tests.rs"]
+mod read_authority_tests;
+
 /// Handle for submitting work to the runtime.
 ///
 /// Maintainer:
@@ -36,6 +75,7 @@ pub struct RuntimeHandle {
     /// Shared local disk admission for transaction spill runs.
     pub(crate) storage_budget: Option<Arc<crate::storage::HybridStorage>>,
     pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
+    pub(super) read_authority: Option<CloudReadAuthority>,
     pub(super) lifecycle: Arc<RuntimeLifecycle>,
     pub(super) runtime_response_timeout: Duration,
 }
@@ -89,7 +129,27 @@ impl RuntimeHandle {
     }
 
     pub(crate) fn acquire_transaction_guard(&self) -> MidgeResult<RuntimeTransactionGuard> {
-        self.lifecycle.acquire()
+        let guard = self.lifecycle.acquire()?;
+        self.ensure_read_authority()?;
+        Ok(guard)
+    }
+
+    pub(crate) fn ensure_read_authority(&self) -> MidgeResult<()> {
+        self.read_authority
+            .as_ref()
+            .map_or(Ok(()), CloudReadAuthority::check)
+    }
+
+    /// Recheck after blocking I/O, including failed reads: a successor may have
+    /// reclaimed a file while this operation was in flight.
+    pub(crate) fn read_with_authority<T>(
+        &self,
+        read: impl FnOnce() -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        self.ensure_read_authority()?;
+        let result = read();
+        self.ensure_read_authority()?;
+        result
     }
     pub(crate) fn begin_snapshot_acquisition(
         &self,
