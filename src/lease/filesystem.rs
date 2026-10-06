@@ -184,12 +184,14 @@ impl PrimaryLease for FileSystemLease {
                             age.as_secs()
                         )));
                     }
-                    tracing::warn!(
+                    if existing.acquired_at != super::fs_leader_store::RELEASED_TIMESTAMP {
+                        tracing::warn!(
                         old_holder = %existing.holder_id,
                         old_epoch = existing.epoch,
                         age_secs = age.as_secs(),
                         "taking over stale leader record (previous holder likely crashed)"
-                    );
+                        );
+                    }
                     Ok(())
                 },
                 |_| Ok(()),
@@ -296,6 +298,87 @@ unsafe impl Sync for FileSystemLease {}
 mod tests {
     use super::super::traits::{format_leader_record, LeaderRecord};
     use super::*;
+
+    #[derive(Clone)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn should_log_crash_takeover_only_when_previous_holder_did_not_release() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let first = Arc::new(FileSystemLease::new(dir.path(), false).unwrap());
+        let first_guard = Arc::clone(&first).try_acquire().unwrap();
+        let epoch = first.epoch();
+        first.release().unwrap();
+        drop(first_guard);
+        let logs = CapturedLogs(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+
+        // Act
+        tracing::subscriber::with_default(subscriber, || {
+            let second = Arc::new(FileSystemLease::new(dir.path(), false).unwrap());
+            let guard = Arc::clone(&second).try_acquire().unwrap();
+            let second_epoch = second.epoch();
+            assert!(second_epoch > epoch);
+            second.release().unwrap();
+            drop(guard);
+            assert!(!String::from_utf8(logs.0.lock().unwrap().clone())
+                .unwrap()
+                .contains("previous holder likely crashed"));
+
+            let record = LeaderRecord {
+                epoch: second_epoch,
+                holder_id: "expired-holder".to_string(),
+                acquired_at: (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(),
+            };
+            std::fs::write(
+                dir.path().join(".midge_leader"),
+                format_leader_record(&record),
+            )
+            .unwrap();
+            let third = Arc::new(FileSystemLease::new(dir.path(), false).unwrap());
+            let _guard = Arc::clone(&third).try_acquire().unwrap();
+            assert!(third.epoch() > record.epoch);
+        });
+
+        // Assert
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(output.matches("previous holder likely crashed").count(), 1);
+        assert!(output.contains("old_holder=expired-holder"));
+        let age = output
+            .split("age_secs=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!((120..150).contains(&age), "unexpected stale age: {age}");
+    }
 
     /// In-memory filesystem whose next atomic rename fails once armed.
     struct FlakyRenameFs {
