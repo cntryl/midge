@@ -54,9 +54,9 @@ fn assert_exact(tx: &cntryl_midge::Transaction, expected: &BTreeMap<Vec<u8>, Vec
         expected.get(b"released".as_slice()).cloned()
     );
 }
-#[test]
 // Keep the pressure/release order visible beside its exact-state assertions.
 #[allow(clippy::too_many_lines)]
+#[test]
 fn should_retain_frozen_history_and_resume_writes_when_spill_capacity_is_exhausted() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
