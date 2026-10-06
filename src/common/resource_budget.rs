@@ -179,7 +179,7 @@ impl ResourceBudget {
         self.inner.current.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn peak(&self) -> usize {
         self.inner.peak.load(Ordering::Acquire)
     }

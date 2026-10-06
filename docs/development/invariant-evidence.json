@@ -1774,7 +1774,7 @@
       "production": [
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 152,
+          "line": 154,
           "symbol": "ReplayCoverage::contains",
           "kind": "function",
           "marker": "pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {"
@@ -1811,34 +1811,34 @@
       "tests": [
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 1077,
+          "line": 1079,
           "symbol": "should_replay_put_when_equal_sequence_sst_expiration_differs",
           "claim": "Actual SST fixture value/sequence equality with different TTL still returns covered=false.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1084,
+              "line": 1086,
               "marker": "assert!("
             }
           ]
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 1158,
+          "line": 1160,
           "symbol": "should_retain_wal_when_pinned_sst_identity_changes_before_block_reload",
           "claim": "Actual SST bytes change after initial proof; after reader/cache reload, contains=false.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1162,
+              "line": 1164,
               "marker": "assert!(coverage.contains(&record));"
             },
             {
-              "line": 1175,
+              "line": 1177,
               "marker": "assert!("
             },
             {
-              "line": 1179,
+              "line": 1181,
               "marker": "assert!("
             }
           ]
@@ -1862,25 +1862,25 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 752,
+          "line": 754,
           "symbol": "should_replay_when_unreadable_interval_overlaps_verified_exact_sst",
           "claim": "The first real checksummed SST is verified while the second overlapping authoritative object was removed before the query. The exact visitor still returns replay, counts both candidates and releases all budget; this is a bounded filesystem-backed coverage control, not public ACK or native-hour recovery.",
           "scope": "actual seeded SST bytes/removed authoritative object; no public ACK or native provider/hour qualification",
           "assertions": [
             {
-              "line": 769,
+              "line": 771,
               "marker": "assert!(!covered, \"every candidate must supply an exact proof\");"
             },
             {
-              "line": 770,
+              "line": 772,
               "marker": "assert_eq!(coverage.reader_opens.get(), 1, \"first SST was verified\");"
             },
             {
-              "line": 771,
+              "line": 773,
               "marker": "assert_eq!(coverage.manifest_candidates.get(), 2);"
             },
             {
-              "line": 773,
+              "line": 775,
               "marker": "assert_eq!(coverage.read_budget.used(), 0);"
             }
           ]
@@ -2141,7 +2141,7 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 152,
+          "line": 154,
           "symbol": "ReplayCoverage::contains",
           "kind": "function",
           "marker": "pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {"
@@ -2175,21 +2175,21 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 1158,
+          "line": 1160,
           "symbol": "should_retain_wal_when_pinned_sst_identity_changes_before_block_reload",
           "claim": "Changed real SST identity invalidates coverage after reload.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1162,
+              "line": 1164,
               "marker": "assert!(coverage.contains(&record));"
             },
             {
-              "line": 1175,
+              "line": 1177,
               "marker": "assert!("
             },
             {
-              "line": 1179,
+              "line": 1181,
               "marker": "assert!("
             }
           ]
@@ -3472,13 +3472,13 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 1077,
+          "line": 1079,
           "symbol": "should_replay_put_when_equal_sequence_sst_expiration_differs",
           "claim": "Equal value/sequence with different TTL is not sufficient coverage.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1084,
+              "line": 1086,
               "marker": "assert!("
             }
           ]
@@ -4121,7 +4121,7 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 118,
+          "line": 120,
           "symbol": "ReplayCoverage::new",
           "kind": "function",
           "marker": "pub(crate) fn new("
@@ -4199,33 +4199,33 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 777,
+          "line": 779,
           "symbol": "should_preserve_exact_proof_when_candidate_index_cannot_fit_read_budget",
           "claim": "One actual checksummed SST fits the configured read budget while 8192 disjoint metadata descriptors make the index exceed it. The legacy full scan retains exact proof, leaves no index and releases all reservations.",
           "scope": "actual seeded SST/legacy fallback; other descriptors are metadata-only, not 8193 actual SSTs",
           "assertions": [
             {
-              "line": 795,
+              "line": 797,
               "marker": "assert!(covered);"
             },
             {
-              "line": 796,
+              "line": 798,
               "marker": "assert!(coverage.candidate_index.borrow().is_none());"
             },
             {
-              "line": 797,
+              "line": 799,
               "marker": "assert_eq!(coverage.manifest_scanned.get(), 8193);"
             },
             {
-              "line": 798,
+              "line": 800,
               "marker": "assert_eq!(coverage.reader_opens.get(), 1);"
             },
             {
-              "line": 799,
+              "line": 801,
               "marker": "assert!(coverage.read_budget.peak() <= coverage.read_budget.limit());"
             },
             {
-              "line": 801,
+              "line": 803,
               "marker": "assert_eq!(coverage.read_budget.used(), 0);"
             }
           ]
@@ -5695,29 +5695,29 @@
         },
         {
           "path": "src/runtime/cloud_startup/replay_coverage.rs",
-          "line": 805,
+          "line": 807,
           "symbol": "should_bound_manifest_work_when_replay_probes_sparse_sequence_intervals",
           "claim": "100 genuine coverage probes read one real checksummed candidate SST amid 8192 disjoint metadata descriptors; query-node/candidate/open counters bound selection without a machine elapsed assertion. Construction is once per index and is outside the query-node metric.",
           "scope": "actual seeded checksummed SST plus constructed disjoint descriptors; per-query selection-work bound, not elapsed/native-hour qualification",
           "assertions": [
             {
-              "line": 825,
+              "line": 827,
               "marker": "assert!(coverage.contains(&record));"
             },
             {
-              "line": 830,
+              "line": 832,
               "marker": "assert_eq!(coverage.probes.get(), 100);"
             },
             {
-              "line": 831,
+              "line": 833,
               "marker": "assert_eq!(coverage.manifest_candidates.get(), 100);"
             },
             {
-              "line": 832,
+              "line": 834,
               "marker": "assert!("
             },
             {
-              "line": 837,
+              "line": 839,
               "marker": "assert_eq!(coverage.reader_opens.get(), 1);"
             }
           ]
@@ -8876,7 +8876,7 @@
         }
       ],
       "preconditions": "All 33 linked reader controls intentionally construct JSON evidence/counters and sometimes real temporary-file reads; they do not execute hosted A/B/C, waiter bodies, device I/O or full-hour qualification. The two #730 zero-rejection cases and #731 exact-expiry parser case are constructed reachability contracts. Shared commit controls at RES-3 and nine capture controls here separate scripted rejection/gauge plus actual local ACK/reopen from pure constructed clocks/errors. Before/end capture uses actual timed runtime query then same-owner snapshot; it requires only zero Persistent metadata activity, not global compute/GC/publication idleness. The actual workload separately requires strict ACK, flush, compaction, exact verification, reopen and both owned shutdowns.",
-      "uncovered": "Initial campaign 37268459342 at c8983928 remains invalid after the three A repeats terminated on genuine L0 WriteStall; six other rows cannot qualify it. Historical smoke 37270512400 validates A/r1 transport/construction only at 32911805: 256 commits, 230 measured, 100 compactions, zero stalls/waits and retained too_few_samples diagnostics. Historical nine-run 37270845568 at 32911805 remains invalid: A/r1 and A/r2 verified all data but selected active CompactionBeforeGc metadata endpoints, despite later settled owners; seven other valid rows cannot repair it. Measured c8f0de80 smoke 37273556125 is transport/construction-valid; all nine fresh attempts of 37274074026 are valid, totaling 1,376,256 real strict ACK rows, exact point/ordered scans before and after reopen and two owned shutdowns per attempt. B/C each miss the snapshot-payload target in three repeats (13.023\u201313.534% / 80.261\u201380.262%); A has one time miss and does not qualify. A/r1 end and B/r1/B/r3 warmup captured real active candidates then selected idle, without weakening the gate. This satisfies only the conditional policy-investigation predicate. Cadence remains unchanged, pre-state costs are unknown/excluded, and no physical-device, native confidence or final fourteen-hour qualification follows. Adjacent samples are not global barriers and JSON cannot prove executed body/clock. Final fourteen hours use the final merged #711 source."
+      "uncovered": "Initial campaign 37268459342 at c8983928 remains invalid after the three A repeats terminated on genuine L0 WriteStall; six other rows cannot qualify it. Historical smoke 37270512400 validates A/r1 transport/construction only at 32911805: 256 commits, 230 measured, 100 compactions, zero stalls/waits and retained too_few_samples diagnostics. Historical nine-run 37270845568 at 32911805 remains invalid: A/r1 and A/r2 verified all data but selected active CompactionBeforeGc metadata endpoints, despite later settled owners; seven other valid rows cannot repair it. Measured c8f0de80 smoke 37273556125 is transport/construction-valid; all nine fresh attempts of 37274074026 are valid, totaling 1,376,256 real strict ACK rows, exact point/ordered scans before and after reopen and two owned shutdowns per attempt. B/C each miss the snapshot-payload target in three repeats (13.023–13.534% / 80.261–80.262%); A has one time miss and does not qualify. A/r1 end and B/r1/B/r3 warmup captured real active candidates then selected idle, without weakening the gate. This satisfies only the conditional policy-investigation predicate. Cadence remains unchanged, pre-state costs are unknown/excluded, and no physical-device, native confidence or final fourteen-hour qualification follows. Adjacent samples are not global barriers and JSON cannot prove executed body/clock. Final fourteen hours use the final merged #711 source."
     }
   ],
   "reference_refresh": {

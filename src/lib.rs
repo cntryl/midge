@@ -99,6 +99,7 @@ pub mod __internal {
         pub use crate::metadata::accounting::{
             Bucket, Counters, LatencyHistogram, Medium, MetricsHandle, Origin, Snapshot,
         };
+        pub use crate::metadata::checkpoint_policy_probe::run_checkpoint_policy_probe;
 
         #[must_use]
         pub fn metrics_handle(engine: &crate::Engine) -> MetricsHandle {
@@ -146,6 +147,7 @@ pub mod __internal {
             run_recovery_progress_fixture, RecoveryProgressFixtureMode,
             RecoveryProgressFixtureResult,
         };
+        pub use crate::runtime::cloud_startup::replay_coverage::cost_probe::run_recovery_cost_probe;
     }
     pub mod sst {
         pub mod bloom {

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod candidate_index;
+#[cfg(feature = "internal-testing")]
+pub(crate) mod cost_probe;
 
 pub(crate) struct ReplayCoverage {
     manifest: crate::metadata::Manifest,

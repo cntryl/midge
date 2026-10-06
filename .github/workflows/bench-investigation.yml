@@ -1,0 +1,128 @@
+name: Benchmark Investigation
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        required: true
+      campaign:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Fresh-process comparison interval
+        type: choice
+        required: true
+        default: smoke
+        options: [smoke, standard, full]
+      campaign:
+        description: Independent comparisons or exploratory probes
+        type: choice
+        required: true
+        default: all
+        options: [all, comparisons, probes]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-investigation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  comparison:
+    if: inputs.campaign != 'probes'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        repeat: [1, 2, 3]
+        cell:
+          - {workload: tier5_write_heavy_local, clients: 1, cloud: false}
+          - {workload: tier5_write_heavy_local, clients: 2, cloud: false}
+          - {workload: tier5_write_heavy_local, clients: 4, cloud: false}
+          - {workload: tier5_write_heavy_local, clients: 8, cloud: false}
+          - {workload: tier5_write_heavy_local, clients: 16, cloud: false}
+          - {workload: tier5_write_pressure_s3, clients: 1, cloud: true}
+          - {workload: tier5_write_pressure_s3, clients: 2, cloud: true}
+          - {workload: tier5_write_pressure_s3, clients: 4, cloud: true}
+    env:
+      CARGO_INCREMENTAL: 0
+      STRESS_PROFILE: smoke
+      STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+      MIDGE_STRESS_COMPARISON_CLIENTS: ${{ matrix.cell.clients }}
+      MIDGE_COMPARISON_REPEAT: ${{ matrix.repeat }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve original duration and watchdog allowance
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          case "$PROFILE" in
+            smoke) seconds=60 ;;
+            standard) seconds=600 ;;
+            full) seconds=3600 ;;
+            *) exit 1 ;;
+          esac
+          printf 'MIDGE_TIER5_DURATION_SECS=%s\nSTRESS_TIMEOUT_SECS=%s\n' "$seconds" "$((seconds + 900))" >> "$GITHUB_ENV"
+      - run: rustup update stable
+      - name: Start Sqrzl
+        if: matrix.cell.cloud
+        run: docker compose up -d sqrzl
+      - name: Run independent cell
+        id: workload
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+          SELECTED_WORKLOAD: ${{ matrix.cell.workload }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/midge-stress/runner-logs
+          cargo bench --bench tier5_stress_workloads --features stress-soak -- --workload "$SELECTED_WORKLOAD" 2>&1 | tee target/midge-stress/runner-logs/workload.log
+      - name: Preserve literal receipts and failures
+        if: always()
+        env:
+          WORKLOAD_OUTCOME: ${{ steps.workload.outcome }}
+          SELECTED_WORKLOAD: ${{ matrix.cell.workload }}
+        run: |
+          mkdir -p target/midge-stress/emulator-logs
+          docker compose logs --no-color sqrzl > target/midge-stress/emulator-logs/sqrzl.log 2>&1 || true
+          python3 tools/finalize_stress_artifacts.py --workload "$SELECTED_WORKLOAD" --suite tier5-stress-workloads --sha "$GITHUB_SHA" --outcome "$WORKLOAD_OUTCOME"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: investigation-${{ matrix.cell.workload }}-${{ matrix.cell.clients }}-r${{ matrix.repeat }}-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+      - name: Stop Sqrzl
+        if: always() && matrix.cell.cloud
+        run: docker compose down -v
+
+  probe:
+    if: inputs.campaign != 'comparisons'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [checkpoint, recovery]
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - name: Run source-bound release probe
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/investigation
+          cargo run --release --example benchmark_investigation --features internal-testing -- "$MODE" "target/investigation/$MODE.json" 2>&1 | tee "target/investigation/$MODE.log"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: investigation-${{ matrix.mode }}-${{ github.sha }}
+          path: target/investigation/**

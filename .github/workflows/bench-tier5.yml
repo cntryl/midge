@@ -9,6 +9,12 @@ on:
         required: true
         default: standard
         options: [smoke, standard, full]
+      investigation:
+        description: Optional independent measurement campaign
+        type: choice
+        required: true
+        default: none
+        options: [none, comparisons, probes, all]
   schedule:
     - cron: "17 5 * * 2"
 
@@ -20,7 +26,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  investigation:
+    if: github.event_name == 'workflow_dispatch' && inputs.investigation != '' && inputs.investigation != 'none'
+    uses: ./.github/workflows/bench-investigation.yml
+    with:
+      profile: ${{ inputs.profile }}
+      campaign: ${{ inputs.investigation }}
   bench:
+    if: github.event_name != 'workflow_dispatch' || inputs.investigation == '' || inputs.investigation == 'none'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     strategy:
