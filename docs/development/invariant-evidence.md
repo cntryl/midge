@@ -4,7 +4,7 @@ Every catalog ID maps to production symbols, exact assertions, fixture
 assumptions and untested boundaries. This is source/reference evidence;
 execution results remain separately scoped in qualification records and PRs.
 References bind recovery seek-index source commit
-48ce6d582ab79b7ce203f0aaeee377e735416782 before this documentation commit;
+c1e5709e376d29090bb331d37f27fa941d763b96 before this documentation commit;
 the changed replay-coverage locations and source hash are refreshed while
 existing invariant claims and historical qualification objects are retained;
 the historical measured c8 source and original report remain explicit. Historical 32911805 A/r1 smoke 37270512400

@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "48ce6d582ab79b7ce203f0aaeee377e735416782",
+  "source_revision": "c1e5709e376d29090bb331d37f27fa941d763b96",
   "source_revision_status": "References bind the actual recovery seek-index source commit before this documentation refresh. Existing invariant claims, prior qualification objects and historical measurements remain unchanged; locations and the changed source postimage are refreshed. New counted regressions and native qualifications are reported in the linked PR; this reference refresh does not claim completed full-hour acceptance.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
