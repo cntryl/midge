@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/midge-stress/runner-logs
-          cargo bench --bench tier5_stress_workloads --features stress-soak -- --workload "$SELECTED_WORKLOAD" 2>&1 | tee target/midge-stress/runner-logs/workload.log
+          bash tools/run-stress-with-receipts.sh tier5_stress_workloads "$SELECTED_WORKLOAD" 2>&1 | tee target/midge-stress/runner-logs/workload.log
       - name: Preserve literal receipts and failures
         if: always()
         env:

@@ -125,6 +125,7 @@ test_db_*/
 tools/*
 !tools/finalize_stress_artifacts.py
 !tools/readback-investigation.rb
+!tools/run-stress-with-receipts.sh
 !tools/tests/
 tools/tests/*
 !tools/tests/test_finalize_stress_artifacts.py

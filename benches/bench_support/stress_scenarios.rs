@@ -219,6 +219,8 @@ struct WorkloadArtifacts {
     resource_phase: Arc<AtomicU64>,
     benchmark: &'static str,
     git_commit: String,
+    binary_sha256: Option<String>,
+    source_worktree_clean: bool,
     stage_index: Option<usize>,
     shutdown_results: Vec<serde_json::Value>,
     terminal_error: Option<String>,
@@ -264,6 +266,11 @@ impl WorkloadArtifacts {
             resource_phase: Arc::new(AtomicU64::new(0)),
             benchmark: case.benchmark,
             git_commit: current_commit(),
+            binary_sha256: std::env::var("MIDGE_STRESS_BINARY_SHA256").ok(),
+            source_worktree_clean: std::process::Command::new("git")
+                .args(["diff", "HEAD", "--quiet"])
+                .status()
+                .is_ok_and(|status| status.success()),
             stage_index: None,
             shutdown_results: Vec::new(),
             terminal_error: None,
@@ -450,6 +457,8 @@ impl WorkloadArtifacts {
             &json!({
                 "benchmark_workload": self.benchmark,
                 "git_commit": self.git_commit,
+                "binary_sha256": self.binary_sha256,
+                "source_worktree_clean": self.source_worktree_clean,
                 "process_id": std::process::id(),
                 "scenario": self.scenario,
                 "backend": self.backend,

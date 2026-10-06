@@ -21,6 +21,12 @@ rows = statuses.map do |path|
   status = json(path)
   directory = File.dirname(path)
   check(status['git_commit'] == sha, "source mismatch: #{path}")
+  check(status['source_worktree_clean'] && status.fetch('binary_sha256').match?(/\A[0-9a-f]{64}\z/), 'missing clean-source executable identity')
+  identities = Dir.glob(File.join(File.dirname(directory), 'runner-logs', 'binary-*.sha256')).map { |p| File.read(p).strip.split(/\s+/, 2) }.select { |hash, _| hash == status['binary_sha256'] }
+  check(identities.size == 1, 'runner/workload executable checksum mismatch')
+  executable = identities.first[1]
+  built = Dir.glob(File.join(File.dirname(directory), 'runner-logs', 'build-*.jsonl')).flat_map { |p| File.readlines(p).map { |l| JSON.parse(l) } }.any? { |d| d['reason'] == 'compiler-artifact' && d['executable'] == executable }
+  check(built, 'executable missing from retained Cargo artifact receipt')
   check(status['status'] == 'passed' && status['phase'] == 'complete' && status['terminal_error'].nil?, "failed workload: #{path}")
   check(status['configured_duration_seconds'] == seconds, 'configured interval mismatch')
   check(status.dig('final_flush', 'completed'), 'incomplete final flush')
@@ -39,6 +45,7 @@ rows = statuses.map do |path|
   candidates = Dir.glob(File.join(File.dirname(File.dirname(directory)), '**', 'latest.json')).map { |p| [p, json(p)] }.select { |_, d| d.dig('environment', 'git_commit') == sha && d.fetch('benchmark_specs', []).any? { |b| b['id'].include?("::#{status['benchmark_workload']}/") } } if candidates.empty?
   check(candidates.size == 1, "ambiguous native report: #{path}")
   report_path, report = candidates.first
+  check(report.dig('environment', 'command_line', 0) == executable, 'native report executable differs from fingerprinted artifact')
   samples = report['samples'].select { |s| s['phase'] == 'measured' }
   check(samples.sum { |s| s['elapsed_ns'] } >= seconds * 1_000_000_000, 'actual interval too short')
   csv = CSV.read(File.join(directory, 'stages.csv'), headers: true)
@@ -75,7 +82,7 @@ rows = statuses.map do |path|
     initial = json(File.join(directory, 'stage-00-prestate.json'))
     check(initial['isolated_comparison'] && initial['prior_stage_count'].zero? && initial['verified_initial_rows'] == initial['seed_rows'], 'comparison initial state mismatch')
   end
-  { 'workload' => status['benchmark_workload'], 'comparison_repeat' => status['comparison_repeat'], 'topology' => status['measurement_topology'], 'clients' => samples.map { |s| s.dig('parameters', 'concurrent_clients') },
+  { 'workload' => status['benchmark_workload'], 'binary_sha256' => status['binary_sha256'], 'comparison_repeat' => status['comparison_repeat'], 'topology' => status['measurement_topology'], 'clients' => samples.map { |s| s.dig('parameters', 'concurrent_clients') },
     'checks' => 6, 'shutdowns' => 2, 'measured_ns' => samples.sum { |s| s['elapsed_ns'] }, 'status_sha256' => Digest::SHA256.file(path).hexdigest, 'report_sha256' => Digest::SHA256.file(report_path).hexdigest }
 end
 check(!rows.empty?, 'no completed receipts')

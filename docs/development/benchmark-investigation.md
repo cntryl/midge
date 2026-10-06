@@ -62,8 +62,8 @@ Run a local cell directly:
 MIDGE_STRESS_COMPARISON_CLIENTS=4 MIDGE_TIER5_DURATION_SECS=600 \
   STRESS_PROFILE=smoke STRESS_NO_PROGRESS_TIMEOUT_SECS=60 \
   STRESS_TIMEOUT_SECS=1500 \
-  cargo bench --bench tier5_stress_workloads --features stress-soak \
-  -- --workload tier5_write_heavy_local
+  bash tools/run-stress-with-receipts.sh tier5_stress_workloads \
+  tier5_write_heavy_local
 ```
 
 `bench-investigation.yml` runs three fresh hosted ARM processes per local
@@ -154,7 +154,13 @@ ruby tools/readback-investigation.rb EXTRACTED_ARTIFACT_ROOT SOURCE_SHA SECONDS
 
 The tool requires real successful completions and checks all six exact-value
 controls, both shutdowns, actual measured duration, source identity and native
-finalization. It compares native observations and sample counts with CSV/status,
+finalization. The runner builds once, retains its Cargo artifact receipt and
+SHA-256, then executes that exact artifact. Hashing happens before the watchdog
+starts. Workload status retains that checksum and checks for clean tracked source
+at setup, outside the measured stage. Direct Cargo invocations without the wrapper
+remain usable diagnostics but do not supply the executable fingerprint.
+Earlier captures without that fingerprint remain diagnostic archives, not
+complete executable-provenance evidence. It compares native observations and sample counts with CSV/status,
 and checks stage-local stall deltas against recorded runtime endpoints. Check
 that the receipt count equals the entire planned matrix; partial downloads do
 not establish a completed campaign. Stage wall time includes initial runtime
