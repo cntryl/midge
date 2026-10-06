@@ -22,6 +22,9 @@ use std::sync::Arc;
 const LEADER_RECORD_FILE: &str = ".midge_leader";
 const LEADER_LOCK_FILE: &str = ".midge_leader.lock";
 
+/// Exact timestamp written by owned clean release, retaining the fencing epoch.
+pub(super) const RELEASED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
+
 /// Filesystem-based `LeaderStore` using temp-write + fsync + atomic rename.
 pub struct FsLeaderStore {
     fs: Arc<dyn Fs>,
@@ -385,7 +388,7 @@ impl FsLeaderStore {
         let released = LeaderRecord {
             epoch: expected_epoch,
             holder_id: holder_id.to_string(),
-            acquired_at: "1970-01-01T00:00:00Z".to_string(),
+            acquired_at: RELEASED_TIMESTAMP.to_string(),
         };
         let temp = Self::temp_path();
         staging::stage_bytes(
