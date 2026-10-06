@@ -123,27 +123,30 @@ impl SstFileIo {
             .recovery_block
             .as_ref()
             .and(self.metadata_budget.as_ref());
-        while let Some(entry) = decoder.next(
-            block_data,
-            self.format_version,
-            budget,
-            "recovery decoder key",
-        )? {
-            steps += 1;
-            match decoder.key().cmp(key) {
-                std::cmp::Ordering::Less => {}
-                std::cmp::Ordering::Greater => break,
-                std::cmp::Ordering::Equal => {
-                    if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
-                        let candidate = Self::state_from_entry_view(block_data, entry);
-                        Self::merge_newer_state(&mut best_state, candidate)?;
+        let result = (|| {
+            while let Some(entry) = decoder.next(
+                block_data,
+                self.format_version,
+                budget,
+                "recovery decoder key",
+            )? {
+                steps += 1;
+                match decoder.key().cmp(key) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Greater => break,
+                    std::cmp::Ordering::Equal => {
+                        if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
+                            let candidate = Self::state_from_entry_view(block_data, entry);
+                            Self::merge_newer_state(&mut best_state, candidate)?;
+                        }
                     }
                 }
             }
-        }
 
+            Ok(best_state)
+        })();
         self.record_recovery_decode_work(steps, if budget.is_some() { steps } else { 0 });
-        Ok(best_state)
+        result
     }
 
     /// Check block bloom filter with proper metrics and failure-safe semantics

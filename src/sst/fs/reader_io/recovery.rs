@@ -32,12 +32,19 @@ pub(super) struct RecoveryBlock {
     peak: usize,
     decode_steps: u64,
     reconstruction_allocations: u64,
+    _cache_reservation: ResourceReservation,
 }
 
 impl RecoveryBlock {
-    fn new(max_blocks: usize, max_bytes: usize) -> Self {
-        Self {
-            blocks: Vec::new(),
+    fn new(max_blocks: usize, max_bytes: usize, budget: &ResourceBudget) -> MidgeResult<Self> {
+        let bytes = max_blocks
+            .checked_mul(std::mem::size_of::<CachedBlock>())
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit("recovery block cache metadata size overflow".into())
+            })?;
+        let reservation = budget.reserve(bytes, "recovery block cache metadata")?;
+        Ok(Self {
+            blocks: Vec::with_capacity(max_blocks),
             max_blocks,
             max_bytes,
             hits: 0,
@@ -45,7 +52,8 @@ impl RecoveryBlock {
             peak: 0,
             decode_steps: 0,
             reconstruction_allocations: 0,
-        }
+            _cache_reservation: reservation,
+        })
     }
 
     fn retained_bytes(&self) -> usize {
@@ -161,11 +169,9 @@ impl SstFileIo {
         max_retained_blocks: usize,
         max_retained_bytes: usize,
     ) -> MidgeResult<Self> {
+        let cache = RecoveryBlock::new(max_retained_blocks, max_retained_bytes, &budget)?;
         let mut reader = Self::open_for_compaction(path, fs, budget)?;
-        reader.recovery_block = Some(Mutex::new(RecoveryBlock::new(
-            max_retained_blocks,
-            max_retained_bytes,
-        )));
+        reader.recovery_block = Some(Mutex::new(cache));
         Ok(reader)
     }
 
