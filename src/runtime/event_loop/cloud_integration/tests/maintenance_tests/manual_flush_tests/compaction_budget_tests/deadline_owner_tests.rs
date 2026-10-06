@@ -525,6 +525,24 @@ fn should_inherit_original_clock_when_actual_manual_work_reaches_second_family()
 
 #[test]
 fn should_stop_second_family_when_original_manual_clock_expires() -> MidgeResult<()> {
+    // Arrange: genuine accepted generations share the original clock.
+    // Act: the helper dispatches actual compute and publication receipts.
+    // Assert: preserve exact per-family authority at expiry.
+    verify_second_family_expiry(false)
+}
+
+#[test]
+fn should_retain_input_authority_when_second_family_compute_arrives_after_manual_deadline(
+) -> MidgeResult<()> {
+    // Arrange: receive a genuine accepted second-family compute result.
+    // Act: hold its dispatch until the original deadline expires.
+    // Assert: no publication callback is required for unsubmitted work.
+    verify_second_family_expiry(true)
+}
+
+// Keep both real completion dispositions beside their shared authority ledger.
+#[allow(clippy::too_many_lines)]
+fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
     crate::failpoints::with_read_gate(|| {
         // Arrange: one real caller owns both CF generations; no late route refresh.
         let mut fixture = BudgetFixture::new_with_all_families(true)?;
@@ -540,17 +558,37 @@ fn should_stop_second_family_when_original_manual_clock_expires() -> MidgeResult
         dispatch_generation(&mut fixture, &mut first);
         let first_phases = complete_three_phases(&mut fixture);
         let mut second = receive_generation(&mut fixture)?;
+        // Rejected pre-intent outputs may be cleaned up; verify the genuine
+        // compute bytes before dispatch, without requiring orphan retention.
+        let mut second_rows = rows_for_generation(&fixture, &second);
         fixture.backend.arm(
             CompactionPublishPhase::OutputDurable,
             started + CALLER_BUDGET + Duration::from_millis(500),
         );
+        if queue_past_deadline {
+            std::thread::sleep(original.remaining() + Duration::from_millis(20));
+            assert!(
+                original.is_expired(),
+                "queued receipt must exhaust the original clock"
+            );
+        }
         dispatch_generation(&mut fixture, &mut second);
-        let second_phase = fixture.complete_actual_phase(None);
+        let rejected_before_publication = original.is_expired()
+            && !fixture.el.compaction_publish_actor.is_inflight()
+            && fixture.el.compaction_publish_result_rx.is_empty();
+        let second_phase = if rejected_before_publication {
+            None
+        } else {
+            Some(fixture.complete_actual_phase(None))
+        };
+        if second_phase.is_some() {
+            // A persisted publication intent retains the output generation.
+            second_rows = rows_for_generation(&fixture, &second);
+        }
         let no_later_phase = fixture.el.compaction_publish_result_rx.is_empty()
             && !fixture.el.compaction_publish_actor.is_inflight();
         let outcome = fixture.drive_manual_response(&response);
         let first_rows = rows_for_generation(&fixture, &first);
-        let second_rows = rows_for_generation(&fixture, &second);
         let committed = fixture.committed_manifest();
         fixture.el.gc_actor.shutdown_workers();
         let first_retired = retired_inputs(&fixture, &first);
@@ -577,15 +615,31 @@ fn should_stop_second_family_when_original_manual_clock_expires() -> MidgeResult
         assert!(first_phases
             .iter()
             .all(|phase| phase.completed_at < started + CALLER_BUDGET));
-        assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);
-        assert!(
-            matches!(second_phase.error, Some(MidgeError::Timeout(_))),
-            "{second_phase:?}"
-        );
-        assert!(no_later_phase && second_local_inputs && second_intent);
-        assert_genuine_holds(&reads, 2);
+        if let Some(second_phase) = &second_phase {
+            assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);
+            assert!(
+                matches!(second_phase.error, Some(MidgeError::Timeout(_))),
+                "{second_phase:?}"
+            );
+            assert!(second_intent);
+            assert_genuine_holds(&reads, 2);
+            assert!(reads[1].forwarded_at >= started + CALLER_BUDGET);
+        } else {
+            assert!(rejected_before_publication && original.is_expired());
+            assert!(
+                !second_intent,
+                "no phase or intent was accepted after expiry"
+            );
+            assert_genuine_holds(&reads, 1);
+        }
+        if queue_past_deadline {
+            assert!(
+                second_phase.is_none(),
+                "expired queued compute must not submit publication"
+            );
+        }
+        assert!(no_later_phase && second_local_inputs);
         assert!(reads[0].forwarded_at < started + CALLER_BUDGET);
-        assert!(reads[1].forwarded_at >= started + CALLER_BUDGET);
         assert_route_timeout(&outcome, MANUAL_REQUEST);
         assert_one_exact_fixture_row(first_rows);
         assert_one_exact_fixture_row(second_rows);
