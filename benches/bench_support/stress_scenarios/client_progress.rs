@@ -94,6 +94,7 @@ impl ClientReporter {
             "resource_limit_responses": result.stats.saturation.resource_limit,
             "write_stall_responses": result.stats.saturation.write_stall,
             "saturation_backoff_ms": result.stats.saturation.backoff_ms,
+            "latency": result.stats.latency.summary(&result.stats.latency_us),
             "elapsed_ms": report.elapsed_ms,
             "last_success_elapsed_ms": result.last_success_elapsed_ms,
             "terminal_error": result.terminal_error.as_ref().map(ToString::to_string),
@@ -198,7 +199,9 @@ where
     N: FnMut() -> Instant,
     S: FnMut(Duration),
 {
-    let deadline = (clock.now)() + budget;
+    let loop_started = (clock.now)();
+    let deadline = loop_started + budget;
+    let mut last_ack = loop_started;
     let mut result = WorkerResult::default();
     let mut sequences = [0_u64; 11];
     let mut account = 0_u64;
@@ -229,7 +232,14 @@ where
             ended.saturating_duration_since(control.origin).as_millis(),
             &mut backoff,
         ) {
-            ClientAttempt::Success => advance(),
+            ClientAttempt::Success => {
+                result.stats.latency.successful(
+                    ended.saturating_duration_since(started),
+                    ended.saturating_duration_since(last_ack),
+                );
+                last_ack = ended;
+                advance();
+            }
             ClientAttempt::Retry { error, backoff_ms } => {
                 if !result.retry_lease_healthy(&error, config.workload, control) {
                     control.stop.store(true, Ordering::Release);
@@ -240,7 +250,12 @@ where
                     .saturation
                     .backoff_ms
                     .saturating_add(backoff_ms);
+                let sleep_started = (clock.now)();
                 (clock.sleep)(Duration::from_millis(backoff_ms));
+                result
+                    .stats
+                    .latency
+                    .slept((clock.now)().saturating_duration_since(sleep_started));
             }
             ClientAttempt::Terminal => {
                 control.stop.store(true, Ordering::Release);
@@ -251,6 +266,10 @@ where
     }
     result.stopped_by_peer =
         control.stop.load(Ordering::Acquire) && result.terminal_error.is_none();
+    result
+        .stats
+        .latency
+        .censor((clock.now)().saturating_duration_since(last_ack));
     report(
         &result,
         ClientReport {
@@ -289,6 +308,126 @@ mod progress_tests {
             seed_count: 0,
             cloud: false,
         }
+    }
+
+    #[test]
+    fn should_measure_retry_sleep_and_inter_ack_delay_when_attempts_are_rejected() {
+        use std::cell::Cell;
+        // Arrange
+        let origin = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let stop = AtomicBool::new(false);
+        let directory = tempfile::tempdir().unwrap();
+        let reporter = ClientReporter::new(
+            directory.path(),
+            write_config(),
+            origin,
+            Duration::from_secs(1),
+            "scripted",
+        );
+        // Act: two rejected 100us calls, requested sleeps of 1ms and 2ms,
+        // each overshooting by 500us, then one successful 100us call.
+        let result = run_client_with(
+            write_config(),
+            Duration::from_secs(1),
+            &ClientControl {
+                stop: &stop,
+                lease_health: None,
+                origin,
+            },
+            ClientClock {
+                now: || origin + elapsed.get(),
+                sleep: |duration| {
+                    elapsed.set(elapsed.get() + duration + Duration::from_micros(500));
+                },
+            },
+            |attempt, _, _| {
+                elapsed.set(elapsed.get() + Duration::from_micros(100));
+                match attempt {
+                    0 => Err(MidgeError::WriteStall("scripted".into())),
+                    1 => Err(MidgeError::ResourceLimit("scripted".into())),
+                    _ => {
+                        stop.store(true, Ordering::Release);
+                        Ok((Some(0), 1, 1, false))
+                    }
+                }
+            },
+            || {},
+            |_, report| {
+                if report.operation_in_flight {
+                    elapsed.set(elapsed.get() + Duration::from_micros(10));
+                }
+            },
+        );
+        let snapshot = reporter.snapshot(
+            &result,
+            ClientReport {
+                elapsed_ms: elapsed.get().as_millis(),
+                operation_in_flight: false,
+                force: true,
+            },
+        );
+        // Assert: first inter-ACK sample starts at this client's loop start,
+        // includes all reports/rejections/actual sleep; no final report time.
+        assert_eq!(snapshot["latency"]["attempt_samples"], 3);
+        assert_eq!(snapshot["latency"]["successful_call_samples"], 1);
+        assert_eq!(snapshot["latency"]["inter_ack_samples"], 1);
+        assert_eq!(snapshot["latency"]["successful_call_p99_us"], 100);
+        assert!((4_330..4_340).contains(&snapshot["latency"]["inter_ack_p99_us"].as_u64().unwrap()));
+        assert_eq!(snapshot["latency"]["actual_sleep_ns"], 4_000_000);
+        assert_eq!(snapshot["latency"]["censored_inter_ack_samples"], 0);
+        assert_eq!(result.stats.acknowledged, 1);
+        assert_eq!(result.stats.saturation.backoff_ms, 3);
+    }
+
+    #[test]
+    fn should_censor_pending_interval_when_backoff_expires_without_an_ack() {
+        use std::cell::Cell;
+        // Arrange
+        let origin = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let stop = AtomicBool::new(false);
+        let directory = tempfile::tempdir().unwrap();
+        let reporter = ClientReporter::new(
+            directory.path(),
+            write_config(),
+            origin,
+            Duration::from_secs(1),
+            "scripted",
+        );
+        // Act
+        let result = run_client_with(
+            write_config(),
+            Duration::from_micros(500),
+            &ClientControl {
+                stop: &stop,
+                lease_health: None,
+                origin,
+            },
+            ClientClock {
+                now: || origin + elapsed.get(),
+                sleep: |duration| elapsed.set(elapsed.get() + duration),
+            },
+            |_, _, _| {
+                elapsed.set(elapsed.get() + Duration::from_micros(100));
+                Err(MidgeError::WriteStall("scripted".into()))
+            },
+            || panic!("rejection cannot advance progress"),
+            |_, _| {},
+        );
+        let snapshot = reporter.snapshot(
+            &result,
+            ClientReport {
+                elapsed_ms: 1,
+                operation_in_flight: false,
+                force: true,
+            },
+        );
+        // Assert
+        assert_eq!(snapshot["latency"]["successful_call_samples"], 0);
+        assert_eq!(snapshot["latency"]["inter_ack_samples"], 0);
+        assert_eq!(snapshot["latency"]["censored_inter_ack_samples"], 1);
+        assert_eq!(snapshot["latency"]["censored_inter_ack_ns"], 1_100_000);
     }
 
     #[test]
@@ -379,6 +518,8 @@ mod progress_tests {
         // Assert
         assert_eq!(result.stats.attempts, 1);
         assert_eq!(result.stats.acknowledged, 0);
+        assert_eq!(result.stats.latency.successful_us.len(), 0);
+        assert_eq!(result.stats.latency.inter_ack_us.len(), 0);
         assert!(result
             .terminal_error
             .as_ref()
@@ -571,6 +712,14 @@ mod progress_tests {
         let final_snapshot = snapshots.last().unwrap();
         assert_eq!(final_snapshot["attempted_transactions"], 3);
         assert_eq!(final_snapshot["acknowledged_rows"], 32);
+        assert_eq!(final_snapshot["latency"]["attempt_samples"], 3);
+        assert_eq!(final_snapshot["latency"]["successful_call_samples"], 1);
+        assert_eq!(final_snapshot["latency"]["inter_ack_samples"], 1);
+        assert_eq!(final_snapshot["latency"]["censored_inter_ack_samples"], 1);
+        assert_eq!(
+            final_snapshot["latency"]["censored_inter_ack_ns"],
+            2_001_000_000_u64
+        );
         assert_eq!(final_snapshot["resource_limit_responses"], 1);
         assert_eq!(final_snapshot["saturation_backoff_ms"], 1);
         assert_eq!(final_snapshot["operation_in_flight"], false);

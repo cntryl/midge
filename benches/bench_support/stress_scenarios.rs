@@ -35,6 +35,8 @@ use checkpoint_accounting::CheckpointAccounting;
 #[cfg(all(test, feature = "failpoints"))]
 #[path = "stress_scenarios/final_flush_watchdog.rs"]
 mod final_flush_watchdog;
+#[path = "stress_scenarios/latency.rs"]
+mod latency;
 #[cfg(all(test, feature = "failpoints"))]
 #[allow(
     unused_imports,
@@ -140,6 +142,7 @@ struct StageStats {
     acknowledged_rows: u64,
     saturation: SaturationCounts,
     latency_us: Histogram<u64>,
+    latency: latency::LatencyMetrics,
 }
 
 impl Default for StageStats {
@@ -151,6 +154,7 @@ impl Default for StageStats {
             acknowledged_rows: 0,
             saturation: SaturationCounts::default(),
             latency_us: Histogram::new(3).expect("create transaction latency histogram"),
+            latency: latency::LatencyMetrics::default(),
         }
     }
 }
@@ -180,6 +184,7 @@ impl StageStats {
         self.latency_us
             .add(&other.latency_us)
             .expect("merge transaction latency histogram");
+        self.latency.merge(&other.latency);
     }
 
     fn record_latency(&mut self, elapsed: Duration) {
@@ -214,6 +219,8 @@ struct WorkloadArtifacts {
     resource_phase: Arc<AtomicU64>,
     benchmark: &'static str,
     git_commit: String,
+    binary_sha256: Option<String>,
+    source_worktree_clean: bool,
     stage_index: Option<usize>,
     shutdown_results: Vec<serde_json::Value>,
     terminal_error: Option<String>,
@@ -229,6 +236,7 @@ struct WorkloadArtifacts {
     resource_limit: u64,
     write_stall: u64,
     saturation_backoff_ms: u64,
+    latency_stats: StageStats,
     progress_units: u64,
     checks: Vec<serde_json::Value>,
     complete: bool,
@@ -258,6 +266,11 @@ impl WorkloadArtifacts {
             resource_phase: Arc::new(AtomicU64::new(0)),
             benchmark: case.benchmark,
             git_commit: current_commit(),
+            binary_sha256: std::env::var("MIDGE_STRESS_BINARY_SHA256").ok(),
+            source_worktree_clean: std::process::Command::new("git")
+                .args(["diff", "HEAD", "--quiet"])
+                .status()
+                .is_ok_and(|status| status.success()),
             stage_index: None,
             shutdown_results: Vec::new(),
             terminal_error: None,
@@ -273,6 +286,7 @@ impl WorkloadArtifacts {
             resource_limit: 0,
             write_stall: 0,
             saturation_backoff_ms: 0,
+            latency_stats: StageStats::default(),
             progress_units: 0,
             checks: Vec::new(),
             complete: false,
@@ -288,6 +302,7 @@ impl WorkloadArtifacts {
     }
 
     fn record_stage(&mut self, stage: &str, stats: &StageStats, progress: &ProgressHandle) {
+        self.latency_stats.merge(stats);
         self.phase = "workload";
         self.stage = stage.to_string();
         self.stage_index = None;
@@ -442,6 +457,8 @@ impl WorkloadArtifacts {
             &json!({
                 "benchmark_workload": self.benchmark,
                 "git_commit": self.git_commit,
+                "binary_sha256": self.binary_sha256,
+                "source_worktree_clean": self.source_worktree_clean,
                 "process_id": std::process::id(),
                 "scenario": self.scenario,
                 "backend": self.backend,
@@ -453,12 +470,15 @@ impl WorkloadArtifacts {
                 "phase_started_unix_ms": self.started_unix_ms + self.phase_started_elapsed_ms,
                 "shutdown_results": self.shutdown_results,
                 "configured_duration_seconds": self.configured_seconds,
+                "measurement_topology": if std::env::var_os("MIDGE_STRESS_COMPARISON_CLIENTS").is_some() { "independent_fresh_process" } else { "cumulative_client_ramp" },
+                "comparison_repeat": std::env::var("MIDGE_COMPARISON_REPEAT").ok(),
                 "attempted_transactions": self.attempts,
                 "acknowledged_transactions": self.acknowledged,
                 "acknowledged_rows": self.acknowledged_rows,
                 "resource_limit_responses": self.resource_limit,
                 "write_stall_responses": self.write_stall,
                 "saturation_backoff_ms": self.saturation_backoff_ms,
+                "latency": self.latency_stats.latency.summary(&self.latency_stats.latency_us),
                 "progress_completed_units": self.progress_units,
                 "verification_checks": self.checks.len(),
                 "terminal_error": self.terminal_error,
@@ -669,6 +689,13 @@ struct StageReport<'a> {
 }
 
 pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
+    let case = comparison_case(
+        case,
+        std::env::var("MIDGE_STRESS_COMPARISON_CLIENTS")
+            .ok()
+            .as_deref(),
+    )
+    .expect("valid isolated comparison client count");
     enable_phase_tracing();
     let duration = case_duration(case.tier);
     let progress = ctx.progress_handle();
@@ -681,6 +708,30 @@ pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
     let (resource_start, resource_end, peak_rss) = sampler.finish();
     record_resources(ctx, resource_start, resource_end, peak_rss);
     artifacts.finish(&progress);
+}
+
+fn comparison_case(
+    mut case: WorkloadCase,
+    requested: Option<&str>,
+) -> Result<WorkloadCase, String> {
+    if let Some(requested) = requested {
+        let clients = requested
+            .parse::<usize>()
+            .map_err(|_| "comparison clients must be an integer")?;
+        if !case.stages.contains(&clients) {
+            return Err("comparison client count must be an original workload stage".into());
+        }
+        case.stages = match clients {
+            1 => &[1],
+            2 => &[2],
+            4 => &[4],
+            8 => &[8],
+            16 => &[16],
+            32 => &[32],
+            _ => return Err("unsupported comparison client count".into()),
+        };
+    }
+    Ok(case)
 }
 
 fn open_case(
@@ -760,6 +811,7 @@ fn run_stages(
         artifacts.enter_stage(stage_index, &stage_label, progress);
         let started = Instant::now();
         let before = runtime_metrics(&opened.engine);
+        capture_prestate(case, stage_index, clients, opened, artifacts, &before);
         let (stage, outcomes) = run_stage(
             case,
             stage_index,
@@ -787,6 +839,13 @@ fn run_stages(
         }
         let elapsed = started.elapsed().max(Duration::from_nanos(1));
         let after = runtime_metrics(&opened.engine);
+        write_atomic_json(
+            &artifacts
+                .path
+                .join(format!("stage-{stage_index:02}-endstate.json")),
+            &json!({ "stage_index": stage_index, "runtime": after }),
+        )
+        .expect("persist measured end-stage runtime state");
         record_stage(
             ctx,
             StageReport {
@@ -804,6 +863,66 @@ fn run_stages(
         .checkpoint_accounting
         .window("ingestion", &ingestion_before, artifacts, None);
     expected
+}
+
+fn capture_prestate(
+    case: WorkloadCase,
+    stage_index: usize,
+    clients: usize,
+    opened: &OpenedCase,
+    artifacts: &WorkloadArtifacts,
+    before: &RuntimeMetricsSnapshot,
+) {
+    let isolated = std::env::var_os("MIDGE_STRESS_COMPARISON_CLIENTS").is_some();
+    let initial_rows = if isolated {
+        assert_eq!(stage_index, 0, "comparison cannot inherit earlier stages");
+        let transaction = opened
+            .engine
+            .begin_tx(opened.family.id(), TransactionMode::ReadOnly)
+            .expect("capture isolated initial rows");
+        let mut scan = transaction
+            .scan(&Query::new())
+            .expect("scan isolated initial state");
+        let mut rows = 0;
+        for row in scan.by_ref() {
+            row.expect("read isolated initial row");
+            rows += 1;
+        }
+        assert!(scan.exhausted(), "isolated initial scan exhausted normally");
+        assert_eq!(
+            rows,
+            seed_rows(case.workload),
+            "comparison initial cardinality differs from fixed seed"
+        );
+        Some(rows)
+    } else {
+        None
+    };
+    let layout = opened
+        .engine
+        .metrics()
+        .get_storage_layout()
+        .expect("capture pre-stage storage layout");
+    write_atomic_json(
+        &artifacts
+            .path
+            .join(format!("stage-{stage_index:02}-prestate.json")),
+        &json!({
+            "schema_version": 1,
+            "git_commit": artifacts.git_commit,
+            "stage_index": stage_index,
+            "clients": clients,
+            "isolated_comparison": isolated,
+            "verified_initial_rows": initial_rows,
+            "warmup_operations": 0,
+            "seed_rows": seed_rows(case.workload),
+            "prior_stage_count": stage_index,
+            "database_logical_file_bytes": directory_bytes(&opened.database),
+            "runtime": before,
+            "storage_layout": layout,
+        }),
+    )
+    .expect("persist pre-stage comparison state");
 }
 
 fn run_stage(
@@ -1709,6 +1828,15 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
         .parameter("resource_limit_responses", stats.saturation.resource_limit)
         .parameter("write_stall_responses", stats.saturation.write_stall)
         .parameter("saturation_backoff_ms", stats.saturation.backoff_ms)
+        .parameter("legacy_transaction_latency_scope", "all_attempts_excluding_report_and_retry_sleep")
+        .parameter("inter_ack_latency_scope", "worker_loop_start_or_previous_success_to_next_success_including_reporting_and_actual_sleep")
+        .parameter("latency_accounting_valid", stats.latency.valid)
+        .parameter("attempt_latency_samples", stats.latency_us.len())
+        .parameter("successful_call_latency_samples", stats.latency.successful_us.len())
+        .parameter("inter_ack_latency_samples", stats.latency.inter_ack_us.len())
+        .parameter("actual_sleep_ns", stats.latency.actual_sleep_ns)
+        .parameter("censored_inter_ack_samples", stats.latency.censored_samples)
+        .parameter("censored_inter_ack_ns", stats.latency.censored_ns)
         .parameter("midge_write_stalls_total", after.write_stalls_total)
         .parameter("midge_write_stalls_memory", after.write_stalls_memory_total)
         .parameter(
@@ -1720,16 +1848,13 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
             "midge_write_stalls_no_space",
             after.write_stalls_no_space_total,
         );
+    record_stage_diagnostics(ctx, stats, before, after);
     for (name, quantile) in [
         ("transaction_latency_p50_us", 0.50),
         ("transaction_latency_p95_us", 0.95),
         ("transaction_latency_p99_us", 0.99),
     ] {
-        let value = if stats.latency_us.is_empty() {
-            0.0
-        } else {
-            observation_value(stats.latency_us.value_at_quantile(quantile))
-        };
+        let value = observation_value(self::quantile(&stats.latency_us, quantile));
         ctx.record_observation(
             name,
             value,
@@ -1773,6 +1898,60 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
     );
 }
 
+fn record_stage_diagnostics(
+    ctx: &mut StressContext,
+    stats: &StageStats,
+    before: &RuntimeMetricsSnapshot,
+    after: &RuntimeMetricsSnapshot,
+) {
+    for (name, initial, final_value) in [
+        (
+            "memory",
+            before.write_stalls_memory_total,
+            after.write_stalls_memory_total,
+        ),
+        (
+            "compaction",
+            before.write_stalls_compaction_total,
+            after.write_stalls_compaction_total,
+        ),
+        (
+            "cloud",
+            before.write_stalls_cloud_total,
+            after.write_stalls_cloud_total,
+        ),
+        (
+            "no_space",
+            before.write_stalls_no_space_total,
+            after.write_stalls_no_space_total,
+        ),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        ctx.parameter(
+            format!("midge_write_stalls_{name}_delta_valid"),
+            delta.is_some(),
+        )
+        .parameter(
+            format!("midge_write_stalls_{name}_delta"),
+            delta.unwrap_or(0),
+        );
+    }
+    for (prefix, histogram) in [
+        ("attempt_latency", &stats.latency_us),
+        ("successful_call_latency", &stats.latency.successful_us),
+        ("inter_ack_latency", &stats.latency.inter_ack_us),
+    ] {
+        for (suffix, rank) in [("p50", 0.50), ("p95", 0.95), ("p99", 0.99)] {
+            ctx.record_observation(
+                format!("{prefix}_{suffix}_us"),
+                observation_value(quantile(histogram, rank)),
+                ObservationUnit::Microseconds,
+                ObservationDirection::LowerIsBetter,
+            );
+        }
+    }
+}
+
 fn observation_value(value: u64) -> f64 {
     value
         .to_string()
@@ -1789,12 +1968,16 @@ fn append_stage_csv(path: &Path, stage: &str, stats: &StageStats) {
         .open(report)
         .expect("open stage report");
     if needs_header {
-        writeln!(file,"stage,attempted_transactions,acknowledged_transactions,logical_operations,acknowledged_rows,resource_limit_responses,write_stall_responses,saturation_backoff_ms,latency_p50_us,latency_p95_us,latency_p99_us")
+        writeln!(file,"stage,attempted_transactions,acknowledged_transactions,logical_operations,acknowledged_rows,resource_limit_responses,write_stall_responses,saturation_backoff_ms,latency_p50_us,latency_p95_us,latency_p99_us,{}", latency::CSV_FIELDS.join(","))
             .expect("write stage report header");
     }
+    let summary = stats.latency.summary(&stats.latency_us);
+    let additional = latency::CSV_FIELDS
+        .map(|key| summary[key].to_string())
+        .join(",");
     writeln!(
         file,
-        "{stage},{},{},{},{},{},{},{},{},{},{}",
+        "{stage},{},{},{},{},{},{},{},{},{},{},{additional}",
         stats.attempts,
         stats.acknowledged,
         stats.logical_operations,
@@ -2549,6 +2732,28 @@ fn watchdog_fixture_operation(
 
 #[cfg(test)]
 mod artifact_tests {
+
+    #[test]
+    fn should_select_one_original_stage_when_comparison_starts_in_a_fresh_process() {
+        use super::*;
+        // Arrange
+        let case = WorkloadCase {
+            benchmark: "fixture",
+            scenario: "write-heavy",
+            backend: "local",
+            tier: 5,
+            workload: "write-heavy",
+            stages: &[1, 2, 4, 8, 16],
+        };
+        // Act and Assert
+        for clients in ["1", "2", "4", "8", "16"] {
+            let selected = comparison_case(case, Some(clients)).unwrap();
+            assert_eq!(selected.stages, &[clients.parse::<usize>().unwrap()]);
+        }
+        assert_eq!(comparison_case(case, None).unwrap().stages, case.stages);
+        assert!(comparison_case(case, Some("3")).is_err());
+        assert!(comparison_case(case, Some("invalid")).is_err());
+    }
 
     #[test]
     fn should_count_disk_changes_only_within_one_eligible_storage_phase() {

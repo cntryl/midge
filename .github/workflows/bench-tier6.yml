@@ -69,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/midge-stress/runner-logs
-          cargo bench --bench 'tier6_*' --features stress-soak -- --workload ${{ matrix.workload }} 2>&1 | tee target/midge-stress/runner-logs/workload.log
+          bash tools/run-stress-with-receipts.sh tier6_mixed_workload_soak ${{ matrix.workload }} 2>&1 | tee target/midge-stress/runner-logs/workload.log
 
       - name: Preserve workload failure and emulator diagnostics
         if: always()
