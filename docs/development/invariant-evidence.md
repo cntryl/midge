@@ -35,6 +35,8 @@ do not establish semantic sufficiency or execute the linked tests.
 
 ## AUTH-1
 
+Composed native regression: [should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Native S3 predecessor loses real lease validity; a higher epoch successor publishes and reclaims WAL/SST state before held immutable WAL completion. Strict predecessor write is fenced and no subsequent control mutation is forwarded. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
+
 Production: [src/runtime/event_loop/fencing.rs:14](../../src/runtime/event_loop/fencing.rs#L14) `RuntimeFence::check_health`; [src/runtime/event_loop/fencing.rs:39](../../src/runtime/event_loop/fencing.rs#L39) `RuntimeFence::validate_within`; [src/lease/heartbeat.rs:141](../../src/lease/heartbeat.rs#L141) `run_watchdog_worker`.
 
 Exact evidence and assertion markers:
@@ -417,6 +419,8 @@ Uncovered boundary: Call observation is not physical power-loss proof for every 
 
 ## CLOUD-1
 
+Composed native regression: [should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Held native immutable WAL PUT succeeds, remains an uncatalogued orphan, and cannot alter the successor catalog. Two absent-cache fresh-process recoveries exclude its complete transaction. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
+
 Production: [src/wal/cloud_segment.rs:39](../../src/wal/cloud_segment.rs#L39) `object_key`; [src/wal/cloud_catalog.rs:190](../../src/wal/cloud_catalog.rs#L190) `WalPublicationCatalog::validate`; [src/runtime/cloud_startup/streaming_wal_plan.rs:333](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L333) `validate_publication_identity`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:371](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L371) `reject_cloud_wal_without_catalog_within`.
 
 Exact evidence and assertion markers:
@@ -429,6 +433,8 @@ Preconditions: Actual filesystem CloudSimulated object and real catalog planner;
 Uncovered boundary: These prove object existence is insufficient and catalog identity is checked. They do not simulate every late native upload schedule or establish provider-side immutable-object retention settings.
 
 ## CLOUD-2
+
+Composed native regression: [should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Late native upload completion after real takeover leaves the predecessor cloud frontier unchanged. A deliberate early-frontier mutation is rejected by the fixture. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
 Production: [src/storage/hybrid/backend/uploads.rs:372](../../src/storage/hybrid/backend/uploads.rs#L372) `process_wal_upload`; [src/runtime/hybrid_persistence.rs:671](../../src/runtime/hybrid_persistence.rs#L671) `publish_remote_wal_segment`; [src/runtime/frontiers.rs:58](../../src/runtime/frontiers.rs#L58) `advance_cloud_to`.
 
@@ -471,6 +477,8 @@ Preconditions: Actual real SST objects/metadata in filesystem/mock-cloud fixture
 Uncovered boundary: Selected assertions prove size and bounds validation. They do not cover all missing/corrupt/incompatible object variants or complete native provider salvage policy; full body/block integrity is lazy in some metadata-only startup paths.
 
 ## CLOUD-5
+
+Composed native regression: [should_verify_acknowledged_state_in_fresh_recovery_process](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
 Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:118](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L118) `build_with_local_fs_within`; [src/runtime/cloud_startup/streaming_wal_plan.rs:373](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L373) `remote_source`; [src/runtime/cloud_startup/streaming_wal_plan.rs:593](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L593) `active_local_source`; [src/wal/recovery/streaming.rs:283](../../src/wal/recovery/streaming.rs#L283) `replay_wal_with_options`.
 

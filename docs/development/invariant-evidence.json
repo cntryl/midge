@@ -327,6 +327,30 @@
               "marker": "assert_eq!("
             }
           ]
+        },
+        {
+          "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
+          "line": 55,
+          "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
+          "claim": "Native S3 predecessor loses real lease validity; a higher epoch successor publishes and reclaims WAL/SST state before held immutable WAL completion. Strict predecessor write is fenced and no subsequent control mutation is forwarded.",
+          "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
+          "assertions": [
+            {
+              "line": 277,
+              "marker": "assert!(",
+              "helper": "run_schedule"
+            },
+            {
+              "line": 369,
+              "marker": "assert!(",
+              "helper": "run_schedule"
+            },
+            {
+              "line": 402,
+              "marker": "assert!(predecessor_proxy.control.observations()[predecessor_release_index..]",
+              "helper": "run_schedule"
+            }
+          ]
         }
       ],
       "preconditions": "A real validity object and conditional provider mock are required. The delayed-CAS schedule has positive request/ownership prerequisites.",
@@ -3023,6 +3047,20 @@
               "marker": "assert_eq!(recovered.next_segment_id, 4);"
             }
           ]
+        },
+        {
+          "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
+          "line": 55,
+          "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
+          "claim": "Held native immutable WAL PUT succeeds, remains an uncatalogued orphan, and cannot alter the successor catalog. Two absent-cache fresh-process recoveries exclude its complete transaction.",
+          "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
+          "assertions": [
+            {
+              "line": 409,
+              "marker": "assert_eq!(",
+              "helper": "run_schedule"
+            }
+          ]
         }
       ],
       "preconditions": "Actual filesystem CloudSimulated object and real catalog planner; explicit epoch/checksum faults.",
@@ -3138,6 +3176,20 @@
             {
               "line": 5859,
               "marker": "assert!("
+            }
+          ]
+        },
+        {
+          "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
+          "line": 55,
+          "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
+          "claim": "Late native upload completion after real takeover leaves the predecessor cloud frontier unchanged. A deliberate early-frontier mutation is rejected by the fixture.",
+          "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
+          "assertions": [
+            {
+              "line": 385,
+              "marker": "assert_eq!(",
+              "helper": "run_schedule"
             }
           ]
         }
@@ -3413,6 +3465,30 @@
             {
               "line": 204,
               "marker": "assert!("
+            }
+          ]
+        },
+        {
+          "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
+          "line": 502,
+          "symbol": "should_verify_acknowledged_state_in_fresh_recovery_process",
+          "claim": "Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation.",
+          "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
+          "assertions": [
+            {
+              "line": 123,
+              "marker": "assert_eq!(",
+              "helper": "assert_exact"
+            },
+            {
+              "line": 128,
+              "marker": "assert_eq!(",
+              "helper": "assert_exact"
+            },
+            {
+              "line": 134,
+              "marker": "assert_eq!(",
+              "helper": "assert_exact"
             }
           ]
         }

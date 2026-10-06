@@ -311,7 +311,7 @@ impl Drop for NativeStartupProxy {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> io::Result<(String, String, Vec<u8>)> {
+pub(crate) fn read_request(stream: &mut TcpStream) -> io::Result<(String, String, Vec<u8>)> {
     stream.set_nonblocking(false)?; // Accepted sockets inherit flags on some systems.
     stream.set_read_timeout(Some(SOCKET_WAIT))?;
     stream.set_write_timeout(Some(SOCKET_WAIT))?;
@@ -411,7 +411,7 @@ fn client_closed(stream: &TcpStream) -> io::Result<bool> {
     result
 }
 
-fn forward(request: &[u8], address: SocketAddr) -> io::Result<Vec<u8>> {
+pub(crate) fn forward(request: &[u8], address: SocketAddr) -> io::Result<Vec<u8>> {
     let mut upstream = TcpStream::connect_timeout(&address, SOCKET_WAIT)?;
     upstream.set_read_timeout(Some(SOCKET_WAIT))?;
     upstream.set_write_timeout(Some(SOCKET_WAIT))?;

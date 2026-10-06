@@ -9,7 +9,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 #[path = "native_startup_proxy.rs"]
-mod proxy;
+pub(crate) mod proxy;
 use proxy::{Control, DelayMode, LeaseCondition, NativeStartupProxy};
 
 const OPEN_BUDGET: Duration = Duration::from_millis(600);
