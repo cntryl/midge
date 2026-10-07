@@ -29,16 +29,18 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
 
 fn measured_duration(profile: &str, clients: usize) -> Duration {
-    match (profile, clients) {
+    let smoke_duration = match (profile, clients) {
         ("local", CLIENTS_16) => LOCAL_16_MEASURED,
         ("cloud", CLIENTS_16) => CLOUD_16_MEASURED,
         _ => MEASURED,
-    }
+    };
+    stress_config::tier4_measured_duration(smoke_duration)
 }
 
 fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     let measured_window = measured_duration(profile, clients);
     ycsb::configure_workload_parameters(ctx, profile, clients, measured_window);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -106,8 +108,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let measured = stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let measured = {
             let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
-            let write_opts = measured_write_opts;
-            ycsb::run_multi_client_for_duration_with_stats(
+            ycsb::run_multi_client_for_duration_observed_with_stats(
                 &engine,
                 clients,
                 measured_window,
@@ -132,16 +133,17 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
                                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                                 .expect("measured begin");
                             let _ = tx.get(&k[..]).expect("measured get");
+                            true
                         } else {
                             let v = ycsb::make_value((op_index % 251) as u8);
-                            ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
+                            ycsb::retry_write_stall_observed(e, cf_id, stop.as_ref(), || {
                                 let mut tx = e
                                     .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                                     .expect("measured begin");
                                 tx.put(k.to_vec(), v.clone(), None).expect("measured put");
-                                tx.commit(write_opts)
+                                tx.commit(measured_write_opts)
                             })
-                            .expect("measured commit");
+                            .expect("measured commit")
                         }
                     }
                 },

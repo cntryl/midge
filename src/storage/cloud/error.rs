@@ -26,6 +26,10 @@ pub enum CloudError {
     /// race with a concurrent writer.
     #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     PreconditionFailed(String),
+    /// A conditional mutation was definitely rejected by a retryable provider
+    /// conflict, without establishing that its precondition failed.
+    #[cfg_attr(not(any(test, feature = "cloud-aws")), allow(dead_code))]
+    ConditionalConflict(String),
     /// Authentication or authorization failure (401 / 403).
     #[cfg(any(test, feature = "cloud-common"))]
     Unauthorized(String),
@@ -148,6 +152,7 @@ impl std::fmt::Display for CloudError {
             #[cfg(any(test, feature = "cloud-common"))]
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::PreconditionFailed(msg) => write!(f, "precondition failed: {msg}"),
+            Self::ConditionalConflict(msg) => write!(f, "conditional conflict: {msg}"),
             #[cfg(any(test, feature = "cloud-common"))]
             Self::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
             #[cfg(any(test, feature = "cloud-common"))]

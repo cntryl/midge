@@ -15,13 +15,17 @@ impl CloudStorage {
         reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
         callback: &crate::storage::RangeReadCallback,
     ) {
+        let timeout = self.scoped_timeout(timeout);
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let start = range.start;
         let end = range.end;
-        if timeout.is_zero()
-            || start >= end
-            || end > expected.size
-            || !expected.same_version(&expected)
-        {
+        if timeout.is_zero() {
+            let _ = callback.send(Err(crate::storage::storage_timeout_error(
+                "conditional range request has no remaining budget",
+            )));
+            return;
+        }
+        if start >= end || end > expected.size || !expected.same_version(&expected) {
             let _ = callback.send(Err("invalid conditional range request".into()));
             return;
         }
@@ -35,7 +39,7 @@ impl CloudStorage {
             reservation,
             tx,
         );
-        let result = match rx.recv_timeout(timeout) {
+        let result = match super::adapter::await_cloud_event(self, &rx, &deadline, "range GET") {
             Ok(CloudEvent::GetRange {
                 key: returned,
                 start: actual_start,
@@ -55,7 +59,7 @@ impl CloudStorage {
             Ok(event) => Err(crate::storage::StorageError::protocol(format!(
                 "unexpected conditional range response: {event:?}"
             ))),
-            Err(error) => Err(crate::storage::StorageError::timeout(error)),
+            Err(error) => Err(error),
         };
         let _ = callback.send(result);
     }
@@ -68,6 +72,8 @@ impl CloudStorage {
         reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
         callback: &StorageCallback,
     ) {
+        let timeout = self.scoped_timeout(timeout);
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
         if timeout.is_zero() {
             let _ = callback.send(StorageEvent::WriteComplete {
                 key: key.to_string(),
@@ -86,7 +92,7 @@ impl CloudStorage {
             reservation,
             tx,
         );
-        let event = match rx.recv_timeout(timeout) {
+        let event = match super::adapter::await_cloud_event(self, &rx, &deadline, "PUT") {
             Ok(CloudEvent::Put { result, .. }) => StorageEvent::WriteComplete {
                 key: key.to_string(),
                 result: cloud_to_storage_outcome(result),
@@ -97,15 +103,9 @@ impl CloudStorage {
                     format!("unexpected cloud PUT response: {other:?}").into(),
                 ),
             },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::WriteComplete {
+            Err(error) => StorageEvent::WriteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud PUT callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err("cloud PUT callback closed".to_string().into()),
+                result: StorageOutcome::Err(error),
             },
         };
         let _ = callback.send(event);

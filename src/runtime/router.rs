@@ -1,7 +1,7 @@
 //! Per-request response routing.
 
 use super::RuntimeResponse;
-use crate::common::MidgeError;
+use crate::common::{MidgeError, OperationDeadline};
 use crossbeam::channel::{self, Receiver, Sender};
 use dashmap::DashMap;
 use std::collections::{HashMap, VecDeque};
@@ -16,6 +16,7 @@ struct PendingRequest {
     response_tx: Sender<RuntimeResponse>,
     request_kind: &'static str,
     registered_at: Instant,
+    deadline: Option<OperationDeadline>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +107,20 @@ impl ResponseRouter {
             .map(|pending| pending.registered_at)
     }
 
+    /// The original caller budget while its response obligation remains live.
+    /// Direct registrations use the configured budget from their original clock.
+    pub(crate) fn request_deadline(
+        &self,
+        request_id: u64,
+        configured_budget: Duration,
+    ) -> Option<OperationDeadline> {
+        self.pending.get(&request_id).map(|pending| {
+            pending.deadline.unwrap_or_else(|| {
+                OperationDeadline::from_start(pending.registered_at, configured_budget)
+            })
+        })
+    }
+
     /// Register a new pending response for a given `request_id`.
     ///
     /// Returns a receiver that will yield exactly one `RuntimeResponse`.
@@ -123,6 +138,26 @@ impl ResponseRouter {
         request_kind: &'static str,
         registered_at: Instant,
     ) -> Receiver<RuntimeResponse> {
+        self.register_captured(request_id, request_kind, registered_at, None)
+    }
+
+    pub(crate) fn register_with_deadline(
+        &self,
+        request_id: u64,
+        request_kind: &'static str,
+        registered_at: Instant,
+        deadline: OperationDeadline,
+    ) -> Receiver<RuntimeResponse> {
+        self.register_captured(request_id, request_kind, registered_at, Some(deadline))
+    }
+
+    fn register_captured(
+        &self,
+        request_id: u64,
+        request_kind: &'static str,
+        registered_at: Instant,
+        deadline: Option<OperationDeadline>,
+    ) -> Receiver<RuntimeResponse> {
         let (tx, rx) = channel::bounded(1);
         self.pending.insert(
             request_id,
@@ -130,6 +165,7 @@ impl ResponseRouter {
                 response_tx: tx,
                 request_kind,
                 registered_at,
+                deadline,
             },
         );
         rx
@@ -595,6 +631,7 @@ mod tests {
                 response_tx,
                 request_kind: "Queue",
                 registered_at: Instant::now(),
+                deadline: None,
             },
         );
         let completer = Arc::clone(&router);

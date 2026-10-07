@@ -35,14 +35,13 @@ impl EventLoop {
 
     /// Seal the WAL segment recovered at startup.
     ///
-    /// Deliberately unbounded: this runs during open, before the event loop
-    /// serves any request, so nothing is stalled behind it. A bounded budget
-    /// would turn a slow provider into `RecoveryFailed` and fail the open,
-    /// where waiting succeeds. Retain data when unsure.
+    /// Configured startup shares one deadline, including authority validation
+    /// and upload admission. Unconfigured opens retain their unbounded budget.
     pub(in crate::runtime::event_loop) fn seal_recovered_cloud_active_segment(
         &mut self,
+        deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(true, &crate::common::OperationDeadline::unbounded())
+        self.seal_current_cloud_segment_inner(true, deadline)
     }
 
     fn seal_current_cloud_segment_inner(
@@ -75,17 +74,20 @@ impl EventLoop {
             self.wal_transition
                 .begin_seal(segment_id, next_segment_id, expected_max_sequence)?;
         let seal_start = Instant::now();
-        let max_sequence =
-            match self
-                .wal_actor
+        let flushed = if recovered_active {
+            self.wal_actor
+                .flush_recovered_cloud_wal_within(&mut self.state, deadline, &ticket)
+        } else {
+            self.wal_actor
                 .flush_for_cloud_upload_within(&mut self.state, deadline, &ticket)
-            {
-                Ok(max_sequence) => max_sequence,
-                Err(error) => {
-                    self.settle_failed_seal_step(ticket, &error);
-                    return Err(error);
-                }
-            };
+        };
+        let max_sequence = match flushed {
+            Ok(max_sequence) => max_sequence,
+            Err(error) => {
+                self.settle_failed_seal_step(ticket, &error);
+                return Err(error);
+            }
+        };
         if max_sequence != expected_max_sequence {
             let error = crate::common::MidgeError::Internal(format!(
                 "cloud WAL accounting changed during seal: expected max sequence {expected_max_sequence}, flushed {max_sequence}"

@@ -1,6 +1,6 @@
 # Midge operator runbook
 
-Midge 0.3.0 is an embedded, single-process Rust LSM engine. This is a local-first
+Midge 0.3.2 is an embedded, single-process Rust LSM engine. This is a local-first
 operator checklist for evaluation and controlled deployments; it is not a
 production endorsement.
 
@@ -54,9 +54,13 @@ separate copy before changing production traffic.
 
 ## Lease loss and fencing
 
-Midge is fail-closed on lease loss: the engine remains open so reads and
-diagnostics are available, but every new write is rejected with
-`MidgeError::Fenced`. Configure `OpenOptionsBuilder::on_lease_loss` for an
+Midge is fail-closed on lease loss. Cloud transactions are invalidated:
+new transactions, point reads, scan creation and existing lazy iterator advances
+return `MidgeError::Fenced`; writes remain fenced as well. Readers check monotonic
+lease expiry even before notification and recheck after blocking I/O. Remote SST
+retention is not shared with the successor, which may reclaim old files.
+Diagnostics and orderly shutdown remain available. Local and in-memory snapshot
+reads retain their existing behavior. Configure `OpenOptionsBuilder::on_lease_loss` for an
 exact-once process-local notification and begin orderly shutdown from the
 application; the callback must not block the lease thread. Polling
 `Engine::is_primary_lease_healthy` remains useful for health reporting.

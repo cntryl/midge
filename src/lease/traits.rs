@@ -15,6 +15,12 @@ pub(crate) enum LeaseValidityState {
     Fenced { epoch: u64 },
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static REMAINING_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 /// Shared lease validity watched independently from provider renewal I/O.
 pub(crate) struct LeaseValidity {
     state: Mutex<LeaseValidityState>,
@@ -150,14 +156,26 @@ impl LeaseValidity {
     }
 
     pub(crate) fn remaining(&self, epoch: u64) -> Result<Duration, LeaseError> {
-        match self.snapshot() {
+        #[cfg(test)]
+        REMAINING_CHECK_HOOK.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *state {
             LeaseValidityState::Active {
                 epoch: active_epoch,
                 valid_until,
             } if active_epoch == epoch => {
                 let remaining = valid_until.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    self.fence(epoch);
+                    *state = LeaseValidityState::Fenced { epoch };
+                    self.changed.notify_all();
                     Err(LeaseError::RenewalFailed(
                         "lease renewal crossed monotonic expiry".to_string(),
                     ))
@@ -168,6 +186,26 @@ impl LeaseValidity {
             _ => Err(LeaseError::RenewalFailed(
                 "lease is no longer valid for renewal".to_string(),
             )),
+        }
+    }
+
+    /// Fence only if this epoch's current deadline has expired. Observers may
+    /// hold an older deadline that a timely renewal has already superseded.
+    pub(crate) fn fence_if_expired(&self, epoch: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *state,
+            LeaseValidityState::Active { epoch: active_epoch, valid_until }
+                if active_epoch == epoch && valid_until <= Instant::now()
+        ) {
+            *state = LeaseValidityState::Fenced { epoch };
+            self.changed.notify_all();
+            true
+        } else {
+            false
         }
     }
 
@@ -199,8 +237,9 @@ impl LeaseValidity {
 ///
 /// This taxonomy exists so `LeaseHeld` means one thing and one thing only:
 /// confirmed, safe-to-retry contention — a live holder genuinely owns the
-/// lease, or a conditional write/delete genuinely lost a race to a
-/// concurrent acquirer. Every other failure mode gets its own variant so a
+/// lease, or a conditional write/delete was definitely rejected by a
+/// retryable precondition or provider conflict. Every other failure mode gets
+/// its own variant so a
 /// caller can no longer conflate "someone else holds it" with "we don't
 /// know" (I/O, timeout, auth, transport, non-precondition HTTP failures),
 /// "the persisted state can't be interpreted" (malformed/ambiguous), "the
@@ -209,8 +248,8 @@ impl LeaseValidity {
 #[derive(Debug)]
 pub(crate) enum LeaseError {
     /// Confirmed, safe-to-retry contention: another live holder genuinely
-    /// owns the lease, or a conditional write/delete genuinely lost a race
-    /// to a concurrent acquirer.
+    /// owns the lease, or a conditional write/delete was definitely rejected
+    /// by a retryable precondition or provider conflict.
     AcquisitionFailed(String),
     /// Lease renewal failed (instance should stop accepting writes).
     RenewalFailed(String),
@@ -263,6 +302,22 @@ impl From<crate::io::traits::FsError> for LeaseError {
     fn from(err: crate::io::traits::FsError) -> Self {
         LeaseError::IoError(err.to_string())
     }
+}
+
+pub(super) fn scope_lease_error(error: crate::common::MidgeError) -> LeaseError {
+    match error {
+        crate::common::MidgeError::Timeout(message) => LeaseError::Timeout(message),
+        other => LeaseError::Internal(other.to_string()),
+    }
+}
+
+fn definite_acquisition_rejection(error: &LeaseError) -> bool {
+    matches!(
+        error,
+        LeaseError::AcquisitionFailed(_)
+            | LeaseError::EpochExhausted
+            | LeaseError::AlreadyAcquired(_)
+    )
 }
 
 /// RAII guard for the primary lease.
@@ -368,6 +423,33 @@ pub trait PrimaryLease: Send + Sync {
         Err(LeaseError::Internal(format!(
             "lease cannot honor minimum epoch {minimum_epoch}"
         )))
+    }
+
+    /// Acquisition entrypoint carrying the caller's startup ownership scope.
+    fn try_acquire_with_minimum_epoch_within(
+        self: std::sync::Arc<Self>,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+    ) -> Result<LeaseGuard, LeaseError> {
+        scope
+            .begin_ambiguous_mutation("primary lease acquisition")
+            .map_err(scope_lease_error)?;
+        let result = self.try_acquire_with_minimum_epoch(minimum_epoch);
+        match result {
+            Ok(guard) => {
+                scope.resolve_ambiguous_mutation();
+                scope
+                    .check("confirmed primary lease acquisition")
+                    .map_err(scope_lease_error)?;
+                Ok(guard)
+            }
+            Err(error) => {
+                if definite_acquisition_rejection(&error) {
+                    scope.resolve_ambiguous_mutation();
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Renew the lease (extend TTL).
@@ -536,8 +618,8 @@ pub trait LeaderStore: Send + Sync {
     /// Atomically acquire leadership by incrementing the epoch via CAS.
     ///
     /// On success returns the newly written `LeaderRecord` with a strictly
-    /// higher epoch than the previous one.  On conflict (another node won
-    /// the race) returns `LeaseError::AcquisitionFailed`.
+    /// higher epoch than the previous one. On definite conditional rejection
+    /// returns `LeaseError::AcquisitionFailed`.
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError>;
 
     /// Atomically acquire leadership, guaranteeing the granted epoch is at
@@ -569,8 +651,46 @@ pub trait LeaderStore: Send + Sync {
         )))
     }
 
+    /// Acquisition scope with a conditional cleanup candidate observer.
+    ///
+    /// Native stores report the attempted epoch after mutation admission and
+    /// before submission. This does not confirm acquisition: cleanup must read
+    /// and match the exact holder, owner token and epoch before expiring it.
+    /// Compatibility implementations can report only a confirmed result.
+    fn acquire_leadership_with_minimum_epoch_within(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+        on_cleanup_epoch: &mut dyn FnMut(u64),
+    ) -> Result<LeaderRecord, LeaseError> {
+        scope
+            .begin_ambiguous_mutation("leader-store acquisition")
+            .map_err(scope_lease_error)?;
+        let result = self.acquire_leadership_with_minimum_epoch(holder_id, minimum_epoch);
+        match result {
+            Ok(record) => {
+                on_cleanup_epoch(record.epoch);
+                Ok(record)
+            }
+            Err(error) => {
+                if definite_acquisition_rejection(&error) {
+                    scope.resolve_ambiguous_mutation();
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Read the current leader record from storage (non-locking).
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError>;
+
+    fn read_current_with_timeout(
+        &self,
+        _timeout: Duration,
+    ) -> Result<Option<LeaderRecord>, LeaseError> {
+        self.read_current()
+    }
 
     /// Read the committed cloud control-metadata generation from the lease.
     ///
@@ -793,5 +913,95 @@ mod checksum_tests {
 
         // Assert
         assert_eq!(parsed, None);
+    }
+}
+
+#[cfg(test)]
+mod lease_validity_tests {
+    use super::{LeaseValidity, LeaseValidityState, REMAINING_CHECK_HOOK};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_fence_only_current_expiry_when_acquisitions_change() {
+        // Arrange
+        let validity = LeaseValidity::new();
+        validity
+            .activate(7, Instant::now() + Duration::from_secs(10))
+            .expect("activate lease");
+
+        // Act: an old observer cannot invalidate another acquisition.
+        validity.deactivate(7);
+        assert!(!validity.fence_if_expired(7));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        validity.activate(8, deadline).expect("acquire next epoch");
+        assert!(!validity.fence_if_expired(7));
+        assert!(!validity.fence_if_expired(8));
+
+        // Assert: genuine expiry remains terminal and cannot be renewed.
+        assert_eq!(
+            validity.snapshot(),
+            LeaseValidityState::Active {
+                epoch: 8,
+                valid_until: deadline,
+            }
+        );
+        validity.expire_for_test();
+        assert!(validity.fence_if_expired(8));
+        assert_eq!(validity.snapshot(), LeaseValidityState::Fenced { epoch: 8 });
+        assert!(validity.advance(8, deadline).is_err());
+        assert!(validity.remaining(8).is_err());
+    }
+
+    #[test]
+    fn should_preserve_renewed_validity_when_expiry_check_resumes_with_stale_snapshot() {
+        // Arrange: pause a checker before its authoritative state check,
+        // then renew this epoch before the original deadline.
+        let validity = Arc::new(LeaseValidity::new());
+        let old_deadline = Instant::now() + Duration::from_secs(1);
+        validity.activate(7, old_deadline).expect("activate lease");
+        let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let checker = {
+            let validity = Arc::clone(&validity);
+            std::thread::spawn(move || {
+                REMAINING_CHECK_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        snapshot_tx.send(()).expect("announce pending check");
+                        resume_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("resume stale checker");
+                    }));
+                });
+                validity.remaining(7)
+            })
+        };
+        snapshot_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("checker entered validity check");
+        let renewed_deadline = Instant::now() + Duration::from_secs(10);
+        validity
+            .advance(7, renewed_deadline)
+            .expect("renew while old deadline is still live");
+
+        // Act: the checker resumes after its observed deadline has passed,
+        // although the same acquisition is valid until the renewed deadline.
+        std::thread::sleep(old_deadline.saturating_duration_since(Instant::now()));
+        resume_tx.send(()).expect("resume checker after old expiry");
+        let remaining = checker.join().expect("checker thread");
+
+        // Assert
+        assert!(
+            remaining.is_ok(),
+            "a timely renewal must survive an old expiry observation: {remaining:?}"
+        );
+        assert_eq!(
+            validity.snapshot(),
+            LeaseValidityState::Active {
+                epoch: 7,
+                valid_until: renewed_deadline,
+            },
+            "stale observation must not fence the renewed epoch"
+        );
     }
 }

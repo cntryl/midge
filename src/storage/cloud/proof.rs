@@ -33,6 +33,7 @@ pub(crate) fn validate_object_proof(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn blocking_cloud_object_proof(
     cloud: &CloudStorage,
     key: &str,
@@ -46,6 +47,7 @@ pub(crate) fn blocking_cloud_object_proof_within(
     key: &str,
     deadline: &crate::common::OperationDeadline,
 ) -> crate::common::MidgeResult<Option<CloudObjectProof>> {
+    cloud.check_startup_scope("cloud object proof submission")?;
     let get_timeout = deadline
         .clamp_nonzero(cloud.callback_timeout())
         .ok_or_else(|| {
@@ -54,8 +56,23 @@ pub(crate) fn blocking_cloud_object_proof_within(
             ))
         })?;
     let (get_tx, get_rx) = std::sync::mpsc::channel();
-    cloud.submit_get_with_metadata(key, get_tx);
-    let (bytes, metadata) = match get_rx.recv_timeout(get_timeout) {
+    let get_deadline = crate::common::OperationDeadline::from_budget(get_timeout);
+    cloud.submit_get_with_metadata_within(key, get_timeout, get_tx);
+    let wait_timeout = get_deadline
+        .clamp_nonzero(deadline.remaining())
+        .ok_or_else(|| {
+            crate::common::MidgeError::Timeout(format!(
+                "operation deadline exhausted during cloud object GET submission for '{key}'"
+            ))
+        })?;
+    let event = get_rx.recv_timeout(wait_timeout);
+    cloud.check_startup_scope("cloud object proof completion")?;
+    if get_deadline.is_expired() || deadline.is_expired() {
+        return Err(crate::common::MidgeError::Timeout(format!(
+            "cloud object proof deadline exhausted for '{key}'"
+        )));
+    }
+    let (bytes, metadata) = match event {
         Ok(CloudEvent::GetWithMetadata {
             result: CloudOutcome::Ok((bytes, metadata)),
             ..
@@ -92,6 +109,7 @@ pub(crate) fn blocking_cloud_object_proof_within(
     };
 
     validate_object_proof(key, &bytes, &metadata)?;
+    cloud.check_startup_scope("cloud object proof acceptance")?;
 
     Ok(Some(CloudObjectProof { bytes, metadata }))
 }

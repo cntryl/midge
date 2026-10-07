@@ -17,10 +17,14 @@ use std::time::{Duration, Instant};
 
 use crate::io::traits::{Fs, FsError, FsPath};
 
+mod accounting;
 mod flush;
 mod manifest;
 mod recovery;
 mod snapshots;
+
+pub(crate) use accounting::FlushPublicationAccounting;
+pub(crate) use manifest::FlushManifestPublication;
 
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
@@ -46,6 +50,7 @@ pub(crate) enum ImmutableFlushPhase {
 #[derive(Clone)]
 pub(crate) struct ImmutableFlush {
     pub flush_id: u64,
+    pub(crate) accounting: FlushPublicationAccounting,
     pub writer_epoch: u64,
     /// Earliest WAL segment that can contain this generation's records.
     /// Missing provenance must veto retirement until the generation publishes.
@@ -479,6 +484,7 @@ pub struct RuntimeState {
 
     // Filesystem abstraction for all IO (never call std::fs directly)
     pub fs: std::sync::Arc<dyn Fs>,
+    pub(crate) startup_scope: Option<crate::common::DeadlineScope>,
     /// The only runtime writer of the manifest journal and snapshot (#494).
     pub(crate) manifest_store: Arc<crate::metadata::store::ManifestStore>,
     /// Flush SST name allocation in hybrid mode (#491).
@@ -527,7 +533,7 @@ pub struct RuntimeState {
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Manual compaction requests awaiting a completed worker or cloud turn.
-    pub pending_compaction_waits: std::collections::HashSet<u64>,
+    pub pending_compaction_waits: std::collections::BTreeMap<u64, crate::common::OperationDeadline>,
 }
 
 impl RuntimeState {
@@ -797,23 +803,71 @@ impl RuntimeState {
         )
     }
 
+    #[cfg(test)]
     pub fn cleanup_storage_residue(&mut self) {
+        if let Err(error) = self.cleanup_storage_residue_within() {
+            tracing::warn!(%error, "startup residue cleanup stopped");
+        }
+    }
+
+    fn storage_residue_assessment_within(
+        &self,
+    ) -> MidgeResult<crate::runtime::storage_residue::StorageResidueAssessment> {
+        self.check_startup_scope("storage residue inventory")?;
+        let mut residue = crate::runtime::storage_residue::StorageResidueAssessment::default();
+        let entries = match self.fs.list_dir(&FsPath::new("sst")) {
+            Ok(entries) => entries,
+            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
+            Err(_) => return Ok(residue),
+        };
+        let published: HashSet<_> = self
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        for entry in entries {
+            self.check_startup_scope("storage residue inventory entry")?;
+            let name = entry.name;
+            let path = std::path::Path::new(&name);
+            if name.ends_with(".sst.tmp")
+                || path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+            {
+                residue.sst_temp_files.push(name);
+            } else if path.extension().is_some_and(|extension| extension == "sst")
+                && !published.contains(name.as_str())
+            {
+                residue.orphan_ssts.push(name);
+            }
+        }
+        residue.orphan_ssts.sort();
+        residue.sst_temp_files.sort();
+        self.check_startup_scope("storage residue inventory completion")?;
+        Ok(residue)
+    }
+
+    pub(crate) fn cleanup_storage_residue_within(&mut self) -> MidgeResult<()> {
+        self.check_startup_scope("storage residue cleanup")?;
         if self.is_memory_mode() {
-            return;
+            return Ok(());
         }
 
-        self.cleanup_flush_staging_residue();
-        self.cleanup_repair_scratch_residue();
+        self.cleanup_flush_staging_residue()?;
+        self.cleanup_repair_scratch_residue()?;
 
-        let residue = self.storage_residue_assessment();
+        let residue = self.storage_residue_assessment_within()?;
 
         for temp_name in residue.sst_temp_files {
+            self.check_startup_scope("startup residue entry")?;
             let path = FsPath::new(crate::cloud_layout::object_key(&temp_name));
             match self.fs.remove_file(&path) {
                 Ok(()) => {
                     tracing::info!(path = %path.0.as_str(), "deleted non-authoritative SST temp residue");
                 }
                 Err(FsError::NotFound(_)) => {}
+                Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
                 Err(error) => {
                     tracing::warn!(
                         path = %path.0.as_str(),
@@ -830,12 +884,13 @@ impl RuntimeState {
             // every candidate out of the SST directory for operator-controlled
             // recovery: left in place, the next strict open would see a
             // readable manifest without them and delete them.
-            self.quarantine_salvage_retained_ssts(&residue.orphan_ssts);
-            self.cleanup_root_staging_residue();
-            return;
+            self.quarantine_salvage_retained_ssts(&residue.orphan_ssts)?;
+            self.cleanup_root_staging_residue()?;
+            return Ok(());
         }
 
         for orphan_name in residue.orphan_ssts {
+            self.check_startup_scope("startup residue entry")?;
             let path = FsPath::new(crate::cloud_layout::object_key(&orphan_name));
             let injected_delete_failure =
                 crate::failpoints::is_active("midge::recovery::inject_orphan_sst_delete_failure");
@@ -852,6 +907,7 @@ impl RuntimeState {
                     tracing::info!(path = %path.0.as_str(), "deleted orphan SST residue during startup cleanup");
                 }
                 Err(FsError::NotFound(_)) => {}
+                Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
                 Err(error) => {
                     self.mark_persistence_anomaly();
                     tracing::warn!(
@@ -863,10 +919,12 @@ impl RuntimeState {
             }
         }
 
-        self.cleanup_root_staging_residue();
+        self.cleanup_root_staging_residue()?;
+        self.check_startup_scope("startup residue completion")
     }
 
-    fn cleanup_flush_staging_residue(&mut self) {
+    fn cleanup_flush_staging_residue(&mut self) -> MidgeResult<()> {
+        self.check_startup_scope("flush staging residue")?;
         let staging_dir = self.sst_dir.join(".flush-staging");
         match self.fs.remove_dir_all(&FsPath::new("sst/.flush-staging")) {
             Ok(()) => {
@@ -876,6 +934,7 @@ impl RuntimeState {
                 );
             }
             Err(FsError::NotFound(_)) => {}
+            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(error) => {
                 self.mark_persistence_anomaly();
                 tracing::warn!(
@@ -885,12 +944,14 @@ impl RuntimeState {
                 );
             }
         }
+        self.check_startup_scope("startup residue completion")
     }
 
     /// Repair runs never enter the manifest. Cleanup runs only during startup
     /// after the writer lease is acquired, before a new worker may use the
     /// directory.
-    fn cleanup_repair_scratch_residue(&mut self) {
+    fn cleanup_repair_scratch_residue(&mut self) -> MidgeResult<()> {
+        self.check_startup_scope("repair scratch residue")?;
         let directory = self.sst_dir.join(".compaction-repair");
         match self
             .fs
@@ -900,37 +961,45 @@ impl RuntimeState {
                 tracing::info!(path = %directory.display(), "deleted stale overlap-repair scratch");
             }
             Err(FsError::NotFound(_)) => {}
+            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(error) => {
                 self.mark_persistence_anomaly();
                 tracing::warn!(path = %directory.display(), error = %error, "retaining unclean overlap-repair scratch");
             }
         }
+        self.check_startup_scope("startup residue completion")
     }
 
     /// Move SSTs a salvage open could not prove unreferenced into
     /// `salvage-retained/<millis>/`, which startup cleanup never deletes.
     /// A file that cannot be moved stays in place and marks an anomaly.
-    fn quarantine_salvage_retained_ssts(&mut self, sst_names: &[String]) {
+    fn quarantine_salvage_retained_ssts(&mut self, sst_names: &[String]) -> MidgeResult<()> {
+        self.check_startup_scope("salvage SST quarantine")?;
         let millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis());
         let quarantine = FsPath::new(format!("{SALVAGE_RETAINED_DIR}/{millis}"));
         if let Err(error) = self.fs.create_dir_all(&quarantine) {
+            if matches!(error, FsError::Timeout(_)) {
+                return Err(error.into_midge());
+            }
             self.mark_persistence_anomaly();
             tracing::warn!(
                 error = %error,
                 retained = sst_names.len(),
                 "salvage mode could not create its SST quarantine; SSTs stay in place"
             );
-            return;
+            return Ok(());
         }
         let mut moved = 0usize;
         for name in sst_names {
+            self.check_startup_scope("startup residue entry")?;
             let from = FsPath::new(crate::cloud_layout::object_key(name));
             let to = FsPath::new(format!("{}/{name}", quarantine.0));
             match self.fs.rename_atomic(&from, &to) {
                 Ok(()) => moved += 1,
                 Err(FsError::NotFound(_)) => {}
+                Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
                 Err(error) => {
                     self.mark_persistence_anomaly();
                     tracing::warn!(
@@ -947,8 +1016,12 @@ impl RuntimeState {
             FsPath::new(SALVAGE_RETAINED_DIR),
             FsPath::new(""),
         ] {
+            self.check_startup_scope("salvage SST quarantine directory")?;
             let dir = FsPath::new(dir.0.trim_end_matches('/'));
             if let Err(error) = self.fs.sync_dir(&dir, crate::io::Durability::Durable) {
+                if matches!(error, FsError::Timeout(_)) {
+                    return Err(error.into_midge());
+                }
                 self.mark_persistence_anomaly();
                 tracing::warn!(dir = %dir.0.as_str(), error = %error, "failed to sync salvage quarantine directory");
             }
@@ -960,9 +1033,11 @@ impl RuntimeState {
             orphan_ssts = ?sst_names,
             "salvage mode quarantined SSTs missing from the recovered manifest"
         );
+        self.check_startup_scope("startup residue completion")
     }
 
-    fn cleanup_root_staging_residue(&mut self) {
+    fn cleanup_root_staging_residue(&mut self) -> MidgeResult<()> {
+        self.check_startup_scope("root staging residue")?;
         let root = FsPath::new("");
         let mut temp_files = Vec::new();
         let mut staging_dirs = Vec::new();
@@ -970,6 +1045,7 @@ impl RuntimeState {
         match self.fs.list_dir(&root) {
             Ok(entries) => {
                 for entry in entries {
+                    self.check_startup_scope("startup residue entry")?;
                     if entry.is_dir {
                         if entry.name == "cloud_recovery" {
                             staging_dirs.push(entry.name);
@@ -982,9 +1058,10 @@ impl RuntimeState {
                     }
                 }
             }
+            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(error) => {
                 tracing::debug!(error = %error, "skipping root residue cleanup because root listing failed");
-                return;
+                return Ok(());
             }
         }
 
@@ -992,12 +1069,14 @@ impl RuntimeState {
         staging_dirs.sort();
 
         for temp_name in temp_files {
+            self.check_startup_scope("startup residue entry")?;
             let path = FsPath::new(temp_name);
             match self.fs.remove_file(&path) {
                 Ok(()) => {
                     tracing::info!(path = %path.0.as_str(), "deleted root staging temp residue");
                 }
                 Err(FsError::NotFound(_)) => {}
+                Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
                 Err(error) => {
                     self.mark_persistence_anomaly();
                     tracing::warn!(
@@ -1010,6 +1089,7 @@ impl RuntimeState {
         }
 
         for dir_name in staging_dirs {
+            self.check_startup_scope("startup residue entry")?;
             let path = FsPath::new(dir_name);
             let result = if crate::failpoints::with_read_gate(|| {
                 crate::failpoints::is_active("midge::recovery::inject_root_staging_delete_failure")
@@ -1023,6 +1103,7 @@ impl RuntimeState {
                     tracing::info!(path = %path.0.as_str(), "deleted stale staging directory");
                 }
                 Err(FsError::NotFound(_)) => {}
+                Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
                 Err(error) => {
                     self.mark_persistence_anomaly();
                     tracing::warn!(
@@ -1033,6 +1114,7 @@ impl RuntimeState {
                 }
             }
         }
+        self.check_startup_scope("startup residue completion")
     }
 
     /// Physical scratch left after startup cleanup. Nested SST/WAL staging
@@ -1045,7 +1127,9 @@ impl RuntimeState {
         let mut directories = vec![root.clone()];
         let mut bytes = 0_u64;
         while let Some(directory) = directories.pop() {
+            self.check_startup_scope("startup scratch directory")?;
             for entry in self.fs.list_dir(&directory).map_err(FsError::into_midge)? {
+                self.check_startup_scope("startup scratch entry")?;
                 if directory == root {
                     let is_scratch = if entry.is_dir {
                         matches!(entry.name.as_str(), "cloud_recovery" | "txn")

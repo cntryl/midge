@@ -95,6 +95,17 @@ pub mod __internal {
     // Each module lists the items its tests, benches and fuzz targets use.
     // Glob re-exports would make every `pub` item reachable from outside the
     // crate and so hide dead code from the compiler.
+    pub mod checkpoint {
+        pub use crate::metadata::accounting::{
+            Bucket, Counters, LatencyHistogram, Medium, MetricsHandle, Origin, Snapshot,
+        };
+        pub use crate::metadata::checkpoint_policy_probe::run_checkpoint_policy_probe;
+
+        #[must_use]
+        pub fn metrics_handle(engine: &crate::Engine) -> MetricsHandle {
+            engine.checkpoint_metrics()
+        }
+    }
     pub mod codec {
         pub use crate::codec::{
             compress_block, compress_block_with_trailer, compress_wal_value, decompress_block,
@@ -114,6 +125,29 @@ pub mod __internal {
     }
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
+    }
+    pub mod startup {
+        pub use crate::runtime::{StartupEvent, StartupObserver};
+    }
+    pub mod maintenance {
+        #[doc(hidden)]
+        pub fn flush_cf_with_timeout(
+            engine: &crate::Engine,
+            cf: &crate::ColumnFamilyHandle,
+            timeout: std::time::Duration,
+        ) -> crate::MidgeResult<()> {
+            engine.flush_cf_with_timeout(cf, timeout)
+        }
+    }
+    pub mod recovery {
+        pub use crate::metadata::recovery_progress_fixture::{
+            run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
+        };
+        pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
+            run_recovery_progress_fixture, RecoveryProgressFixtureMode,
+            RecoveryProgressFixtureResult,
+        };
+        pub use crate::runtime::cloud_startup::replay_coverage::cost_probe::run_recovery_cost_probe;
     }
     pub mod sst {
         pub mod bloom {

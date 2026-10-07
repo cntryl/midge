@@ -140,7 +140,7 @@ fn should_keep_test_only_protocols_out_of_runtime() {
             assert!(!source.contains(forbidden), "{name} retains {forbidden}");
         }
     }
-    assert!(state.contains("HashSet<u64>"));
+    assert!(state.contains("BTreeMap<u64, crate::common::OperationDeadline>"));
     assert!(!state.contains("HashMap<u64, String>"));
 }
 
@@ -662,7 +662,8 @@ fn should_bound_legacy_sst_backfill_work_when_persisting() {
 
     // Act
     let uses_worker = read_path.contains("midge-legacy-sst-bound-backfill");
-    let batches_edits = read_path.contains("manifest_store.append_batch(&edits)");
+    let batches_edits = read_path
+        .contains(".append_batch_for(crate::metadata::accounting::Origin::Administration, &edits)");
 
     // Assert
     assert!(uses_worker);

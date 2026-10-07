@@ -131,7 +131,7 @@ fn should_execute_cloud_recovery_phase_in_child() {
         started + Duration::from_secs(campaign.profile.timeout_seconds),
     );
     engine
-        .shutdown(Duration::from_secs(60))
+        .shutdown(Duration::from_mins(1))
         .expect("shutdown qualified engine");
 
     // Assert

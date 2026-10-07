@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn should_leave_startup_unbounded_when_no_open_timeout_is_configured() {
+    // Arrange
+    let builder = OpenOptions::in_memory();
+    // Act
+    let options = builder.build().expect("default options");
+    // Assert
+    assert_eq!(options.open_timeout(), None);
+}
+
+#[test]
+fn should_allow_shorter_startup_budget_when_storage_has_a_larger_io_cap() {
+    // Arrange
+    let startup = Duration::from_millis(100);
+    let io = Duration::from_secs(2);
+    // Act
+    let options = OpenOptions::in_memory()
+        .storage_io_timeout(io)
+        .open_timeout(startup)
+        .build()
+        .expect("independent startup and per-I/O budgets");
+    // Assert
+    assert_eq!(options.open_timeout(), Some(startup));
+    assert_eq!(options.storage_io_timeout(), io);
+    assert!(options.runtime_response_timeout() > io);
+}
+
+#[test]
+fn should_reject_invalid_startup_budget_when_duration_cannot_bound_an_open() {
+    // Arrange
+    let invalid = [Duration::ZERO, Duration::from_nanos(1), Duration::MAX];
+    // Act
+    for timeout in invalid {
+        let error = OpenOptions::in_memory()
+            .open_timeout(timeout)
+            .build()
+            .expect_err("invalid startup budget");
+        // Assert
+        assert!(matches!(error, MidgeError::InvalidArgument(_)));
+    }
+}
+
+#[test]
 fn should_reserve_read_capacity_when_automatic_memtables_reach_small_memory_budgets() {
     // Arrange
     for budget in [128 * 1024, 8 * 1024 * 1024, 32 * 1024 * 1024] {

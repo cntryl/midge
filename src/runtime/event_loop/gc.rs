@@ -20,13 +20,16 @@ impl GcCoordinator {
             }
         }
         if event_loop.gc_actor.has_manifest_reclamation() {
-            let published = crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)
-                .and_then(|()| {
-                    // Reclamation cannot use salvage-mode best effort. Until
-                    // the remote manifest mirror succeeds, its old snapshot
-                    // may still reference every queued SST.
-                    event_loop.mirror_metadata_to_authoritative_cloud_within(deadline)
-                });
+            let published = crate::runtime::actors::ManifestActor::persist_for(
+                &mut event_loop.state,
+                crate::metadata::accounting::Origin::Administration,
+            )
+            .and_then(|()| {
+                // Reclamation cannot use salvage-mode best effort. Until
+                // the remote manifest mirror succeeds, its old snapshot
+                // may still reference every queued SST.
+                event_loop.mirror_metadata_to_authoritative_cloud_within(deadline)
+            });
             if let Err(error) = published {
                 event_loop.gc_actor.defer_manifest_reclamation_retry();
                 event_loop.state.mark_persistence_anomaly();

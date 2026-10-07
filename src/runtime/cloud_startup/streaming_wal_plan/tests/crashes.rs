@@ -212,7 +212,7 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
         let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
-            .activate(9, std::time::Instant::now() + Duration::from_secs(60))
+            .activate(9, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
         let active = fixture.directory.path().join("local/wal/wal.log");

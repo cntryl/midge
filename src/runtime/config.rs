@@ -121,6 +121,10 @@ pub struct RuntimeConfig {
     /// this from its streaming replay limits; commits above it are rejected
     /// so an acknowledged transaction can never block recovery.
     pub(crate) max_replayable_txn_bytes: Option<usize>,
+    /// Explicit owner of startup transition observations for internal tests.
+    pub(crate) startup_observer: Option<Arc<dyn super::StartupObserver>>,
+    /// Mandatory runtime initialization shares the original open budget.
+    pub(crate) startup_scope: Option<crate::common::DeadlineScope>,
 }
 
 impl Default for RuntimeConfig {
@@ -158,6 +162,8 @@ impl Default for RuntimeConfig {
             leader_store: None,
             leader_holder_id: None,
             max_replayable_txn_bytes: None,
+            startup_observer: None,
+            startup_scope: None,
         }
     }
 }

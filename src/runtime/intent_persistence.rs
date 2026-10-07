@@ -3,6 +3,8 @@
 //! Persists runtime intent log to disk in JSON format to enable recovery of
 //! actor intent states across restarts.
 
+use crate::common::{MidgeError, MidgeResult};
+use crate::io::FsError;
 use crate::runtime::IntentLogEntry;
 #[cfg(test)]
 use std::fs;
@@ -25,6 +27,13 @@ impl IntentPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Vec<IntentLogEntry>, String> {
+        Self::load_with_fs_and_policy_typed(fs, recovery_policy).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn load_with_fs_and_policy_typed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::config::RecoveryPolicy,
+    ) -> MidgeResult<Vec<IntentLogEntry>> {
         use crate::io::traits::FsPath;
 
         let p = FsPath::new(Self::INTENT_FILE);
@@ -33,7 +42,7 @@ impl IntentPersistence {
                 tracing::debug!(path = ?p, "intent file not found, using empty log");
                 return Ok(Vec::new());
             }
-            Err(e) => return Err(format!("fs exists error: {e:?}")),
+            Err(e) => return Err(recovery_io_error(e, "fs exists error")),
             Ok(true) => {}
         }
 
@@ -47,21 +56,23 @@ impl IntentPersistence {
                     truncate: false,
                 },
             )
-            .map_err(|e| format!("failed to open intent file: {e:?}"))?;
+            .map_err(|error| recovery_io_error(error, "failed to open intent file"))?;
         let len = file
             .len()
-            .map_err(|e| format!("failed to stat intent file: {e:?}"))?;
+            .map_err(|error| recovery_io_error(error, "failed to stat intent file"))?;
         let data = file
             .read_at(0, len)
-            .map_err(|e| format!("failed to read intent file: {e:?}"))?;
+            .map_err(|error| recovery_io_error(error, "failed to read intent file"))?;
         let intents: Vec<IntentLogEntry> = serde_json::from_slice(&data).map_err(|e| {
             if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                format!("failed to parse intent JSON: {e}")
+                MidgeError::RecoveryFailed(format!("failed to parse intent JSON: {e}"))
             } else {
-                format!("failed to parse intent JSON (salvage mode): {e}")
+                MidgeError::RecoveryFailed(format!(
+                    "failed to parse intent JSON (salvage mode): {e}"
+                ))
             }
         })?;
-        Self::validate_persisted_sst_names(&intents)?;
+        Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)?;
 
         tracing::debug!(path = ?p, entries = intents.len(), "intent log loaded");
         Ok(intents)
@@ -151,6 +162,28 @@ impl IntentPersistence {
         Ok(())
     }
 
+    pub(crate) fn save_with_fs_typed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        intents: &[IntentLogEntry],
+    ) -> MidgeResult<()> {
+        Self::validate_persisted_sst_names(intents).map_err(MidgeError::RecoveryFailed)?;
+        crate::failpoints::fail_point!("midge::intent::before_save");
+        let json = serde_json::to_vec_pretty(intents)
+            .map_err(|error| MidgeError::Internal(format!("serialize intent log: {error}")))?;
+        crate::io::staging::stage_bytes_typed(
+            fs,
+            &crate::io::FsPath::new(Self::INTENT_FILE_TEMP),
+            &crate::io::FsPath::new(Self::INTENT_FILE),
+            &json,
+            || {
+                crate::failpoints::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
+                    MidgeError::NoSpace("failpoint: no space while saving intent log".into())
+                ));
+                Ok(())
+            },
+        )
+    }
+
     pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
@@ -174,6 +207,13 @@ impl IntentPersistence {
         }
         tracing::debug!(path = ?p, temp_path = ?temp, "intent file deleted");
         Ok(())
+    }
+}
+
+fn recovery_io_error(error: FsError, context: &str) -> MidgeError {
+    match error {
+        FsError::Timeout(message) => MidgeError::Timeout(message),
+        error => MidgeError::RecoveryFailed(format!("{context}: {error:?}")),
     }
 }
 

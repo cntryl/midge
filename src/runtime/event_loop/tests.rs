@@ -93,7 +93,7 @@ fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::com
     assert!(event_loop
         .state
         .pending_compaction_waits
-        .contains(&request_id));
+        .contains_key(&request_id));
     Ok(())
 }
 
@@ -353,7 +353,10 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     event_loop
         .verification_barrier
         .deferred_messages
-        .push_back(RuntimeMsg::ManifestPersist { request_id: 8103 });
+        .push_back(RuntimeMsg::ManifestPersist {
+            request_id: 8103,
+            origin: crate::metadata::accounting::Origin::Unclassified,
+        });
     event_loop.flush_barrier_waiters.insert(
         0,
         vec![super::flush::FlushBarrierWaiter {
@@ -361,7 +364,13 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
             frontier: 1,
         }],
     );
-    event_loop.state.pending_compaction_waits.insert(8105);
+    event_loop.state.pending_compaction_waits.insert(
+        8105,
+        event_loop
+            .router
+            .request_deadline(8105, event_loop.runtime_response_timeout)
+            .unwrap(),
+    );
     event_loop.write_stall_waiters.register(8106, 0);
     event_loop.durability.queue_waiter_for_key(
         0,
@@ -1335,6 +1344,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     let blocked_mutation =
         event_loop.gate_message_for_storage_verification(RuntimeMsg::ManifestPersist {
             request_id: mutation_request_id,
+            origin: crate::metadata::accounting::Origin::Unclassified,
         });
     let deferred_completion = event_loop.gate_message_for_storage_verification(completion);
     let deferred_gc = event_loop.gate_message_for_storage_verification(RuntimeMsg::RetryGc);
@@ -2326,7 +2336,15 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
         .expect("prepare active compaction fixture");
     let request_id = 8_156;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let waiter_request_id = 8_161;
+    let response_rx = event_loop.router.register(waiter_request_id, "CompactAll");
+    event_loop.state.pending_compaction_waits.insert(
+        waiter_request_id,
+        event_loop
+            .router
+            .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+            .expect("manual compaction caller deadline"),
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2393,7 +2411,15 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
     let request_id = 8_159;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let waiter_request_id = 8_162;
+    let response_rx = event_loop.router.register(waiter_request_id, "CompactAll");
+    event_loop.state.pending_compaction_waits.insert(
+        waiter_request_id,
+        event_loop
+            .router
+            .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+            .expect("manual compaction caller deadline"),
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2478,15 +2504,31 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, &captured_inputs)?;
     let request_id = 8_160;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let second_waiter_request_id = 8_164;
+    let response_rx = event_loop
+        .router
+        .register(second_waiter_request_id, "CompactAll");
+    event_loop.state.pending_compaction_waits.insert(
+        second_waiter_request_id,
+        event_loop
+            .router
+            .request_deadline(
+                second_waiter_request_id,
+                event_loop.runtime_response_timeout,
+            )
+            .expect("second manual compaction caller deadline"),
+    );
     let compact_all_request_id = 8_163;
     let compact_all_rx = event_loop
         .router
         .register(compact_all_request_id, "CompactAll");
-    event_loop
-        .state
-        .pending_compaction_waits
-        .insert(compact_all_request_id);
+    event_loop.state.pending_compaction_waits.insert(
+        compact_all_request_id,
+        event_loop
+            .router
+            .request_deadline(compact_all_request_id, event_loop.runtime_response_timeout)
+            .unwrap(),
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2556,10 +2598,13 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
     let response_rx = event_loop
         .router
         .register(compact_all_request_id, "CompactAll");
-    event_loop
-        .state
-        .pending_compaction_waits
-        .insert(compact_all_request_id);
+    event_loop.state.pending_compaction_waits.insert(
+        compact_all_request_id,
+        event_loop
+            .router
+            .request_deadline(compact_all_request_id, event_loop.runtime_response_timeout)
+            .unwrap(),
+    );
     event_loop.compaction_actor.set_worker_error_for_test(
         crate::common::MidgeError::ResourceLimit("compaction pool exhausted".to_string()),
     );

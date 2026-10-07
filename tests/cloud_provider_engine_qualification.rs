@@ -13,6 +13,13 @@ use std::time::Duration;
 #[path = "cloud_provider_engine_qualification/operational.rs"]
 mod operational;
 
+#[path = "cloud_provider_engine_qualification/startup_deadline.rs"]
+mod startup_deadline;
+
+#[cfg(feature = "failpoints")]
+#[path = "cloud_provider_engine_qualification/authority_publication.rs"]
+mod authority_publication;
+
 #[test]
 fn should_join_azure_canonical_headers_directly_to_resource() {
     // Arrange

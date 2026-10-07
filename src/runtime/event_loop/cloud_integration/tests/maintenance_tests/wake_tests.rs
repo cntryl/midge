@@ -19,7 +19,12 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     // that event cannot yet reap the handle or release the publication gate.
     let mut el = idle_cloud_loop()?;
     let response = el.router.register(91_008, "CompactAll");
-    el.state.pending_compaction_waits.insert(91_008);
+    el.state.pending_compaction_waits.insert(
+        91_008,
+        el.router
+            .request_deadline(91_008, el.runtime_response_timeout)
+            .unwrap(),
+    );
     el.cloud_coordinator.cloud_wal.prune_inflight.insert(42);
     el.publication_gate
         .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);

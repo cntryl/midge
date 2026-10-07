@@ -138,7 +138,10 @@ impl EventLoop {
             .cloned()
             .map(crate::metadata::ManifestEdit::AddSst)
             .collect();
-        let edit_id = self.state.manifest_store.append_batch(&edits)?;
+        let edit_id = self
+            .state
+            .manifest_store
+            .append_batch_for(crate::metadata::accounting::Origin::Administration, &edits)?;
         for updated in updated_files {
             self.legacy_bound_backfill.record_success(&updated.name);
             self.state.manifest.add_file(updated);
@@ -156,7 +159,10 @@ impl EventLoop {
         if !self.legacy_bound_backfill.uncheckpointed {
             return Ok(());
         }
-        crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
+        crate::runtime::actors::ManifestActor::persist_for(
+            &mut self.state,
+            crate::metadata::accounting::Origin::Administration,
+        )?;
         self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
         self.legacy_bound_backfill.uncheckpointed = false;
         Ok(())

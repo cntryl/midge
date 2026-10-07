@@ -26,53 +26,28 @@ const WORKLOAD_SEED: u64 = 0xD0D0_EA5E_5678_9ABC;
 
 fn run_workload_d_warmup(
     engine: &Arc<cntryl_midge::Engine>,
-    cf_id: cntryl_midge::ColumnFamilyId,
-    clients: usize,
-    initial_keys: usize,
+    inventories: &[ycsb::inventory::InsertInventory],
 ) {
-    let _warmup_ops =
-        ycsb::run_multi_client_for_duration(engine, clients, WARMUP, |client_id, stop| {
-            let mut inserts_so_far = 0_u64;
-            move |e, _cf, op_index| {
-                let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                let is_insert = (r0 % 100) >= 95;
-
-                if is_insert {
-                    inserts_so_far = inserts_so_far.wrapping_add(1);
-                    let key_id = (initial_keys as u64)
-                        .wrapping_add((client_id as u64) << 32)
-                        .wrapping_add(inserts_so_far);
-                    let k = ycsb::make_key(key_id);
-                    let v = ycsb::make_value((op_index % 251) as u8);
-                    ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                        let mut tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                            .expect("begin");
-                        tx.put(k.to_vec(), v.clone(), None).expect("warmup insert");
-                        tx.commit(cntryl_midge::WriteOptions::best_effort())
-                    })
-                    .expect("commit");
-                    return;
-                }
-
-                let latest = (initial_keys as u64)
-                    .wrapping_add((client_id as u64) << 32)
-                    .wrapping_add(inserts_so_far);
-                let recent_window = (latest / 10).max(1);
-                let pick = if (r0 % 100) < 90 {
-                    let r1 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 1);
-                    latest.saturating_sub(1).saturating_sub(r1 % recent_window)
-                } else {
-                    let r2 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 2);
-                    r2 % latest.max(1)
-                };
-                let k = ycsb::make_key(pick);
-                let tx = e
-                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                    .expect("begin");
-                let _ = tx.get(&k[..]).expect("warmup get");
+    ycsb::run_multi_client_for_duration_observed_with_stats(
+        engine,
+        inventories.len(),
+        WARMUP,
+        |client_id, stop| {
+            let inventory = inventories[client_id].clone();
+            move |e, cf, op_index| {
+                inventory
+                    .read_latest_step(
+                        e,
+                        cf.id(),
+                        stop.as_ref(),
+                        WORKLOAD_SEED,
+                        op_index,
+                        cntryl_midge::WriteOptions::best_effort(),
+                    )
+                    .expect("warmup D operation")
             }
-        });
+        },
+    );
 }
 
 fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
@@ -81,7 +56,9 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     } else {
         MEASURED_DEFAULT
     };
+    let measured_duration = stress_config::tier4_measured_duration(measured_duration);
     ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -110,7 +87,18 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     // Use a deterministic, stochastic mix (avoid periodic scheduling artifacts).
 
     // Phase 2: Warm-up (not measured)
-    run_workload_d_warmup(&engine, cf.id(), clients, initial_keys);
+    let inventories: Vec<_> = (0..clients)
+        .map(|client| ycsb::inventory::InsertInventory::new(initial_keys, client))
+        .collect();
+    run_workload_d_warmup(&engine, &inventories);
+    let warmup_inserts: u64 = inventories
+        .iter()
+        .map(ycsb::inventory::InsertInventory::committed)
+        .sum();
+    let warmup_reads: u64 = inventories
+        .iter()
+        .map(ycsb::inventory::InsertInventory::read_hits)
+        .sum();
 
     // Flush to ensure warmup data is durable before measured phase
     ycsb::flush_after_phase(engine.as_ref(), &cf).expect("flush warmup phase");
@@ -123,54 +111,23 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let measured = stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let measured = {
             let write_opts = measured_write_opts;
-            ycsb::run_multi_client_for_duration_with_stats(
+            ycsb::run_multi_client_for_duration_observed_with_stats(
                 &engine,
                 clients,
                 measured_duration,
                 |client_id, stop| {
-                    let mut inserts_so_far: u64 = 0;
+                    let inventory = inventories[client_id].clone();
                     move |e, cf, op_index| {
-                        let r0 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 0);
-                        let is_insert = (r0 % 100) >= 95;
-                        let cf_id = cf.id();
-
-                        if is_insert {
-                            inserts_so_far = inserts_so_far.wrapping_add(1);
-                            let key_id = (initial_keys as u64)
-                                .wrapping_add((client_id as u64) << 32)
-                                .wrapping_add(inserts_so_far);
-                            let k = ycsb::make_key(key_id);
-                            let v = ycsb::make_value((op_index % 251) as u8);
-                            ycsb::retry_write_stall(e, cf_id, stop.as_ref(), || {
-                                let mut tx = e
-                                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                                    .expect("measured begin");
-                                tx.put(k.to_vec(), v.clone(), None)
-                                    .expect("measured insert");
-                                tx.commit(write_opts)
-                            })
-                            .expect("measured commit");
-                            return;
-                        }
-
-                        let latest = (initial_keys as u64)
-                            .wrapping_add((client_id as u64) << 32)
-                            .wrapping_add(inserts_so_far);
-
-                        let recent_window = (latest / 10).max(1);
-                        let pick = if (r0 % 100) < 90 {
-                            let r1 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 1);
-                            latest.saturating_sub(1).saturating_sub(r1 % recent_window)
-                        } else {
-                            let r2 = ycsb::deterministic_u64(WORKLOAD_SEED, client_id, op_index, 2);
-                            r2 % latest.max(1)
-                        };
-
-                        let k = ycsb::make_key(pick);
-                        let tx = e
-                            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-                            .expect("measured begin");
-                        let _ = tx.get(&k[..]).expect("measured get");
+                        inventory
+                            .read_latest_step(
+                                e,
+                                cf.id(),
+                                stop.as_ref(),
+                                WORKLOAD_SEED,
+                                op_index,
+                                write_opts,
+                            )
+                            .expect("measured D operation")
                     }
                 },
             )
@@ -182,6 +139,23 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     measured.record_latencies(ctx);
     let perf = ycsb::runtime_perf_report(engine.as_ref(), perf_start);
     ycsb::record_runtime_report(ctx, &perf);
+    let rows =
+        ycsb::inventory::verify_inventory(engine.as_ref(), cf.id(), initial_keys, &inventories)
+            .expect("D fresh insert cardinality");
+    let read_hits: u64 = inventories
+        .iter()
+        .map(ycsb::inventory::InsertInventory::read_hits)
+        .sum();
+    ctx.parameter("verified_read_hits", read_hits - warmup_reads);
+    ctx.parameter(
+        "verified_fresh_inserts",
+        rows - initial_keys as u64 - warmup_inserts,
+    );
+    ctx.parameter("verified_rows", rows);
+    let mut engine = Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("D workers must be joined"));
+    engine
+        .shutdown(Duration::from_secs(30))
+        .expect("D shutdown");
 }
 
 #[stress(tier = 4, role = "diagnostic")]

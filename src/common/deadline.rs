@@ -19,7 +19,7 @@
 use std::time::{Duration, Instant};
 
 /// A shared budget for a sequence of storage operations.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperationDeadline {
     expires_at: Option<Instant>,
 }
@@ -74,6 +74,18 @@ impl OperationDeadline {
     #[must_use]
     pub fn is_bounded(&self) -> bool {
         self.expires_at.is_some()
+    }
+
+    /// Keep the earlier absolute expiration without rebuilding either budget.
+    #[must_use]
+    pub fn earlier(self, other: Self) -> Self {
+        match (self.expires_at, other.expires_at) {
+            (Some(left), Some(right)) => Self {
+                expires_at: Some(left.min(right)),
+            },
+            (Some(_), None) => self,
+            (None, _) => other,
+        }
     }
 
     /// Clamp a per-operation timeout to what the shared budget still allows.

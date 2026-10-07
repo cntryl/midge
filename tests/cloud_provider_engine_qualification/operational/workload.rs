@@ -380,7 +380,7 @@ pub(super) fn verify(engine: &Engine) {
 fn should_preserve_profile_timeout_when_maintenance_progress_changes() {
     // Arrange
     let started = Instant::now();
-    let mut progress = WorkloadProgress::new(started, Duration::from_secs(120));
+    let mut progress = WorkloadProgress::new(started, Duration::from_mins(2));
     let completed = MaintenanceProgress {
         sequence: 10,
         persisted_sequence: 10,
@@ -407,10 +407,10 @@ fn should_preserve_profile_timeout_when_maintenance_progress_changes() {
         Duration::from_secs(59)
     );
     assert_eq!(
-        progress.remaining(started + Duration::from_secs(120)),
+        progress.remaining(started + Duration::from_mins(2)),
         Duration::ZERO
     );
-    assert_eq!(progress.deadline, started + Duration::from_secs(120));
+    assert_eq!(progress.deadline, started + Duration::from_mins(2));
     assert_eq!(
         (started + Duration::from_secs(119)).duration_since(progress.flush_changed_at),
         Duration::from_secs(58),

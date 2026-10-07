@@ -50,20 +50,50 @@ impl EventLoop {
             .maintenance_enabled(self.wal_actor.is_cloud_async(), self.state.is_memory_mode())
     }
 
+    pub(super) fn cloud_maintenance_control_blocked(&self) -> bool {
+        self.pending_msg.is_some()
+            || !self.publication_gate.deferred_messages_is_empty()
+            || self.publication_gate.is_active()
+            || self.verification_barrier.is_active()
+            || self.flush_actor.is_inflight()
+            || self.cloud_coordinator.cloud_wal_prune_worker.is_some()
+    }
+
+    pub(super) fn compaction_compute_owned(&self) -> bool {
+        self.state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+            || !self.state.compaction.compacting_ssts.is_empty()
+    }
+
+    pub(super) fn has_manual_flush_obligation(&self) -> bool {
+        self.flush_barrier_waiters
+            .values()
+            .any(|waiters| !waiters.is_empty())
+    }
+
     /// Dispatch at most one ready worker. A missing or retry-delayed task does
     /// not hold the turn; a successful launch advances the preferred task.
     pub(super) fn schedule_cloud_maintenance(&mut self) -> Option<MaintenanceTask> {
-        let blocked = self.pending_msg.is_some()
-            || !self.publication_gate.deferred_messages_is_empty()
-            || self.publication_gate.is_active()
-            || self.flush_actor.is_inflight()
-            || self
-                .state
-                .active_compactions
-                .load(std::sync::atomic::Ordering::Acquire)
-                > 0
-            || !self.state.compaction.compacting_ssts.is_empty();
+        super::compaction::CompactionCoordinator::expire_manual_compaction_waiters(self);
+        let compute_owned = self.compaction_compute_owned();
+        let blocked = self.cloud_maintenance_control_blocked()
+            || (compute_owned
+                && (!self.has_manual_flush_obligation() || !self.state.has_due_immutable_flush()));
         let mut task = self.cloud_coordinator.begin_maintenance_turn(blocked)?;
+        if compute_owned {
+            // A manual durability barrier may drain older immutable work while
+            // compute retains its inputs and reservations. Only Flush can use
+            // this turn; compaction and retirement still wait for that owner.
+            self.schedule_next_flush_worker();
+            let started = self
+                .flush_actor
+                .is_inflight()
+                .then_some(MaintenanceTask::Flush);
+            self.cloud_coordinator.complete_maintenance_turn(started);
+            return started;
+        }
         let mut started = None;
         for _ in 0..3 {
             let launched = match task {

@@ -3,7 +3,10 @@
 //! Persists manifest state to disk in JSON format to enable
 //! recovery of LSM structure across restarts.
 
+use crate::common::{DeadlineScope, MidgeError, MidgeResult};
+use crate::io::FsError;
 use crate::metadata::Manifest;
+#[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -11,6 +14,17 @@ use std::time::Instant;
 
 /// Manifest persistence operations
 pub struct ManifestPersistence;
+
+fn recovery_io_error(error: FsError, context: &str) -> MidgeError {
+    match error {
+        FsError::Timeout(message) => MidgeError::Timeout(message),
+        error => MidgeError::RecoveryFailed(format!("{context}: {error:?}")),
+    }
+}
+
+fn check_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check(context))
+}
 
 /// Where the manifest journal stands, as `ManifestStore` tracks it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +84,14 @@ impl ManifestPersistence {
         path: &crate::io::traits::FsPath,
         context: &str,
     ) -> Result<Manifest, String> {
+        Self::load_json_manifest_file_typed(fs, path, context).map_err(|error| error.to_string())
+    }
+
+    fn load_json_manifest_file_typed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        path: &crate::io::traits::FsPath,
+        context: &str,
+    ) -> MidgeResult<Manifest> {
         let start = Instant::now();
         let file = fs
             .open(
@@ -81,15 +103,16 @@ impl ManifestPersistence {
                     truncate: false,
                 },
             )
-            .map_err(|e| format!("failed to open {context}: {e:?}"))?;
+            .map_err(|error| recovery_io_error(error, &format!("failed to open {context}")))?;
         let len = file
             .len()
-            .map_err(|e| format!("failed to stat {context}: {e:?}"))?;
+            .map_err(|error| recovery_io_error(error, &format!("failed to stat {context}")))?;
         let data = file
             .read_at(0, len)
-            .map_err(|e| format!("failed to read {context}: {e:?}"))?;
-        let manifest: Manifest = serde_json::from_slice(&data)
-            .map_err(|e| format!("failed to parse {context} JSON: {e}"))?;
+            .map_err(|error| recovery_io_error(error, &format!("failed to read {context}")))?;
+        let manifest: Manifest = serde_json::from_slice(&data).map_err(|e| {
+            MidgeError::RecoveryFailed(format!("failed to parse {context} JSON: {e}"))
+        })?;
         let elapsed = start.elapsed();
         tracing::info!(
             path = ?path,
@@ -120,27 +143,47 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Manifest, String> {
+        Self::load_with_fs_and_policy_typed(fs, recovery_policy).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn load_with_fs_and_policy_typed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::config::RecoveryPolicy,
+    ) -> MidgeResult<Manifest> {
         crate::metadata::journal::with_manifest_writer_lock(fs, || {
-            Self::load_with_fs_and_policy_unlocked(fs, recovery_policy)
+            Self::load_with_fs_and_policy_unlocked(fs, recovery_policy, None)
+        })
+    }
+
+    pub(crate) fn load_with_fs_and_policy_within(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::config::RecoveryPolicy,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        crate::metadata::journal::with_manifest_writer_lock_within(fs, scope, || {
+            Self::load_with_fs_and_policy_unlocked(fs, recovery_policy, Some(scope))
         })
     }
 
     fn load_with_fs_and_policy_unlocked(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
-    ) -> Result<Manifest, String> {
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let manifest_path = FsPath::new(Self::MANIFEST_FILE);
-        let mut manifest = if fs.exists(&snap_path).map_err(|error| {
-            format!("failed to check for manifest snapshot {snap_path:?}: {error:?}")
-        })? {
-            Self::load_json_manifest_file(fs, &snap_path, "manifest snapshot")?
-        } else if fs.exists(&manifest_path).map_err(|error| {
-            format!("failed to check for manifest file {manifest_path:?}: {error:?}")
-        })? {
-            Self::load_json_manifest_file(fs, &manifest_path, "manifest file")?
+        let mut manifest = if fs
+            .exists(&snap_path)
+            .map_err(|error| recovery_io_error(error, "failed to check for manifest snapshot"))?
+        {
+            Self::load_json_manifest_file_typed(fs, &snap_path, "manifest snapshot")?
+        } else if fs
+            .exists(&manifest_path)
+            .map_err(|error| recovery_io_error(error, "failed to check for manifest file"))?
+        {
+            Self::load_json_manifest_file_typed(fs, &manifest_path, "manifest file")?
         } else {
             tracing::debug!(
                 current_manifest = ?manifest_path,
@@ -150,24 +193,27 @@ impl ManifestPersistence {
         };
 
         let journal_path = FsPath::new("manifest.journal");
-        let journal_exists = fs.exists(&journal_path).map_err(|error| {
-            format!("failed to check for manifest journal {journal_path:?}: {error:?}")
-        })?;
+        let journal_exists = fs
+            .exists(&journal_path)
+            .map_err(|error| recovery_io_error(error, "failed to check for manifest journal"))?;
         if !journal_exists {
             tracing::debug!(path = ?journal_path, "manifest journal not found, skipping replay");
-            Self::validate_persisted_sst_names(&manifest)?;
+            Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+            check_scope(scope, "manifest validation")?;
             return Ok(manifest);
         }
 
         // Replay only edits newer than the snapshot checkpoint. If a crash
         // happened after snapshot rename but before journal truncation, the
         // already-applied prefix is therefore harmless.
-        match crate::metadata::journal::replay_identified_edits_after_with_fs_unlocked(
+        match crate::metadata::journal::replay_identified_edits_after_with_fs_unlocked_within(
             fs,
             manifest.edit_checkpoint_id,
+            scope,
         ) {
             Ok(edits) => {
                 for (edit_id, edit) in &edits {
+                    check_scope(scope, "manifest journal application")?;
                     manifest.apply_edit(edit);
                     // The loaded manifest now holds every edit up to this one,
                     // so the horizon may cover it (#493).
@@ -176,14 +222,20 @@ impl ManifestPersistence {
                 tracing::info!(replayed = edits.len(), "manifest journal replayed");
             }
             Err(e) => {
-                if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                    return Err(format!("failed to replay manifest journal: {e}"));
+                if matches!(e, MidgeError::Timeout(_)) {
+                    return Err(e);
                 }
-                Self::salvage_journal_prefix_unlocked(fs, &mut manifest, &e)?;
+                if recovery_policy == crate::config::RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to replay manifest journal: {e}"
+                    )));
+                }
+                Self::salvage_journal_prefix_unlocked(fs, &mut manifest, &e, scope)?;
             }
         }
 
-        Self::validate_persisted_sst_names(&manifest)?;
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+        check_scope(scope, "manifest validation")?;
         Ok(manifest)
     }
 
@@ -193,13 +245,16 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &mut Manifest,
         replay_error: &crate::common::MidgeError,
-    ) -> Result<(), String> {
-        let salvaged = crate::metadata::journal::salvage_edits_after_with_fs_unlocked(
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<()> {
+        check_scope(scope, "manifest journal salvage")?;
+        let salvaged = crate::metadata::journal::salvage_edits_after_with_fs_unlocked_within(
             fs,
             manifest.edit_checkpoint_id,
-        )
-        .map_err(|error| format!("failed to salvage manifest journal prefix: {error}"))?;
+            scope,
+        )?;
         for edit in &salvaged.edits {
+            check_scope(scope, "salvaged manifest application")?;
             manifest.apply_edit(edit);
         }
         tracing::warn!(
@@ -214,8 +269,8 @@ impl ManifestPersistence {
         manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(salvaged.max_edit_id);
         // The heal must succeed: later loads are strict, so a journal that
         // still holds the corrupt record would fail every publication.
+        check_scope(scope, "salvaged manifest checkpoint")?;
         Self::checkpoint_salvaged_manifest_unlocked(fs, manifest)
-            .map_err(|error| format!("failed to checkpoint salvaged manifest: {error}"))
     }
 
     /// Preserve the corrupt journal, then make the salvaged manifest the
@@ -225,23 +280,22 @@ impl ManifestPersistence {
     fn checkpoint_salvaged_manifest_unlocked(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
-    ) -> Result<(), String> {
+    ) -> MidgeResult<()> {
         use crate::io::traits::FsPath;
 
-        let preserved = crate::metadata::journal::preserve_corrupt_journal_with_fs_unlocked(fs)
-            .map_err(|error| format!("failed to preserve corrupt manifest journal: {error}"))?;
-        Self::validate_persisted_sst_names(manifest)?;
-        let json = serde_json::to_vec_pretty(manifest)
-            .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
-        crate::io::staging::stage_bytes(
+        let preserved = crate::metadata::journal::preserve_corrupt_journal_with_fs_unlocked(fs)?;
+        Self::validate_persisted_sst_names(manifest).map_err(MidgeError::RecoveryFailed)?;
+        let json = serde_json::to_vec_pretty(manifest).map_err(|e| {
+            MidgeError::RecoveryFailed(format!("failed to serialize manifest to JSON: {e}"))
+        })?;
+        crate::io::staging::stage_bytes_typed(
             fs,
             &FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP),
             &FsPath::new(Self::MANIFEST_SNAPSHOT),
             &json,
-            |msg| msg,
+            || Ok(()),
         )?;
-        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)
-            .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
+        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
         tracing::warn!(
             preserved = %preserved,
             "checkpointed salvaged manifest and preserved the corrupt journal"
@@ -323,6 +377,7 @@ impl ManifestPersistence {
     ///
     /// # Errors
     /// Returns error if write fails
+    #[cfg(test)]
     pub fn save_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
@@ -331,6 +386,7 @@ impl ManifestPersistence {
     }
 
     /// Stage a manifest snapshot, keeping the I/O error's kind.
+    #[cfg(test)]
     fn write_snapshot(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
@@ -390,10 +446,20 @@ impl ManifestPersistence {
     ///
     /// `known` is the journal position when the caller already knows it
     /// (`ManifestStore`); then a current caller costs no metadata reads at all.
+    #[cfg(test)]
     pub(crate) fn save_snapshot_unlocked(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
         known: Option<JournalPosition>,
+    ) -> crate::common::MidgeResult<WrittenCheckpoint> {
+        Self::save_snapshot_unlocked_observed(fs, manifest, known, None)
+    }
+
+    pub(crate) fn save_snapshot_unlocked_observed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+        known: Option<JournalPosition>,
+        observation: Option<&crate::metadata::accounting::Operation>,
     ) -> crate::common::MidgeResult<WrittenCheckpoint> {
         use crate::common::MidgeError;
         use crate::io::traits::FsPath;
@@ -457,6 +523,10 @@ impl ManifestPersistence {
             Ok(())
         })?;
 
+        if let Some(observation) = observation {
+            observation.snapshot_durable(u64::try_from(json.len()).unwrap_or(u64::MAX));
+        }
+
         crate::failpoints::fail_point!(
             "midge::manifest::after_snapshot_rename_before_journal_truncate",
             |_| Err(MidgeError::Internal(
@@ -465,6 +535,9 @@ impl ManifestPersistence {
         );
 
         crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
+        if let Some(observation) = observation {
+            observation.checkpoint_complete();
+        }
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
@@ -475,6 +548,7 @@ impl ManifestPersistence {
     }
 
     /// Save manifest to disk in JSON format (compat wrapper for tests and callers using Path)
+    #[cfg(test)]
     pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;

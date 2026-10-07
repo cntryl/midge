@@ -2,7 +2,7 @@
 
 # Midge
 
-Midge `0.3.0` is an embedded Rust 2021 LSM key-value engine. It uses explicit
+Midge `0.3.2` is an embedded Rust 2021 LSM key-value engine. It uses explicit
 transactions and explicit write durability policies. The crate MSRV is Rust
 `1.97`.
 
@@ -39,7 +39,7 @@ The executable canonical example is [examples/documented_quick_start.rs](example
 
 - Users: [overview](docs/user-guides/overview.md) → [quick start](docs/user-guides/quick-start.md) → [API guide](docs/user-guides/api-guide.md).
 - Durability: [transaction durability contract](docs/user-guides/transaction-durability-contract.md) → [recovery internals](docs/development/recovery-internals.md).
-- Contributors: [architecture](docs/development/architecture.md) → [invariants](docs/development/storage-invariants.md) → [testing](docs/development/testing.md).
+- Contributors: [architecture](docs/development/architecture.md) → [system invariant catalog and gap analysis](docs/development/invariant-catalog.md) → [storage invariants](docs/development/storage-invariants.md) → [testing](docs/development/testing.md).
 - Cloud qualification: [policy](docs/development/cloud-qualification-policy.md) → [cloud setup](docs/operations/cloud-setup.md).
 - Operators: [operator runbook](docs/operations/operator-runbook.md) and [cloud setup](docs/operations/cloud-setup.md).
 

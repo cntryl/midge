@@ -9,6 +9,7 @@
 use super::super::state::RuntimeState;
 use super::super::FileMeta;
 use crate::common::MidgeResult;
+use crate::metadata::accounting::Origin;
 #[cfg(test)]
 use crate::types::EntryType;
 
@@ -55,7 +56,11 @@ impl ManifestActor {
                     "failpoint: no space on manifest add_sst append".to_string()
                 ))
             );
-            journaled_id = Some(state.manifest_store.append(&edit)?);
+            journaled_id = Some(
+                state
+                    .manifest_store
+                    .append_for(Origin::Unclassified, &edit)?,
+            );
         }
 
         // Now that intent is durable, apply mutation to in-memory manifest
@@ -101,7 +106,11 @@ impl ManifestActor {
                     "failpoint: no space on manifest compaction batch append".to_string()
                 ))
             );
-            journaled_id = Some(state.manifest_store.append_batch(&edits)?);
+            journaled_id = Some(
+                state
+                    .manifest_store
+                    .append_batch_for(Origin::CompactionBeforeGc, &edits)?,
+            );
         }
 
         // Now that intent is durable, apply mutations to in-memory manifest
@@ -129,7 +138,12 @@ impl ManifestActor {
     }
 
     /// Persist manifest to disk
+    #[cfg(test)]
     pub fn persist(state: &mut RuntimeState) -> MidgeResult<()> {
+        Self::persist_for(state, Origin::Unclassified)
+    }
+
+    pub fn persist_for(state: &mut RuntimeState, origin: Origin) -> MidgeResult<()> {
         // Skip persistence in memory mode
         if state.is_memory_mode() {
             tracing::debug!("Manifest: skipping persistence in memory mode");
@@ -149,7 +163,9 @@ impl ManifestActor {
 
         // Publish a crash-safe snapshot before truncating the journal. Recovery
         // can therefore replay only edits newer than the checkpoint horizon.
-        let checkpoint = state.manifest_store.save_snapshot(&state.manifest)?;
+        let checkpoint = state
+            .manifest_store
+            .save_snapshot_for(origin, &state.manifest)?;
         state.manifest.adopt_checkpoint(checkpoint);
 
         tracing::debug!("Manifest persisted");

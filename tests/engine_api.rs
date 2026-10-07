@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "engine_api/startup_deadline.rs"]
+mod startup_deadline;
+
 mod engine_init {
     use crate::common::*;
     use cntryl_midge::TransactionMode;

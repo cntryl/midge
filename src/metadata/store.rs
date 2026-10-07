@@ -17,6 +17,10 @@
 
 use crate::common::MidgeResult;
 use crate::io::traits::{Fs, FsError, FsPath};
+use crate::metadata::accounted_fs::account_fs;
+#[cfg(any(test, feature = "internal-testing"))]
+use crate::metadata::accounting::MetricsHandle;
+use crate::metadata::accounting::{Medium, OperationKind, Origin, Owner};
 use crate::metadata::journal::{self, ManifestEdit};
 use crate::metadata::persistence::{JournalPosition, WrittenCheckpoint};
 use crate::metadata::{Manifest, ManifestPersistence};
@@ -41,6 +45,8 @@ struct FileLengths {
 pub(crate) struct ManifestStore {
     fs: Arc<dyn Fs>,
     known: parking_lot::Mutex<Option<KnownPosition>>,
+    accounting: Owner,
+    medium: Medium,
 }
 
 impl std::fmt::Debug for ManifestStore {
@@ -52,124 +58,204 @@ impl std::fmt::Debug for ManifestStore {
 }
 
 impl ManifestStore {
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn new(fs: Arc<dyn Fs>) -> Self {
+        Self::new_with_accounting(fs, Owner::new(), Medium::MemoryOnly)
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn append(&self, edit: &ManifestEdit) -> MidgeResult<u64> {
+        self.append_for(Origin::Unclassified, edit)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_batch(&self, edits: &[ManifestEdit]) -> MidgeResult<u64> {
+        self.append_batch_for(Origin::Unclassified, edits)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn save_snapshot(&self, manifest: &Manifest) -> MidgeResult<WrittenCheckpoint> {
+        self.save_snapshot_for(Origin::Unclassified, manifest)
+    }
+
+    pub(crate) fn new_with_accounting(fs: Arc<dyn Fs>, accounting: Owner, medium: Medium) -> Self {
         Self {
             fs,
+            accounting,
+            medium,
             known: parking_lot::Mutex::new(None),
         }
     }
 
-    /// Journals one edit and returns its edit id.
-    pub(crate) fn append(&self, edit: &ManifestEdit) -> MidgeResult<u64> {
-        edit.validate_for_append()?;
-        self.write_next(|fs, edit_id| journal::append_validated_edit_with_id(fs, edit, edit_id))
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn accounting_handle(&self) -> MetricsHandle {
+        self.accounting.handle()
+    }
+    pub(crate) fn accounting_owner(&self) -> &Owner {
+        &self.accounting
+    }
+    pub(crate) const fn accounting_medium(&self) -> Medium {
+        self.medium
     }
 
-    /// Journals `edits` as one record and returns its edit id.
-    pub(crate) fn append_batch(&self, edits: &[ManifestEdit]) -> MidgeResult<u64> {
-        for edit in edits {
-            edit.validate_for_append()?;
-        }
-        self.write_next(|fs, edit_id| {
-            journal::append_validated_edit_batch_with_id(fs, edits, edit_id)
-        })
+    pub(crate) fn append_for(&self, origin: Origin, edit: &ManifestEdit) -> MidgeResult<u64> {
+        let operation = self
+            .accounting
+            .begin(OperationKind::JournalAppend, origin, self.medium);
+        let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
+        let result = edit.validate_for_append().and_then(|()| {
+            self.write_next_with_fs(&fs, |fs, edit_id| {
+                journal::append_validated_edit_with_id_observed(fs, edit, edit_id, Some(&operation))
+            })
+        });
+        operation.finish(result.is_ok());
+        result
     }
 
-    /// Snapshots `manifest` plus any journaled edit it lacks, then truncates
-    /// the journal.
-    pub(crate) fn save_snapshot(&self, manifest: &Manifest) -> MidgeResult<WrittenCheckpoint> {
-        journal::with_manifest_writer_lock(&self.fs, || {
+    pub(crate) fn append_batch_for(
+        &self,
+        origin: Origin,
+        edits: &[ManifestEdit],
+    ) -> MidgeResult<u64> {
+        let operation = self
+            .accounting
+            .begin(OperationKind::JournalAppend, origin, self.medium);
+        let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
+        let result = edits
+            .iter()
+            .try_for_each(ManifestEdit::validate_for_append)
+            .and_then(|()| {
+                self.write_next_with_fs(&fs, |fs, edit_id| {
+                    journal::append_validated_edit_batch_with_id_observed(
+                        fs,
+                        edits,
+                        edit_id,
+                        Some(&operation),
+                    )
+                })
+            });
+        operation.finish(result.is_ok());
+        result
+    }
+
+    pub(crate) fn save_snapshot_for(
+        &self,
+        origin: Origin,
+        manifest: &Manifest,
+    ) -> MidgeResult<WrittenCheckpoint> {
+        let operation = self
+            .accounting
+            .begin(OperationKind::Checkpoint, origin, self.medium);
+        let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
+        let result = journal::with_manifest_writer_lock(&fs, || {
             let mut known = self.known.lock();
-            let position = self.position(&mut known)?;
-            let result =
-                ManifestPersistence::save_snapshot_unlocked(&self.fs, manifest, Some(position));
+            let position = Self::position_with_fs(&fs, &mut known)?;
+            let result = ManifestPersistence::save_snapshot_unlocked_observed(
+                &fs,
+                manifest,
+                Some(position),
+                Some(&operation),
+            );
             *known = match &result {
-                Ok(written) => self.remember(JournalPosition {
-                    checkpoint_edit_id: written.edit_checkpoint_id,
-                    highest_edit_id: written.edit_checkpoint_id,
-                }),
+                Ok(written) => Self::remember_with_fs(
+                    &fs,
+                    JournalPosition {
+                        checkpoint_edit_id: written.edit_checkpoint_id,
+                        highest_edit_id: written.edit_checkpoint_id,
+                    },
+                ),
                 Err(_) => None,
             };
             result
-        })
+        });
+        operation.finish(result.is_ok());
+        result
     }
 
-    fn write_next(
+    fn write_next_with_fs(
         &self,
+        fs: &Arc<dyn Fs>,
         write: impl FnOnce(&Arc<dyn Fs>, u64) -> MidgeResult<u64>,
     ) -> MidgeResult<u64> {
-        journal::with_manifest_writer_lock(&self.fs, || {
+        journal::with_manifest_writer_lock(fs, || {
             let mut known = self.known.lock();
-            let position = self.position(&mut known)?;
+            let position = Self::position_with_fs(fs, &mut known)?;
             let edit_id = position.highest_edit_id.saturating_add(1).max(1);
-            let result = write(&self.fs, edit_id);
+            let result = write(fs, edit_id);
             *known = match result {
-                Ok(_) => self.remember(JournalPosition {
-                    highest_edit_id: edit_id,
-                    ..position
-                }),
-                // The write may have left a torn tail; re-read from disk,
-                // which repairs it, before the next write.
+                Ok(_) => Self::remember_with_fs(
+                    fs,
+                    JournalPosition {
+                        highest_edit_id: edit_id,
+                        ..position
+                    },
+                ),
                 Err(_) => None,
             };
             result
         })
     }
 
-    /// The journal position, from memory when the journal is as the store
-    /// left it, otherwise from disk.
-    fn position(&self, known: &mut Option<KnownPosition>) -> MidgeResult<JournalPosition> {
-        let lengths = self.lengths()?;
+    // Position replay can rewrite a torn journal's valid prefix. Use the same
+    // observed filesystem for positioning and writes so repair payload remains
+    // attributable to this operation.
+    fn position_with_fs(
+        fs: &Arc<dyn Fs>,
+        known: &mut Option<KnownPosition>,
+    ) -> MidgeResult<JournalPosition> {
+        let lengths = Self::lengths_with_fs(fs)?;
         if let Some(cached) = *known {
             if cached.lengths == lengths {
                 return Ok(cached.position);
             }
-            tracing::warn!(
-                expected = ?cached.lengths,
-                actual = ?lengths,
-                "manifest files changed outside the store; re-reading the journal position"
-            );
+            tracing::warn!(expected = ?cached.lengths, actual = ?lengths,
+                "manifest files changed outside the store; re-reading the journal position");
         }
-        // `next_edit_id_with_fs` also repairs a torn journal tail.
-        let highest_edit_id = journal::next_edit_id_with_fs(&self.fs)?.saturating_sub(1);
+        // next_edit_id_with_fs also stages a genuine partial-EOF repair. The same
+        // observed Fs keeps that payload within the active operation's ledger.
+        let highest_edit_id = journal::next_edit_id_with_fs(fs)?.saturating_sub(1);
         let position = JournalPosition {
-            checkpoint_edit_id: journal::checkpoint_edit_id_with_fs(&self.fs)?,
+            checkpoint_edit_id: journal::checkpoint_edit_id_with_fs(fs)?,
             highest_edit_id,
         };
         *known = Some(KnownPosition {
             position,
-            lengths: self.lengths()?,
+            lengths: Self::lengths_with_fs(fs)?,
         });
         Ok(position)
     }
 
-    /// The cache after a write that succeeded. The write is durable, so a
-    /// failed stat must not turn it into an error; the store forgets its
-    /// position instead and re-reads it next time.
-    fn remember(&self, position: JournalPosition) -> Option<KnownPosition> {
-        match self.lengths() {
+    fn remember_with_fs(fs: &Arc<dyn Fs>, position: JournalPosition) -> Option<KnownPosition> {
+        match Self::lengths_with_fs(fs) {
             Ok(lengths) => Some(KnownPosition { position, lengths }),
             Err(error) => {
+                // Preserve the existing successful durable-write result: a failed
+                // stat only forgets cache state, never changes it into an error.
                 tracing::warn!(%error, "cannot stat manifest files after a write; forgetting position");
                 None
             }
         }
     }
 
-    fn lengths(&self) -> MidgeResult<FileLengths> {
+    fn lengths_with_fs(fs: &Arc<dyn Fs>) -> MidgeResult<FileLengths> {
         Ok(FileLengths {
-            journal: self.file_len(crate::metadata::files::JOURNAL)?,
-            snapshot: self.file_len(crate::metadata::files::MANIFEST_SNAPSHOT)?,
+            journal: Self::file_len_with_fs(fs, crate::metadata::files::JOURNAL)?,
+            snapshot: Self::file_len_with_fs(fs, crate::metadata::files::MANIFEST_SNAPSHOT)?,
         })
     }
 
-    fn file_len(&self, name: &str) -> MidgeResult<u64> {
-        match self.fs.metadata(&FsPath::new(name)) {
+    fn file_len_with_fs(fs: &Arc<dyn Fs>, name: &str) -> MidgeResult<u64> {
+        match fs.metadata(&FsPath::new(name)) {
             Ok(metadata) => Ok(metadata.len),
             Err(FsError::NotFound(_)) => Ok(0),
             Err(error) => Err(error.into_midge()),
         }
     }
+
+    // Keep legacy names ONLY under cfg(any(test, feature="internal-testing")); they
+    // forward to *_for(Origin::Unclassified, ...). Production calls must be explicit.
+    // Writer-lock/cache-update/error ordering is retained, including the unchanged
+    // missing-file length0 and post-success failed-stat cache invalidation behavior.
 }
 
 #[cfg(test)]

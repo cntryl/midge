@@ -28,11 +28,13 @@ pub(crate) mod cloud;
 mod filesystem;
 pub mod fs_leader_store;
 mod heartbeat;
+mod scoped_leader_store;
 mod traits;
 
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
+pub(crate) use scoped_leader_store::scoped_leader_store;
 #[cfg(test)]
 pub(crate) use traits::LeaderRecord;
 pub(crate) use traits::LeaseError;

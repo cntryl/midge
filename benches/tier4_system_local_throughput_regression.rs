@@ -70,16 +70,30 @@ fn run_mode(ctx: &mut StressContext, mode: &'static str) {
     );
     stress_config::mark_capped_probe(ctx, "fixed_batch_inventory_regression_probe");
 
-    let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
-    let cf = engine
-        .create_column_family("test")
-        .expect("failed to create column family");
-    let batches = make_key_value_batches();
-
     let measurement_name = format!("{mode}_batched_write_throughput");
-    stress_config::measure_counted(ctx, measurement_name, "write", || {
+    stress_config::measure_tier4_cycles(ctx, measurement_name, "write", || {
+        let directory =
+            (mode == "local").then(|| tempfile::tempdir().expect("local cycle directory"));
+        let mut cycle_options = opts.clone();
+        if let Some(directory) = &directory {
+            cycle_options.storage_mode = stress_config::StorageMode::LocalDisk {
+                db_path: directory.path().to_path_buf(),
+            };
+        }
+        let mut engine =
+            Engine::open(cycle_options.to_open_options()).expect("failed to open engine");
+        let cf = engine
+            .create_column_family("test")
+            .expect("failed to create column family");
+        let batches = make_key_value_batches();
+        let started_at = std::time::Instant::now();
         let completed = run_batched_write_workload(&engine, cf.id(), &batches);
-        ((), completed)
+        let elapsed = started_at.elapsed();
+        engine
+            .shutdown(std::time::Duration::from_secs(30))
+            .expect("shutdown local write cycle");
+        drop(engine);
+        (completed, elapsed)
     });
 }
 

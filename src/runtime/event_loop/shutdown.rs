@@ -16,7 +16,8 @@ impl EventLoop {
     }
 
     pub(super) fn handle_shutdown(&mut self, request_id: Option<u64>) -> HandleOutcome {
-        tracing::info!("Runtime shutting down");
+        let shutdown_started = std::time::Instant::now();
+        self.trace_shutdown_start();
         let mut shutdown_error = None;
         self.shutting_down = true;
 
@@ -24,7 +25,9 @@ impl EventLoop {
         // tail is the only copy of buffered commits from the last batch
         // window. Make it durable, and complete the waiters it covers, before
         // held work is rejected below. CloudAsync seals its segment later.
-        if let Err(error) = self.sync_current_wal() {
+        if let Err(error) =
+            trace_shutdown_phase("sync-current-wal", None, || self.sync_current_wal())
+        {
             tracing::error!(error = %error, "Failed to sync local WAL during shutdown");
             shutdown_error = Some(error);
         }
@@ -39,7 +42,9 @@ impl EventLoop {
         // installation, and mirrored clear, holding the publication gate that
         // parks finished flushes. Settle it first so the flush drain below can
         // publish them, and so it completes while this lease epoch is valid.
-        if let Err(error) = self.drain_shutdown_compaction_publication() {
+        if let Err(error) = trace_shutdown_phase("compaction-publication-drain", None, || {
+            self.drain_shutdown_compaction_publication()
+        }) {
             if shutdown_error.is_none() {
                 shutdown_error = Some(error);
             }
@@ -54,27 +59,36 @@ impl EventLoop {
         // durability budget as upload drain; local shutdown retains its
         // existing behavior.
         if cloud_async {
-            if let Err(error) = self.drain_shutdown_flush_pipeline_within(&cloud_shutdown_deadline)
-            {
+            if let Err(error) = trace_shutdown_phase(
+                "cloud-flush-pipeline-drain",
+                Some(&cloud_shutdown_deadline),
+                || self.drain_shutdown_flush_pipeline_within(&cloud_shutdown_deadline),
+            ) {
                 shutdown_error = Some(error);
             }
         } else {
-            while self.flush_actor.is_inflight() {
-                match self
-                    .flush_worker_result_rx
-                    .recv_timeout(std::time::Duration::from_millis(25))
-                {
-                    Ok(result) => self.handle_flush_worker_result(result),
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            trace_shutdown_phase("local-flush-pipeline-drain", None, || {
+                while self.flush_actor.is_inflight() {
+                    match self
+                        .flush_worker_result_rx
+                        .recv_timeout(std::time::Duration::from_millis(25))
+                    {
+                        Ok(result) => self.handle_flush_worker_result(result),
+                        Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+                    }
                 }
-            }
+            });
         }
 
         // Establish authoritative remote WAL durability before replacing that
         // recovery authority with an SST/manifest checkpoint.
         if cloud_async && self.state.wal.pending_writes > 0 {
-            match self.seal_current_cloud_segment_within(&cloud_shutdown_deadline) {
+            match trace_shutdown_phase(
+                "final-cloud-wal-seal",
+                Some(&cloud_shutdown_deadline),
+                || self.seal_current_cloud_segment_within(&cloud_shutdown_deadline),
+            ) {
                 Ok(Some((segment_id, _max_sequence))) => {
                     tracing::info!(segment_id, "Enqueued final CloudAsync segment on shutdown");
                 }
@@ -92,7 +106,10 @@ impl EventLoop {
         }
 
         if cloud_async {
-            if let Some(error) = self.drain_shutdown_cloud_uploads_within(&cloud_shutdown_deadline)
+            if let Some(error) =
+                trace_shutdown_phase("cloud-upload-drain", Some(&cloud_shutdown_deadline), || {
+                    self.drain_shutdown_cloud_uploads_within(&cloud_shutdown_deadline)
+                })
             {
                 if shutdown_error.is_none() {
                     shutdown_error = Some(error);
@@ -107,16 +124,88 @@ impl EventLoop {
         // earlier flush failed, retain WAL authority and report the shutdown
         // failure instead of attempting the authority switch.
         if cloud_async && shutdown_error.is_none() {
-            if let Err(error) =
-                self.checkpoint_active_cloud_memtables_within(&cloud_shutdown_deadline)
-            {
+            if let Err(error) = trace_shutdown_phase(
+                "active-cloud-memtable-checkpoint",
+                Some(&cloud_shutdown_deadline),
+                || self.checkpoint_active_cloud_memtables_within(&cloud_shutdown_deadline),
+            ) {
                 shutdown_error = Some(error);
             }
         }
 
-        if let Err(error) = self.flush_actor.shutdown_and_join() {
+        self.join_shutdown_storage_workers(
+            cloud_async,
+            &cloud_shutdown_deadline,
+            &mut shutdown_error,
+        );
+        self.state.invalidate_unsettled_flush_accounting();
+
+        // Flush completion and other worker progress can restore a deferred
+        // caller into `pending_msg` while shutdown drains. The run loop exits
+        // immediately after this method, so explicitly reject every held
+        // caller before acknowledging shutdown rather than silently dropping
+        // its response channel.
+        self.fail_shutdown_held_work();
+
+        self.trace_shutdown_completion(shutdown_started, shutdown_error.is_none());
+        if let Some(request_id) = request_id {
+            let response = match shutdown_error {
+                Some(error) => RuntimeResponse::Error { request_id, error },
+                None => RuntimeResponse::Ok { request_id },
+            };
+            self.respond(request_id, response);
+        }
+
+        HandleOutcome::Break
+    }
+
+    fn trace_shutdown_start(&self) {
+        tracing::info!(
+            writer_epoch = self.state.writer_epoch,
+            cloud_async = self.wal_actor.is_cloud_async(),
+            immutable_flushes_pending = self
+                .state
+                .column_families
+                .values()
+                .map(|cf| cf.immutable_flushes.len())
+                .sum::<usize>(),
+            flush_worker_inflight = self.flush_actor.is_inflight(),
+            compaction_publisher_inflight = self.compaction_publish_actor.is_inflight(),
+            wal_pending_writes = self.state.wal.pending_writes,
+            runtime_uploads_pending = self.cloud_coordinator.cloud_wal.upload_backlog.len(),
+            storage_uploads_pending = self
+                .cloud_coordinator
+                .hybrid_storage
+                .as_ref()
+                .map_or(0, |storage| storage.pending_upload_count()),
+            wal_segments_acked = self.cloud_coordinator.cloud_wal.acked_segments.len(),
+            wal_prunes_inflight = self.cloud_coordinator.cloud_wal.prune_inflight.len(),
+            wal_preflight_worker_owned = self.cloud_coordinator.cloud_wal_prune_worker.is_some(),
+            "Runtime shutdown started"
+        );
+    }
+
+    fn trace_shutdown_completion(&self, started: std::time::Instant, successful: bool) {
+        tracing::info!(
+            writer_epoch = self.state.writer_epoch,
+            elapsed_ms = started.elapsed().as_millis(),
+            successful,
+            "Runtime shutdown completed"
+        );
+    }
+
+    fn join_shutdown_storage_workers(
+        &mut self,
+        cloud_async: bool,
+        cloud_shutdown_deadline: &crate::common::OperationDeadline,
+        shutdown_error: &mut Option<MidgeError>,
+    ) {
+        let join_deadline = cloud_async.then_some(cloud_shutdown_deadline);
+        if let Err(error) = trace_shutdown_phase("flush-worker-join", join_deadline, || {
+            self.flush_actor.shutdown_and_join()
+        }) {
             if shutdown_error.is_none() {
-                shutdown_error = Some(error);
+                *shutdown_error = Some(error);
             }
         }
 
@@ -131,38 +220,28 @@ impl EventLoop {
                 std::sync::Arc::clone(storage)
                     as std::sync::Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
             });
-        self.compaction_actor
-            .cancel_and_join_worker(&mut self.state, compaction_storage.as_ref());
+        trace_shutdown_phase("compaction-worker-join", join_deadline, || {
+            self.compaction_actor
+                .cancel_and_join_worker(&mut self.state, compaction_storage.as_ref());
+        });
 
         // GC and remote WAL-prune workers can mutate local/cloud storage.
         // Join them before the event loop exits; Engine releases its lease
         // only after this runtime has quiesced.
-        self.gc_actor.shutdown_workers();
-        if cloud_async {
-            self.drain_shutdown_cloud_wal_prunes_within(&cloud_shutdown_deadline);
-        } else {
+        trace_shutdown_phase("sst-gc-worker-join", join_deadline, || {
+            self.gc_actor.shutdown_workers();
+        });
+        trace_shutdown_phase("wal-preflight-worker-join", join_deadline, || {
             self.join_cloud_wal_prune_worker();
+        });
+        if cloud_async {
+            self.drain_hybrid_storage_events_within(cloud_shutdown_deadline);
         }
         if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
-            storage.shutdown_background_workers();
+            trace_shutdown_phase("storage-prune-worker-join", join_deadline, || {
+                storage.shutdown_background_workers();
+            });
         }
-
-        // Flush completion and other worker progress can restore a deferred
-        // caller into `pending_msg` while shutdown drains. The run loop exits
-        // immediately after this method, so explicitly reject every held
-        // caller before acknowledging shutdown rather than silently dropping
-        // its response channel.
-        self.fail_shutdown_held_work();
-
-        if let Some(request_id) = request_id {
-            let response = match shutdown_error {
-                Some(error) => RuntimeResponse::Error { request_id, error },
-                None => RuntimeResponse::Ok { request_id },
-            };
-            self.respond(request_id, response);
-        }
-
-        HandleOutcome::Break
     }
 
     fn drain_shutdown_cloud_uploads_within(
@@ -253,7 +332,7 @@ impl EventLoop {
                     "cloud shutdown checkpoint exceeded the durability deadline".to_string(),
                 ));
             }
-            self.freeze_active_memtable(cf_id)?;
+            self.freeze_active_memtable_for(cf_id, crate::metadata::accounting::Origin::Shutdown)?;
         }
         self.drain_shutdown_flush_pipeline_within(deadline)
     }
@@ -320,30 +399,6 @@ impl EventLoop {
         }
     }
 
-    fn drain_shutdown_cloud_wal_prunes_within(
-        &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) {
-        // Bound retries to the authority snapshot observed at shutdown. A
-        // failed proof may leak an object, but must not turn cleanup into an
-        // unbounded terminal loop.
-        let attempts = self.cloud_coordinator.cloud_wal.acked_segments.len();
-        self.join_cloud_wal_prune_worker();
-        self.drain_hybrid_storage_events_within(deadline);
-
-        for _ in 0..attempts {
-            if deadline.is_expired() {
-                break;
-            }
-            self.prune_cloud_wal_segments_covered_by_manifest();
-            if self.cloud_coordinator.cloud_wal_prune_worker.is_none() {
-                break;
-            }
-            self.join_cloud_wal_prune_worker();
-            self.drain_hybrid_storage_events_within(deadline);
-        }
-    }
-
     pub(super) fn fail_shutdown_held_work(&mut self) {
         let mut messages = Vec::new();
         if let Some(message) = self.pending_msg.take() {
@@ -362,7 +417,8 @@ impl EventLoop {
                 .flat_map(|(_, waiters)| waiters)
                 .map(|waiter| waiter.request_id),
         );
-        routed_request_ids.extend(self.state.pending_compaction_waits.drain());
+        routed_request_ids
+            .extend(std::mem::take(&mut self.state.pending_compaction_waits).into_keys());
         routed_request_ids.extend(self.write_stall_waiters.drain());
         let durability_waiters = self.durability.drain_all_waiters();
         routed_request_ids.extend(
@@ -402,6 +458,29 @@ impl EventLoop {
             self.respond(request_id, response);
         }
     }
+}
+
+// This records the inherited budget without starting a new deadline or
+// changing the requirement to join accepted workers before releasing fencing.
+fn trace_shutdown_phase<T>(
+    phase: &'static str,
+    deadline: Option<&crate::common::OperationDeadline>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let started = std::time::Instant::now();
+    tracing::info!(
+        phase,
+        cloud_deadline_remaining_ms = ?deadline.map(|deadline| deadline.remaining().as_millis()),
+        "Runtime shutdown phase started"
+    );
+    let result = operation();
+    tracing::info!(
+        phase,
+        elapsed_ms = started.elapsed().as_millis(),
+        cloud_deadline_remaining_ms = ?deadline.map(|deadline| deadline.remaining().as_millis()),
+        "Runtime shutdown phase completed"
+    );
+    result
 }
 
 fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {

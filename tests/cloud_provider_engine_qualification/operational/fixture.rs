@@ -95,10 +95,7 @@ fn should_apply_profile_timeout_to_long_running_engine_requests() {
     let options = campaign.options();
 
     // Assert
-    assert_eq!(
-        options.runtime_response_timeout(),
-        Duration::from_secs(3600)
-    );
+    assert_eq!(options.runtime_response_timeout(), Duration::from_hours(1));
 }
 
 #[derive(Debug, Serialize, Deserialize)]

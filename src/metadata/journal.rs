@@ -26,6 +26,31 @@ pub(crate) fn with_manifest_writer_lock<T>(
     })
 }
 
+pub(crate) fn with_manifest_writer_lock_within<T>(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    scope: &crate::common::DeadlineScope,
+    operation: impl FnOnce() -> MidgeResult<T>,
+) -> MidgeResult<T> {
+    crate::failpoints::with_read_gate(|| {
+        scope.check("manifest writer lock")?;
+        let stripe_count = u64::try_from(MANIFEST_WRITER_LOCK_STRIPES).unwrap_or(64);
+        let stripe = usize::try_from(fs.coordination_key() % stripe_count).unwrap_or(0);
+        let lock = &MANIFEST_WRITER_LOCKS[stripe];
+        let deadline = scope.deadline();
+        let _guard = if deadline.is_bounded() {
+            lock.try_lock_for(deadline.remaining()).ok_or_else(|| {
+                crate::common::MidgeError::Timeout("manifest writer lock timed out".into())
+            })?
+        } else {
+            lock.lock()
+        };
+        scope.check("manifest writer lock")?;
+        let result = operation()?;
+        scope.check("manifest writer completion")?;
+        Ok(result)
+    })
+}
+
 fn journal_serialize<T: ?Sized + serde::Serialize>(value: &T) -> MidgeResult<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
 }
@@ -284,11 +309,24 @@ pub(crate) fn replay_identified_edits_after_with_fs_unlocked(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     checkpoint: u64,
 ) -> MidgeResult<Vec<(u64, ManifestEdit)>> {
-    Ok(replay_journal_with_ids_with_fs(fs)?
-        .into_iter()
-        .filter(|edit| edit.edit_id > checkpoint)
-        .map(|edit| (edit.edit_id, edit.edit))
-        .collect())
+    replay_identified_edits_after_with_fs_unlocked_within(fs, checkpoint, None)
+}
+
+pub(crate) fn replay_identified_edits_after_with_fs_unlocked_within(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    checkpoint: u64,
+    scope: Option<&crate::common::DeadlineScope>,
+) -> MidgeResult<Vec<(u64, ManifestEdit)>> {
+    let replay = replay_journal_with_mode(fs, JournalReplayMode::Strict, scope)?;
+    let mut edits = Vec::new();
+    for edit in replay.edits {
+        check_replay_scope(scope)?;
+        if edit.edit_id > checkpoint {
+            edits.push((edit.edit_id, edit.edit));
+        }
+    }
+    check_replay_scope(scope)?;
+    Ok(edits)
 }
 
 /// Durable journal prefix recovered by salvage replay.
@@ -304,18 +342,30 @@ pub(crate) struct SalvagedJournal {
 
 /// Replay the journal, stopping at the first corrupt record instead of
 /// failing, and keep every durable edit before it.
+#[cfg(test)]
 pub(crate) fn salvage_edits_after_with_fs_unlocked(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     checkpoint: u64,
 ) -> MidgeResult<SalvagedJournal> {
-    let replay = replay_journal_with_mode(fs, JournalReplayMode::SalvagePrefix)?;
+    salvage_edits_after_with_fs_unlocked_within(fs, checkpoint, None)
+}
+
+pub(crate) fn salvage_edits_after_with_fs_unlocked_within(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    checkpoint: u64,
+    scope: Option<&crate::common::DeadlineScope>,
+) -> MidgeResult<SalvagedJournal> {
+    let replay = replay_journal_with_mode(fs, JournalReplayMode::SalvagePrefix, scope)?;
+    let mut edits = Vec::new();
+    for edit in replay.edits {
+        check_replay_scope(scope)?;
+        if edit.edit_id > checkpoint {
+            edits.push(edit.edit);
+        }
+    }
+    check_replay_scope(scope)?;
     Ok(SalvagedJournal {
-        edits: replay
-            .edits
-            .into_iter()
-            .filter(|edit| edit.edit_id > checkpoint)
-            .map(|edit| edit.edit)
-            .collect(),
+        edits,
         max_edit_id: replay.max_edit_id,
         corruption: replay.corruption,
     })
@@ -369,10 +419,20 @@ fn append_validated_edit_with_fs(
 
 /// Appends a validated edit under `edit_id`. The caller holds the manifest
 /// writer lock and has chosen an id above every durable one.
+#[cfg(test)]
 pub(crate) fn append_validated_edit_with_id(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
     edit_id: u64,
+) -> MidgeResult<u64> {
+    append_validated_edit_with_id_observed(fs, edit, edit_id, None)
+}
+
+pub(crate) fn append_validated_edit_with_id_observed(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edit: &ManifestEdit,
+    edit_id: u64,
+    observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<u64> {
     let record = encode_journal_record(
         edit.record_type(),
@@ -387,7 +447,7 @@ pub(crate) fn append_validated_edit_with_id(
             "failpoint: no space on manifest journal append".to_string()
         )
     ));
-    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id)?;
+    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id, observation)?;
     tracing::info!(
         write_ns,
         fsync_ns,
@@ -400,6 +460,7 @@ fn append_record_and_marker_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     record: Vec<u8>,
     edit_id: u64,
+    observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<(u128, u128)> {
     use crate::io::traits::{Durability, FsPath, OpenMode, OpenOptions};
 
@@ -411,6 +472,9 @@ fn append_record_and_marker_with_fs(
         },
     )?;
 
+    let framed_bytes = u64::try_from(record.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(u64::try_from(marker.len()).unwrap_or(u64::MAX));
     let journal_path = FsPath::new(JOURNAL_FILE);
     // A missing or still-empty journal has never had its directory entry
     // made durable, whether this append creates it or a crash left it empty.
@@ -458,6 +522,9 @@ fn append_record_and_marker_with_fs(
             .map_err(FsError::into_midge)?;
     }
     let fsync_ns = fsync_start.elapsed().as_nanos();
+    if let Some(observation) = observation {
+        observation.journal_durable(framed_bytes);
+    }
 
     Ok((write_ns, fsync_ns))
 }
@@ -530,6 +597,7 @@ pub fn replay_journal_with_fs(
         .map(|edits| edits.into_iter().map(|edit| edit.edit).collect())
 }
 
+#[cfg(test)]
 fn replay_journal_with_ids_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<Vec<JournalEdit>> {
@@ -539,7 +607,7 @@ fn replay_journal_with_ids_with_fs(
 fn replay_journal_with_state(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<JournalReplay> {
-    replay_journal_with_mode(fs, JournalReplayMode::Strict)
+    replay_journal_with_mode(fs, JournalReplayMode::Strict, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,7 +621,9 @@ enum JournalReplayMode {
 fn replay_journal_with_mode(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     mode: JournalReplayMode,
+    scope: Option<&crate::common::DeadlineScope>,
 ) -> MidgeResult<JournalReplay> {
+    check_replay_scope(scope)?;
     let Some(file) = open_journal_for_replay(fs)? else {
         return Ok(JournalReplay::empty());
     };
@@ -563,8 +633,10 @@ fn replay_journal_with_mode(
     let mut offset: u64 = 0;
     let mut tail = JournalReplayTail::Clean;
     let mut corruption = None;
+    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("manifest_journal");
 
     while offset < file_len {
+        check_replay_scope(scope)?;
         let status = match read_journal_record(&*file, offset, file_len) {
             Ok(status) => status,
             // A read error is not evidence of corruption: salvaging past it
@@ -575,13 +647,18 @@ fn replay_journal_with_mode(
             }
             Err(error) => return Err(error),
         };
+        check_replay_scope(scope)?;
         match status {
             JournalRecordStatus::Record(record) => {
                 offset = record.next_offset;
                 let applied = validate_journal_record_crc(&record)
                     .and_then(|()| handle_journal_record(&record, &mut state));
+                check_replay_scope(scope)?;
                 match applied {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        progress.completed(record.next_offset - record.record_start, 1);
+                    }
+                    Err(error @ crate::common::MidgeError::Timeout(_)) => return Err(error),
                     Err(error) if mode == JournalReplayMode::SalvagePrefix => {
                         corruption = Some(format!("at byte {}: {error}", record.record_start));
                         break;
@@ -622,14 +699,16 @@ fn replay_journal_with_mode(
         };
     }
 
+    check_replay_scope(scope)?;
     state.edits.truncate(durable_edit_count);
-    let max_edit_id = state
-        .edits
-        .iter()
-        .map(|edit| edit.edit_id)
-        .max()
-        .unwrap_or(0);
+    let mut max_edit_id = 0;
+    for edit in &state.edits {
+        check_replay_scope(scope)?;
+        max_edit_id = max_edit_id.max(edit.edit_id);
+    }
+    check_replay_scope(scope)?;
 
+    progress.finish();
     Ok(JournalReplay {
         edits: state.edits,
         max_edit_id,
@@ -637,6 +716,10 @@ fn replay_journal_with_mode(
         tail,
         corruption,
     })
+}
+
+fn check_replay_scope(scope: Option<&crate::common::DeadlineScope>) -> MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check("manifest journal replay"))
 }
 
 struct JournalReplay {
@@ -990,11 +1073,21 @@ fn append_validated_edit_batch_with_fs(
 }
 
 /// Appends a validated batch under `edit_id`; see
-/// [`append_validated_edit_with_id`].
+/// [`append_validated_edit_with_id_observed`].
+#[cfg(test)]
 pub(crate) fn append_validated_edit_batch_with_id(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
     edit_id: u64,
+) -> MidgeResult<u64> {
+    append_validated_edit_batch_with_id_observed(fs, batch, edit_id, None)
+}
+
+pub(crate) fn append_validated_edit_batch_with_id_observed(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    batch: &[ManifestEdit],
+    edit_id: u64,
+    observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<u64> {
     let record = encode_journal_record(
         BATCH_RECORD_TYPE,
@@ -1026,7 +1119,7 @@ pub(crate) fn append_validated_edit_batch_with_id(
             "failpoint: no space on manifest journal batch append".to_string()
         ))
     );
-    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id)?;
+    let (write_ns, fsync_ns) = append_record_and_marker_with_fs(fs, record, edit_id, observation)?;
     tracing::info!(
         batch_size = batch.len(),
         write_ns,

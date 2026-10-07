@@ -4,27 +4,46 @@ use super::{
     RuntimeRecoveryMaterialization, RuntimeStorageMaterialization, StartedRuntime, StartupLease,
     StartupStoragePath,
 };
-use crate::common::{MidgeError, MidgeResult};
+use crate::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::Storage;
 use crate::engine::ingest;
 use crate::runtime::Runtime;
 use std::sync::Arc;
 
 impl StartedRuntime {
-    fn start(opts: &OpenOptions, recovered: RuntimeRecoveryMaterialization) -> MidgeResult<Self> {
+    fn start(
+        opts: &OpenOptions,
+        mut recovered: RuntimeRecoveryMaterialization,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Self> {
         let recovered_sequence = recovered.recovered_sequence;
         let recovered_cf_metas = recovered.recovered_cf_metas;
         let (runtime_inst, _) = Runtime::new();
-        let (runtime, runtime_handle) =
-            runtime_inst.start_with_config(recovered.state, recovered.runtime_config)?;
-
-        EngineStartup::apply_post_start_config(opts, &runtime_handle)?;
+        recovered.state.limits.memtable_size_limit = opts.runtime_memtable_size_limit();
+        recovered.state.limits.memtable_flush_threshold = opts.runtime_memtable_flush_threshold();
+        #[cfg(feature = "internal-testing")]
+        let metadata_accounting = recovered.state.checkpoint_metrics();
+        let (runtime, runtime_handle, admission) = if let Some(scope) = scope {
+            let (runtime, handle, admission) = runtime_inst.prepare_with_config(
+                recovered.state,
+                recovered.runtime_config,
+                scope.clone(),
+            )?;
+            (runtime, handle, Some(admission))
+        } else {
+            let (runtime, handle) =
+                runtime_inst.start_with_config(recovered.state, recovered.runtime_config)?;
+            (runtime, handle, None)
+        };
 
         Ok(Self {
+            #[cfg(feature = "internal-testing")]
+            metadata_accounting,
             runtime,
             runtime_handle,
             recovered_sequence,
             recovered_cf_metas,
+            admission,
         })
     }
 }
@@ -35,7 +54,6 @@ impl FacadeAssembly {
         storage_path: StartupStoragePath,
         mut startup_lease: StartupLease,
         started: StartedRuntime,
-        start: std::time::Instant,
     ) -> MidgeResult<Engine> {
         let column_families = dashmap::DashMap::new();
         let default_handle = ColumnFamilyHandle::new(0, "default".to_string());
@@ -46,13 +64,6 @@ impl FacadeAssembly {
         ingest_coordinators.insert(0, default_coordinator);
 
         startup_lease.ensure_healthy("before engine assembly")?;
-        let lease_heartbeat = startup_lease.take_heartbeat()?;
-
-        tracing::info!(
-            db_path = %storage_path.db_path.display(),
-            open_ms = start.elapsed().as_secs_f64() * 1000.0,
-            "engine open completed"
-        );
 
         for cf_meta in &started.recovered_cf_metas {
             if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
@@ -64,15 +75,23 @@ impl FacadeAssembly {
             }
         }
 
+        startup_lease.ensure_healthy("before transferring engine ownership")?;
+        if startup_lease.lease_guard.is_none() {
+            return Err(MidgeError::Internal(
+                "startup lease guard was already transferred".into(),
+            ));
+        }
+        let lease_heartbeat = startup_lease.take_heartbeat()?;
         let lease = Arc::clone(&startup_lease.lease);
         let lease_guard = startup_lease.lease_guard.take().ok_or_else(|| {
             MidgeError::Internal("startup lease guard was already transferred".to_string())
         })?;
 
-        startup_lease.ensure_healthy("before returning the engine")?;
         let hybrid_storage = started.runtime_handle.storage_budget.clone();
 
         Ok(Engine {
+            #[cfg(feature = "internal-testing")]
+            metadata_accounting: started.metadata_accounting,
             runtime: Some(started.runtime),
             runtime_handle: started.runtime_handle,
             db_path: storage_path.db_path,
@@ -101,44 +120,117 @@ impl FacadeAssembly {
 
 impl EngineStartup {
     pub(crate) fn open_owned(opts: OpenOptions) -> MidgeResult<Engine> {
-        let opts = std::sync::Arc::new(opts);
-        Self::open(opts.as_ref())
+        if let Some(budget) = opts.open_timeout() {
+            super::deadline::open(opts, budget)
+        } else {
+            Self::open(&opts)
+        }
     }
 
     pub(crate) fn open(opts: &OpenOptions) -> MidgeResult<Engine> {
-        super::timing::measure("open", || Self::open_profiled(opts))
+        if let Some(budget) = opts.open_timeout() {
+            return super::deadline::open(opts.clone(), budget);
+        }
+        super::timing::measure("open", || {
+            Self::open_profiled(opts, None, std::time::Instant::now()).map(|(engine, _)| engine)
+        })
     }
 
-    fn open_profiled(opts: &OpenOptions) -> MidgeResult<Engine> {
-        let start = std::time::Instant::now();
+    pub(super) fn prepare_within(
+        opts: &OpenOptions,
+        scope: &DeadlineScope,
+        start: std::time::Instant,
+    ) -> MidgeResult<super::deadline::PreparedEngine> {
+        let (engine, admission) = super::timing::measure("open_preparation", || {
+            Self::open_profiled(opts, Some(scope), start)
+        })?;
+        Ok(super::deadline::PreparedEngine {
+            engine,
+            admission: admission.expect("timed startup always prepares an admission gate"),
+        })
+    }
+
+    fn open_profiled(
+        opts: &OpenOptions,
+        scope: Option<&DeadlineScope>,
+        start: std::time::Instant,
+    ) -> MidgeResult<(Engine, Option<crate::runtime::StartupAdmission>)> {
+        check_scope(scope, "startup entry")?;
         Self::trace_open(opts);
         let storage_path = StartupStoragePath::resolve(opts.storage());
         storage_path.prepare()?;
+        check_scope(scope, "storage path preparation")?;
 
         let minimum_epoch = super::timing::measure("lease_epoch_floor", || {
-            super::epoch_floor::StartupEpochFloor::discover(opts, &storage_path)
+            if let Some(scope) = scope {
+                super::epoch_floor::StartupEpochFloor::discover_within(opts, &storage_path, scope)
+            } else {
+                super::epoch_floor::StartupEpochFloor::discover(opts, &storage_path)
+            }
         })?;
+        check_scope(scope, "lease epoch discovery")?;
         let startup_lease = super::timing::measure("lease_acquisition", || {
-            StartupLease::acquire(opts, minimum_epoch)
+            if let Some(scope) = scope {
+                StartupLease::acquire_within(opts, minimum_epoch, scope)
+            } else {
+                StartupLease::acquire(opts, minimum_epoch)
+            }
         })?;
+        if let Some(observer) = opts.startup_observer() {
+            observer.observe(crate::runtime::StartupEvent::LeaseAcquired {
+                epoch: startup_lease.writer_epoch,
+            });
+        }
+        check_scope(scope, "lease acquisition")?;
         if !storage_path.memory_mode {
             crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
         }
+        check_scope(scope, "orphaned spill cleanup")?;
         let materialized = super::timing::measure("storage_materialization", || {
-            RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)
+            if let Some(scope) = scope {
+                RuntimeStorageMaterialization::materialize_within(
+                    opts,
+                    &storage_path,
+                    &startup_lease,
+                    scope,
+                )
+            } else {
+                RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)
+            }
         })?;
+        check_scope(scope, "storage materialization")?;
         let recovered = super::timing::measure("replay_and_repair", || {
-            RuntimeRecoveryMaterialization::replay_and_repair(
-                materialized,
-                &storage_path.db_path,
-                opts.recovery_policy(),
-            )
+            if let Some(scope) = scope {
+                RuntimeRecoveryMaterialization::replay_and_repair_within(
+                    materialized,
+                    &storage_path.db_path,
+                    opts.recovery_policy(),
+                    scope,
+                )
+            } else {
+                RuntimeRecoveryMaterialization::replay_and_repair(
+                    materialized,
+                    &storage_path.db_path,
+                    opts.recovery_policy(),
+                )
+            }
         })?;
+        check_scope(scope, "replay and repair")?;
         startup_lease.ensure_healthy("before runtime creation")?;
-        let started =
-            super::timing::measure("runtime_start", || StartedRuntime::start(opts, recovered))?;
-
-        FacadeAssembly::assemble(opts, storage_path, startup_lease, started, start)
+        let started = super::timing::measure("runtime_start", || {
+            StartedRuntime::start(opts, recovered, scope)
+        })?;
+        check_scope(scope, "runtime preparation")?;
+        let admission = started.admission.clone();
+        let engine = FacadeAssembly::assemble(opts, storage_path, startup_lease, started)?;
+        if admission.is_none() {
+            tracing::info!(
+                db_path = %engine.db_path.display(),
+                open_ms = start.elapsed().as_secs_f64() * 1000.0,
+                "engine open completed"
+            );
+        }
+        Ok((engine, admission))
     }
 
     pub(super) fn trace_open(opts: &OpenOptions) {
@@ -184,29 +276,8 @@ impl EngineStartup {
             tracing::debug!(storage = ?opts.storage(), "opening midge engine");
         }
     }
+}
 
-    fn apply_post_start_config(
-        opts: &OpenOptions,
-        runtime_handle: &crate::runtime::RuntimeHandle,
-    ) -> MidgeResult<()> {
-        let request_id = crate::runtime::next_request_id()?;
-        let response =
-            runtime_handle.send_and_wait(crate::runtime::RuntimeMsg::SetRuntimeConfig {
-                request_id,
-                memtable_size_limit: Some(opts.runtime_memtable_size_limit()),
-                memtable_flush_threshold: Some(opts.runtime_memtable_flush_threshold()),
-                enable_compaction: None,
-                l0_compaction_trigger: None,
-                wal_durability_policy: None,
-                wal_batch_config: None,
-            })?;
-
-        match response {
-            crate::runtime::RuntimeResponse::Ok { .. } => Ok(()),
-            crate::runtime::RuntimeResponse::Error { error, .. } => Err(error),
-            _ => Err(MidgeError::Internal(
-                "unexpected response to SetRuntimeConfig".to_string(),
-            )),
-        }
-    }
+fn check_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeResult<()> {
+    scope.map_or(Ok(()), |scope| scope.check(context))
 }

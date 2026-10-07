@@ -852,6 +852,59 @@ impl ListPageParser for AzureListContext {
     }
 }
 
+impl AzureBackend {
+    fn submit_get_request(
+        &self,
+        key: &str,
+        timeout: Option<std::time::Duration>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let url = self.object_url(&key);
+        let mut request = CloudRequest::new(Method::GET, url);
+        request.timeout = timeout;
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| azure_response_error(resp, "Azure GET", false),
+            ),
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    fn submit_get_with_metadata_request(
+        &self,
+        key: &str,
+        timeout: Option<std::time::Duration>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
+        request.timeout = timeout;
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
+                key: ctx,
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        object_metadata_from_response(
+                            &resp,
+                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                            "Azure",
+                        )
+                        .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| azure_response_error(resp, "Azure GET", false),
+                ),
+            };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
 impl CloudBackend for AzureBackend {
     fn set_request_timeout(&self, timeout: std::time::Duration) {
         self.executor.set_default_timeout(timeout);
@@ -913,42 +966,29 @@ impl CloudBackend for AzureBackend {
     }
 
     fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let url = self.object_url(&key);
-        let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
-            key: ctx,
-            result: map_response(
-                result,
-                |status| status == 200,
-                |resp| Ok(resp.body),
-                |resp| azure_response_error(resp, "Azure GET", false),
-            ),
-        };
-        self.executor.spawn_request(request, key, callback, mapper);
+        self.submit_get_request(key, None, callback);
+    }
+
+    fn submit_get_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_request(key, Some(timeout), callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let request = CloudRequest::new(Method::GET, self.object_url(&key));
-        let mapper =
-            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: map_response(
-                    result,
-                    |status| status == 200,
-                    |resp| {
-                        object_metadata_from_response(
-                            &resp,
-                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
-                            "Azure",
-                        )
-                        .map(|metadata| (resp.body, metadata))
-                    },
-                    |resp| azure_response_error(resp, "Azure GET", false),
-                ),
-            };
-        self.executor.spawn_request(request, key, callback, mapper);
+        self.submit_get_with_metadata_request(key, None, callback);
+    }
+
+    fn submit_get_with_metadata_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_with_metadata_request(key, Some(timeout), callback);
     }
 
     fn submit_get_range_with_identity(
@@ -1094,10 +1134,11 @@ impl CloudBackend for AzureBackend {
                 sas_token: self.sas_token.clone(),
             },
         );
-        self.executor.spawn_request_loop(
+        self.executor.spawn_request_loop_with_timeout(
             state,
             prefix,
             callback,
+            request_timeout,
             move |state| {
                 let mut request = CloudRequest::new(Method::GET, state.url());
                 if let Some(timeout) = request_timeout {

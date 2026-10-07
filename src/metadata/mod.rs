@@ -2,12 +2,19 @@
 //!
 //! Tracks SST files, levels, and version history
 
+pub(crate) mod accounted_fs;
+pub(crate) mod accounting;
+#[cfg(feature = "internal-testing")]
+pub(crate) mod checkpoint_policy_probe;
 pub mod files;
 pub mod format;
 pub mod journal;
 mod key_bounds;
 pub mod manifest;
 pub mod persistence;
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub(crate) mod recovery_progress_fixture;
 pub(crate) mod store;
 
 pub use format::{ensure_or_create_format_marker, validate_format_marker};

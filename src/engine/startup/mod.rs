@@ -8,8 +8,10 @@ use crate::common::MidgeResult;
 use crate::runtime::{Runtime, RuntimeState};
 
 mod assembly;
+mod deadline;
 use crate::runtime::cloud_startup::CloudStartupRecovery;
 mod epoch_floor;
+mod recovery;
 mod storage;
 mod streaming_recovery;
 mod timing;
@@ -27,6 +29,7 @@ struct StartupLease {
     lease_healthy: Arc<std::sync::atomic::AtomicBool>,
     lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     lease_heartbeat: Option<crate::lease::LeaseHeartbeat>,
+    cleanup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
 }
 
 struct RuntimeStorageMaterialization {
@@ -46,10 +49,13 @@ struct RuntimeRecoveryMaterialization {
 }
 
 struct StartedRuntime {
+    #[cfg(feature = "internal-testing")]
+    metadata_accounting: crate::metadata::accounting::MetricsHandle,
     runtime: Runtime,
     runtime_handle: crate::runtime::RuntimeHandle,
     recovered_sequence: u64,
     recovered_cf_metas: Vec<crate::metadata::ColumnFamilyMeta>,
+    admission: Option<crate::runtime::StartupAdmission>,
 }
 
 struct FacadeAssembly;

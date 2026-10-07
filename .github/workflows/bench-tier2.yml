@@ -1,0 +1,37 @@
+name: Benchmark Tier 2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-tier2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Run registered Tier 2 targets
+        shell: bash
+        run: cargo bench --bench 'tier2_*'
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier2-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore

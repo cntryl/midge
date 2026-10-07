@@ -2,9 +2,9 @@
 
 use super::{
     snapshot_cache, snapshot_pins, EventLoop, ResponseRouter, RuntimeConfig, RuntimeHandle,
-    RuntimeLifecycle, RuntimeMsg, RuntimeState,
+    RuntimeLifecycle, RuntimeMsg, RuntimeState, StartupAdmission,
 };
-use crate::common::{MidgeError, MidgeResult};
+use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{atomic::Ordering, Arc};
 use std::thread::{self, JoinHandle};
@@ -29,6 +29,7 @@ pub struct Runtime {
     router: Arc<ResponseRouter>,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     lifecycle: Arc<RuntimeLifecycle>,
+    startup_admission: Option<StartupAdmission>,
 }
 
 impl Runtime {
@@ -64,6 +65,7 @@ impl Runtime {
             diagnostics: Arc::clone(&diagnostics),
             storage_budget: None,
             sst_read_fs: None,
+            read_authority: None,
             lifecycle: Arc::clone(&lifecycle),
             runtime_response_timeout,
         };
@@ -76,6 +78,7 @@ impl Runtime {
             router,
             diagnostics,
             lifecycle,
+            startup_admission: None,
         };
 
         (runtime, handle)
@@ -85,16 +88,34 @@ impl Runtime {
     ///
     /// Returns the Runtime (which owns the thread) and a handle for submitting work.
     pub fn start_with_config(
-        mut self,
+        self,
         state: RuntimeState,
         config: RuntimeConfig,
     ) -> MidgeResult<(Self, RuntimeHandle)> {
+        let (runtime, handle, admission) = self.prepare_with_config(
+            state,
+            config,
+            DeadlineScope::new(OperationDeadline::unbounded()),
+        )?;
+        admission.accept()?;
+        Ok((runtime, handle))
+    }
+
+    /// Initialize actors while their owner retains the admission decision.
+    pub(crate) fn prepare_with_config(
+        mut self,
+        state: RuntimeState,
+        mut config: RuntimeConfig,
+        scope: DeadlineScope,
+    ) -> MidgeResult<(Self, RuntimeHandle, StartupAdmission)> {
+        scope.check("runtime creation")?;
+        config.startup_scope = Some(scope.clone());
         let trace_enabled = self.trace_enabled;
         let router = self.router.clone();
         let runtime_response_timeout = config.runtime_response_timeout;
 
         // Channel to signal successful event loop initialization
-        let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
+        let (init_tx, init_rx) = channel::bounded::<MidgeResult<()>>(1);
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let snapshot_pins = Arc::clone(&state.snapshot_pins);
@@ -103,6 +124,9 @@ impl Runtime {
         self.diagnostics = Arc::clone(&state.diagnostics);
         let lifecycle = Arc::clone(&self.lifecycle);
         let lifecycle_for_thread = Arc::clone(&lifecycle);
+        let preparation_scope = scope.clone();
+        let admission = StartupAdmission::new(scope, Arc::clone(&lifecycle), &config);
+        self.startup_admission = Some(admission.clone());
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
@@ -113,6 +137,7 @@ impl Runtime {
             diagnostics: Arc::clone(&self.diagnostics),
             storage_budget: config.hybrid_storage.clone(),
             sst_read_fs: config.sst_read_fs.clone(),
+            read_authority: super::handle::CloudReadAuthority::from_config(&config),
             lifecycle,
             runtime_response_timeout,
         };
@@ -122,65 +147,30 @@ impl Runtime {
             std::mem::replace(&mut self.msg_rx, channel::bounded(RUNTIME_QUEUE_CAPACITY).1);
         let router_for_thread = router.clone();
 
+        let startup = WorkerStartup {
+            state,
+            config,
+            trace_enabled,
+            router,
+            router_for_thread,
+            snapshot_cache,
+            lifecycle: lifecycle_for_thread,
+            worker_msg_tx,
+            worker_msg_rx,
+            msg_rx,
+            init_tx,
+            admission: admission.clone(),
+        };
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
-            .spawn(move || {
-                match EventLoop::new(
-                    state,
-                    trace_enabled,
-                    router,
-                    config,
-                    crate::runtime::event_loop::FlushWorkerMode::Background(worker_msg_tx),
-                ) {
-                    Ok(mut event_loop) => {
-                        // Share the snapshot cache with the event loop
-                        event_loop.set_snapshot_cache(snapshot_cache);
-                        event_loop.schedule_background_compaction_on_startup();
-                        lifecycle_for_thread.mark_running();
-                        // Signal successful initialization
-                        let _ = init_tx.send(Ok(()));
-                        let run_result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                event_loop.run(&msg_rx, &worker_msg_rx);
-                            }));
-                        if run_result.is_err() {
-                            tracing::error!("Runtime event loop panicked");
-                            // Close the submission gate before failing pending
-                            // requests. On the clean shutdown path `begin_shutdown`
-                            // already drains in-flight submissions before
-                            // `fail_all` runs, but a spontaneous panic leaves the
-                            // lifecycle Open, so a caller could register after
-                            // `fail_all` snapshotted the pending table and then
-                            // wait out its full response timeout.
-                            lifecycle_for_thread.begin_shutdown();
-                            router_for_thread
-                                .fail_all("runtime event loop panicked before responding");
-                        }
-                        // Drop actors and their worker handles before publishing Closed.
-                        // Engine fencing resources are retained until this point.
-                        drop(event_loop);
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to create event loop: {e}");
-                        tracing::error!("{}", msg);
-                        // Signal initialization failure
-                        let _ = init_tx.send(Err(msg));
-                    }
-                }
-                lifecycle_for_thread.mark_closed();
-            })
+            .spawn(move || startup.run())
             .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {e}")))?;
 
         self.event_loop_handle = Some(event_loop_handle);
 
-        // Wait for event loop initialization to complete
-        match init_rx.recv() {
-            Ok(Ok(())) => Ok((self, handle)),
-            Ok(Err(e)) => Err(MidgeError::Internal(e)),
-            Err(_) => Err(MidgeError::Internal(
-                "Runtime initialization channel closed unexpectedly".to_string(),
-            )),
-        }
+        wait_for_preparation(&init_rx, &preparation_scope)?;
+        preparation_scope.check("runtime preparation receipt")?;
+        Ok((self, handle, admission))
     }
 
     fn join_until(&mut self, timeout: Duration, context: &str) -> bool {
@@ -214,6 +204,9 @@ impl Runtime {
     }
 
     fn shutdown_inner(&mut self, context: &str) {
+        if let Some(admission) = &self.startup_admission {
+            admission.cancel();
+        }
         self.lifecycle.begin_shutdown();
         self.lifecycle.wait_for_transactions();
         if self.event_loop_handle.is_some()
@@ -235,6 +228,118 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.shutdown_inner("drop");
+    }
+}
+
+struct WorkerStartup {
+    state: RuntimeState,
+    config: RuntimeConfig,
+    trace_enabled: bool,
+    router: Arc<ResponseRouter>,
+    router_for_thread: Arc<ResponseRouter>,
+    snapshot_cache: Arc<snapshot_cache::SnapshotCache>,
+    lifecycle: Arc<RuntimeLifecycle>,
+    worker_msg_tx: Sender<RuntimeMsg>,
+    worker_msg_rx: Receiver<RuntimeMsg>,
+    msg_rx: Receiver<RuntimeMsg>,
+    init_tx: Sender<MidgeResult<()>>,
+    admission: StartupAdmission,
+}
+
+impl WorkerStartup {
+    fn run(self) {
+        let Self {
+            state,
+            config,
+            trace_enabled,
+            router,
+            router_for_thread,
+            snapshot_cache,
+            lifecycle,
+            worker_msg_tx,
+            worker_msg_rx,
+            msg_rx,
+            init_tx,
+            admission,
+        } = self;
+        match EventLoop::new(
+            state,
+            trace_enabled,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Background(worker_msg_tx),
+        ) {
+            Ok(mut event_loop) => {
+                event_loop.set_snapshot_cache(snapshot_cache);
+                match admission.prepared() {
+                    Ok(()) => {
+                        let _ = init_tx.send(Ok(()));
+                        if admission.wait_until_accepted() {
+                            event_loop.schedule_background_compaction_on_startup();
+                            run_event_loop(
+                                &mut event_loop,
+                                &msg_rx,
+                                &worker_msg_rx,
+                                &lifecycle,
+                                &router_for_thread,
+                            );
+                        } else {
+                            admission.aborted();
+                        }
+                    }
+                    Err(error) => {
+                        let _ = init_tx.send(Err(error));
+                        admission.aborted();
+                    }
+                }
+                drop(event_loop);
+            }
+            Err(error) => {
+                tracing::error!(%error, "Failed to create event loop");
+                let _ = init_tx.send(Err(error));
+                admission.aborted();
+            }
+        }
+        lifecycle.mark_closed();
+    }
+}
+
+fn wait_for_preparation(
+    init_rx: &Receiver<MidgeResult<()>>,
+    scope: &DeadlineScope,
+) -> MidgeResult<()> {
+    let deadline = scope.deadline();
+    let ready = if deadline.is_bounded() {
+        init_rx.recv_timeout(deadline.remaining()).map_err(|error| {
+            if error.is_timeout() {
+                MidgeError::Timeout("runtime preparation exceeded the open deadline".into())
+            } else {
+                MidgeError::Internal("runtime initialization channel closed unexpectedly".into())
+            }
+        })
+    } else {
+        init_rx.recv().map_err(|_| {
+            MidgeError::Internal("runtime initialization channel closed unexpectedly".into())
+        })
+    };
+    ready?
+}
+
+fn run_event_loop(
+    event_loop: &mut EventLoop,
+    msg_rx: &Receiver<RuntimeMsg>,
+    worker_msg_rx: &Receiver<RuntimeMsg>,
+    lifecycle: &RuntimeLifecycle,
+    router: &ResponseRouter,
+) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        event_loop.run(msg_rx, worker_msg_rx);
+    }));
+    if result.is_err() {
+        tracing::error!("Runtime event loop panicked");
+        // Close submissions before snapshotting and failing pending routes.
+        lifecycle.begin_shutdown();
+        router.fail_all("runtime event loop panicked before responding");
     }
 }
 

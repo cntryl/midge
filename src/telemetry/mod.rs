@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod metrics;
+pub(crate) mod recovery_progress;
 
 pub use config::TelemetryConfig;
 pub use metrics::Metrics;

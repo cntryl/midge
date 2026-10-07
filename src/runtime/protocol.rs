@@ -334,7 +334,8 @@ pub enum RuntimeMsg {
     },
 
     // === Compaction Actor ===
-    /// Compaction completed.
+    /// Internal worker completion. The ID correlates publication ownership;
+    /// it does not identify a caller waiting for a response.
     CompactionComplete {
         request_id: u64,
         input_ssts: Vec<String>,
@@ -384,7 +385,10 @@ pub enum RuntimeMsg {
 
     // === Manifest Actor ===
     /// Persist manifest to disk.
-    ManifestPersist { request_id: u64 },
+    ManifestPersist {
+        request_id: u64,
+        origin: crate::metadata::accounting::Origin,
+    },
 
     // === Column Family Lifecycle ===
     /// Create a new column family.
@@ -400,6 +404,7 @@ pub enum RuntimeMsg {
     },
 
     /// Set runtime configuration atomically. Any field set to `None` will be left unchanged.
+    #[cfg(test)]
     SetRuntimeConfig {
         request_id: u64,
         memtable_size_limit: Option<usize>,
@@ -689,11 +694,14 @@ impl RuntimeMsg {
             | RuntimeMsg::FlushMemtable { request_id, .. }
             | RuntimeMsg::WalSync { request_id }
             | RuntimeMsg::SealWalForCloud { request_id, .. }
-            | RuntimeMsg::ManifestPersist { request_id }
+            | RuntimeMsg::ManifestPersist { request_id, .. }
             | RuntimeMsg::ManifestCreateColumnFamily { request_id, .. }
             | RuntimeMsg::ManifestDropColumnFamily { request_id, .. }
-            | RuntimeMsg::SetRuntimeConfig { request_id, .. }
             | RuntimeMsg::CompactAll { request_id } => VerificationBarrierAction::Reject {
+                request_id: *request_id,
+            },
+            #[cfg(test)]
+            RuntimeMsg::SetRuntimeConfig { request_id, .. } => VerificationBarrierAction::Reject {
                 request_id: *request_id,
             },
             RuntimeMsg::Test(msg) => msg.verification_barrier_action(),
@@ -708,12 +716,11 @@ impl RuntimeMsg {
     pub fn request_id(&self) -> Option<u64> {
         match self {
             RuntimeMsg::FlushMemtable { request_id, .. }
-            | RuntimeMsg::CompactionComplete { request_id, .. }
             | RuntimeMsg::ApplyTransaction { request_id, .. }
             | RuntimeMsg::ApplySpilledTransaction { request_id, .. }
             | RuntimeMsg::WalSync { request_id }
             | RuntimeMsg::SealWalForCloud { request_id, .. }
-            | RuntimeMsg::ManifestPersist { request_id }
+            | RuntimeMsg::ManifestPersist { request_id, .. }
             | RuntimeMsg::ManifestCreateColumnFamily { request_id, .. }
             | RuntimeMsg::ManifestDropColumnFamily { request_id, .. }
             | RuntimeMsg::GetReadAmpMetrics { request_id }
@@ -724,13 +731,16 @@ impl RuntimeMsg {
             | RuntimeMsg::BeginBackupCapture { request_id }
             | RuntimeMsg::EndStorageVerification { request_id, .. }
             | RuntimeMsg::BeginTransaction { request_id, .. }
-            | RuntimeMsg::SetRuntimeConfig { request_id, .. }
             | RuntimeMsg::CompactAll { request_id }
             | RuntimeMsg::CheckWriteStall { request_id, .. }
             | RuntimeMsg::ShutdownWithResponse { request_id }
             | RuntimeMsg::WaitForWriteStallClear { request_id, .. } => Some(*request_id),
 
-            RuntimeMsg::CancelWaitForWriteStallClear { .. }
+            #[cfg(test)]
+            RuntimeMsg::SetRuntimeConfig { request_id, .. } => Some(*request_id),
+
+            RuntimeMsg::CompactionComplete { .. }
+            | RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::Shutdown
             | RuntimeMsg::RetryGc => None,
 
@@ -757,6 +767,7 @@ impl RuntimeMsg {
             RuntimeMsg::BeginBackupCapture { .. } => "BeginBackupCapture",
             RuntimeMsg::EndStorageVerification { .. } => "EndStorageVerification",
             RuntimeMsg::BeginTransaction { .. } => "BeginTransaction",
+            #[cfg(test)]
             RuntimeMsg::SetRuntimeConfig { .. } => "SetRuntimeConfig",
             RuntimeMsg::CompactAll { .. } => "CompactAll",
             RuntimeMsg::Shutdown => "Shutdown",

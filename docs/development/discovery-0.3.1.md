@@ -83,7 +83,7 @@ their revision; do not relabel later replay success as original-revision proof.
 
 ## Architectural coverage map
 
-This map records scaffold capability, not completed full-campaign evidence.
+This original investigation map records scaffold capability. The final qualification coverage interpretation below records the executed release evidence.
 Each physical probe must record its exact revision, seed or fixed crash tuple,
 backend, durability, ordinal, counters, and outcome. Applicable focused properties
 run 256 cases; actual abort scenarios are serial and capped at twelve beyond
@@ -246,3 +246,30 @@ They may run ordinary smoke histories; discovery/release/provider campaigns
 continue to require a clean committed Git checkout, even when an archive
 asserts a SHA and clean state. A clean assertion without an
 explicit SHA is rejected. No logical test is skipped to accommodate archives.
+
+## Final qualification coverage interpretation
+
+The original map above is the investigation plan. Release evidence combines the
+logical corpus, named actual process aborts, focused regression/property tests,
+serial fault injection, provider qualification, sanitized fuzzing, and lifecycle
+benchmarks. It does not claim twenty-one independent random history generators.
+
+| Planned family | Executed evidence and limits |
+| --- | --- |
+| Recovery: commits, epochs, holes, torn tails | Full DurableRestart corpus; cloud salvage legal-prefix and sequence-floor regressions; serial WAL corruption/fault-injection tests and eight named aborts. |
+| Recovery: predecessor takeover and GC | Lease validity tests and real-expiry public-engine takeover/maintenance/restart test; both stale commits rejected and successor state retained. |
+| Snapshot: held versions and own intents | HeldSnapshot/PinnedCompaction and resident/spilled OrdinalIntents fixtures; transaction model/scaling/accounting tests. Matching spill runs may still be probed. |
+| Snapshot: bounded/reverse tombstones | BoundedScan corpus; range sweep, overlapping tombstone, boundary, late-error and reverse-limit focused tests. |
+| Compaction: equivalence, empty outputs and pin retention | CompactionEquivalence/PinnedCompaction corpus, actual empty-compaction publication abort, lifecycle/reclamation tests. |
+| Lifecycle: publication, repeated recovery, reachable/ambiguous orphans | Named restore/empty-publication process aborts; serial fault injection, orphan/stale-proof tests, interrupted provider recovery and repeated complete cache loss. |
+| Concurrency: iterator/maintenance, capture/GC, CloudAck/catalog | Existing held-reader tests; 256 scheduled acquisition-guard/pin/GC cases; attempt-local CloudAck sibling reservation and waiter regressions. These are bounded schedules, not exhaustive concurrency proof. |
+| Failure: restore, partial provider operations, retry and shutdown | Eight restore abort tuples in platform CI; foreign stages/collisions/overlap tests; supported Sqrzl adapters, provider engine tests; retry/worker panic/bounded shutdown fault injection. |
+| Boundary: binary ranges, arithmetic and malformed lengths | BinaryBoundaries corpus, focused sequence/allocation/encoding bounds and malformed/corrupt frame/block tests; four sanitized recovery fuzz targets plus retained intent input replay. |
+
+Confirmed findings #662–#669 were repaired and merged. Qualification findings
+#686 (asynchronous fuzz Engine lifetime), #688 (Docker archive provenance), and
+#690 (healthy-writer one-second lease timing) were tracked and repaired serially.
+#670 was measured and deferred; its unchanged checkpoint amplification remains
+listed as a known limit. No Jev probability is used as correctness evidence.
+Full release discovery requires clean Git provenance; Docker archive smoke uses
+explicit caller-supplied provenance and cannot qualify a full campaign.

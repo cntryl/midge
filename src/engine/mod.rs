@@ -80,6 +80,8 @@ impl ColumnFamilyHandle {
 /// This is a thin façade over the runtime. All state and background work
 /// is managed by the runtime actors.
 pub struct Engine {
+    #[cfg(feature = "internal-testing")]
+    metadata_accounting: crate::metadata::accounting::MetricsHandle,
     /// Runtime (owns the event loop thread)
     runtime: Option<Runtime>,
     /// Handle to submit work to the runtime
@@ -127,6 +129,11 @@ impl Drop for Engine {
 type CloudSstRecoveryProof = crate::runtime::cloud_startup::CloudSstRecoveryProof;
 
 impl Engine {
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn checkpoint_metrics(&self) -> crate::metadata::accounting::MetricsHandle {
+        self.metadata_accounting.clone()
+    }
+
     #[cfg(test)]
     fn blocking_cloud_get(
         cloud: &crate::storage::cloud::CloudStorage,
@@ -281,6 +288,32 @@ impl Engine {
                 cf_id: cf.id(),
             })?;
 
+        Self::finish_flush_response(response)
+    }
+
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn flush_cf_with_timeout(
+        &self,
+        cf: &ColumnFamilyHandle,
+        timeout: Duration,
+    ) -> MidgeResult<()> {
+        let request_id = next_request_id()?;
+        let response = self.runtime_handle.send_and_wait_timeout(
+            RuntimeMsg::FlushMemtable {
+                request_id,
+                cf_id: cf.id(),
+            },
+            timeout,
+        )?;
+        match response {
+            Some(response) => Self::finish_flush_response(response),
+            None => Err(MidgeError::Timeout(format!(
+                "FlushMemtable request {request_id} exceeded caller wait {timeout:?}"
+            ))),
+        }
+    }
+
+    fn finish_flush_response(response: RuntimeResponse) -> MidgeResult<()> {
         match response {
             RuntimeResponse::Ok { .. } => Ok(()),
             RuntimeResponse::Error { error, .. } => Err(error),
@@ -299,7 +332,8 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when snapshot registration fails or the column family does
-    /// not exist.
+    /// not exist. Cloud engines return [`MidgeError::Fenced`] when their lease is
+    /// no longer valid; existing cloud transactions also reject reads.
     ///
     pub fn begin_tx(
         &self,
@@ -523,7 +557,7 @@ impl Engine {
                     .lease_state
                     .schedule_runtime_cleanup(runtime, self.runtime_handle.clone())
                 {
-                    self.runtime = Some(runtime);
+                    self.runtime = Some(*runtime);
                     return Err(error);
                 }
                 return shutdown_result;
@@ -558,7 +592,10 @@ impl Engine {
         }
         let outcome = next_request_id().and_then(|request_id| {
             self.runtime_handle
-                .send_and_wait(RuntimeMsg::ManifestPersist { request_id })
+                .send_and_wait(RuntimeMsg::ManifestPersist {
+                    request_id,
+                    origin: crate::metadata::accounting::Origin::Ddl,
+                })
         });
         match outcome {
             Ok(RuntimeResponse::Error { error, .. }) | Err(error) => {

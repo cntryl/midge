@@ -13,11 +13,27 @@ use super::*;
 /// either the callback budget running out or the provider dropping the
 /// callback, and callers report those identically apart from the operation.
 pub(super) fn await_cloud_event(
+    cloud: &CloudStorage,
     rx: &std::sync::mpsc::Receiver<CloudEvent>,
-    timeout: std::time::Duration,
+    deadline: &crate::common::OperationDeadline,
     operation: &str,
 ) -> Result<CloudEvent, crate::storage::StorageError> {
-    rx.recv_timeout(timeout).map_err(|error| match error {
+    let timeout = cloud.scoped_timeout(deadline.remaining());
+    if timeout.is_zero() {
+        return Err(crate::storage::storage_timeout_error(format!(
+            "cloud {operation} exhausted its submission budget"
+        )));
+    }
+    let result = rx.recv_timeout(timeout);
+    cloud
+        .check_startup_scope("cloud callback acceptance")
+        .map_err(crate::storage::StorageError::from)?;
+    if deadline.is_expired() {
+        return Err(crate::storage::storage_timeout_error(format!(
+            "cloud {operation} callback crossed its deadline"
+        )));
+    }
+    result.map_err(|error| match error {
         std::sync::mpsc::RecvTimeoutError::Timeout => {
             crate::storage::storage_timeout_error(format!("cloud {operation} callback timed out"))
         }
@@ -29,12 +45,13 @@ pub(super) fn await_cloud_event(
 
 /// Wait for a delete callback and forward its outcome to the storage caller.
 pub(super) fn deliver_delete_outcome(
+    cloud: &CloudStorage,
     key: &str,
     rx: &std::sync::mpsc::Receiver<CloudEvent>,
-    timeout: std::time::Duration,
+    deadline: &crate::common::OperationDeadline,
     callback: &StorageCallback,
 ) {
-    let event = match await_cloud_event(rx, timeout, "DELETE") {
+    let event = match await_cloud_event(cloud, rx, deadline, "DELETE") {
         Ok(CloudEvent::Delete { result, .. }) => StorageEvent::DeleteComplete {
             key: key.to_string(),
             result: cloud_to_storage_outcome(result),
@@ -74,7 +91,9 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
             #[cfg(any(test, feature = "cloud-common"))]
             CloudError::Unauthorized(_) => StorageErrorKind::Unauthorized,
             CloudError::Transport(_) => StorageErrorKind::Transport,
-            CloudError::Protocol(_) => StorageErrorKind::Protocol,
+            CloudError::Protocol(_) | CloudError::ConditionalConflict(_) => {
+                StorageErrorKind::Protocol
+            }
             #[cfg(any(test, feature = "cloud-common"))]
             CloudError::InvalidRequest(_) | CloudError::ServerError(_) => {
                 StorageErrorKind::Protocol
@@ -92,13 +111,26 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: &StorageCallback,
     ) {
+        let deadline = crate::common::OperationDeadline::from_budget(self.scoped_timeout(timeout));
         let (tx, rx) = std::sync::mpsc::channel();
-        self.head_with_timeout(key, timeout, &tx);
-        let result = match rx.recv_timeout(timeout) {
+        self.head_with_timeout(key, deadline.remaining(), &tx);
+        let result = match deadline.clamp_nonzero(self.scoped_timeout(timeout)) {
+            Some(remaining) => rx.recv_timeout(remaining),
+            None => Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        };
+        let result = match result {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
                 result,
-            }) if actual == key => result,
+            }) if actual == key => {
+                if deadline.is_expired() || self.scoped_timeout(timeout).is_zero() {
+                    StorageOutcome::Err(crate::storage::storage_timeout_error(
+                        "range HEAD crossed its deadline",
+                    ))
+                } else {
+                    result
+                }
+            }
             Ok(event) => StorageOutcome::Err(
                 format!("range HEAD returned a different object: {event:?}").into(),
             ),
@@ -137,7 +169,7 @@ impl StorageBackend for CloudStorage {
         range: std::ops::Range<u64>,
         callback: crate::storage::RangeReadCallback,
     ) {
-        let timeout = request.remaining_timeout();
+        let timeout = self.scoped_timeout(request.remaining_timeout());
         if timeout.is_zero() {
             let _ = callback.send(Err(crate::storage::storage_timeout_error(
                 "range read timed out",
@@ -199,7 +231,8 @@ impl StorageBackend for CloudStorage {
         request: crate::storage::StorageRequest,
         callback: StorageCallback,
     ) {
-        let timeout = request.remaining_timeout();
+        let timeout = self.scoped_timeout(request.remaining_timeout());
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let key = request.key;
         if timeout.is_zero() {
             let _ = callback.send(StorageEvent::DeleteComplete {
@@ -222,13 +255,13 @@ impl StorageBackend for CloudStorage {
         };
         let _reservation = request.reservation;
         let (tx, rx) = std::sync::mpsc::channel();
-        if headers.is_empty() && timeout == self.callback_timeout {
+        if headers.is_empty() && timeout == self.callback_timeout() {
             CloudStorage::submit_delete(self, &key, tx);
         } else {
             set_request_timeout_header(&mut headers, timeout);
             CloudStorage::submit_delete_with_headers(self, &key, headers, tx);
         }
-        deliver_delete_outcome(&key, &rx, timeout, &callback);
+        deliver_delete_outcome(self, &key, &rx, &deadline, &callback);
     }
 
     fn submit_write_request(
@@ -237,8 +270,17 @@ impl StorageBackend for CloudStorage {
         data: Vec<u8>,
         callback: StorageCallback,
     ) {
-        let timeout = request.remaining_timeout();
+        let timeout = self.scoped_timeout(request.remaining_timeout());
         let key = request.key;
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::WriteComplete {
+                key,
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud PUT has no remaining budget",
+                )),
+            });
+            return;
+        }
         let headers = match request.precondition.headers() {
             Ok(headers) => headers,
             Err(error) => {
@@ -260,6 +302,8 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: &StorageCallback,
     ) {
+        let timeout = self.scoped_timeout(timeout);
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
         if timeout.is_zero() {
             let _ = callback.send(StorageEvent::HeadComplete {
                 key: key.to_string(),
@@ -271,7 +315,7 @@ impl CloudStorage {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_head_within(self, key, timeout, tx);
-        let event = match await_cloud_event(&rx, timeout, "HEAD") {
+        let event = match await_cloud_event(self, &rx, &deadline, "HEAD") {
             Ok(CloudEvent::Head { result, .. }) => {
                 let outcome = match result {
                     CloudOutcome::Ok(metadata) => StorageOutcome::Ok(metadata),

@@ -2,11 +2,6 @@ name: CI
 
 on:
   workflow_dispatch:
-    inputs:
-      tier3_lifecycle_bench:
-        description: Run Tier 3 lifecycle benchmarks on all supported operating systems
-        type: boolean
-        default: false
   schedule:
     - cron: "41 3 * * 3"
   push:
@@ -50,6 +45,9 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      - name: Test stress artifact finalization
+        run: python3 -m unittest discover -s tools/tests -p 'test_*.py'
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
@@ -58,6 +56,9 @@ jobs:
 
       - name: Unit and binary tests
         run: cargo test --lib --bins --all-features -- --test-threads=1
+
+      - name: Test checkpoint readback contracts
+        run: cargo test --example checkpoint_campaign_readback --all-features -- --test-threads=1
 
       - name: Integration tests
         shell: bash
@@ -152,6 +153,16 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo test --lib salvage_removes_definitively_lost_ssts --all-features
 
+      - name: Test compaction deadlines and retained ownership on Windows
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --lib --all-features compaction::repair::tests -- --test-threads=1
+          cargo test --lib --all-features compaction_budget_tests:: -- --test-threads=1
+          cargo test --lib --all-features publication_error_tests:: -- --test-threads=1
+          cargo test --test fault_injection --all-features compaction_deadline:: -- --test-threads=1
+
       - name: Test consistent-cut backup and restore on Windows
         if: matrix.os == 'windows-latest'
         run: |
@@ -176,6 +187,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib validity --all-features -- --test-threads=1
+          cargo test --lib read_authority_tests --all-features -- --test-threads=1
+          cargo test --lib cloud_read_fencing --all-features -- --test-threads=1
           cargo test --lib should_reject_predecessor --all-features -- --test-threads=1
           cargo test --lib should_preserve_floor_when_salvage_aborts --all-features -- --test-threads=1
 
@@ -194,29 +207,3 @@ jobs:
           name: discovery-model-${{ matrix.os }}-${{ github.sha }}
           path: target/discovery-031
           if-no-files-found: ignore
-
-  tier3_lifecycle_bench:
-    name: Tier 3 lifecycle (${{ matrix.os }})
-    if: github.event_name == 'workflow_dispatch' && inputs.tier3_lifecycle_bench
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    env:
-      CARGO_INCREMENTAL: 0
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Update Rust toolchain
-        run: rustup update stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "tier3-lifecycle-${{ matrix.os }}"
-
-      - name: Run Tier 3 lifecycle benchmark
-        run: cargo bench --bench tier3_system_lifecycle -- --profile default

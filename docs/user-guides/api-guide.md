@@ -55,7 +55,7 @@ progress.
 
 Every Engine operation that submits a `RuntimeMsg` and waits for its response is
 bounded. Transactions, column-family changes, flushes, compaction, metrics,
-storage-layout capture, and post-start configuration use
+storage-layout capture use
 `runtime_response_timeout`. The default is 60 seconds. When
 `storage_io_timeout` is raised without an explicit runtime override, Midge
 derives the enclosing deadline as at least 30 seconds longer than the storage
@@ -69,9 +69,19 @@ response. Engine drop hands teardown to a reaper which may continue waiting for
 durability workers so writer fencing is not released early.
 
 Engine open and recovery happen before the event loop accepts runtime messages,
-so `runtime_response_timeout` is not an aggregate startup deadline. Individual
-provider callbacks use `storage_io_timeout`; embedders that need to bound total
-startup should retain an outer process or startup watchdog.
+so `runtime_response_timeout` does not bound startup. Set
+`OpenOptionsBuilder::open_timeout(Duration)` to give one open attempt an aggregate
+monotonic budget, including epoch discovery, lease acquisition, recovery and
+runtime preparation. Each provider request uses the smaller of its ordinary
+`storage_io_timeout` and the remaining startup budget. The default is `None`.
+
+An exhausted startup budget returns `MidgeError::Timeout` without admitting the
+runtime. If a lease mutation has an unresolved outcome, the result is
+`MidgeError::LeaseIndeterminate`. A startup worker retains fencing and accepted
+work until cleanup finishes; a caller timeout does not prove that a remote
+mutation was cancelled or that a local syscall has stopped. A later open may
+temporarily encounter the retained lease. Successful startup restores ordinary
+runtime I/O budgets.
 
 A configured runtime-response `MidgeError::Timeout` identifies the request kind
 and request ID. The timeout removes the caller's response route but does not
@@ -112,9 +122,17 @@ sealed WAL is already a durability obligation and must still close its inflight
 frontier gap; this keeps later strict waits from stalling, but also means a
 caller timeout remains outcome-ambiguous.
 
-Compaction publication does not yet share one aggregate caller deadline across
-its provider operations. On a degraded provider, an explicit compaction request
-can therefore reach `runtime_response_timeout` while its accepted work continues.
+Explicit `compact_all()` work shares one caller deadline across queueing,
+filename reservation, compute, output uploads, and all publication phases and
+column families. Expiry returns `MidgeError::Timeout` and refuses new publication
+work for that caller. Compute observes expiry at its safe stop points.
+Accepted workers retain their inputs, payloads, reservations, and
+lease until safe settlement; an uncertain remote publication keeps both data
+generations and its reconciliation intent. A timeout does not cancel a local
+syscall or prove that a submitted remote mutation did not commit. Recovery and
+shutdown reconciliation remain separately owned obligations. A caller joining
+accepted background compaction has its own bounded wait and leaves that job's
+original ownership and operation caps intact.
 
 If a remote DDL compare-exchange times out or disconnects after submission,
 Midge retains its durable prepare and returns `MidgeError::Fenced` unless the
@@ -216,7 +234,13 @@ the old prefix, export it with a compatible binary, and import into a new prefix
 
 `on_lease_loss` registers a process-local notification for the transition to a
 fenced writer. Begin orderly shutdown from the callback without blocking it;
-the engine remains readable but rejects new writes. Shutdown timeouts bound the
+cloud transactions become invalid: new transactions, point reads and scans
+return `MidgeError::Fenced`, including the next advance of an iterator opened
+before lease loss. Reads also check monotonic lease expiry before notification
+and after blocking I/O. A successor may reclaim the predecessor's remote SSTs;
+process-local snapshot pins do not retain them across takeover. Diagnostics and
+shutdown remain available. Local and in-memory snapshot reads keep their existing
+behavior. Shutdown timeouts bound the
 caller's wait without releasing fencing ahead of still-running durability work.
 
 ## Errors and diagnostics

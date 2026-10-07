@@ -205,8 +205,31 @@ pub trait CloudBackend: Send + Sync + 'static {
     /// Submit an object GET.
     fn submit_get(&self, key: &str, callback: CloudCallback);
 
+    /// Submit a GET with a per-request provider budget. Network backends must
+    /// override this compatibility fallback; synchronous backends can finish
+    /// through their existing GET implementation.
+    fn submit_get_with_timeout(
+        &self,
+        key: &str,
+        _timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get(key, callback);
+    }
+
     /// Submit an object GET that also returns the observed object identity.
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback);
+
+    /// Submit a metadata-bearing GET under the caller's provider budget; see
+    /// [`Self::submit_get_with_timeout`] for the compatibility fallback.
+    fn submit_get_with_metadata_with_timeout(
+        &self,
+        key: &str,
+        _timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_with_metadata(key, callback);
+    }
 
     /// Submit a ranged GET for provider tests. `end` is an exclusive byte offset.
     #[cfg(test)]

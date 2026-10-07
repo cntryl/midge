@@ -376,6 +376,7 @@ fn clear_local_prepare(state: &RuntimeState, storage: Option<&HybridStorage>) ->
         .map_err(FsError::into_midge)
 }
 
+#[cfg(test)]
 fn read_remote_registry(
     storage: &HybridStorage,
 ) -> Result<(Option<DdlRegistry>, Option<RemoteObjectProof>), String> {
@@ -406,20 +407,6 @@ fn reread_remote_registry_after_ambiguous_cas_within(
         ))
     );
     read_remote_registry_within(storage, deadline)
-}
-
-fn write_remote_registry(
-    storage: &HybridStorage,
-    registry: &DdlRegistry,
-    expected: Option<&RemoteObjectProof>,
-) -> MidgeResult<RemoteObjectProof> {
-    write_remote_registry_within(
-        storage,
-        registry,
-        expected,
-        &crate::common::OperationDeadline::unbounded(),
-    )
-    .map_err(|failure| failure.error)
 }
 
 fn write_remote_registry_within(
@@ -595,6 +582,14 @@ fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEd
 /// candidate manifest is built first so a failed journal append cannot mutate
 /// in-memory visibility.
 pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) -> MidgeResult<()> {
+    apply_local_edit_for(state, edit, crate::metadata::accounting::Origin::Ddl)
+}
+
+fn apply_local_edit_for(
+    state: &mut RuntimeState,
+    edit: &ManifestEdit,
+    origin: crate::metadata::accounting::Origin,
+) -> MidgeResult<()> {
     if local_edit_matches(state, edit) {
         return Ok(());
     }
@@ -606,7 +601,7 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
     let journaled_id = if state.is_memory_mode() {
         None
     } else {
-        Some(state.manifest_store.append(edit)?)
+        Some(state.manifest_store.append_for(origin, edit)?)
     };
     crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
         MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
@@ -629,24 +624,8 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
     Ok(())
 }
 
-/// Reconcile one local prepare with the remote registry. A remote operation is
-/// committed locally; a definitely pre-submit operation absent remotely is
-/// aborted. Ambiguous live requests remain fenced, while startup can safely
-/// re-drive the same durable operation once.
-fn reconcile_prepared_on_startup(
-    state: &mut RuntimeState,
-    storage: Option<&Arc<HybridStorage>>,
-    authority: Option<&DdlLeaseAuthority>,
-) -> MidgeResult<()> {
-    reconcile_prepared_with_resolution(
-        state,
-        storage,
-        authority,
-        &crate::common::OperationDeadline::unbounded(),
-        AmbiguousPrepareResolution::RedriveOnceOnStartup,
-    )
-}
-
+/// Reconcile one local prepare within its caller deadline. Ambiguous live
+/// requests remain fenced until the remote outcome can be verified.
 pub(crate) fn reconcile_prepared_within(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
@@ -669,6 +648,12 @@ fn reconcile_prepared_with_resolution(
     deadline: &crate::common::OperationDeadline,
     resolution: AmbiguousPrepareResolution,
 ) -> MidgeResult<()> {
+    let origin = match resolution {
+        AmbiguousPrepareResolution::ObserveOnly => crate::metadata::accounting::Origin::Ddl,
+        AmbiguousPrepareResolution::RedriveOnceOnStartup => {
+            crate::metadata::accounting::Origin::Recovery
+        }
+    };
     let Some(prepare) = read_local_prepare(state)? else {
         return Ok(());
     };
@@ -692,7 +677,7 @@ fn reconcile_prepared_with_resolution(
         .as_ref()
         .is_some_and(|registry| registry.operation(&prepare.op_id).is_some())
     {
-        apply_local_edit(state, &prepare.edit)?;
+        apply_local_edit_for(state, &prepare.edit, origin)?;
         clear_local_prepare(state, Some(storage))?;
         return Ok(());
     }
@@ -778,7 +763,11 @@ fn redrive_ambiguous_prepare_within(
                             && authority.validate(deadline).is_ok()
                     }) =>
             {
-                apply_local_edit(state, &prepare.edit)?;
+                apply_local_edit_for(
+                    state,
+                    &prepare.edit,
+                    crate::metadata::accounting::Origin::Recovery,
+                )?;
                 clear_local_prepare(state, Some(storage))
             }
             Ok(_) => {
@@ -796,31 +785,59 @@ fn redrive_ambiguous_prepare_within(
         };
     }
 
-    apply_local_edit(state, &prepare.edit)?;
+    apply_local_edit_for(
+        state,
+        &prepare.edit,
+        crate::metadata::accounting::Origin::Recovery,
+    )?;
     clear_local_prepare(state, Some(storage))
 }
 
 /// Reconcile the remote CF registry into a freshly recovered local state.
 /// This also bootstraps an absent registry from the local manifest on the
 /// first cloud open.
+#[cfg(test)]
 pub(crate) fn reconcile_startup(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
     authority: Option<&DdlLeaseAuthority>,
 ) -> MidgeResult<()> {
+    reconcile_startup_within(
+        state,
+        storage,
+        authority,
+        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+    )
+}
+
+pub(crate) fn reconcile_startup_within(
+    state: &mut RuntimeState,
+    storage: Option<&Arc<HybridStorage>>,
+    authority: Option<&DdlLeaseAuthority>,
+    scope: &crate::common::DeadlineScope,
+) -> MidgeResult<()> {
+    scope.check("DDL startup reconciliation")?;
+    let deadline = scope.deadline();
     let Some(storage) = storage else {
         return Ok(());
     };
-    reconcile_prepared_on_startup(state, Some(storage), authority)?;
-    let (remote, proof) = read_remote_registry(storage).map_err(MidgeError::Internal)?;
+    reconcile_prepared_with_resolution(
+        state,
+        Some(storage),
+        authority,
+        &deadline,
+        AmbiguousPrepareResolution::RedriveOnceOnStartup,
+    )?;
+    scope.check("DDL prepare reconciliation")?;
+    let (remote, proof) = read_remote_registry_within(storage, &deadline)?;
     if let Some(authority) = authority {
-        authority.validate(&crate::common::OperationDeadline::unbounded())?;
+        authority.validate(&deadline)?;
         require_current_registry(remote.as_ref(), authority)?;
     }
     let Some(remote) = remote else {
         let registry = DdlRegistry::from_manifest(&state.manifest);
-        let _ = write_remote_registry(storage, &registry, proof.as_ref())
-            .map_err(|error| MidgeError::Internal(error.to_string()))?;
+        let _ = write_remote_registry_within(storage, &registry, proof.as_ref(), &deadline)
+            .map_err(|failure| failure.error)?;
         return Ok(());
     };
 
@@ -834,16 +851,23 @@ pub(crate) fn reconcile_startup(
     {
         let mut baseline = DdlRegistry::from_manifest(&state.manifest);
         baseline.writer_epoch = remote.writer_epoch;
-        let _ = write_remote_registry(storage, &baseline, proof.as_ref())?;
+        let _ = write_remote_registry_within(storage, &baseline, proof.as_ref(), &deadline)
+            .map_err(|failure| failure.error)?;
         return Ok(());
     }
 
     for operation in &remote.operations {
+        scope.check("DDL startup operation")?;
         if !local_edit_matches(state, &operation.edit) {
-            apply_local_edit(state, &operation.edit)?;
+            apply_local_edit_for(
+                state,
+                &operation.edit,
+                crate::metadata::accounting::Origin::Recovery,
+            )?;
         }
     }
     for remote_cf in &remote.column_families {
+        scope.check("DDL startup column family")?;
         let local_cf = state
             .manifest
             .column_families
@@ -868,7 +892,7 @@ pub(crate) fn reconcile_startup(
             "local column-family state is ahead of the remote DDL registry".to_string(),
         ));
     }
-    Ok(())
+    scope.check("DDL startup reconciliation completion")
 }
 
 pub(crate) fn execute_within(

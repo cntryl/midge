@@ -113,10 +113,12 @@ pub(crate) fn execute_compaction_at_target(
     let target_sst_size = resources.target_sst_size;
     let fan_in = resources.source_fan_in;
     let mut scratch = if same_level_repair && plan.source_files.len() > fan_in {
+        executor::ensure_compaction_not_aborted(abort_check)?;
         let admitted_scratch = match output_size_limit {
             Some(limit) => limit / 2,
             None => repair::RepairScratch::local_capacity(sst_factory)?,
         };
+        executor::ensure_compaction_not_aborted(abort_check)?;
         Some(repair::RepairScratch::new(
             sst_factory,
             output_dir,
@@ -1470,26 +1472,29 @@ mod tests {
 
     #[test]
     fn should_clean_temporary_output_given_compaction_write_failure() -> MidgeResult<()> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, Ordering};
 
-        // Arrange: make cancellation happen after input collection and the
-        // first streaming check, immediately after output finalization.
+        // Arrange: observe a real successful output finalization before cancellation.
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(
             crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,
         );
-        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let input_name = "input.sst";
         let input_path = temp_dir.path().join(input_name);
-        let mut writer = factory.create()?;
+        let mut writer = base_factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &input_path)?;
         let input_bytes = std::fs::read(&input_path)?;
+        let finalized = std::sync::Arc::new(AtomicBool::new(false));
+        let factory = RejectFinishBytesFactory {
+            inner: base_factory,
+            finalized: Some(finalized.clone()),
+        };
 
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(45);
         plan.add_test_source(input_name.to_string());
-        let checks = AtomicUsize::new(0);
-        let cancelled_after_finalize = || checks.fetch_add(1, Ordering::SeqCst) >= 3;
+        let cancelled_after_finalize = || finalized.load(Ordering::Acquire);
 
         // Act
         let error = execute_compaction(
@@ -1501,6 +1506,10 @@ mod tests {
         .expect_err("late cancellation must not publish staged output");
 
         // Assert
+        assert!(
+            finalized.load(Ordering::Acquire),
+            "actual output must finish first"
+        );
         assert!(matches!(error, MidgeError::Aborted(_)));
         assert_eq!(std::fs::read(&input_path)?, input_bytes);
         assert!(
@@ -1515,6 +1524,7 @@ mod tests {
 
     struct RejectFinishBytesWriter {
         inner: Box<dyn crate::sst::traits::DynSstWriter>,
+        finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
@@ -1574,7 +1584,11 @@ mod tests {
         }
 
         fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-            self.inner.finish_to_path(path)
+            self.inner.finish_to_path(path)?;
+            if let Some(finalized) = self.finalized {
+                finalized.store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok(())
         }
 
         fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -1586,6 +1600,7 @@ mod tests {
 
     struct RejectFinishBytesFactory {
         inner: crate::sst::FsSstFactoryIo,
+        finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
@@ -1603,6 +1618,7 @@ mod tests {
         ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Ok(Box::new(RejectFinishBytesWriter {
                 inner: self.inner.create_for_compaction(budget)?,
+                finalized: self.finalized.clone(),
             }))
         }
 
@@ -1618,6 +1634,7 @@ mod tests {
         fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Ok(Box::new(RejectFinishBytesWriter {
                 inner: self.inner.create()?,
+                finalized: self.finalized.clone(),
             }))
         }
 
@@ -1639,6 +1656,7 @@ mod tests {
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("input.sst"))?;
         let factory = RejectFinishBytesFactory {
             inner: base_factory,
+            finalized: None,
         };
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(46);
         plan.add_test_source("input.sst".to_string());

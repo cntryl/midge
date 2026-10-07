@@ -216,7 +216,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cntryl-midge"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -266,9 +266,9 @@ dependencies = [
 
 [[package]]
 name = "cntryl-stress"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd85b890190d4fe86c29eda20490fb3afefb4203a71b59b2ec9a1a1c874a4cc5"
+checksum = "9df1e2184fc54f70ccafcef496cd952dc1eb131bf4779d4df12d0e0403b64ce8"
 dependencies = [
  "cntryl-stress-macros",
  "fs2",
@@ -280,9 +280,9 @@ dependencies = [
 
 [[package]]
 name = "cntryl-stress-macros"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c27973a765d87b2059f8d07d924e046687de485a1f624a2e074f1062a063e723"
+checksum = "f3fcb20e95968704562ff4d8b0e279848cd255951fd241ae72009a029f23953d"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

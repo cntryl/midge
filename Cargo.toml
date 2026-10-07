@@ -1,6 +1,6 @@
 [package]
 name = "cntryl-midge"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 resolver = "2"
 rust-version = "1.97"
@@ -99,7 +99,8 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
 proptest = "1.11"
-cntryl-stress = "0.5"
+cntryl-stress = "0.5.1"
+sha2 = "0.11"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
 # without those modules being public API for downstream consumers.
@@ -119,6 +120,8 @@ telemetry = [
     "dep:opentelemetry_sdk",
 ]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
+stress-soak = ["cloud-all"]
+checkpoint-bench = ["internal-testing"]
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [
@@ -175,6 +178,19 @@ name = "fault_injection"
 path = "tests/fault_injection.rs"
 test = false
 required-features = ["failpoints"]
+
+# A real stress harness runs in a child so its process::exit cannot terminate
+# Cargo's test process. Its only watchdog is cntryl-stress's configured one.
+[[test]]
+name = "stress_workload_watchdog"
+path = "tests/stress_workload_watchdog.rs"
+harness = false
+required-features = ["stress-soak"]
+
+# Exploratory measurement example; not a public engine configuration surface.
+[[example]]
+name = "benchmark_investigation"
+required-features = ["internal-testing"]
 
 # =============================================================================
 # Benchmarks — Active Targets
@@ -317,6 +333,12 @@ harness = false
 
 # Tier 4
 [[bench]]
+name = "tier4_system_checkpoint_write_amplification"
+path = "benches/tier4_system_checkpoint_write_amplification.rs"
+harness = false
+required-features = ["checkpoint-bench"]
+
+[[bench]]
 name = "tier4_system_local_throughput_regression"
 path = "benches/tier4_system_local_throughput_regression.rs"
 harness = false
@@ -381,3 +403,22 @@ name = "tier4_bounded_compaction_qualification"
 path = "benches/tier4_bounded_compaction_qualification.rs"
 harness = false
 required-features = ["failpoints"]
+
+# Tiers 5 and 6 are opt-in, long-running stress campaigns. The required
+# feature keeps ordinary `cargo bench` from starting a soak accidentally.
+[[bench]]
+name = "tier5_stress_workloads"
+path = "benches/tier5_stress_workloads.rs"
+harness = false
+required-features = ["stress-soak"]
+
+[[bench]]
+name = "tier6_mixed_workload_soak"
+path = "benches/tier6_mixed_workload_soak.rs"
+harness = false
+required-features = ["stress-soak"]
+
+[[example]]
+name = "checkpoint_campaign_readback"
+path = "examples/checkpoint_campaign_readback.rs"
+required-features = ["internal-testing"]

@@ -7,6 +7,13 @@ use std::sync::Arc;
 #[path = "tests/concurrent_renewal.rs"]
 mod concurrent_renewal;
 
+#[path = "tests/renewal_read_budget.rs"]
+mod renewal_read_budget;
+
+#[cfg(feature = "cloud-all")]
+#[path = "tests/startup_deadline.rs"]
+mod startup_deadline;
+
 static TEMP_PATH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn test_config() -> CloudLeaseConfig {

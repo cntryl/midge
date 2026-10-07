@@ -29,6 +29,10 @@ use std::sync::{Arc, Mutex};
 use url::{Host, Url};
 use urlencoding::encode;
 
+#[cfg(test)]
+#[path = "s3_lease_conflict_tests.rs"]
+mod lease_conflict_tests;
+
 // SigV4's UriEncode contract preserves only RFC 3986 unreserved bytes. Object
 // key separators are handled before this set is applied so `/` remains the one
 // intentional exception.
@@ -1062,6 +1066,59 @@ impl ListPageParser for S3ListContext {
     }
 }
 
+impl S3Backend {
+    fn submit_get_request(
+        &self,
+        key: &str,
+        timeout: Option<std::time::Duration>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let url = self.object_url(&key);
+        let mut request = CloudRequest::new(Method::GET, url);
+        request.timeout = timeout;
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| s3_response_error(resp, "S3 GET", false),
+            ),
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    fn submit_get_with_metadata_request(
+        &self,
+        key: &str,
+        timeout: Option<std::time::Duration>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
+        request.timeout = timeout;
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
+                key: ctx,
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        object_metadata_from_response(
+                            &resp,
+                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                            "S3",
+                        )
+                        .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| s3_response_error(resp, "S3 GET", false),
+                ),
+            };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
 impl CloudBackend for S3Backend {
     fn set_request_timeout(&self, timeout: std::time::Duration) {
         self.executor.set_default_timeout(timeout);
@@ -1125,42 +1182,29 @@ impl CloudBackend for S3Backend {
     }
 
     fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let url = self.object_url(&key);
-        let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
-            key: ctx,
-            result: map_response(
-                result,
-                |status| status == 200,
-                |resp| Ok(resp.body),
-                |resp| s3_response_error(resp, "S3 GET", false),
-            ),
-        };
-        self.executor.spawn_request(request, key, callback, mapper);
+        self.submit_get_request(key, None, callback);
+    }
+
+    fn submit_get_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_request(key, Some(timeout), callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let request = CloudRequest::new(Method::GET, self.object_url(&key));
-        let mapper =
-            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: map_response(
-                    result,
-                    |status| status == 200,
-                    |resp| {
-                        object_metadata_from_response(
-                            &resp,
-                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
-                            "S3",
-                        )
-                        .map(|metadata| (resp.body, metadata))
-                    },
-                    |resp| s3_response_error(resp, "S3 GET", false),
-                ),
-            };
-        self.executor.spawn_request(request, key, callback, mapper);
+        self.submit_get_with_metadata_request(key, None, callback);
+    }
+
+    fn submit_get_with_metadata_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_with_metadata_request(key, Some(timeout), callback);
     }
 
     fn submit_get_range_with_identity(
@@ -1305,10 +1349,11 @@ impl CloudBackend for S3Backend {
         let prefix = prefix.to_string();
         let base_url = self.base_url();
         let state = PagedList::new(prefix.clone(), S3ListContext { base_url });
-        self.executor.spawn_request_loop(
+        self.executor.spawn_request_loop_with_timeout(
             state,
             prefix,
             callback,
+            request_timeout,
             move |state| {
                 let mut request = CloudRequest::new(Method::GET, state.url());
                 if let Some(timeout) = request_timeout {
@@ -1361,9 +1406,18 @@ impl CloudBackend for S3Backend {
 fn s3_put_response_error(response: &CloudResponse, conditional_mutation: bool) -> CloudError {
     let error = s3_response_error(response, "S3 PUT", conditional_mutation);
     let body = String::from_utf8_lossy(&response.body);
-    let missing_object = extract_xml_tag_values(&body, "Code")
-        .first()
-        .is_some_and(|code| code.eq_ignore_ascii_case("NoSuchKey"));
+    let codes = extract_xml_tag_values(&body, "Code");
+    let code = codes.first();
+    if conditional_mutation
+        && response.status == 409
+        && code.is_some_and(|code| {
+            code.eq_ignore_ascii_case("ConditionalRequestConflict")
+                || code.eq_ignore_ascii_case("OperationAborted")
+        })
+    {
+        return CloudError::ConditionalConflict(format!("status 409: S3 PUT: {error}"));
+    }
+    let missing_object = code.is_some_and(|code| code.eq_ignore_ascii_case("NoSuchKey"));
     match error {
         CloudError::NotFound(detail) if conditional_mutation && missing_object => {
             CloudError::PreconditionFailed(detail)
@@ -2079,6 +2133,42 @@ mod tests {
         // Assert
         assert!(matches!(predicate_error, CloudError::PreconditionFailed(_)));
         assert!(matches!(unrelated_error, CloudError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn should_classify_only_structured_conditional_put_rejection_as_retryable_conflict() {
+        // Arrange
+        for (status, code, conditional, expected_conflict) in [
+            (409, "ConditionalRequestConflict", true, true),
+            (409, "OperationAborted", true, true),
+            (409, "OperationAborted", false, false),
+            (409, "ConditionalRequestConflict", false, false),
+            (409, "BucketAlreadyExists", true, false),
+            (409, "", true, false),
+            (412, "ConditionalRequestConflict", true, false),
+            (500, "ConditionalRequestConflict", true, false),
+        ] {
+            let response = CloudResponse {
+                status,
+                headers: Vec::new(),
+                body: format!("<Error><Code>{code}</Code></Error>").into_bytes(),
+            };
+
+            // Act
+            let error = s3_put_response_error(&response, conditional);
+
+            // Assert
+            assert_eq!(
+                matches!(error, CloudError::ConditionalConflict(_)),
+                expected_conflict,
+                "status={status}, code={code}, conditional={conditional}: {error}"
+            );
+            assert!(!error.is_precondition_failed());
+            assert!(!matches!(
+                s3_response_error(&response, "S3 DELETE", true),
+                CloudError::ConditionalConflict(_)
+            ));
+        }
     }
 
     #[test]

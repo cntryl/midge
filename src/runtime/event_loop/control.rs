@@ -1,6 +1,9 @@
-use super::{EventLoop, HandleOutcome};
+use super::EventLoop;
+#[cfg(test)]
+use super::HandleOutcome;
 use crate::runtime::RuntimeResponse;
 
+#[cfg(test)]
 pub(super) struct RuntimeConfigUpdate {
     pub request_id: u64,
     pub memtable_size_limit: Option<usize>,
@@ -27,6 +30,10 @@ impl EventLoop {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) {
+        if let Err(error) = self.check_lease_health() {
+            self.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return;
+        }
         let is_stalled = self.should_stall_writes(cf_id);
         self.respond(
             request_id,
@@ -42,6 +49,10 @@ impl EventLoop {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) {
+        if let Err(error) = self.check_lease_health() {
+            self.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return;
+        }
         if self.should_stall_writes(cf_id) {
             self.write_stall_waiters.register(request_id, cf_id);
         } else {
@@ -144,6 +155,7 @@ impl EventLoop {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn handle_set_runtime_config(
         &mut self,
         update: &RuntimeConfigUpdate,

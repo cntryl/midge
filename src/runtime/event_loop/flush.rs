@@ -27,6 +27,10 @@ impl FlushCoordinator {
             );
             return HandleOutcome::Continue;
         }
+        if let Err(error) = event_loop.check_lease_health() {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
         if event_loop.state.is_memory_mode() {
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
             return HandleOutcome::Continue;
@@ -77,5 +81,29 @@ impl FlushCoordinator {
     ) -> HandleOutcome {
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
+    }
+}
+
+impl EventLoop {
+    pub(super) fn wake_flush_waiters_for_terminal_fencing(&mut self) {
+        if self.flush_barrier_waiters.is_empty() {
+            return;
+        }
+        let Err(error) = self.check_lease_health() else {
+            return;
+        };
+        // Only answer callers. Accepted immutable data, worker reservations
+        // and the publication owner stay retained until their normal outcome.
+        for waiters in std::mem::take(&mut self.flush_barrier_waiters).into_values() {
+            for waiter in waiters {
+                self.respond(
+                    waiter.request_id,
+                    RuntimeResponse::Error {
+                        request_id: waiter.request_id,
+                        error: error.replay(),
+                    },
+                );
+            }
+        }
     }
 }

@@ -24,6 +24,9 @@ use super::config::{MidgeOptions, StorageMode};
 pub const KEY_SIZE: usize = 16;
 pub const DEFAULT_VALUE_SIZE: usize = 128;
 
+#[path = "ycsb/inventory.rs"]
+pub mod inventory;
+
 pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub const TIER4_MEMORY_MEMTABLE_SIZE_BYTES: usize = 512 * 1024 * 1024;
 
@@ -697,130 +700,170 @@ fn retry_transient_runtime_request<T>(
 /// Panics if transaction creation, writes, commits, or the final flush fail
 /// during deterministic dataset loading.
 pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_keys: usize) {
-    // Load is not measured; optimize aggressively to keep Tier-4 runs practical.
-    // Use WriteOptions::best_effort() for fastest loading of initial dataset:
-    //
-    // SAFETY: No durability is needed during load because:
-    // - Load phase is not measured (setup phase only)
-    // - On engine crash, re-running load_initial_dataset reloads the data
-    // - Measured workload uses buffered() for proper durability
-    // - flush_cf() at end ensures data reaches storage before warm-up begins
-    //
-    // This skip of WAL commits speeds up 100k key loads by 3-5x compared to buffered().
-    //
-    // Use larger batches to amortize commit overhead during load.
+    let workers = initial_keys.max(1).min(num_cpus::get().max(1));
+    load_initial_dataset_with_workers(engine, cf, initial_keys, workers, configured_value_size())
+        .expect("load initial dataset");
+}
 
-    // Optional trace: set MIDGE_TRACE_YCSB=1 to print progress during load.
+/// Load the same setup dataset with an explicit worker count and value size.
+///
+/// The benchmark wrapper supplies its configured values. Tests can exercise
+/// the actual parallel loader without changing process-wide environment state.
+/// Loading remains outside the measured window, uses best-effort commits and
+/// finishes with the same real flush before warm-up.
+///
+/// # Errors
+/// Returns a transaction or flush error after joining every started worker.
+///
+/// # Panics
+/// Propagates an unexpected worker panic after scoped worker cleanup.
+pub fn load_initial_dataset_with_workers(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    initial_keys: usize,
+    workers: usize,
+    value_size: usize,
+) -> MidgeResult<()> {
+    let workers = initial_keys.max(1).min(workers.max(1));
+    let per_worker = initial_keys.div_ceil(workers);
+    let local_bytes = retry_transient_runtime_request(|| engine.metrics().get_runtime_metrics())?
+        .hybrid_max_local_bytes;
+    let batch_ops = preload_batch_ops(local_bytes, value_size);
     let trace = std::env::var_os("MIDGE_TRACE_YCSB").is_some();
-
-    // Hard-coded sensible defaults (no env lookups):
-    // - Batch size: increased from 20k to 50k to amortize commit overhead.
-    // - Threads: use available CPU cores, but never exceed the number of keys.
-    let batch_ops: usize = DEFAULT_BATCH_OPS;
-
-    let threads: usize = std::cmp::min(initial_keys.max(1), num_cpus::get().max(1));
-
-    let cf_id = cf.id();
     if trace {
         eprintln!(
-            "[midge][ycsb] starting load: initial_keys={initial_keys} batch_ops={batch_ops} threads={threads}"
+            "[midge][ycsb] starting load: initial_keys={initial_keys} batch_ops={batch_ops} threads={workers}"
         );
     }
-
-    if threads <= 1 {
-        // Single-threaded (original behavior) but with configurable batch size.
-        let mut tx = engine
-            .begin_tx(cf_id, TransactionMode::ReadWrite)
-            .expect("begin_tx failed");
-        let mut count = 0;
-
-        for i in 0..usize_to_u64(initial_keys) {
-            let k = make_key(i);
-            let v = make_value(fill_byte(i));
-
-            tx.put(k.to_vec(), v, None).expect("put failed");
-            count += 1;
-
-            if count >= batch_ops {
-                tx.commit(WriteOptions::best_effort())
-                    .expect("commit failed");
-                if trace {
-                    eprintln!("[midge][ycsb] loaded {} keys", i + 1);
-                }
-                tx = engine
-                    .begin_tx(cf_id, TransactionMode::ReadWrite)
-                    .expect("begin_tx failed");
-                count = 0;
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let start = worker * per_worker;
+            let end = ((worker + 1) * per_worker).min(initial_keys);
+            if start < end {
+                handles.push(scope.spawn(move || {
+                    load_initial_range(engine, cf.id(), start..end, value_size, worker, batch_ops)
+                }));
             }
         }
-
-        if count > 0 {
-            tx.commit(WriteOptions::best_effort())
-                .expect("commit failed");
-            if trace {
-                eprintln!("[midge][ycsb] loaded {initial_keys} keys (final)");
+        let mut result = Ok(());
+        for handle in handles {
+            let worker_result = handle.join().expect("dataset load worker panicked");
+            if result.is_ok() {
+                result = worker_result;
             }
         }
-    } else {
-        // Parallel load: split keyspace into contiguous ranges per worker and
-        // let each thread drive its own transactions. Use a scoped thread
-        // pool so we can borrow &Engine safely.
-        let per_worker = initial_keys.div_ceil(threads); // ceil div
-
-        thread::scope(|s| {
-            for worker in 0..threads {
-                let start = worker * per_worker;
-                let end = ((worker + 1) * per_worker).min(initial_keys);
-
-                if start >= end {
-                    continue;
-                }
-
-                s.spawn(move || {
-                    let mut tx = engine
-                        .begin_tx(cf_id, TransactionMode::ReadWrite)
-                        .expect("begin_tx failed");
-                    let mut count = 0usize;
-                    for i in start..end {
-                        let i = usize_to_u64(i);
-                        let k = make_key(i);
-                        let v = make_value(fill_byte(i));
-                        tx.put(k.to_vec(), v, None).expect("put failed");
-                        count += 1;
-                        if count >= batch_ops {
-                            tx.commit(WriteOptions::best_effort())
-                                .expect("commit failed");
-                            if trace {
-                                eprintln!(
-                                    "[midge][ycsb] worker={} loaded {}..{}",
-                                    worker,
-                                    start,
-                                    i + 1
-                                );
-                            }
-                            tx = engine
-                                .begin_tx(cf_id, TransactionMode::ReadWrite)
-                                .expect("begin_tx failed");
-                            count = 0;
-                        }
-                    }
-                    if count > 0 {
-                        tx.commit(WriteOptions::best_effort())
-                            .expect("commit failed");
-                        if trace {
-                            eprintln!(
-                                "[midge][ycsb] worker={worker} loaded {start}..{end} (final)"
-                            );
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    flush_after_phase(engine, cf).expect("load phase flush");
+        result
+    })?;
+    retry_preload_write_stall(
+        || engine.flush_cf(cf),
+        |timeout| engine.wait_for_write_stall_clear(cf.id(), timeout),
+        Duration::from_secs(30),
+    )?;
     if trace {
         eprintln!("[midge][ycsb] load complete");
+    }
+    Ok(())
+}
+
+fn preload_batch_ops(local_bytes: u64, value_size: usize) -> usize {
+    use cntryl_midge::__internal::memtable::bench::point_flush_staging_bytes;
+
+    if local_bytes == 0 {
+        return DEFAULT_BATCH_OPS;
+    }
+    // Cloud admission reserves the other half for compaction staging.
+    let window = local_bytes / 2;
+    // Let the actual engine report an indivisible point's resource error.
+    if point_flush_staging_bytes(1, KEY_SIZE, value_size) > window {
+        return 1;
+    }
+    let mut low = 1;
+    let mut high = DEFAULT_BATCH_OPS;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if point_flush_staging_bytes(middle, KEY_SIZE, value_size) <= window {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
+}
+
+fn load_initial_range(
+    engine: &Engine,
+    cf_id: u32,
+    keys: std::ops::Range<usize>,
+    value_size: usize,
+    worker: usize,
+    batch_ops: usize,
+) -> MidgeResult<()> {
+    let trace = std::env::var_os("MIDGE_TRACE_YCSB").is_some();
+    let mut start = keys.start;
+    while start < keys.end {
+        let end = start.saturating_add(batch_ops).min(keys.end);
+        retry_preload_write_stall(
+            || {
+                let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
+                for index in start..end {
+                    let id = usize_to_u64(index);
+                    tx.put(make_key(id).to_vec(), vec![fill_byte(id); value_size], None)?;
+                }
+                tx.commit(WriteOptions::best_effort())
+            },
+            |timeout| engine.wait_for_write_stall_clear(cf_id, timeout),
+            Duration::from_secs(30),
+        )?;
+        if trace {
+            eprintln!("[midge][ycsb] worker={worker} loaded {start}..{end}");
+        }
+        start = end;
+    }
+    Ok(())
+}
+
+/// Retry only rejected setup batches, with one original write-stall retry budget.
+///
+/// # Errors
+/// Returns non-`WriteStall` errors unchanged, or `Timeout` when retries exhaust
+/// the original budget. A cleared stall still requires a successful commit.
+pub fn retry_preload_write_stall<O, W>(
+    mut operation: O,
+    mut wait_for_clear: W,
+    timeout: Duration,
+) -> MidgeResult<()>
+where
+    O: FnMut() -> MidgeResult<()>,
+    W: FnMut(Duration) -> MidgeResult<bool>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(MidgeError::WriteStall(_)) => {}
+            Err(error) => return Err(error),
+        }
+        loop {
+            let remaining = preload_retry_remaining(deadline)?;
+            match wait_for_clear(remaining.min(Duration::from_millis(50))) {
+                Ok(true) => break,
+                Ok(false) | Err(MidgeError::WriteStall(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        preload_retry_remaining(deadline)?;
+    }
+}
+
+fn preload_retry_remaining(deadline: Instant) -> MidgeResult<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(MidgeError::Timeout(
+            "YCSB preload write-stall retry budget exhausted".into(),
+        ))
+    } else {
+        Ok(remaining)
     }
 }
 
@@ -926,8 +969,9 @@ where
     }
 }
 
-/// Retry write stalls and report whether the logical operation completed
-/// before the workload stop signal was observed.
+/// Retry write stalls and report whether the logical operation completed.
+/// Cancellation before success returns `false`; an actual success remains
+/// completed when the stop signal arrives before the callback returns.
 ///
 /// # Errors
 /// Returns any non-`WriteStall` engine error from `op`, or any error returned
@@ -1002,6 +1046,35 @@ where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
     Step: FnMut(&Engine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
+    run_multi_client_for_duration_observed_with_stats(
+        engine,
+        clients,
+        duration,
+        |client_id, stop| {
+            let mut step = make_client(client_id, stop);
+            move |engine, cf, op_index| {
+                step(engine, cf, op_index);
+                true
+            }
+        },
+    )
+}
+
+/// Run concurrent clients and meter callbacks that report actual completion.
+/// A `false` result cancels that client without recording a completion or latency.
+///
+/// # Panics
+/// Panics under the same conditions as [`run_multi_client_for_duration`].
+pub fn run_multi_client_for_duration_observed_with_stats<MakeClient, Step>(
+    engine: &Arc<Engine>,
+    clients: usize,
+    duration: Duration,
+    make_client: MakeClient,
+) -> MultiClientRunStats
+where
+    MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) -> bool + Send + 'static,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));
     let mut handles = Vec::with_capacity(clients);
@@ -1020,7 +1093,7 @@ where
         let engine = Arc::clone(engine);
         let stop = Arc::clone(&stop);
         let barrier = Arc::clone(&barrier);
-        let mut client_step = make_client(client_id, Arc::clone(&stop));
+        let client_step = make_client(client_id, Arc::clone(&stop));
         let last_op_ts = Arc::clone(&last_op_ts);
 
         // Get the CF (it was created in load phase)
@@ -1041,36 +1114,14 @@ where
                 std::thread::sleep(Duration::from_micros(usize_to_u64(client_id) * 50));
             }
 
-            let mut stats = ClientRunStats::empty();
-            let mut op_index: u64 = 0;
-            // Optional slow-op threshold (enable with MIDGE_YCSB_SLOW_OP_MS)
-            let slow_op_ms = std::env::var("MIDGE_YCSB_SLOW_OP_MS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok());
-
-            while !stop.load(Ordering::Acquire) {
-                let start = Instant::now();
-                client_step(engine.as_ref(), &cf, op_index);
-                let elapsed = start.elapsed();
-
-                // Update heartbeat timestamp after each logical operation.
-                let now_ms = millis_since_epoch();
-                last_op_ts.store(now_ms, Ordering::Release);
-
-                if let Some(threshold) = slow_op_ms {
-                    let el_ms = u128_to_u64(elapsed.as_millis());
-                    if el_ms >= threshold {
-                        eprintln!(
-                            "[midge][ycsb][slow_op] client={client_id} op_index={op_index} elapsed_ms={el_ms} threshold_ms={threshold}"
-                        );
-                    }
-                }
-
-                stats.record_latency(elapsed);
-                stats.operations = stats.operations.wrapping_add(1);
-                op_index = op_index.wrapping_add(1);
-            }
-            stats
+            run_observed_client_loop(
+                engine.as_ref(),
+                &cf,
+                stop.as_ref(),
+                last_op_ts.as_ref(),
+                client_id,
+                client_step,
+            )
         }));
     }
 
@@ -1125,6 +1176,52 @@ where
         latency_max_us: latency_us.max(),
         latency_quantiles_us: latency_quantiles_us(&latency_us),
     }
+}
+
+fn run_observed_client_loop<Step>(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    stop: &AtomicBool,
+    last_op_ts: &AtomicU64,
+    client_id: usize,
+    mut client_step: Step,
+) -> ClientRunStats
+where
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) -> bool,
+{
+    let mut stats = ClientRunStats::empty();
+    let mut op_index: u64 = 0;
+    // Optional slow-op threshold (enable with MIDGE_YCSB_SLOW_OP_MS)
+    let slow_op_ms = std::env::var("MIDGE_YCSB_SLOW_OP_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+
+    while !stop.load(Ordering::Acquire) {
+        let start = Instant::now();
+        let completed = client_step(engine, cf, op_index);
+        if !completed {
+            break;
+        }
+        let elapsed = start.elapsed();
+
+        // Update heartbeat timestamp after each logical operation.
+        let now_ms = millis_since_epoch();
+        last_op_ts.store(now_ms, Ordering::Release);
+
+        if let Some(threshold) = slow_op_ms {
+            let el_ms = u128_to_u64(elapsed.as_millis());
+            if el_ms >= threshold {
+                eprintln!(
+                    "[midge][ycsb][slow_op] client={client_id} op_index={op_index} elapsed_ms={el_ms} threshold_ms={threshold}"
+                );
+            }
+        }
+
+        stats.record_latency(elapsed);
+        stats.operations = stats.operations.wrapping_add(1);
+        op_index = op_index.wrapping_add(1);
+    }
+    stats
 }
 
 /// Run concurrent client loops for a fixed number of operations per client.
@@ -1233,3 +1330,7 @@ fn millis_since_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| u128_to_u64(duration.as_millis()))
 }
+
+#[cfg(test)]
+#[path = "ycsb/cancelled_completion_tests.rs"]
+mod cancelled_completion_tests;

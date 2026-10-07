@@ -50,6 +50,14 @@ arguments. It is excluded from plain `cargo bench` by its existing `failpoints`
 feature requirement; use the commands in
 [Bounded Compaction Qualification](bounded-compaction-qualification.md).
 
+The controlled checkpoint target requires the explicit `checkpoint-bench`
+feature and dedicated Tier 4 workflow modes. Run the actual same-SHA
+construction smoke before its nine fresh release processes, then retain the
+native diagnostic trust and all invalid attempts during readback. See
+[Checkpoint Write Amplification](checkpoint-write-amplification.md) for the
+fixed cells, commands, gate and filesystem-issued byte limits. Measurement is
+pending.
+
 The Tier 2 read amplification target opens a local Engine with three overlapping
 flushed SSTs. It records Engine point-read amplification and block-cache deltas
 alongside point-only and mixed point/short-scan throughput. The metrics are
@@ -59,10 +67,88 @@ whole measured workload.
 Its row names and results start a new baseline; old simulator numbers cannot
 be compared with Engine throughput or block counts.
 
-To qualify the Tier 3 lifecycle benchmark on Ubuntu, Windows, and macOS,
-dispatch `CI` with `tier3_lifecycle_bench` enabled. This runs only the
-`tier3_system_lifecycle` benchmark target as an opt-in platform check.
-Its repeated flush-cycle row enables compaction so L0 slots can be recycled.
+Tier benchmarks run in separate manually dispatched workflows. Tier 4 uses
+`Benchmark Tier 4` (`bench-tier4.yml`) for 25 system scenarios and the checkpoint
+modes, and `Benchmark Tier 4 YCSB` (`bench-tier4-ycsb.yml`) for 48 YCSB A–F
+scenarios. The other tiers use `Benchmark Tier 1` through `Benchmark Tier 6`.
+Tier 3 runs all registered Tier 3 targets on Ubuntu, Windows, and macOS; the
+repeated flush-cycle row enables compaction so L0 slots can be recycled.
+
+Tier 4, 5 and 6 workflows share a `profile` dropdown, defaulting to `standard`:
+
+| Profile | Tier 4 scenario | Tier 5/6 workload |
+| --- | --- | --- |
+| `smoke` | One original short window or complete system cycle | 60 seconds |
+| `standard` | 10 minutes | 10 minutes |
+| `full` | 60 minutes | 60 minutes |
+
+Each Tier 4 scenario has its own ARM matrix job. YCSB, streaming and backpressure
+keep one engine through the selected measured window. Fixed-count system cases
+repeat complete bounded cycles, retaining each cycle's checks; their long-run
+clock includes setup and teardown and can exceed the window by the final cycle.
+Their SST footprint observations sum the final footprints of completed cycles.
+Smoke keeps the original timing boundaries and workload warmups. Checkpoint
+workflow modes retain their separate fixed-cardinality campaign.
+
+These workflow profiles use one native harness sample without native warmups.
+They establish workload execution and correctness; a single sample does not
+establish a statistical performance baseline. Scheduled Tier 5/6 runs use `full`.
+Automation using their former `duration_seconds` input must switch to `profile`.
+
+For a direct Tier 4 standard run, supply both the workload profile and the
+matching native duration:
+
+```bash
+MIDGE_BENCH_PROFILE=standard cargo bench --bench tier4_ycsb_workload_a -- \
+  --workload 'tier4_ycsb_workload_a::tier4_ycsb_a_memory_1_client' \
+  --profile smoke --sample-duration-ms 600000 --timeout-secs 1500
+```
+
+Use `MIDGE_BENCH_PROFILE=full`, `--sample-duration-ms 3600000` and
+`--timeout-secs 4500` for an hour. Direct invocations without the workload profile
+keep their existing short Tier 4 windows. A fixed-cycle case rejects a native
+measurement shorter than its selected standard/full window.
+
+The old Destroyer scenarios now live in the opt-in `stress-soak` bench targets.
+The feature gates both Tier 5 and Tier 6, so a plain `cargo bench` cannot start
+an hours-long run. Local Tier 5 runs use one hour per workload/backend
+concurrency sweep; Tier 6 uses one hour per composite soak. Short smoke runs
+can set `MIDGE_TIER5_DURATION_SECS` or `MIDGE_TIER6_DURATION_SECS` to a smaller
+positive value. Sqrzl protocol cases use the local emulator at
+`MIDGE_STRESS_SQRZL_ENDPOINT` (default `http://127.0.0.1:9000`); they measure
+those protocol surfaces and do not claim live-provider capacity. Namespace
+setup reads `SQRZL_SECRET_ACCESS_KEY`, which must match the Sqrzl credentials;
+the benchmark workflows set it for their local emulator jobs.
+
+Tier 5/6 workflows set a 60-second `cntryl-stress` no-progress watchdog.
+Only successful client operations advance workload progress; retryable
+rejections and background database growth do not reset that watchdog during
+client stages or shutdown. Workload artifacts under `target/midge-stress/`
+include status, stage latency and saturation summaries, per-client snapshots,
+phase timings, resource samples, shutdown results, and flush/reopen or
+cloud-cache-loss verification summaries. `ResourceLimit` and `WriteStall` responses are
+reported as saturation; repeated responses back off exponentially up to 256 ms
+and the delay decays only after 32 successful operations. The accumulated
+backoff is recorded separately. Sqrzl Tier 5 sweeps cover 1, 2, and 4
+clients; Tier 6 uses four local clients and two Sqrzl clients. The resource
+sampler follows database-file changes only during flush and recovery, so the
+no-progress heartbeat reflects observed storage work in those phases.
+Client snapshots are published atomically before the first operation,
+periodically during the stage, and at completion or a terminal error. They
+retain partial counters if the external watchdog abandons the worker;
+`cntryl-stress` supplies the authoritative timeout receipt. Artifact collection
+finalizes abandoned workload status from that receipt and preserves emulator
+logs before teardown. Completed-stage totals and partial-stage counters are
+reported separately.
+
+Shutdown calls use a 45-second caller budget, leaving 15 seconds before the
+workflows' 60-second watchdog to record the result and unwind. A stricter
+watchdog selected on the command line can expire earlier. Runtime worker joins
+continue to retain fencing after a caller timeout. Phase traces show those
+joins without treating them as successful workload progress. Sqrzl
+workloads use a 5-second cloud WAL seal window to batch objects during the long
+sweeps. Data mismatches, failed recovery, a stalled workload, or the hard
+benchmark deadline fail the run.
 
 ## Comparing Changes
 

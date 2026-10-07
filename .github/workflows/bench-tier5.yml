@@ -1,0 +1,113 @@
+name: Benchmark Tier 5
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Workload profile (60s smoke, 600s standard, 3600s full)
+        type: choice
+        required: true
+        default: standard
+        options: [smoke, standard, full]
+      investigation:
+        description: Optional independent measurement campaign
+        type: choice
+        required: true
+        default: none
+        options: [none, comparisons, probes, all]
+  schedule:
+    - cron: "17 5 * * 2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-tier5-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  investigation:
+    if: github.event_name == 'workflow_dispatch' && inputs.investigation != '' && inputs.investigation != 'none'
+    uses: ./.github/workflows/bench-investigation.yml
+    with:
+      profile: ${{ inputs.profile }}
+      campaign: ${{ inputs.investigation }}
+  bench:
+    if: github.event_name != 'workflow_dispatch' || inputs.investigation == '' || inputs.investigation == 'none'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        workload:
+          - tier5_write_heavy_local
+          - tier5_read_heavy_local
+          - tier5_balanced_local
+          - tier5_many_small_transactions_local
+          - tier5_mixed_transaction_sizes_local
+          - tier5_write_pressure_s3
+          - tier5_write_pressure_azure
+          - tier5_write_pressure_gcs_xml
+          - tier5_write_pressure_gcs_json
+    env:
+      CARGO_INCREMENTAL: 0
+      MIDGE_BENCH_PROFILE: ${{ github.event_name == 'workflow_dispatch' && (inputs.profile || 'standard') || 'full' }}
+      STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+      STRESS_PROFILE: smoke
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve benchmark profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$MIDGE_BENCH_PROFILE" in
+            smoke) workload_seconds=60 ;;
+            standard) workload_seconds=600 ;;
+            full) workload_seconds=3600 ;;
+            *) printf 'Unknown benchmark profile: %s\n' "$MIDGE_BENCH_PROFILE" >&2; exit 1 ;;
+          esac
+          printf 'MIDGE_TIER5_DURATION_SECS=%s\n' "$workload_seconds" >> "$GITHUB_ENV"
+          printf 'STRESS_TIMEOUT_SECS=%s\n' "$((workload_seconds + 900))" >> "$GITHUB_ENV"
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Start Sqrzl
+        if: contains(matrix.workload, 's3') || contains(matrix.workload, 'azure') || contains(matrix.workload, 'gcs')
+        run: docker compose up -d sqrzl
+
+      - name: Run Tier 5 workload
+        id: workload
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/midge-stress/runner-logs
+          bash tools/run-stress-with-receipts.sh tier5_stress_workloads ${{ matrix.workload }} 2>&1 | tee target/midge-stress/runner-logs/workload.log
+
+      - name: Preserve workload failure and emulator diagnostics
+        if: always()
+        env:
+          WORKLOAD_OUTCOME: ${{ steps.workload.outcome }}
+          SELECTED_WORKLOAD: ${{ matrix.workload }}
+        run: |
+          mkdir -p target/midge-stress/emulator-logs
+          docker compose logs --no-color sqrzl > target/midge-stress/emulator-logs/sqrzl.log 2>&1 || true
+          python3 tools/finalize_stress_artifacts.py --workload "$SELECTED_WORKLOAD" --suite tier5-stress-workloads --sha "$GITHUB_SHA" --outcome "$WORKLOAD_OUTCOME"
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier5-${{ matrix.workload }}-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore
+
+      - name: Stop Sqrzl
+        if: always() && (contains(matrix.workload, 's3') || contains(matrix.workload, 'azure') || contains(matrix.workload, 'gcs'))
+        run: docker compose down -v

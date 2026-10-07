@@ -814,8 +814,14 @@ impl Transaction {
     ///
     /// # Errors
     ///
-    /// Returns an error when the transaction snapshot is unavailable.
+    /// Returns an error when the transaction snapshot is unavailable, or
+    /// [`MidgeError::Fenced`] when a cloud transaction's lease is no longer valid.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        self.runtime_handle
+            .read_with_authority(|| self.get_value(key))
+    }
+
+    fn get_value(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
         // Check transaction's write set first (read-your-own-writes)
         if let Some(value) = self.write_set.latest_for_key(key)? {
             return Ok(match value {
@@ -844,8 +850,18 @@ impl Transaction {
     /// Returns [`MidgeError::InvalidArgument`] when both explicit bounds are
     /// present and `start > end`. Equal bounds and valid bounds whose prefix
     /// intersection is empty produce an empty iterator. Also returns an error
-    /// when the transaction snapshot is unavailable.
+    /// when the transaction snapshot is unavailable. Cloud transactions return
+    /// [`MidgeError::Fenced`] after lease loss; an existing iterator reports the
+    /// same sticky error on its next advance.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {
+        self.runtime_handle
+            .read_with_authority(|| self.build_scan(query))
+    }
+
+    fn build_scan(
+        &self,
+        query: &super::query::Query,
+    ) -> MidgeResult<super::iterator::Iterator<'_>> {
         if let (Some(start), Some(end)) = (query.start.as_deref(), query.end.as_deref()) {
             if start > end {
                 return Err(MidgeError::InvalidArgument(
@@ -864,8 +880,15 @@ impl Transaction {
         let intent_scan = self
             .write_set
             .key_scan(start.as_deref(), end.as_deref(), reverse)?;
+        let mut scan = TransactionScan::new(snapshot_scan, intent_scan, &self.write_set, query);
+        let handle = &self.runtime_handle;
         Ok(super::iterator::Iterator::from_iter(
-            TransactionScan::new(snapshot_scan, intent_scan, &self.write_set, query),
+            std::iter::from_fn(
+                move || match handle.read_with_authority(|| Ok(scan.next())) {
+                    Ok(row) => row,
+                    Err(error) => Some(Err(error)),
+                },
+            ),
             query.direction,
         ))
     }

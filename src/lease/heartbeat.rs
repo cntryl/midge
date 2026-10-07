@@ -9,6 +9,12 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[cfg(test)]
+std::thread_local! {
+    static WATCHDOG_SNAPSHOT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 /// Heartbeat manager for lease renewal.
 ///
 /// Runs a background thread that periodically renews the lease.
@@ -141,6 +147,13 @@ fn run_watchdog_worker(
 ) {
     while running.load(Ordering::Acquire) {
         let observed = validity.snapshot();
+        #[cfg(test)]
+        WATCHDOG_SNAPSHOT_HOOK.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
         match observed {
             LeaseValidityState::Inactive => {
                 let _ = validity.wait_for_change(observed, Duration::from_secs(30), running);
@@ -152,13 +165,17 @@ fn run_watchdog_worker(
             LeaseValidityState::Active { epoch, valid_until } => {
                 let wait = valid_until.saturating_duration_since(std::time::Instant::now());
                 if wait.is_zero() {
-                    validity.fence(epoch);
-                    mark_unhealthy(healthy, loss_notified, loss_hook);
-                    break;
+                    if validity.fence_if_expired(epoch) {
+                        mark_unhealthy(healthy, loss_notified, loss_hook);
+                        break;
+                    }
+                    continue;
                 }
                 let current = validity.wait_for_change(observed, wait, running);
-                if current == observed && std::time::Instant::now() >= valid_until {
-                    validity.fence(epoch);
+                if current == observed
+                    && std::time::Instant::now() >= valid_until
+                    && validity.fence_if_expired(epoch)
+                {
                     mark_unhealthy(healthy, loss_notified, loss_hook);
                     break;
                 }
@@ -871,5 +888,85 @@ mod tests {
             LeaseValidityState::Active { valid_until, .. } if valid_until > prior_deadline
         ));
         heartbeat.stop();
+    }
+}
+
+#[cfg(test)]
+mod watchdog_snapshot_tests {
+    use super::{run_watchdog_worker, WATCHDOG_SNAPSHOT_HOOK};
+    use crate::lease::traits::{LeaseValidity, LeaseValidityState};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_preserve_renewed_validity_when_watchdog_resumes_with_stale_snapshot() {
+        // Arrange: suspend the watchdog after its old snapshot releases the
+        // mutex; a timely renewal must remain authoritative afterward.
+        let validity = Arc::new(LeaseValidity::new());
+        let old_deadline = Instant::now() + Duration::from_secs(1);
+        validity.activate(9, old_deadline).expect("activate lease");
+        let running = Arc::new(AtomicBool::new(true));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (loss_tx, loss_rx) = mpsc::sync_channel(1);
+        let worker = {
+            let validity = Arc::clone(&validity);
+            let running = Arc::clone(&running);
+            let healthy = Arc::clone(&healthy);
+            std::thread::spawn(move || {
+                WATCHDOG_SNAPSHOT_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        snapshot_tx.send(()).expect("announce old snapshot");
+                        resume_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("resume stale watchdog");
+                    }));
+                });
+                let loss_notified = AtomicBool::new(false);
+                let loss_hook = || {
+                    loss_tx.send(()).expect("announce lease loss");
+                };
+                run_watchdog_worker(
+                    &validity,
+                    &running,
+                    &healthy,
+                    &loss_notified,
+                    Some(&loss_hook),
+                );
+            })
+        };
+        snapshot_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("watchdog captured old deadline");
+        let renewed_deadline = Instant::now() + Duration::from_secs(10);
+        validity
+            .advance(9, renewed_deadline)
+            .expect("renew while old deadline is still live");
+
+        // Act: resume the watchdog once only its copied deadline has expired.
+        std::thread::sleep(old_deadline.saturating_duration_since(Instant::now()));
+        resume_tx
+            .send(())
+            .expect("resume watchdog after old expiry");
+        let loss = loss_rx.recv_timeout(Duration::from_millis(100));
+        running.store(false, Ordering::Release);
+        validity.notify_all();
+        worker.join().expect("watchdog thread");
+
+        // Assert
+        assert!(
+            matches!(loss, Err(mpsc::RecvTimeoutError::Timeout)),
+            "watchdog must not notify loss for an old deadline: {loss:?}"
+        );
+        assert!(healthy.load(Ordering::Acquire));
+        assert_eq!(
+            validity.snapshot(),
+            LeaseValidityState::Active {
+                epoch: 9,
+                valid_until: renewed_deadline,
+            }
+        );
     }
 }
