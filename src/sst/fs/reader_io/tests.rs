@@ -7,6 +7,8 @@ use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+mod duplicate_successor;
+
 struct CountingFs {
     inner: crate::io::RealFs,
     reads: Arc<Mutex<Vec<(u64, u64)>>>,

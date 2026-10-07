@@ -157,26 +157,41 @@ impl SstFileIo {
             })
     }
 
-    fn trie_search_bounds(&self, last_index: usize, key: &[u8]) -> Option<(usize, usize)> {
+    fn trie_search_bounds(
+        &self,
+        index: &[(Vec<u8>, BlockHandle)],
+        key: &[u8],
+    ) -> Option<(usize, usize)> {
+        let last_index = index.len().checked_sub(1)?;
         let trie = self.trie_reader.as_ref()?;
         let block_index = trie
             .find_block(key)
             .or_else(|| trie.seek_next(key))
             .and_then(|block_index| usize::try_from(block_index).ok())
             .filter(|block_index| *block_index <= last_index)?;
-        Some((block_index.saturating_sub(1), block_index))
+        let first = block_index.saturating_sub(1);
+        // A successor with duplicate boundaries points at its last block.
+        // Trust a hint only when the omitted index entries cannot contain the
+        // query's predecessor; otherwise search the complete sparse index.
+        let lower_brackets = first == 0 || index[first].0.as_slice() <= key;
+        let upper_brackets = block_index == last_index || index[block_index + 1].0.as_slice() > key;
+        (lower_brackets && upper_brackets).then_some((first, block_index))
     }
 
-    fn search_bounds(&self, last_index: usize, key: &[u8]) -> Option<(usize, usize)> {
+    fn search_bounds(
+        &self,
+        index: &[(Vec<u8>, BlockHandle)],
+        key: &[u8],
+    ) -> Option<(usize, usize)> {
         if self.key_outside_persisted_range(key) {
             return None;
         }
 
-        if let Some(bounds) = self.trie_search_bounds(last_index, key) {
+        if let Some(bounds) = self.trie_search_bounds(index, key) {
             return Some(bounds);
         }
 
-        Some((0, last_index))
+        Some((0, index.len().checked_sub(1)?))
     }
 
     /// The blocks that can hold keys in `[start, end]`, clamped to `index`;
@@ -207,8 +222,7 @@ impl SstFileIo {
             return None;
         }
 
-        let last_index = index.len() - 1;
-        let (mut start_bound, end_bound) = self.search_bounds(last_index, key)?;
+        let (mut start_bound, end_bound) = self.search_bounds(index, key)?;
 
         if start_bound > end_bound {
             start_bound = end_bound;
