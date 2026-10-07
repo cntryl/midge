@@ -89,7 +89,7 @@
   "src/runtime/event_loop/write_batch/tests.rs": "6ab88f8f5ebeee19f6f437783c28e603c0d00d92f2df7bbb531f2445fa9ca5d0",
   "src/runtime/frontiers.rs": "71267ef169b8aee2cbddea098e7996a1ce21495e393f2453b4fc8fbe80689a30",
   "src/runtime/handle.rs": "3ca06e6ba47ceedc23d8b5d18a8cb7ecbd22bcf40e0d50913ff1aabce8388c32",
-  "src/runtime/handle/read_authority_tests.rs": "1c266acb191d989829ad0d7085a9b35df129d200db6e876d93c0ce45882f9f3a",
+  "src/runtime/handle/read_authority_tests.rs": "004b7ce2f57c857483ea569fc5497af8ba24274685e308df33252081e42e7392",
   "src/runtime/hybrid_persistence.rs": "a549153b67760c7ec8781eb6f692ae2a8ae9a583b706c8e5bd9e36837be7c3a7",
   "src/runtime/hybrid_persistence/catalog.rs": "7d43733c0901185e8209e72bfcc2bf1e1bbcf31c8a0e665c21a3bee8ac7f63b8",
   "src/runtime/hybrid_persistence/metadata_snapshot.rs": "7b15859082d24cf64d54d606d543e007e4423b38d063949452eaff81c4f47ae9",

@@ -9,7 +9,7 @@ fn live_handle() -> (
     let (_, mut handle) = crate::runtime::Runtime::new();
     let validity = Arc::new(crate::lease::LeaseValidity::new());
     validity
-        .activate(7, std::time::Instant::now() + Duration::from_secs(60))
+        .activate(7, std::time::Instant::now() + Duration::from_mins(1))
         .unwrap();
     let healthy = Arc::new(AtomicBool::new(true));
     handle.read_authority = Some(CloudReadAuthority {
