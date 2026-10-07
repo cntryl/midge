@@ -47,7 +47,7 @@ jobs:
           shared-key: "release-gate"
 
       - name: Install cntryl-tools
-        run: cargo install --git https://github.com/cntryl/tools --rev 7a38b5ede778646f760fe5904aabc6f6580cac92 --locked
+        run: cargo install --git https://github.com/cntryl/tools --rev 7690369409e8d3c86b9db1693cdab486a4fa84ae --locked
 
       - name: Validate current documentation inventory
         shell: bash
