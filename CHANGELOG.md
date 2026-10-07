@@ -9,6 +9,30 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-07
+
+### Fixed
+
+- Preserve point and bounded prefix reads when a duplicate SST successor boundary
+  spans many retained versions. Validate trie hints against the complete sparse
+  index and fall back to binary search when a hint cannot bracket the query.
+  This fixes false absence after SST publication, including Stream epoch reads
+  under Fitz Fast Queue pressure.
+
+### Upgrade and rollback
+
+- FORMAT 4, SST V4, Rust API, CLI JSON schema, and durability contracts are
+  unchanged from `0.3.2`. No export/import or format migration is required.
+- Rollback is supported with constraints: `0.3.2` can read the same format but
+  restores the false-absence defect. Preserve a verified database copy before
+  upgrading and qualify a separate copy before cutover. See the migration guide.
+
+### Known risks
+
+- Midge remains pre-1.0 and single-process. The downstream quarter-core/512MiB
+  pilot qualifies a finite local-disk burst, not maximum capacity or real-cloud
+  behavior. Release qualification must pass before tagging or publication.
+
 ## [0.3.2] - 2026-10-07
 
 ### Added

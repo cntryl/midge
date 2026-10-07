@@ -2591,7 +2591,19 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
         drop(heartbeat);
         // Act
         eprintln!("takeover cloud={cloud}: open healthy successor after real expiry");
-        let mut successor = Engine::open(options.clone())?;
+        // The filesystem lease checks persisted UTC age, while the watchdog
+        // expires against a monotonic clock. Allow bounded clock settling;
+        // never bypass ownership checks or retry an indeterminate failure.
+        let takeover_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut successor = loop {
+            match Engine::open(options.clone()) {
+                Ok(engine) => break engine,
+                Err(MidgeError::LeaseHeld(_)) if std::time::Instant::now() < takeover_deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        };
         assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
         let first = before_gc.commit(WriteOptions::best_effort());
         let successor_cf = successor.get_column_family("default").unwrap();

@@ -133,6 +133,21 @@ Writes made after that copy was taken require separate reconciliation. Returning
 to `0.3.1` also restores its known lease, progress, and cloud read-authority
 defects.
 
+## 0.3.2 to 0.3.3
+
+Version `0.3.3` fixes SST reads that could falsely report an existing key as
+absent when the next indexed boundary has many retained versions. The change
+validates trie hints and falls back to a complete sparse-index search. Existing
+SSTs benefit immediately; no rewrite, offline export/import, or API migration
+is required. FORMAT 4, SST V4, CLI JSON schema version 1, cloud control formats,
+and durability contracts remain unchanged.
+
+Stop writes, complete shutdown, preserve a verified database or prefix copy,
+and qualify recovery on a separate copy before cutover. Rollback is supported
+with constraints: `0.3.2` accepts the same formats but restores the read defect.
+Prefer `0.3.3` for databases with duplicate SST boundaries. This fix does not
+weaken application concurrency assertions or introduce ownership continuity.
+
 ## FORMAT 3 and SST V4
 
 FORMAT 3 is a breaking local-storage transition. It requires checksummed SST
