@@ -9,6 +9,60 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-07
+
+### Added
+
+- Optional `OpenOptionsBuilder::open_timeout(Duration)` bounds one startup
+  attempt across lease acquisition, recovery, and runtime admission. The
+  default remains unbounded; timed-out work retains ownership until it settles.
+- Metadata publication and recovery work diagnostics, with controlled benchmark
+  profiles for checkpoint cost, write pressure, and cold recovery.
+
+### Fixed
+
+- Invalidate cloud transactions after lease loss: point reads, new scans, and
+  the next advance of an active iterator return `MidgeError::Fenced`. Reads
+  recheck authority after blocking I/O, before exposing its result. A successor
+  can reclaim remote SSTs pinned only by the predecessor's process.
+- Preserve renewed monotonic lease validity when a watchdog resumes with an
+  older deadline, and preserve bounded cloud lease-read retries.
+- Surface terminal fencing to stalled admission and flush callers. Explicit
+  cloud flush barriers progress safely through retry and compaction pressure.
+- Carry the initiating manual compaction deadline through queueing, computation,
+  name reservation, upload, and metadata publication; retain data and authority
+  when a late result cannot establish safe cleanup.
+- Route only real compaction caller responses, retain optional WAL cleanup
+  during shutdown, and report clean filesystem lease release accurately.
+- Bound cloud WAL coverage and warm recovery key reconstruction without
+  weakening exact SST coverage or conservative replay fallback.
+- Preserve committed YCSB key inventories and count successful completed work
+  for benchmark and soak progress.
+
+### Upgrade and rollback
+
+- Database FORMAT 4, SST V4, CLI JSON schema version 1, and cloud control formats
+  are unchanged from `0.3.1`. Rust API additions preserve existing call sites
+  and error variants; cloud reads after lease loss now explicitly return
+  `Fenced`. Applications must discard those transactions and reopen under a
+  healthy writer. See the [migration guide](docs/operations/migration-guide.md).
+- No offline export/import is required for a `0.3.1` database. Stop writes,
+  complete shutdown, preserve a verified database/prefix copy, and qualify
+  recovery on a separate copy before cutover.
+- Rollback is supported with constraints: restore the preserved pre-upgrade
+  copy and use `0.3.1`. Salvage-mutated databases are excluded; writes after the
+  preserved copy require separate reconciliation. The older binary also
+  restores the lease, progress, and read-authority defects fixed here.
+
+### Known risks
+
+- Midge remains pre-1.0 and single-process. Sqrzl continuously qualifies provider
+  protocols; deployment-specific credentials, network policy, quotas, and
+  capacity still require application qualification.
+- Full-manifest checkpoint cost and sustained write-pressure/cold-recovery
+  profiling remain follow-up work in #752, #753, and #754. This release does not
+  change the checkpoint policy or promise production latency bounds.
+
 ## [0.3.1] - 2026-10-02
 
 ### Fixed

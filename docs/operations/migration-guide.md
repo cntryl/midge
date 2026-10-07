@@ -100,6 +100,39 @@ fixture. Writes made after that copy was taken need separate reconciliation.
 These format statements do not remove the authority and recovery defects fixed
 in `0.3.1`; returning to `0.3.0` also returns to its known defects.
 
+## 0.3.1 to 0.3.2
+
+Version `0.3.2` preserves FORMAT 4, SST V4, CLI JSON schema version 1, and cloud
+lease, DDL, and WAL catalog formats. Existing Rust call sites and error variants
+remain compatible; new options and diagnostics are additive. No offline
+export/import is required for a `0.3.1` database. Stop writes, complete
+`engine.shutdown(timeout)`, and preserve a verified copy of the database
+directory and relevant cloud prefix. Exercise reads, writes, and restart
+recovery on a separate copy before switching traffic.
+
+Cloud transactions are invalid after lease loss. New transactions, point reads,
+new scans, and the next advance of an active iterator return
+`MidgeError::Fenced`, including when monotonic lease validity expires before
+the lease-loss callback runs. A successor may reclaim the predecessor's remote
+SSTs; process-local snapshot pins do not keep them readable across takeover.
+Discard fenced transactions, shut down the predecessor, and reopen under a
+healthy writer. Local and in-memory snapshot behavior is unchanged.
+
+`OpenOptionsBuilder::open_timeout(Duration)` optionally bounds one aggregate
+startup attempt. It defaults to no aggregate deadline. A timeout does not prove
+that an entered syscall or provider mutation stopped; the startup worker retains
+ownership while it settles. An unresolved acquisition can return
+`LeaseIndeterminate`, and an immediate replacement may encounter a retained
+lease. See the [API guide](../user-guides/api-guide.md) for retry and ownership
+boundaries. Manual compaction now carries its original caller deadline through
+publication rather than granting later phases a fresh allowance.
+
+Rollback is supported with constraints: restore the preserved pre-upgrade copy
+and use `0.3.1`. Salvage-mutated databases are excluded from rollback claims.
+Writes made after that copy was taken require separate reconciliation. Returning
+to `0.3.1` also restores its known lease, progress, and cloud read-authority
+defects.
+
 ## FORMAT 3 and SST V4
 
 FORMAT 3 is a breaking local-storage transition. It requires checksummed SST
