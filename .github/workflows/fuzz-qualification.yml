@@ -48,7 +48,7 @@ jobs:
       - name: Replay original intent mutation seed under sanitizers
         run: |
           mkdir -p fuzz/timeout-seed-corpus
-          cp tests/fixtures/fuzz/intent_timeout_18.bin fuzz/timeout-seed-corpus/
+          cp fuzz/corpus/intent_log_replay/seed0 fuzz/timeout-seed-corpus/
           cargo fuzz run intent_log_replay fuzz/timeout-seed-corpus -- -seed=1504688986 -max_total_time=30 -timeout=10
 
       - name: Replay preserved intent failure corpus under sanitizers

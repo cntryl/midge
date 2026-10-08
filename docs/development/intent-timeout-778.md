@@ -27,8 +27,12 @@ resolve these original timeout frames:
 
 Thus the observed blocked phase was startup-error cleanup joining the watchdog,
 not intent parsing. The diagnostic passed the isolated input 128 times, 2,048
-mutations from the original seed `1504688986`, and 2,048 runs from the preserved
-failure corpus. These passes show intermittency; they do not dismiss the failure.
+mutations using seed `1504688986` starting from the 18-byte timeout control,
+and 2,048 runs from the preserved failure corpus. The seeded diagnostic used a
+different starting input than the original campaign and is not an exact replay
+of its mutation sequence. These passes show intermittency; they do not dismiss
+the failure. Changed-source qualification uses the original `seed0` starting
+input instead.
 
 ## Forced regression and fix
 
