@@ -42,6 +42,28 @@ jobs:
       - name: Replay preserved intent timeout under sanitizers
         run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_18.bin -- -runs=32 -timeout=10
 
+      - name: Replay preserved one-byte intent timeout under sanitizers
+        run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_1.bin -- -runs=128 -timeout=10
+
+      - name: Replay original intent mutation seed under sanitizers
+        run: |
+          mkdir -p fuzz/timeout-seed-corpus
+          cp fuzz/corpus/intent_log_replay/seed0 fuzz/timeout-seed-corpus/
+          cargo fuzz run intent_log_replay fuzz/timeout-seed-corpus -- -seed=1504688986 -max_total_time=30 -timeout=10
+
+      - name: Replay preserved intent failure corpus under sanitizers
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          destination = Path("fuzz/timeout-regression-corpus")
+          destination.mkdir(parents=True, exist_ok=True)
+          corpus = json.loads(Path("tests/fixtures/fuzz/intent_timeout_corpus.json").read_text())
+          for name, encoded in corpus.items():
+              (destination / name).write_bytes(bytes.fromhex(encoded))
+          PYTHON
+          cargo fuzz run intent_log_replay fuzz/timeout-regression-corpus -- -runs=2048 -timeout=10
+
       - name: Smoke WAL frame recovery
         run: cargo fuzz run wal_frame_recovery -- -max_total_time=30 -timeout=10
 
@@ -62,4 +84,6 @@ jobs:
           path: |
             fuzz/corpus
             fuzz/artifacts
+            fuzz/timeout-seed-corpus
+            fuzz/timeout-regression-corpus
           if-no-files-found: ignore

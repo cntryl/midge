@@ -19,6 +19,8 @@ pub(crate) enum LeaseValidityState {
 std::thread_local! {
     static REMAINING_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static WAIT_PREDICATE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Shared lease validity watched independently from provider renewal I/O.
@@ -222,13 +224,30 @@ impl LeaseValidity {
         let (state, _) = self
             .changed
             .wait_timeout_while(state, timeout, |state| {
-                *state == observed && running.load(std::sync::atomic::Ordering::Acquire)
+                let keep_waiting =
+                    *state == observed && running.load(std::sync::atomic::Ordering::Acquire);
+                #[cfg(test)]
+                if keep_waiting {
+                    WAIT_PREDICATE_HOOK.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().take() {
+                            hook();
+                        }
+                    });
+                }
+                keep_waiting
             })
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *state
     }
 
     pub(crate) fn notify_all(&self) {
+        // Stop changes an external atomic used by wait_for_change's predicate.
+        // Serialize notification with the predicate's mutex so a waiter that
+        // read running=true cannot register after the only shutdown wakeup.
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.changed.notify_all();
     }
 }
@@ -308,6 +327,67 @@ pub(super) fn scope_lease_error(error: crate::common::MidgeError) -> LeaseError 
     match error {
         crate::common::MidgeError::Timeout(message) => LeaseError::Timeout(message),
         other => LeaseError::Internal(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod stop_notification_tests {
+    use super::{LeaseValidity, WAIT_PREDICATE_HOOK};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_wake_lease_waiter_when_stop_races_with_wait_registration() {
+        // Arrange: pause after the wait predicate observes running=true,
+        // while the validity mutex is still held, before entering the condvar.
+        let validity = Arc::new(LeaseValidity::new());
+        validity
+            .activate(7, Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        let observed = validity.snapshot();
+        let running = Arc::new(AtomicBool::new(true));
+        let (predicate_tx, predicate_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let waiter = {
+            let validity = Arc::clone(&validity);
+            let running = Arc::clone(&running);
+            std::thread::spawn(move || {
+                WAIT_PREDICATE_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        predicate_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }));
+                });
+                let state = validity.wait_for_change(observed, Duration::from_secs(2), &running);
+                finished_tx.send(state).unwrap();
+            })
+        };
+        predicate_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // Act: stop and notify while the waiter has already read the old
+        // predicate. An unsynchronized notify returns before registration.
+        running.store(false, Ordering::Release);
+        let (notified_tx, notified_rx) = mpsc::sync_channel(1);
+        let notifier = {
+            let validity = Arc::clone(&validity);
+            std::thread::spawn(move || {
+                validity.notify_all();
+                notified_tx.send(()).unwrap();
+            })
+        };
+        let _ = notified_rx.recv_timeout(Duration::from_millis(100));
+        resume_tx.send(()).unwrap();
+        let finished = finished_rx.recv_timeout(Duration::from_millis(500));
+        // Join even on RED so the fixture never leaves a waiting worker behind.
+        notifier.join().unwrap();
+        waiter.join().unwrap();
+
+        // Assert: stopping wakes promptly without changing lease authority.
+        assert!(finished.is_ok(), "stop notification was lost: {finished:?}");
+        assert_eq!(finished.unwrap(), observed);
+        assert_eq!(validity.snapshot(), observed);
     }
 }
 
