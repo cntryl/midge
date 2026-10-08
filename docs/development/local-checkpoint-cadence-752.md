@@ -34,7 +34,10 @@ is independently valid. No unfavorable repeat or admission rejection is removed.
 
 ## Candidate contract
 
-Only an ordinary local flush without a required snapshot may defer. Its durable
+Only an ordinary local flush without a required snapshot may defer, and only
+when its last successful checkpoint payload is at least 5% of the current
+committed SST size. This uses the original byte-cost gate without allocating a
+trial serialization. Cheap larger flushes retain forced cadence. Its durable
 batch includes the SST, next SST identity and `BumpWalSeq` persisted frontier;
 all three share a framed record and synced marker. No journal format or public
 API change is introduced. `next_wal_seq` has no runtime mutation and is not a
@@ -125,3 +128,28 @@ candidate retained at most 8,235 bytes/15 records in the tested small-key cases,
 checkpointed at record 16, and forced large-key snapshots. Both sources had
 reopen outliers (candidate up to 165.8 ms). The differing diagnostic driver,
 debug profile and first timeout prevent stable startup-performance acceptance.
+
+## Cost guard refinement
+
+The complete first replication retained slower ingestion/public-flush results:
+A median ingestion 5.767 versus 4.662 seconds and median public flush p95 38.737
+versus 17.433 ms; B/C also showed unfavorable repeats. A same-machine diagnostic
+ran the exact sealed hosted executables in balanced source order under a
+4-CPU/4-GiB ARM64 Ubuntu container. All six A trials verified exact data/reopen,
+but candidate median ingestion was 4.593 versus 3.829 seconds. The initial
+container setup attempt lacked Git and failed before measurements; its failures
+are preserved separately. Container results do not replace hosted acceptance.
+
+The broad policy is rejected for no-regression acceptance. The refinement uses
+the original >=5% checkpoint-payload/SST byte gate to limit deferral to costly
+metadata. A new regression failed on the broad policy (137,654 ordinary versus
+1,972,990 forced bytes) and now requires a current snapshot after every cheap
+large-SST publication. Bounds, durable frontier batching and failure pressure
+remain unchanged. All older results remain historical evidence; the refined
+runtime requires fresh hosted comparison and exact-head qualification.
+
+Cost-guard local verification: 76 default-feature runtime-state tests passed
+(one measurement ignored), all 186 all-feature fault-injection tests passed,
+Clippy across all targets/features with pedantic lints passed, and all 3743 test
+contracts were compliant. Cheap large-SST snapshot-frontier checks passed at
+every publication; expensive metadata retained the >=90% payload regression.

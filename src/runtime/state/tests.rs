@@ -2639,6 +2639,15 @@ fn measure_flush_publication_io_for(
     origin: crate::metadata::accounting::Origin,
     require_snapshot: bool,
 ) -> (u64, u64, u64, u64) {
+    measure_flush_publication_io_with_sst_size(flushes, origin, require_snapshot, 4096)
+}
+
+fn measure_flush_publication_io_with_sst_size(
+    flushes: u64,
+    origin: crate::metadata::accounting::Origin,
+    require_snapshot: bool,
+    sst_bytes: u64,
+) -> (u64, u64, u64, u64) {
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let mut state = RuntimeState::try_new(
         temp_dir.path().to_path_buf(),
@@ -2658,7 +2667,7 @@ fn measure_flush_publication_io_for(
         let file_meta = crate::runtime::FileMeta {
             name: format!("000000_00_{n:020}.sst"),
             level: 0,
-            size_bytes: 4096,
+            size_bytes: sst_bytes,
             content_crc32c: Some(7),
             cf_id: 0,
             smallest_key: None,
@@ -2685,6 +2694,21 @@ fn measure_flush_publication_io_for(
         )
         .expect("reconstruct published authority");
         assert_eq!(recovered.last_persisted_sequence, n);
+        if sst_bytes == 2 * 1024 * 1024 {
+            let snapshot: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    temp_dir
+                        .path()
+                        .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot["last_persisted_sequence"], n,
+                "cheap checkpoint must remain forced at each publication"
+            );
+        }
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&(n + 1)));
         assert_eq!(recovered.files.len(), usize::try_from(n).unwrap());
     }
@@ -2791,6 +2815,34 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
         assert_eq!(successor.next_sst_seqs.get(&0), Some(&18));
     }
     scenario.teardown();
+}
+
+#[test]
+fn should_keep_forced_cadence_when_checkpoint_payload_is_small_relative_to_flush() {
+    // Arrange
+    let flushes = 128;
+    let sst_bytes = 2 * 1024 * 1024;
+    let (_, forced_bytes, _, _) = measure_flush_publication_io_with_sst_size(
+        flushes,
+        crate::metadata::accounting::Origin::Unclassified,
+        true,
+        sst_bytes,
+    );
+
+    // Act
+    let (_, ordinary_bytes, _, _) = measure_flush_publication_io_with_sst_size(
+        flushes,
+        crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+        false,
+        sst_bytes,
+    );
+
+    // Assert: the preregistered byte-cost gate does not justify changing the
+    // cadence of these larger flushes. Their checkpoint behavior stays forced.
+    assert!(
+        ordinary_bytes >= forced_bytes,
+        "cheap checkpoints must remain forced: {ordinary_bytes} vs {forced_bytes}"
+    );
 }
 
 /// Characterizes #670: every flush rewrites the full manifest, so cumulative

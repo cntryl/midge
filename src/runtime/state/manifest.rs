@@ -377,6 +377,9 @@ impl RuntimeState {
         if ordinary_local
             && bounded_record
             && appended
+            && self
+                .manifest_store
+                .local_checkpoint_is_costly(file_meta.size_bytes)
             && !self
                 .manifest_store
                 .local_checkpoint_due(self.manifest.edit_checkpoint_id)

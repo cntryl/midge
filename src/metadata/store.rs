@@ -65,6 +65,15 @@ impl std::fmt::Debug for ManifestStore {
 }
 
 impl ManifestStore {
+    /// Use the last successful checkpoint's payload, not an uncharged JSON
+    /// serialization, to apply #715's predeclared five-percent byte-cost gate.
+    /// Unknown authority cannot establish a cost justification for deferral.
+    pub(crate) fn local_checkpoint_is_costly(&self, sst_bytes: u64) -> bool {
+        self.known.lock().is_some_and(|cached| {
+            sst_bytes > 0 && u128::from(cached.lengths.snapshot) * 20 >= u128::from(sst_bytes)
+        })
+    }
+
     /// Unknown, externally changed or stale authority must never defer a
     /// checkpoint. This query only stats files; it does not repair/replay them.
     pub(crate) fn local_checkpoint_due(&self, applied_edit_id: u64) -> bool {
