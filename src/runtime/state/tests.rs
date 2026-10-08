@@ -2769,7 +2769,9 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
             let file_meta = crate::runtime::FileMeta {
                 name: format!("000000_00_{n:020}.sst"),
                 level: 0,
-                size_bytes: 4096,
+                // Keep every publication above the five-percent checkpoint
+                // cost gate so the first deferred interval has 16 records.
+                size_bytes: 1,
                 content_crc32c: Some(7),
                 cf_id: 0,
                 smallest_key: None,
@@ -2790,6 +2792,10 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
         for n in 1..16 {
             publish(&mut state, n).unwrap();
         }
+        assert!(!state
+            .manifest_store
+            .local_checkpoint_due(state.manifest.edit_checkpoint_id));
+        assert!(state.manifest_store.local_checkpoint_is_costly(1));
         fail::cfg(failure, "return").unwrap();
 
         // Act: the triggering publication remains journal-durable; subsequent

@@ -153,3 +153,30 @@ Cost-guard local verification: 76 default-feature runtime-state tests passed
 Clippy across all targets/features with pedantic lints passed, and all 3743 test
 contracts were compliant. Cheap large-SST snapshot-frontier checks passed at
 every publication; expensive metadata retained the >=90% payload regression.
+
+## First refined hosted campaign
+
+Refinement `eac7c2c03ee4c804437d86b56b11285e1f5f6887` passed sanitized
+replay 37818264759, transport smoke 37818260994 and all nine measurements
+37818893855. Independent sealed raw-artifact readback and both retained baseline
+comparisons are in [checkpoint-752-refined-first-readback.json](evidence/checkpoint-752-refined-first-readback.json)
+and [checkpoint-752-refined-first-comparison.json](evidence/checkpoint-752-refined-first-comparison.json).
+A checkpoint payload remains approximately unchanged; B bytes fell 96.3–96.6%
+and time 91.2–97.0%; C ordinary checkpoint bytes/time fell 100%. All nine
+ingestion/flush comparisons pass against the first baseline, but B/r1 and B/r2
+flush p95 are 1.109x and 1.115x the replication baseline. Both comparisons are
+retained; independent replication is needed before no-regression acceptance.
+
+Hosted CI 37818176478 exposed an outdated all-feature failure-path fixture:
+its 4-KiB SST cost falls below the new cost gate at the first publication,
+so the supposed sixteenth-record failure no longer occurs at record 16.
+The failure reproduces locally. The fixture now uses a one-byte logical SST
+size so every publication qualifies, explicitly checks the deferred interval,
+and retains all three write/ENOSPC/rename failure boundaries and the unchanged
+journal assertion. No runtime source changes in this fixture correction.
+
+A second same-machine diagnostic retained six successful baseline/refined A
+trials under the same container bounds. Ingestion varied from approximately
+10 to 25 seconds during the first four trials, far above the earlier 3–5-second
+profile; these noisy diagnostic results cannot establish stable improvement.
+Raw results remain under `/tmp/midge-752-paired-profile-2/refined-outputs`.
