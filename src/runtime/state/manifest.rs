@@ -13,6 +13,31 @@ pub(crate) struct FlushManifestPublication<'a> {
     pub(crate) require_snapshot: bool,
 }
 
+fn flush_record_is_bounded(file_meta: &crate::runtime::FileMeta) -> bool {
+    // Bound deferred-record encoding before cloning metadata or allocating
+    // JSON. JSON escapes consume at most six bytes per name byte; key
+    // bounds are hex. The fixed allowance covers numeric fields, both
+    // frontier edits, the batch envelope, framing and the fsync marker.
+    let record_bound = file_meta
+        .name
+        .len()
+        .saturating_mul(6)
+        .saturating_add(
+            file_meta
+                .smallest_key
+                .as_ref()
+                .map_or(0, |key| key.len().saturating_mul(2)),
+        )
+        .saturating_add(
+            file_meta
+                .largest_key
+                .as_ref()
+                .map_or(0, |key| key.len().saturating_mul(2)),
+        )
+        .saturating_add(1_536);
+    record_bound <= crate::metadata::store::LOCAL_FLUSH_RECORD_BYTES
+}
+
 impl RuntimeState {
     #[cfg(test)]
     pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
@@ -284,6 +309,27 @@ impl RuntimeState {
             require_snapshot,
         } = publication;
         self.ensure_metadata_current()?;
+        let ordinary_local = origin == Origin::OrdinaryLocalFlush && !require_snapshot;
+        let bounded_record = flush_record_is_bounded(file_meta);
+        if ordinary_local
+            && (self
+                .manifest_store
+                .local_checkpoint_due(self.manifest.edit_checkpoint_id)
+                || !bounded_record)
+        {
+            // A previous failed checkpoint cannot allow another journal edit
+            // to grow the deferred tail. Preserve authority and backpressure.
+            let checkpoint = self
+                .manifest_store
+                .save_snapshot_for(origin, &self.manifest)?;
+            if !checkpoint.caller_was_current {
+                self.fence_metadata_until_reloaded();
+                return Err(crate::common::MidgeError::Fenced(
+                    "local flush checkpoint caller is behind durable authority".into(),
+                ));
+            }
+            self.manifest.adopt_checkpoint(checkpoint);
+        }
         let manifest_meta: crate::metadata::FileMeta = file_meta.into();
         let next_sst_seq = self
             .manifest
@@ -292,6 +338,7 @@ impl RuntimeState {
             .copied()
             .unwrap_or(1)
             .max(next_sst_seq);
+        let mut appended = false;
         match self
             .manifest
             .files
@@ -315,16 +362,27 @@ impl RuntimeState {
                             next_seq: next_sst_seq,
                         },
                         crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
+                        crate::metadata::ManifestEdit::BumpWalSeq { seq: sequence },
                     ],
                 )?;
                 self.manifest.add_file(manifest_meta);
                 self.manifest.note_applied_journal_edit(edit_id);
+                appended = true;
                 crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
             }
         }
         self.manifest.advance_next_sst_seq(cf_id, next_sst_seq);
         self.manifest.advance_persisted_sequence(sequence);
         self.clear_flush_publication_intent(&file_meta.name)?;
+        if ordinary_local
+            && bounded_record
+            && appended
+            && !self
+                .manifest_store
+                .local_checkpoint_due(self.manifest.edit_checkpoint_id)
+        {
+            return Ok(());
+        }
         match self
             .manifest_store
             .save_snapshot_for(origin, &self.manifest)
@@ -536,5 +594,60 @@ impl RuntimeState {
             .save_snapshot_for(Origin::Recovery, &self.manifest)?;
         self.manifest.adopt_checkpoint(checkpoint);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_bound_tests {
+    use super::flush_record_is_bounded;
+
+    #[test]
+    fn should_bound_framed_flush_record_before_deferring_large_key_metadata() {
+        // Arrange
+        for key_bytes in [0, 16, 512, 1024, 65_536] {
+            let meta = crate::runtime::FileMeta {
+                name: "000000_00_18446744073709551615.sst".into(),
+                level: u32::MAX,
+                size_bytes: u64::MAX,
+                content_crc32c: Some(u32::MAX),
+                cf_id: u32::MAX,
+                smallest_key: Some(vec![255; key_bytes]),
+                largest_key: Some(vec![255; key_bytes]),
+                smallest_seq: Some(u64::MAX),
+                largest_seq: Some(u64::MAX),
+                key_bounds_complete: true,
+            };
+
+            // Act
+            let eligible = flush_record_is_bounded(&meta);
+
+            // Assert: oversized bounds cannot enter the deferred path, while
+            // eligible worst-width fields fit including both TLV frames.
+            if key_bytes >= 1024 {
+                assert!(!eligible);
+                continue;
+            }
+            assert!(eligible);
+            let batch = crate::metadata::ManifestEdit::Batch(vec![
+                crate::metadata::ManifestEdit::BumpNextSstSeq {
+                    cf_id: u32::MAX,
+                    next_seq: u64::MAX,
+                },
+                crate::metadata::ManifestEdit::AddSst((&meta).into()),
+                crate::metadata::ManifestEdit::BumpWalSeq { seq: u64::MAX },
+            ]);
+            let envelope = serde_json::json!({"edit_id": u64::MAX, "edit": batch});
+            let marker = crate::metadata::journal::FsyncMarker {
+                last_persisted_sequence: u64::MAX,
+                ts_millis: u64::MAX,
+            };
+            let framed_bytes = serde_json::to_vec(&envelope).unwrap().len()
+                + serde_json::to_vec(&marker).unwrap().len()
+                + 18;
+            assert!(
+                framed_bytes <= crate::metadata::store::LOCAL_FLUSH_RECORD_BYTES,
+                "{key_bytes} key bytes produced {framed_bytes} framed bytes"
+            );
+        }
     }
 }

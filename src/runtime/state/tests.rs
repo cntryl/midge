@@ -2627,6 +2627,18 @@ impl crate::io::Fs for CountingFs {
 /// and returns (journal bytes, checkpoint bytes, durable syncs, final
 /// checkpoint size in bytes).
 fn measure_flush_publication_io(flushes: u64) -> (u64, u64, u64, u64) {
+    measure_flush_publication_io_for(
+        flushes,
+        crate::metadata::accounting::Origin::Unclassified,
+        true,
+    )
+}
+
+fn measure_flush_publication_io_for(
+    flushes: u64,
+    origin: crate::metadata::accounting::Origin,
+    require_snapshot: bool,
+) -> (u64, u64, u64, u64) {
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let mut state = RuntimeState::try_new(
         temp_dir.path().to_path_buf(),
@@ -2656,8 +2668,25 @@ fn measure_flush_publication_io(flushes: u64) -> (u64, u64, u64, u64) {
             key_bounds_complete: false,
         };
         state
-            .commit_flush_publication(0, n, &file_meta, n + 1, true)
+            .commit_flush_publication_for(super::manifest::FlushManifestPublication {
+                origin,
+                cf_id: 0,
+                sequence: n,
+                file_meta: &file_meta,
+                next_sst_seq: n + 1,
+                require_snapshot,
+            })
             .expect("publish flush");
+        // Reconstruct from disk after every publication, including deferred
+        // checkpoints. The snapshot alone must never be needed for progress.
+        let recovered = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+            &state.fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .expect("reconstruct published authority");
+        assert_eq!(recovered.last_persisted_sequence, n);
+        assert_eq!(recovered.next_sst_seqs.get(&0), Some(&(n + 1)));
+        assert_eq!(recovered.files.len(), usize::try_from(n).unwrap());
     }
 
     let load = std::sync::atomic::Ordering::SeqCst;
@@ -2674,6 +2703,94 @@ fn measure_flush_publication_io(flushes: u64) -> (u64, u64, u64, u64) {
         counters.durable_syncs.load(load),
         final_checkpoint,
     )
+}
+
+#[test]
+fn should_reduce_snapshot_bytes_when_ordinary_local_flushes_defer_checkpoints() {
+    // Arrange
+    let flushes = 128;
+    let (_, forced_bytes, _, _) = measure_flush_publication_io(flushes);
+
+    // Act
+    let (_, ordinary_bytes, _, _) = measure_flush_publication_io_for(
+        flushes,
+        crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+        false,
+    );
+
+    // Assert
+    assert!(ordinary_bytes * 10 <= forced_bytes,
+        "ordinary checkpoint payload must fall at least 90 percent: {ordinary_bytes} vs {forced_bytes}");
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    for failure in [
+        "midge::manifest::inject_snapshot_write_failure",
+        "midge::manifest::inject_no_space_on_checkpoint_save",
+        "midge::manifest::after_snapshot_rename_before_journal_truncate",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::try_new(
+            directory.path().to_path_buf(),
+            false,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .unwrap();
+        let publish = |state: &mut RuntimeState, n: u64| {
+            let file_meta = crate::runtime::FileMeta {
+                name: format!("000000_00_{n:020}.sst"),
+                level: 0,
+                size_bytes: 4096,
+                content_crc32c: Some(7),
+                cf_id: 0,
+                smallest_key: None,
+                largest_key: None,
+                smallest_seq: None,
+                largest_seq: None,
+                key_bounds_complete: false,
+            };
+            state.commit_flush_publication_for(super::manifest::FlushManifestPublication {
+                origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                cf_id: 0,
+                sequence: n,
+                file_meta: &file_meta,
+                next_sst_seq: n + 1,
+                require_snapshot: false,
+            })
+        };
+        for n in 1..16 {
+            publish(&mut state, n).unwrap();
+        }
+        fail::cfg(failure, "return").unwrap();
+
+        // Act: the triggering publication remains journal-durable; subsequent
+        // attempts must checkpoint before appending any more authority.
+        publish(&mut state, 16).unwrap();
+        let journal = directory.path().join(crate::metadata::files::JOURNAL);
+        let retained = std::fs::read(&journal).unwrap();
+        for _ in 0..3 {
+            assert!(publish(&mut state, 17).is_err());
+            assert_eq!(std::fs::read(&journal).unwrap(), retained);
+        }
+        let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        fail::remove(failure);
+        publish(&mut state, 17).unwrap();
+        let successor = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+
+        // Assert
+        assert_eq!(recovered.files.len(), 16);
+        assert_eq!(recovered.last_persisted_sequence, 16);
+        assert_eq!(recovered.next_sst_seqs.get(&0), Some(&17));
+        assert_eq!(successor.files.len(), 17);
+        assert_eq!(successor.last_persisted_sequence, 17);
+        assert_eq!(successor.next_sst_seqs.get(&0), Some(&18));
+    }
+    scenario.teardown();
 }
 
 /// Characterizes #670: every flush rewrites the full manifest, so cumulative

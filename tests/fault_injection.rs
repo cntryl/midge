@@ -3122,6 +3122,7 @@ mod chaos_real {
 
         // Act
         match scenario.to_string_lossy().as_ref() {
+            "local_deferred_checkpoint" => child_local_deferred_checkpoint(&db_path),
             "flush_after_sst_write" => child_flush_after_sst_write(&db_path),
             "flush_after_sst_write_best_effort" => {
                 child_flush_after_sst_write_best_effort(&db_path);
@@ -3534,6 +3535,65 @@ mod chaos_real {
         committed
     }
 
+    #[test]
+    fn should_recover_acknowledged_sst_data_when_crashing_with_deferred_local_checkpoint() {
+        // Arrange
+        let directory = TempDir::new().expect("private crash database");
+        let db_path = directory.path();
+
+        // Act: abort only after two real, acknowledged flush publications.
+        run_child_expect_abort("local_deferred_checkpoint", db_path, &[]);
+        expire_crashed_process_lease(db_path);
+        let committed = read_committed_records(db_path);
+        assert_eq!(committed.len(), 16);
+        assert!(!fs::read(db_path.join("manifest.journal"))
+            .unwrap()
+            .is_empty());
+        // Every tracked write was already flushed. Removing WAL in this
+        // private fixture prevents WAL replay from masking missing SST authority.
+        fs::remove_dir_all(db_path.join("wal")).expect("remove flushed fixture WAL");
+        let engine = open_local_engine(db_path);
+
+        // Assert
+        assert_committed_records_visible(&engine, &committed);
+    }
+
+    fn child_local_deferred_checkpoint(db_path: &Path) {
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let cf = default_cf(&engine);
+        let committed_path = committed_log_path(db_path);
+        for round in 0..2 {
+            for index in 0..8 {
+                let key = format!("deferred-{round}-{index}");
+                let value = format!("value-{round}-{index}");
+                put_and_track_commit(
+                    &engine,
+                    &cf,
+                    key.as_bytes(),
+                    value.as_bytes(),
+                    WriteOptions::sync(),
+                    &committed_path,
+                );
+            }
+            engine
+                .flush_cf(&cf)
+                .expect("acknowledged flush publication");
+        }
+        assert!(!fs::read(db_path.join("manifest.journal"))
+            .unwrap()
+            .is_empty());
+        crash::abort_at_trigger(
+            "local_deferred_checkpoint",
+            "manual::after_deferred_flush_ack",
+        );
+    }
+
     fn child_flush_after_sst_write(db_path: &Path) {
         crash::configure_abort_failpoint(
             "midge::flush::after_sst_write_before_publish",
@@ -3804,6 +3864,7 @@ mod chaos_real {
 
     fn crash_trigger(scenario: &str) -> &'static str {
         match scenario {
+            "local_deferred_checkpoint" => "manual::after_deferred_flush_ack",
             "flush_after_sst_write" | "flush_after_sst_write_best_effort" => {
                 "midge::flush::after_sst_write_before_publish"
             }

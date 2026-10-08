@@ -41,6 +41,13 @@ struct FileLengths {
     snapshot: u64,
 }
 
+// Candidate bounds for #752. One bounded flush record may cross the byte
+// trigger; the next append must first checkpoint successfully. Forced
+// publications continue to checkpoint on every call.
+pub(crate) const LOCAL_CHECKPOINT_EDITS: u64 = 16;
+pub(crate) const LOCAL_CHECKPOINT_BYTES: u64 = 16_384;
+pub(crate) const LOCAL_FLUSH_RECORD_BYTES: usize = 4_096;
+
 /// Owns the manifest journal and snapshot of one open database.
 pub(crate) struct ManifestStore {
     fs: Arc<dyn Fs>,
@@ -58,6 +65,28 @@ impl std::fmt::Debug for ManifestStore {
 }
 
 impl ManifestStore {
+    /// Unknown, externally changed or stale authority must never defer a
+    /// checkpoint. This query only stats files; it does not repair/replay them.
+    pub(crate) fn local_checkpoint_due(&self, applied_edit_id: u64) -> bool {
+        journal::with_manifest_writer_lock(&self.fs, || {
+            let known = self.known.lock();
+            let Some(cached) = *known else {
+                return true;
+            };
+            if Self::lengths_with_fs(&self.fs).ok() != Some(cached.lengths)
+                || applied_edit_id != cached.position.highest_edit_id
+            {
+                return true;
+            }
+            cached
+                .position
+                .highest_edit_id
+                .saturating_sub(cached.position.checkpoint_edit_id)
+                >= LOCAL_CHECKPOINT_EDITS
+                || cached.lengths.journal >= LOCAL_CHECKPOINT_BYTES
+        })
+    }
+
     #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn new(fs: Arc<dyn Fs>) -> Self {
         Self::new_with_accounting(fs, Owner::new(), Medium::MemoryOnly)
