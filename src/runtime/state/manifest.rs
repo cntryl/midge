@@ -315,6 +315,7 @@ impl RuntimeState {
                             next_seq: next_sst_seq,
                         },
                         crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
+                        crate::metadata::ManifestEdit::BumpWalSeq { seq: sequence },
                     ],
                 )?;
                 self.manifest.add_file(manifest_meta);

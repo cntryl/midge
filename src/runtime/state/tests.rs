@@ -2483,6 +2483,55 @@ fn should_sync_database_root_when_creating_wal_and_sst_directories() {
     );
 }
 
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = RuntimeState::try_new(
+        directory.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .unwrap();
+    let file_meta = crate::runtime::FileMeta {
+        name: "000000_00_00000000000000000017.sst".into(),
+        level: 0,
+        size_bytes: 4096,
+        content_crc32c: Some(7),
+        cf_id: 0,
+        smallest_key: None,
+        largest_key: None,
+        smallest_seq: None,
+        largest_seq: None,
+        key_bounds_complete: false,
+    };
+    fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
+
+    // Act: optional snapshot failure must leave one complete durable batch.
+    state
+        .commit_flush_publication_for(super::manifest::FlushManifestPublication {
+            origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+            cf_id: 0,
+            sequence: 123,
+            file_meta: &file_meta,
+            next_sst_seq: 18,
+            require_snapshot: false,
+        })
+        .unwrap();
+    fail::remove("midge::manifest::inject_snapshot_write_failure");
+    let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+
+    // Assert
+    assert_eq!(recovered.files.len(), 1);
+    assert_eq!(recovered.files[0].name, file_meta.name);
+    assert_eq!(recovered.next_sst_seqs.get(&0), Some(&18));
+    assert_eq!(recovered.last_persisted_sequence, 123);
+    scenario.teardown();
+}
+
 /// Counts bytes written and durable syncs, split into the manifest journal and
 /// everything else under the state directory (checkpoint staging files).
 #[derive(Default)]
