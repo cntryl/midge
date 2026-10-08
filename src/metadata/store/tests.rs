@@ -256,6 +256,41 @@ fn should_report_no_space_when_snapshot_write_hits_enospc() {
 }
 
 #[test]
+fn should_require_checkpoint_retry_when_append_refreshes_cache_after_snapshot_failure() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let fs = observed(&directory);
+    let store = ManifestStore::new(fs.clone());
+    let mut manifest = Manifest::default();
+    store
+        .save_snapshot(&manifest)
+        .unwrap()
+        .adopt_into(&mut manifest);
+    fs.snapshot_no_space.store(true, Ordering::SeqCst);
+    assert!(store.save_snapshot(&manifest).is_err());
+
+    // Act: a durable frontier fallback refreshes the cached position, but
+    // must not erase the failed checkpoint's publication backpressure.
+    let edit = ManifestEdit::BumpWalSeq { seq: 42 };
+    let id = store.append(&edit).unwrap();
+    manifest.apply_edit(&edit);
+    manifest.note_applied_journal_edit(id);
+    let retry_required = store.local_checkpoint_due(id);
+    fs.snapshot_no_space.store(false, Ordering::SeqCst);
+    store
+        .save_snapshot(&manifest)
+        .unwrap()
+        .adopt_into(&mut manifest);
+
+    // Assert: only a successful checkpoint releases that pressure.
+    assert!(retry_required);
+    assert!(!store.local_checkpoint_due(id));
+    assert!(store.can_use_forced_flush_path(id, 2 * 1024 * 1024));
+    let recovered = ManifestPersistence::load(directory.path()).unwrap();
+    assert_eq!(recovered.last_persisted_sequence, 42);
+}
+
+#[test]
 fn should_not_reuse_edit_id_when_journal_changed_outside_store() {
     // Arrange: the store knows the position, then another writer appends.
     let directory = tempfile::tempdir().expect("tempdir");

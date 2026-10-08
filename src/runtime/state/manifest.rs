@@ -324,6 +324,80 @@ impl RuntimeState {
         Ok(())
     }
 
+    fn append_flush_manifest_edits(
+        &self,
+        publication: FlushManifestPublication<'_>,
+        file_meta: crate::metadata::FileMeta,
+        next_sst_seq: u64,
+        include_frontier: bool,
+    ) -> MidgeResult<u64> {
+        let next = crate::metadata::ManifestEdit::BumpNextSstSeq {
+            cf_id: publication.cf_id,
+            next_seq: next_sst_seq,
+        };
+        let add = crate::metadata::ManifestEdit::AddSst(file_meta);
+        if include_frontier {
+            self.manifest_store.append_batch_for(
+                publication.origin,
+                &[
+                    next,
+                    add,
+                    crate::metadata::ManifestEdit::BumpWalSeq {
+                        seq: publication.sequence,
+                    },
+                ],
+            )
+        } else {
+            // Healthy cheap flushes retain the original two-edit payload;
+            // their forced snapshot makes the remaining frontier durable.
+            self.manifest_store
+                .append_batch_for(publication.origin, &[next, add])
+        }
+    }
+
+    fn checkpoint_flush_publication(
+        &mut self,
+        publication: FlushManifestPublication<'_>,
+        next_sst_seq: u64,
+        frontiers_journaled: bool,
+    ) -> MidgeResult<()> {
+        match self
+            .manifest_store
+            .save_snapshot_for(publication.origin, &self.manifest)
+        {
+            Ok(written) => self.manifest.adopt_checkpoint(written),
+            Err(error) if !publication.require_snapshot => {
+                self.mark_persistence_anomaly();
+                if !frontiers_journaled {
+                    // No flush ACK until both counter and frontier survive
+                    // without this failed snapshot. A fallback append must
+                    // not release the store's checkpoint retry pressure.
+                    let edit_id = self
+                        .manifest_store
+                        .append_batch_for(
+                            publication.origin,
+                            &[
+                                crate::metadata::ManifestEdit::BumpNextSstSeq {
+                                    cf_id: publication.cf_id,
+                                    next_seq: next_sst_seq,
+                                },
+                                crate::metadata::ManifestEdit::BumpWalSeq {
+                                    seq: publication.sequence,
+                                },
+                            ],
+                        )
+                        .inspect_err(|_| {
+                            self.fence_metadata_until_reloaded();
+                        })?;
+                    self.manifest.note_applied_journal_edit(edit_id);
+                }
+                tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
     pub(crate) fn commit_flush_publication_for(
         &mut self,
         publication: FlushManifestPublication<'_>,
@@ -371,16 +445,11 @@ impl RuntimeState {
             }
             None => {
                 crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
-                let edit_id = self.manifest_store.append_batch_for(
-                    origin,
-                    &[
-                        crate::metadata::ManifestEdit::BumpNextSstSeq {
-                            cf_id,
-                            next_seq: next_sst_seq,
-                        },
-                        crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
-                        crate::metadata::ManifestEdit::BumpWalSeq { seq: sequence },
-                    ],
+                let edit_id = self.append_flush_manifest_edits(
+                    publication,
+                    manifest_meta.clone(),
+                    next_sst_seq,
+                    !forced_path,
                 )?;
                 self.manifest.add_file(manifest_meta);
                 self.manifest.note_applied_journal_edit(edit_id);
@@ -404,18 +473,7 @@ impl RuntimeState {
         {
             return Ok(());
         }
-        match self
-            .manifest_store
-            .save_snapshot_for(origin, &self.manifest)
-        {
-            Ok(written) => self.manifest.adopt_checkpoint(written),
-            Err(error) if !require_snapshot => {
-                self.mark_persistence_anomaly();
-                tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
-            }
-            Err(error) => return Err(error),
-        }
-        Ok(())
+        self.checkpoint_flush_publication(publication, next_sst_seq, appended && !forced_path)
     }
 
     pub fn transition_compaction_publication_intent(

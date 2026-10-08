@@ -24,6 +24,7 @@ use crate::metadata::accounting::{Medium, OperationKind, Origin, Owner};
 use crate::metadata::journal::{self, ManifestEdit};
 use crate::metadata::persistence::{JournalPosition, WrittenCheckpoint};
 use crate::metadata::{Manifest, ManifestPersistence};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The journal position the store last wrote, and the file lengths that
@@ -52,6 +53,9 @@ pub(crate) const LOCAL_FLUSH_RECORD_BYTES: usize = 4_096;
 pub(crate) struct ManifestStore {
     fs: Arc<dyn Fs>,
     known: parking_lot::Mutex<Option<KnownPosition>>,
+    // A frontier fallback may refresh `known` after a failed snapshot. Only
+    // a successful checkpoint can release publication backpressure.
+    checkpoint_retry_required: AtomicBool,
     accounting: Owner,
     medium: Medium,
 }
@@ -71,7 +75,8 @@ impl ManifestStore {
     /// or deferred cached authority must take the full checkpoint preflight.
     pub(crate) fn can_use_forced_flush_path(&self, applied_edit_id: u64, sst_bytes: u64) -> bool {
         self.known.lock().is_some_and(|cached| {
-            cached.lengths.snapshot > 0
+            !self.checkpoint_retry_required.load(Ordering::Acquire)
+                && cached.lengths.snapshot > 0
                 && cached.lengths.journal == 0
                 && cached.position.checkpoint_edit_id == cached.position.highest_edit_id
                 && cached.position.highest_edit_id == applied_edit_id
@@ -92,6 +97,9 @@ impl ManifestStore {
     /// checkpoint. This query only stats files; it does not repair/replay them.
     pub(crate) fn local_checkpoint_due(&self, applied_edit_id: u64) -> bool {
         journal::with_manifest_writer_lock(&self.fs, || {
+            if self.checkpoint_retry_required.load(Ordering::Acquire) {
+                return true;
+            }
             let known = self.known.lock();
             let Some(cached) = *known else {
                 return true;
@@ -136,6 +144,7 @@ impl ManifestStore {
             accounting,
             medium,
             known: parking_lot::Mutex::new(None),
+            checkpoint_retry_required: AtomicBool::new(false),
         }
     }
 
@@ -201,13 +210,14 @@ impl ManifestStore {
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
         let result = journal::with_manifest_writer_lock(&fs, || {
             let mut known = self.known.lock();
-            let position = Self::position_with_fs(&fs, &mut known)?;
-            let result = ManifestPersistence::save_snapshot_unlocked_observed(
-                &fs,
-                manifest,
-                Some(position),
-                Some(&operation),
-            );
+            let result = Self::position_with_fs(&fs, &mut known).and_then(|position| {
+                ManifestPersistence::save_snapshot_unlocked_observed(
+                    &fs,
+                    manifest,
+                    Some(position),
+                    Some(&operation),
+                )
+            });
             *known = match &result {
                 Ok(written) => Self::remember_with_fs(
                     &fs,
@@ -218,6 +228,8 @@ impl ManifestStore {
                 ),
                 Err(_) => None,
             };
+            self.checkpoint_retry_required
+                .store(result.is_err(), Ordering::Release);
             result
         });
         operation.finish(result.is_ok());

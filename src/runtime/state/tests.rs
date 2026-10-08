@@ -2963,7 +2963,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
     state.manifest.adopt_checkpoint(checkpoint);
     fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
 
-    // Act: optional snapshot failure must leave one complete durable batch.
+    // Act: optional snapshot failure must leave durable identity/frontiers.
     state
         .commit_flush_publication_for(super::manifest::FlushManifestPublication {
             origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
@@ -2981,6 +2981,129 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
     assert_eq!(recovered.files.len(), 1);
     assert_eq!(recovered.files[0].name, file_meta.name);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&18));
+    assert_eq!(recovered.last_persisted_sequence, 123);
+    scenario.teardown();
+}
+
+fn cheap_flush_file(n: u64) -> crate::runtime::FileMeta {
+    crate::runtime::FileMeta {
+        name: format!("000000_00_{n:020}.sst"),
+        level: 0,
+        size_bytes: 2 * 1024 * 1024,
+        content_crc32c: Some(7),
+        cf_id: 0,
+        smallest_key: None,
+        largest_key: None,
+        smallest_seq: None,
+        largest_seq: None,
+        key_bounds_complete: false,
+    }
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_reject_flush_ack_when_failed_snapshot_frontier_fallback_cannot_sync() {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    for failure in [
+        "midge::manifest::inject_fsync_marker_write_failure",
+        "midge::manifest::inject_required_sync_failure",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::try_new(
+            directory.path().to_path_buf(),
+            false,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .unwrap();
+        let checkpoint = state
+            .manifest_store
+            .save_snapshot_for(
+                crate::metadata::accounting::Origin::Unclassified,
+                &state.manifest,
+            )
+            .unwrap();
+        state.manifest.adopt_checkpoint(checkpoint);
+        let file = cheap_flush_file(17);
+        let publication = super::manifest::FlushManifestPublication {
+            origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+            cf_id: 0,
+            sequence: 123,
+            file_meta: &file,
+            next_sst_seq: 18,
+            require_snapshot: false,
+        };
+        fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
+        // The SST identity batch syncs; only the frontier fallback fails.
+        fail::cfg(failure, "1*off->return").unwrap();
+
+        // Act
+        let failed = state.commit_flush_publication_for(publication);
+        fail::remove(failure);
+        let journal = directory.path().join(crate::metadata::files::JOURNAL);
+        let retained = std::fs::read(&journal).unwrap();
+        let before_retry = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        for _ in 0..3 {
+            assert!(state.commit_flush_publication_for(publication).is_err());
+            assert_eq!(std::fs::read(&journal).unwrap(), retained);
+        }
+        fail::remove("midge::manifest::inject_snapshot_write_failure");
+        state.reload_persisted_metadata().unwrap();
+        state.commit_flush_publication_for(publication).unwrap();
+        let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+
+        // Assert: no false ACK or deletion; a retry publishes exact authority.
+        assert!(failed.is_err(), "fallback must be durable before flush ACK");
+        assert_eq!(before_retry.files.len(), 1);
+        assert_eq!(before_retry.files[0].name, file.name);
+        assert_eq!(recovered.files.len(), 1);
+        assert_eq!(recovered.next_sst_seqs.get(&0), Some(&18));
+        assert_eq!(recovered.last_persisted_sequence, 123);
+    }
+    scenario.teardown();
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_recover_duplicate_flush_frontiers_when_optional_checkpoint_fails() {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = RuntimeState::try_new(
+        directory.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .unwrap();
+    let file = cheap_flush_file(17);
+    let mut publication = super::manifest::FlushManifestPublication {
+        origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+        cf_id: 0,
+        sequence: 17,
+        file_meta: &file,
+        next_sst_seq: 18,
+        require_snapshot: false,
+    };
+    state.commit_flush_publication_for(publication).unwrap();
+    publication.sequence = 123;
+    publication.next_sst_seq = 45;
+    fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
+
+    // Act: the identity already exists; only counter/frontier progress is new.
+    state.commit_flush_publication_for(publication).unwrap();
+    let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let journal = directory.path().join(crate::metadata::files::JOURNAL);
+    let retained = std::fs::read(&journal).unwrap();
+    assert!(state.commit_flush_publication_for(publication).is_err());
+    fail::remove("midge::manifest::inject_snapshot_write_failure");
+
+    // Assert
+    assert_eq!(std::fs::read(&journal).unwrap(), retained);
+    assert_eq!(recovered.files.len(), 1);
+    assert_eq!(recovered.files[0].name, file.name);
+    assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
     assert_eq!(recovered.last_persisted_sequence, 123);
     scenario.teardown();
 }
@@ -3049,6 +3172,104 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
     // Assert: original durable append + forced checkpoint already validates
     // the cheap path; preflight must not issue redundant filesystem stats.
     assert_eq!(ordinary, forced, "extra stats: {ordinary} vs {forced}");
+}
+
+#[test]
+fn should_preserve_original_journal_cost_when_healthy_cheap_flush_is_checkpointed() {
+    // Arrange
+    let measure = |original: bool| {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::try_new(
+            directory.path().to_path_buf(),
+            false,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .unwrap();
+        let counters = Arc::new(FlushIoCounters::default());
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(CountingFs {
+            inner: crate::io::RealFs::new(directory.path()).unwrap(),
+            counters: Arc::clone(&counters),
+        });
+        state.fs = Arc::clone(&fs);
+        state.manifest_store = Arc::new(crate::metadata::store::ManifestStore::new(fs));
+        let checkpoint = state
+            .manifest_store
+            .save_snapshot_for(
+                crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                &state.manifest,
+            )
+            .unwrap();
+        state.manifest.adopt_checkpoint(checkpoint);
+        for n in 1..=8 {
+            let file = crate::runtime::FileMeta {
+                name: format!("000000_00_{n:020}.sst"),
+                level: 0,
+                size_bytes: 2 * 1024 * 1024,
+                content_crc32c: Some(7),
+                cf_id: 0,
+                smallest_key: None,
+                largest_key: None,
+                smallest_seq: None,
+                largest_seq: None,
+                key_bounds_complete: false,
+            };
+            if original {
+                // The original successful forced path needs two edits: the
+                // following durable snapshot publishes the WAL frontier.
+                let meta: crate::metadata::FileMeta = (&file).into();
+                let id = state
+                    .manifest_store
+                    .append_batch_for(
+                        crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                        &[
+                            crate::metadata::ManifestEdit::BumpNextSstSeq {
+                                cf_id: 0,
+                                next_seq: n + 1,
+                            },
+                            crate::metadata::ManifestEdit::AddSst(meta.clone()),
+                        ],
+                    )
+                    .unwrap();
+                state.manifest.add_file(meta);
+                state.manifest.note_applied_journal_edit(id);
+                state.manifest.advance_next_sst_seq(0, n + 1);
+                state.manifest.advance_persisted_sequence(n);
+                let checkpoint = state
+                    .manifest_store
+                    .save_snapshot_for(
+                        crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                        &state.manifest,
+                    )
+                    .unwrap();
+                state.manifest.adopt_checkpoint(checkpoint);
+            } else {
+                state
+                    .commit_flush_publication_for(super::manifest::FlushManifestPublication {
+                        origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                        cf_id: 0,
+                        sequence: n,
+                        file_meta: &file,
+                        next_sst_seq: n + 1,
+                        require_snapshot: false,
+                    })
+                    .unwrap();
+            }
+        }
+        let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        assert_eq!(recovered.files.len(), 8);
+        assert_eq!(recovered.next_sst_seqs.get(&0), Some(&9));
+        assert_eq!(recovered.last_persisted_sequence, 8);
+        counters
+            .journal_bytes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    let original = measure(true);
+
+    // Act
+    let ordinary = measure(false);
+
+    // Assert: healthy forced publications retain the original issued payload.
+    assert_eq!(ordinary, original);
 }
 
 #[test]
@@ -3169,7 +3390,16 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
 
     // Act: cached state is cheap/current, but append must observe the new
     // durable edit and the forced checkpoint must reconstruct all authority.
-    publish(&mut state, 2).unwrap();
+    state
+        .commit_flush_publication_for(super::manifest::FlushManifestPublication {
+            origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+            cf_id: 0,
+            sequence: 123,
+            file_meta: &file(2),
+            next_sst_seq: 3,
+            require_snapshot: false,
+        })
+        .unwrap();
     let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
     let journal = directory.path().join(crate::metadata::files::JOURNAL);
     let retained = std::fs::read(&journal).unwrap();
@@ -3182,13 +3412,79 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
 
     // Assert
     assert_eq!(recovered.files.len(), 3);
-    assert_eq!(recovered.last_persisted_sequence, 77);
+    assert_eq!(recovered.last_persisted_sequence, 123);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
     assert!(matches!(blocked, Err(crate::common::MidgeError::Fenced(_))));
     assert_eq!(retained, Vec::<u8>::new());
     assert_eq!(blocked_recovery.files.len(), 3);
     assert_eq!(blocked_recovery.next_sst_seqs.get(&0), Some(&45));
     assert_eq!(successor.files.len(), 4);
-    assert_eq!(successor.last_persisted_sequence, 77);
+    assert_eq!(successor.last_persisted_sequence, 123);
     assert_eq!(successor.next_sst_seqs.get(&0), Some(&46));
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_append() {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = RuntimeState::try_new(
+        directory.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .unwrap();
+    let checkpoint = state
+        .manifest_store
+        .save_snapshot_for(
+            crate::metadata::accounting::Origin::Unclassified,
+            &state.manifest,
+        )
+        .unwrap();
+    state.manifest.adopt_checkpoint(checkpoint);
+    let other = crate::metadata::store::ManifestStore::new(Arc::clone(&state.fs));
+    fail::cfg_callback("midge::flush_worker::after_manifest_journal", move || {
+        other
+            .append_batch_for(
+                crate::metadata::accounting::Origin::Unclassified,
+                &[
+                    crate::metadata::ManifestEdit::AddSst((&cheap_flush_file(44)).into()),
+                    crate::metadata::ManifestEdit::BumpNextSstSeq {
+                        cf_id: 0,
+                        next_seq: 45,
+                    },
+                    crate::metadata::ManifestEdit::BumpWalSeq { seq: 77 },
+                ],
+            )
+            .unwrap();
+    })
+    .unwrap();
+    let file = cheap_flush_file(17);
+
+    // Act: replay must retain the caller's monotonic progress as well as the
+    // foreign structural authority; no extra healthy-path journal edit is needed.
+    state
+        .commit_flush_publication_for(super::manifest::FlushManifestPublication {
+            origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+            cf_id: 0,
+            sequence: 123,
+            file_meta: &file,
+            next_sst_seq: 18,
+            require_snapshot: false,
+        })
+        .unwrap();
+    fail::remove("midge::flush_worker::after_manifest_journal");
+    let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+
+    // Assert
+    assert_eq!(recovered.files.len(), 2);
+    assert_eq!(recovered.last_persisted_sequence, 123);
+    assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
+    assert_eq!(
+        std::fs::read(directory.path().join(crate::metadata::files::JOURNAL)).unwrap(),
+        Vec::<u8>::new()
+    );
+    scenario.teardown();
 }
