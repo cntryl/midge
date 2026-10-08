@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import pwd
 import signal
 import shutil
 import subprocess
@@ -14,6 +15,12 @@ import zipfile
 
 WORKLOAD = "checkpoint_local_256x1mib_1cf"
 BINARY = "tier4_system_checkpoint_write_amplification"
+BENCHMARK_ENV = ("STRESS_PROFILE", "STRESS_SAMPLES", "STRESS_WARMUP_SAMPLES",
+                 "STRESS_COOLDOWN_SAMPLES", "STRESS_CONFIRM_REGRESSIONS",
+                 "STRESS_TIMEOUT_SECS", "STRESS_NO_PROGRESS_TIMEOUT_SECS",
+                 "STRESS_GIT_SHA", "MIDGE_CHECKPOINT_REPEAT", "STRESS_RUN_ID",
+                 "STRESS_OUTPUT_DIR", "MIDGE_STRESS_ARTIFACT_DIR", "TMPDIR",
+                 "PATH", "GITHUB_SHA")
 
 
 def digest(path):
@@ -129,6 +136,17 @@ def native_result(root, sha):
             "checkpoint_gate": window["gate"], "verified": True}
 
 
+def cpu_command(command, root, environment):
+    # Only the sampler needs privilege. Git, Engine and its receipts retain
+    # the original runner identity and exact benchmark environment.
+    owner = pwd.getpwuid(os.getuid()).pw_name
+    child = ["runuser", "-u", owner, "--", "env"]
+    child.extend(f"{key}={environment[key]}" for key in BENCHMARK_ENV if key in environment)
+    child.extend(command)
+    return ["sudo", "-n", "perf", "record", "-F", "99", "-g", "--call-graph",
+            "dwarf", "-o", str(root / "perf.data"), "--"] + child
+
+
 def trial(build, block, root, instrument=None):
     root.mkdir()
     for directory in ("native", "midge"):
@@ -155,8 +173,7 @@ def trial(build, block, root, instrument=None):
         command = ["strace", "-f", "-c", "-e", "trace=fsync,fdatasync",
                    "-o", str(root / "sync-summary.txt")] + command
     elif instrument == "cpu":
-        command = ["sudo", "-n", "perf", "record", "-F", "99", "-g", "--call-graph",
-                   "dwarf", "-o", str(root / "perf.data"), "--"] + command
+        command = cpu_command(command, root, environment)
     subprocess.run(["sync"], check=True)
     result = {"sha": build["sha"], "binary_sha256": digest(build["binary"]),
               "instrument": instrument, "valid": False, "directory": str(root)}
@@ -175,6 +192,11 @@ def trial(build, block, root, instrument=None):
                 process.wait()
             result.update(returncode=process.returncode, error="original 900-second outer limit")
     result["process_wall_seconds"] = time.monotonic() - start
+    if instrument == "cpu" and (root / "perf.data").exists():
+        # perf's restrictive root-owned output otherwise prevents upload of
+        # every timing row. Restore ownership only on this trial's exact file.
+        subprocess.run(["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}",
+                        str(root / "perf.data")], check=True)
     # Companion receipts use tmpfs during the benchmark, as in the original
     # workflow. Copy only after exit and release this trial's owned duplicate.
     for directory in ("native", "midge"):
@@ -229,6 +251,9 @@ def main():
             item.update(block=block, role=role, index=index)
             report["trials"].append(item)
             save(args.output / "report.json", report)
+            print(json.dumps({key: item.get(key) for key in
+                              ("index", "role", "valid", "measured_elapsed_ns", "flush_p95_ns",
+                               "completed_compactions", "error")}), flush=True)
         report["complete"] = len(report["trials"]) == 12 and all(t["valid"] for t in report["trials"])
         save(args.output / "report.json", report)
         # Instrumentation begins only after the uninstrumented comparison.
@@ -241,6 +266,8 @@ def main():
                 item["role"] = role
                 report["profiles"].append(item)
                 save(args.output / "report.json", report)
+                print(json.dumps({"profile": instrument, "role": role,
+                                  "valid": item["valid"], "error": item.get("error")}), flush=True)
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
         report["error"] = str(error)
         report["complete"] = False

@@ -8,6 +8,21 @@ import profile_checkpoint_pair as pair
 
 
 class CheckpointPairTests(unittest.TestCase):
+    def test_should_keep_benchmark_unprivileged_when_cpu_sampler_requires_root(self):
+        # Arrange
+        environment = {key: "original-" + key for key in pair.BENCHMARK_ENV}
+        command = ["/usr/bin/time", "-v", "/actual/sealed/executable", "--bench"]
+        # Act
+        profiled = pair.cpu_command(command, Path("/owned/trial"), environment)
+        # Assert
+        self.assertEqual(profiled[:4], ["sudo", "-n", "perf", "record"])
+        child = profiled[profiled.index("--") + 1:]
+        self.assertEqual(child[0:2], ["runuser", "-u"])
+        self.assertEqual(child[3:5], ["--", "env"])
+        self.assertEqual(child[-len(command):], command)
+        for key, value in environment.items():
+            self.assertIn(key + "=" + value, child)
+
     def test_should_balance_source_and_position_when_planning_original_trials(self):
         # Arrange
         expected_first = ["baseline", "candidate", "candidate", "baseline"]
