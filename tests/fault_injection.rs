@@ -836,13 +836,35 @@ mod failure_injection {
             ],
             "the retained oldest immutable and younger flush need distinct stable identities"
         );
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(temp_dir.path().join("manifest.snapshot.json"))
-                .expect("read manifest snapshot"),
-        )
-        .expect("parse manifest");
-        assert_eq!(manifest["files"].as_array().map(Vec::len), Some(2));
-        assert_eq!(manifest["next_sst_seqs"][cf.id().to_string()], 3);
+        // A deferred snapshot need not contain the two publications yet.
+        // Reopen the actual snapshot+journal authority, then require its next
+        // SST identity rather than inspecting snapshot-only state.
+        shutdown_engine(engine);
+        let reopened = open_local_engine(temp_dir.path());
+        let cf = default_cf(&reopened);
+        let mut tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"successor".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        tx.commit(WriteOptions::sync()).unwrap();
+        reopened.flush_cf(&cf).unwrap();
+        let layout = reopened.metrics().get_storage_layout().unwrap();
+        let mut recovered_names: Vec<_> = layout
+            .levels
+            .iter()
+            .flat_map(|level| level.files.iter())
+            .map(|file| file.name.clone())
+            .collect();
+        recovered_names.sort();
+        assert_eq!(
+            recovered_names,
+            vec![
+                "000000_00_00000000000000000001.sst".to_string(),
+                "000000_00_00000000000000000002.sst".to_string(),
+                "000000_00_00000000000000000003.sst".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1426,8 +1448,34 @@ mod failure_injection {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let engine = open_local_engine(db_path);
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let cf = default_cf(&engine);
+        let mut families = vec![cf.clone()];
+        for n in 1..4 {
+            families.push(
+                engine
+                    .create_column_family(&format!("checkpoint-primer-{n}"))
+                    .unwrap(),
+            );
+        }
+        // Reach the deferred checkpoint trigger without hitting L0 pressure.
+        // These real flushes precede the best-effort writes under test.
+        for n in 0..15 {
+            let family = &families[n % 4];
+            let mut tx = engine
+                .begin_tx(family.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(format!("primer-{n}").into_bytes(), b"primer".to_vec(), None)
+                .unwrap();
+            tx.commit(WriteOptions::sync()).unwrap();
+            engine.flush_cf(family).unwrap();
+        }
 
         for index in 0..12 {
             let key = format!("checkpoint-flush-{index:02}");
@@ -2698,8 +2746,8 @@ mod failure_injection {
     #[test]
     fn should_not_delete_sst_referenced_by_dropped_journal_edit_when_runtime_publish_hits_corrupt_journal(
     ) {
-        // Arrange: two flushes whose AddSst edits stay in the journal because
-        // snapshot saves fail, then one of those journal records goes bad.
+        // Arrange: two ordinary flushes naturally defer their checkpoint;
+        // one of those durable AddSst journal records then goes bad.
         let _guard = failpoint_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2716,15 +2764,10 @@ mod failure_injection {
         };
         let engine = open(RecoveryPolicy::Salvage).expect("open salvage engine");
         let cf = default_cf(&engine);
-        let scenario = fail::FailScenario::setup();
-        fail::cfg("midge::manifest::inject_snapshot_write_failure", "return")
-            .expect("configure snapshot write failpoint");
         write_cf_value(&engine, &cf, b"a", b"value-a");
         engine.flush_cf(&cf).expect("flush a");
         write_cf_value(&engine, &cf, b"b", b"value-b");
         engine.flush_cf(&cf).expect("flush b");
-        fail::remove("midge::manifest::inject_snapshot_write_failure");
-        scenario.teardown();
         let flushed = sst_file_names(db_path);
         assert_eq!(flushed.len(), 2, "both flushes should publish an SST");
         assert!(

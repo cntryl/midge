@@ -92,3 +92,36 @@ Probe/short-run gains do not close #752.
 - Worst-width numeric fields/key-bound record-size controls passed.
 
 Hosted exact-head validation and candidate measurements remain separate from local proof.
+
+## First candidate campaign and unresolved acceptance
+
+Runtime source `f684ae151db1cb83e9d39f3c4431b5089c62b2ce` passed transport
+[37813574608](https://github.com/cntryl/midge/actions/runs/37813574608) and all nine
+[37814130394](https://github.com/cntryl/midge/actions/runs/37814130394) attempts.
+Independent sealed-artifact readback is committed in
+[checkpoint-752-candidate-first-readback.json](evidence/checkpoint-752-candidate-first-readback.json).
+The full comparison is [checkpoint-752-first-comparison.json](evidence/checkpoint-752-first-comparison.json).
+B checkpoint bytes fell 97.8% and time 97.5–98.8%; C fell 100% for both.
+A ordinary checkpoint cost also fell 100%, but public flush p95 was 2.238x and
+1.830x baseline in repeats 2 and 3. A/r2 ingestion elapsed increased 25%.
+SST build and WAL timing also vary substantially across these fresh hosts;
+that observation does not excuse the regression or establish its cause.
+No-regression acceptance remains unresolved. Complete replications retain all
+first-campaign rows: baseline 37815184003 and candidate 37815188233.
+
+Initial CI 37813517129 passed Windows but failed Linux/macOS on three tests
+assuming every local flush saves a snapshot. Fixtures now reach the actual
+checkpoint trigger before ENOSPC, seed a naturally deferred journal before
+corruption, and check durable successor SST identity through real reopen
+instead of snapshot-only JSON. All 186 local all-feature fault-injection tests
+passed after these changes. No runtime source changed in this fixture update.
+Refreshed exact-head CI and measurement gates are still required.
+
+Local debug reopen evidence, full drivers and binary/lock hashes are retained in
+[checkpoint-752-local-reopen-debug.json](evidence/checkpoint-752-local-reopen-debug.json).
+The first baseline attempt hit its original 60-second total limit; a phase
+diagnostic subsequently completed all 25 cases without widening it. The
+candidate retained at most 8,235 bytes/15 records in the tested small-key cases,
+checkpointed at record 16, and forced large-key snapshots. Both sources had
+reopen outliers (candidate up to 165.8 ms). The differing diagnostic driver,
+debug profile and first timeout prevent stable startup-performance acceptance.

@@ -1,0 +1,3062 @@
+{
+  "cadence_change_accepted": false,
+  "cells": [
+    {
+      "cell": "A",
+      "observed_valid_misses": 0,
+      "qualifies": false,
+      "valid_attempts": 3
+    },
+    {
+      "cell": "B",
+      "observed_valid_misses": 0,
+      "qualifies": false,
+      "valid_attempts": 3
+    },
+    {
+      "cell": "C",
+      "observed_valid_misses": 0,
+      "qualifies": false,
+      "valid_attempts": 3
+    }
+  ],
+  "complete": true,
+  "conditional_policy_measurement_predicate_met": false,
+  "coverage": "issued engine-Fs metadata payload and per-logical-flush publication wall time; pre-state startup writes excluded",
+  "device_write_amplification_measured": false,
+  "identity": {
+    "run_attempt": 1,
+    "run_id": 37814130394,
+    "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce"
+  },
+  "note": "native statistical diagnostics are preserved; hosted metadata is caller-supplied captured REST evidence, no live request made",
+  "planned_attempts": 9,
+  "qualification_errors": [],
+  "rows": [
+    {
+      "accounting": {
+        "completed_compactions": 100,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 0,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": null,
+          "checkpoint_p95_upper_ns": null,
+          "full_publication_elapsed_ns": 1441620098,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 246196325,
+          "snapshot_issued_bytes": 0,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 5666677648,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-A-r1-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "A",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 256,
+          "last_stall": null,
+          "successful_commits": 256,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 26,
+          "last_stall": null,
+          "successful_commits": 26,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 230,
+          "successful_commits": 230,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510505,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1604905,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1894409,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 235520,
+            "completed": 235520,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-A-r1",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479455085780354-0000002339-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 235520,
+              "completed": 235520,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 235520,
+            "completed": 235520,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-A-r1-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479455085780354-0000002339-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-A-r1",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 262144,
+        "benchmark_workload": "checkpoint_local_256x1mib_1cf",
+        "cell": "A",
+        "commit_backpressure": {
+          "attempts": 256,
+          "last_stall": null,
+          "successful_commits": 256,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 256,
+        "database_path": "/home/runner/work/_temp/.tmp6LsEJs",
+        "families": 1,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_256x1mib_1cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479455085780354-0000002339-00000000000000000000.json",
+          "receipt_run_id": "01791479455085780354-0000002339-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 230,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1604905,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1894409,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2339,
+        "reopened_verified": true,
+        "repeat": "1",
+        "rows_per_cycle": 1024,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 256,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 26
+      },
+      "provenance_bound": true,
+      "repeat": 1,
+      "valid": true,
+      "workload": "checkpoint_local_256x1mib_1cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 100,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 0,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": null,
+          "checkpoint_p95_upper_ns": null,
+          "full_publication_elapsed_ns": 1512000781,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 246196271,
+          "snapshot_issued_bytes": 0,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 5948927031,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-A-r2-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "A",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 256,
+          "last_stall": null,
+          "successful_commits": 256,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 26,
+          "last_stall": null,
+          "successful_commits": 26,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 230,
+          "successful_commits": 230,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510396,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1571866,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1711067,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 235520,
+            "completed": 235520,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-A-r2",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479456676689965-0000002459-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 235520,
+              "completed": 235520,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 235520,
+            "completed": 235520,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-A-r2-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479456676689965-0000002459-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-A-r2",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 262144,
+        "benchmark_workload": "checkpoint_local_256x1mib_1cf",
+        "cell": "A",
+        "commit_backpressure": {
+          "attempts": 256,
+          "last_stall": null,
+          "successful_commits": 256,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 256,
+        "database_path": "/home/runner/work/_temp/.tmpxltuwR",
+        "families": 1,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_256x1mib_1cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479456676689965-0000002459-00000000000000000000.json",
+          "receipt_run_id": "01791479456676689965-0000002459-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 230,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1571866,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1711067,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2459,
+        "reopened_verified": true,
+        "repeat": "2",
+        "rows_per_cycle": 1024,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 256,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 26
+      },
+      "provenance_bound": true,
+      "repeat": 2,
+      "valid": true,
+      "workload": "checkpoint_local_256x1mib_1cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 96,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 0,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": null,
+          "checkpoint_p95_upper_ns": null,
+          "full_publication_elapsed_ns": 1255133628,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 246196558,
+          "snapshot_issued_bytes": 0,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 4556443256,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-A-r3-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "A",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 272,
+          "last_stall": "column family 0 has no free L0 slot (14/14)",
+          "successful_commits": 256,
+          "wait_calls": 16,
+          "wait_elapsed_ns": 254534736,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 16
+        },
+        "before": {
+          "attempts": 26,
+          "last_stall": null,
+          "successful_commits": 26,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 246,
+          "successful_commits": 230,
+          "wait_calls": 16,
+          "wait_elapsed_ns": 254534736,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 16
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510292,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 4738899,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1386944,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 235520,
+            "completed": 235520,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-A-r3",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479454015047207-0000002391-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 235520,
+              "completed": 235520,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 235520,
+            "completed": 235520,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-A-r3-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479454015047207-0000002391-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-A-r3",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 262144,
+        "benchmark_workload": "checkpoint_local_256x1mib_1cf",
+        "cell": "A",
+        "commit_backpressure": {
+          "attempts": 272,
+          "last_stall": "column family 0 has no free L0 slot (14/14)",
+          "successful_commits": 256,
+          "wait_calls": 16,
+          "wait_elapsed_ns": 254534736,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 16
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 256,
+        "database_path": "/home/runner/work/_temp/.tmp6Qat6I",
+        "families": 1,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_256x1mib_1cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479454015047207-0000002391-00000000000000000000.json",
+          "receipt_run_id": "01791479454015047207-0000002391-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 230,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 4738899,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1386944,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2391,
+        "reopened_verified": true,
+        "repeat": "3",
+        "rows_per_cycle": 1024,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 256,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 26
+      },
+      "provenance_bound": true,
+      "repeat": 3,
+      "valid": true,
+      "workload": "checkpoint_local_256x1mib_1cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 145,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 9622079,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": 1000000,
+          "checkpoint_p95_upper_ns": 1249999,
+          "full_publication_elapsed_ns": 1740484159,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 123358982,
+          "snapshot_issued_bytes": 364822,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 4608059106,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-B-r1-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "B",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 512,
+          "last_stall": null,
+          "successful_commits": 512,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 52,
+          "last_stall": null,
+          "successful_commits": 52,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 460,
+          "successful_commits": 460,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510388,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1434878,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1312932,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 117760,
+            "completed": 117760,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-B-r1",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479481131156577-0000002410-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 117760,
+              "completed": 117760,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 117760,
+            "completed": 117760,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-B-r1-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479481131156577-0000002410-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-B-r1",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 131072,
+        "benchmark_workload": "checkpoint_local_512x256kib_16cf",
+        "cell": "B",
+        "commit_backpressure": {
+          "attempts": 512,
+          "last_stall": null,
+          "successful_commits": 512,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 512,
+        "database_path": "/home/runner/work/_temp/.tmp7QmZUF",
+        "families": 16,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_512x256kib_16cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479481131156577-0000002410-00000000000000000000.json",
+          "receipt_run_id": "01791479481131156577-0000002410-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 460,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1434878,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1312932,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2410,
+        "reopened_verified": true,
+        "repeat": "1",
+        "rows_per_cycle": 256,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 512,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 52
+      },
+      "provenance_bound": true,
+      "repeat": 1,
+      "valid": true,
+      "workload": "checkpoint_local_512x256kib_16cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 144,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 9702465,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": 1000000,
+          "checkpoint_p95_upper_ns": 1249999,
+          "full_publication_elapsed_ns": 1797083648,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 123358346,
+          "snapshot_issued_bytes": 367890,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 5077110140,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-B-r2-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "B",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 512,
+          "last_stall": null,
+          "successful_commits": 512,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 52,
+          "last_stall": null,
+          "successful_commits": 52,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 460,
+          "successful_commits": 460,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510202,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1576609,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1326953,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 117760,
+            "completed": 117760,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-B-r2",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479481345934533-0000002349-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 117760,
+              "completed": 117760,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 117760,
+            "completed": 117760,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-B-r2-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479481345934533-0000002349-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-B-r2",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 131072,
+        "benchmark_workload": "checkpoint_local_512x256kib_16cf",
+        "cell": "B",
+        "commit_backpressure": {
+          "attempts": 512,
+          "last_stall": null,
+          "successful_commits": 512,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 512,
+        "database_path": "/home/runner/work/_temp/.tmppDcuSZ",
+        "families": 16,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_512x256kib_16cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479481345934533-0000002349-00000000000000000000.json",
+          "receipt_run_id": "01791479481345934533-0000002349-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 460,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1576609,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1326953,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2349,
+        "reopened_verified": true,
+        "repeat": "2",
+        "rows_per_cycle": 256,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 512,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 52
+      },
+      "provenance_bound": true,
+      "repeat": 2,
+      "valid": true,
+      "workload": "checkpoint_local_512x256kib_16cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 146,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 10252184,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": 1500000,
+          "checkpoint_p95_upper_ns": 1749999,
+          "full_publication_elapsed_ns": 1756857389,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 123358783,
+          "snapshot_issued_bytes": 357157,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 4764157931,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-B-r3-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "B",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 512,
+          "last_stall": null,
+          "successful_commits": 512,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 52,
+          "last_stall": null,
+          "successful_commits": 52,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 460,
+          "successful_commits": 460,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510383,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1313408,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 2350013,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 117760,
+            "completed": 117760,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-B-r3",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479482994609781-0000002364-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 117760,
+              "completed": 117760,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 117760,
+            "completed": 117760,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-B-r3-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479482994609781-0000002364-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-B-r3",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 131072,
+        "benchmark_workload": "checkpoint_local_512x256kib_16cf",
+        "cell": "B",
+        "commit_backpressure": {
+          "attempts": 512,
+          "last_stall": null,
+          "successful_commits": 512,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 512,
+        "database_path": "/home/runner/work/_temp/.tmpl7CIBW",
+        "families": 16,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_512x256kib_16cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479482994609781-0000002364-00000000000000000000.json",
+          "receipt_run_id": "01791479482994609781-0000002364-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 460,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1313408,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 2350013,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2364,
+        "reopened_verified": true,
+        "repeat": "3",
+        "rows_per_cycle": 256,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 512,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 52
+      },
+      "provenance_bound": true,
+      "repeat": 3,
+      "valid": true,
+      "workload": "checkpoint_local_512x256kib_16cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 351,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 0,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": null,
+          "checkpoint_p95_upper_ns": null,
+          "full_publication_elapsed_ns": 3207539110,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 61847210,
+          "snapshot_issued_bytes": 0,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 7719768799,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-C-r1-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "C",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 1024,
+          "last_stall": null,
+          "successful_commits": 1024,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 103,
+          "last_stall": null,
+          "successful_commits": 103,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 921,
+          "successful_commits": 921,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510368,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1343476,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 729632,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 58944,
+            "completed": 58944,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-C-r1",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479511461767990-0000003061-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 58944,
+              "completed": 58944,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 58944,
+            "completed": 58944,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-C-r1-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479511461767990-0000003061-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-C-r1",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 65536,
+        "benchmark_workload": "checkpoint_local_1024x64kib_1cf",
+        "cell": "C",
+        "commit_backpressure": {
+          "attempts": 1024,
+          "last_stall": null,
+          "successful_commits": 1024,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 1024,
+        "database_path": "/home/runner/work/_temp/.tmpNOOVRv",
+        "families": 1,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_1024x64kib_1cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479511461767990-0000003061-00000000000000000000.json",
+          "receipt_run_id": "01791479511461767990-0000003061-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 921,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1343476,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 729632,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 3061,
+        "reopened_verified": true,
+        "repeat": "1",
+        "rows_per_cycle": 64,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 1024,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 103
+      },
+      "provenance_bound": true,
+      "repeat": 1,
+      "valid": true,
+      "workload": "checkpoint_local_1024x64kib_1cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 351,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 0,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": null,
+          "checkpoint_p95_upper_ns": null,
+          "full_publication_elapsed_ns": 3572472339,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 61847210,
+          "snapshot_issued_bytes": 0,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 8959801502,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-C-r2-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "C",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 1024,
+          "last_stall": null,
+          "successful_commits": 1024,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 103,
+          "last_stall": null,
+          "successful_commits": 103,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 921,
+          "successful_commits": 921,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510329,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1576299,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1122699,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 58944,
+            "completed": 58944,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-C-r2",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479511634477651-0000002345-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 58944,
+              "completed": 58944,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 58944,
+            "completed": 58944,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-C-r2-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479511634477651-0000002345-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-C-r2",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 65536,
+        "benchmark_workload": "checkpoint_local_1024x64kib_1cf",
+        "cell": "C",
+        "commit_backpressure": {
+          "attempts": 1024,
+          "last_stall": null,
+          "successful_commits": 1024,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 1024,
+        "database_path": "/home/runner/work/_temp/.tmpH4Cikz",
+        "families": 1,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_1024x64kib_1cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479511634477651-0000002345-00000000000000000000.json",
+          "receipt_run_id": "01791479511634477651-0000002345-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 921,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1576299,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1122699,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2345,
+        "reopened_verified": true,
+        "repeat": "2",
+        "rows_per_cycle": 64,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 1024,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 103
+      },
+      "provenance_bound": true,
+      "repeat": 2,
+      "valid": true,
+      "workload": "checkpoint_local_1024x64kib_1cf"
+    },
+    {
+      "accounting": {
+        "completed_compactions": 351,
+        "device_write_amplification_measured": false,
+        "gate": {
+          "checkpoint_elapsed_ns": 0,
+          "checkpoint_miss": false,
+          "checkpoint_p95_lower_ns": null,
+          "checkpoint_p95_upper_ns": null,
+          "full_publication_elapsed_ns": 3317462357,
+          "miss": false,
+          "ordinary_committed_sst_bytes": 61847208,
+          "snapshot_issued_bytes": 0,
+          "snapshot_miss": false
+        },
+        "measured_elapsed_ns": 8087089776,
+        "owner_id": 1
+      },
+      "artifact_name": "bench-tier4-checkpoint-C-r3-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1",
+      "cell": "C",
+      "commit_backpressure": {
+        "after": {
+          "attempts": 1024,
+          "last_stall": null,
+          "successful_commits": 1024,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "before": {
+          "attempts": 103,
+          "last_stall": null,
+          "successful_commits": 103,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "executed_wait_body_verified_from_json": false,
+        "measured": {
+          "attempts": 921,
+          "successful_commits": 921,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "wait_clear_is_ack": false
+      },
+      "failure_kind": null,
+      "hosted_job_conclusion": "success",
+      "hosted_job_id": 113439510312,
+      "invalid_reasons": [],
+      "metadata_boundary": {
+        "after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1327529,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 962257,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "executed_work_or_clock_verified_from_json": false,
+        "global_runtime_barrier": false,
+        "policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "selected_owner_id": 1
+      },
+      "miss": false,
+      "native": {
+        "correctness": {
+          "counters": {
+            "attempted": 58944,
+            "completed": 58944,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          },
+          "errors": [],
+          "passed": true
+        },
+        "diagnostics": [
+          {
+            "code": "too_few_samples",
+            "evidence": {
+              "measured_samples": "1"
+            },
+            "reason": "The row has too few measured samples to make a stable decision.",
+            "severity": "error",
+            "suggestions": [
+              "Collect at least five measured samples, or use the release profile for gate-quality rows."
+            ]
+          }
+        ],
+        "metadata": {
+          "allow_codes_src": "default",
+          "baseline_dir_src": "default",
+          "baseline_runs_src": "default",
+          "baseline_src": "default",
+          "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+          "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+          "console_names_src": "default",
+          "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+          "deny_codes_src": "default",
+          "deny_diagnostics_src": "default",
+          "fail_on_quality_src": "default",
+          "fail_on_regression_src": "default",
+          "filter_src": "cli --workload",
+          "git_sha_src": "env STRESS_GIT_SHA",
+          "include_ignored_src": "default",
+          "json_stdout_src": "default",
+          "micro_sample_duration_src": "default",
+          "min_quality_src": "default",
+          "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+          "operations_per_sample_src": "default",
+          "output_dir_src": "env STRESS_OUTPUT_DIR",
+          "profile_src": "env STRESS_PROFILE",
+          "progress_src": "default",
+          "require_quiet_env_src": "default",
+          "run_id": "midge715-37814130394-a1-C-r3",
+          "sample_duration_src": "default",
+          "samples_src": "env STRESS_SAMPLES",
+          "save_baseline_src": "default",
+          "threshold_src": "default",
+          "tier_src": "default",
+          "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+          "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+        },
+        "quality": "untrustworthy",
+        "started_at": "01791479516907426765-0000002361-00000000000000000000",
+        "trust_class": "invalid"
+      },
+      "native_failure": {
+        "benchmark_errors": [],
+        "correctness": [
+          {
+            "counters": {
+              "attempted": 58944,
+              "completed": 58944,
+              "dropped": 0,
+              "duplicates": 0,
+              "failures": 0,
+              "timeouts": 0,
+              "validation_errors": 0
+            },
+            "errors": [],
+            "passed": true
+          }
+        ],
+        "correctness_failed": false,
+        "failed": false,
+        "failure_kind": null,
+        "failure_kinds": [],
+        "reporter_error": null,
+        "sample_counters": [
+          {
+            "attempted": 58944,
+            "completed": 58944,
+            "dropped": 0,
+            "duplicates": 0,
+            "failures": 0,
+            "timeouts": 0,
+            "validation_errors": 0
+          }
+        ]
+      },
+      "native_receipt": "/tmp/midge-752-candidate-full-captured/artifacts/bench-tier4-checkpoint-C-r3-f684ae151db1cb83e9d39f3c4431b5089c62b2ce-37814130394-a1/native/tier4-system-checkpoint-write-amplification/01791479516907426765-0000002361-00000000000000000000.json",
+      "observed_native_failure_metadata": {
+        "allow_codes_src": "default",
+        "baseline_dir_src": "default",
+        "baseline_runs_src": "default",
+        "baseline_src": "default",
+        "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+        "confirm_regressions_src": "env STRESS_CONFIRM_REGRESSIONS",
+        "console_names_src": "default",
+        "cooldown_samples_src": "env STRESS_COOLDOWN_SAMPLES",
+        "deny_codes_src": "default",
+        "deny_diagnostics_src": "default",
+        "fail_on_quality_src": "default",
+        "fail_on_regression_src": "default",
+        "filter_src": "cli --workload",
+        "git_sha_src": "env STRESS_GIT_SHA",
+        "include_ignored_src": "default",
+        "json_stdout_src": "default",
+        "micro_sample_duration_src": "default",
+        "min_quality_src": "default",
+        "no_progress_timeout_secs_src": "env STRESS_NO_PROGRESS_TIMEOUT_SECS",
+        "operations_per_sample_src": "default",
+        "output_dir_src": "env STRESS_OUTPUT_DIR",
+        "profile_src": "env STRESS_PROFILE",
+        "progress_src": "default",
+        "require_quiet_env_src": "default",
+        "run_id": "midge715-37814130394-a1-C-r3",
+        "sample_duration_src": "default",
+        "samples_src": "env STRESS_SAMPLES",
+        "save_baseline_src": "default",
+        "threshold_src": "default",
+        "tier_src": "default",
+        "timeout_secs_src": "env STRESS_TIMEOUT_SECS",
+        "warmup_samples_src": "env STRESS_WARMUP_SAMPLES"
+      },
+      "observed_status": {
+        "acknowledged_rows": 65536,
+        "benchmark_workload": "checkpoint_local_1024x64kib_1cf",
+        "cell": "C",
+        "commit_backpressure": {
+          "attempts": 1024,
+          "last_stall": null,
+          "successful_commits": 1024,
+          "wait_calls": 0,
+          "wait_elapsed_ns": 0,
+          "wait_timeouts": 0,
+          "wait_write_stalls": 0,
+          "write_stalls": 0
+        },
+        "commit_backpressure_policy": {
+          "cell_budget_ns": 900000000000,
+          "required_no_progress_timeout_ns": 60000000000,
+          "retry_budget_ns": 30000000000,
+          "retry_error": "write_stall_only",
+          "schema_version": "midge-checkpoint-commit-policy.v1",
+          "wait_slice_ns": 1000000000
+        },
+        "completed_cycles": 1024,
+        "database_path": "/home/runner/work/_temp/.tmpkAvKv6",
+        "families": 1,
+        "finalization": {
+          "benchmark_errors": [],
+          "benchmark_workload": "checkpoint_local_1024x64kib_1cf",
+          "correctness_failed": false,
+          "failed": false,
+          "failure_kind": null,
+          "failure_source": null,
+          "receipt_path": "target/checkpoint-attempt/native/tier4-system-checkpoint-write-amplification/01791479516907426765-0000002361-00000000000000000000.json",
+          "receipt_run_id": "01791479516907426765-0000002361-00000000000000000000",
+          "receipt_selection": "matched",
+          "reporter_error": null,
+          "sha": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+          "source": "cntryl-stress",
+          "step_outcome": "success"
+        },
+        "flush_in_flight": false,
+        "git_commit": "f684ae151db1cb83e9d39f3c4431b5089c62b2ce",
+        "measured_cycles": 921,
+        "metadata_boundary_after": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 1327529,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_before": {
+          "active_samples": 0,
+          "complete": true,
+          "elapsed_ns": 962257,
+          "final_persistent_active": 0,
+          "max_pause_requested_ns": 0,
+          "pause_calls": 0,
+          "pause_requested_ns": 0,
+          "paused_ns": 0,
+          "samples": 1
+        },
+        "metadata_boundary_policy": {
+          "after_clock_scope": "end_inside_measured",
+          "before_clock_scope": "warmup_wait_outside_measured_final_query_inside",
+          "boundary_budget_ns": 30000000000,
+          "cell_budget_ns": 900000000000,
+          "metadata_scope": "persistent_only",
+          "pause_slice_ns": 1000000,
+          "progress_advanced": false,
+          "sample_order": "runtime_metrics_then_metadata_snapshot",
+          "schema_version": "midge-checkpoint-boundary-policy.v1",
+          "zero_persistent_active_required": true
+        },
+        "phase": "complete",
+        "process_id": 2361,
+        "reopened_verified": true,
+        "repeat": "3",
+        "rows_per_cycle": 64,
+        "schema_version": "midge-checkpoint.v1",
+        "stage_index": null,
+        "status": "passed",
+        "status_before_finalization": "passed",
+        "terminal_error": null,
+        "total_cycles": 1024,
+        "value_bytes": 1024,
+        "verified": true,
+        "warmup_cycles": 103
+      },
+      "provenance_bound": true,
+      "repeat": 3,
+      "valid": true,
+      "workload": "checkpoint_local_1024x64kib_1cf"
+    }
+  ],
+  "schema_version": "midge715-campaign-readback.v1"
+}
