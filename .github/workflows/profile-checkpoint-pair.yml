@@ -1,0 +1,95 @@
+name: Profile checkpoint pair
+
+on:
+  workflow_call:
+    inputs:
+      baseline_run:
+        type: string
+        required: true
+      baseline_sha:
+        type: string
+        required: true
+      candidate_run:
+        type: string
+        required: true
+      candidate_sha:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      baseline_run:
+        description: Completed original baseline checkpoint campaign run
+        required: true
+        default: '37834100918'
+      baseline_sha:
+        description: Actual immutable baseline source and build SHA
+        required: true
+        default: d5bcb607b75b1fa5cf5e4f4f910d7e49f9ebe12b
+      candidate_run:
+        description: Completed original candidate checkpoint campaign run
+        required: true
+        default: '37841786212'
+      candidate_sha:
+        description: Actual immutable candidate source and build SHA
+        required: true
+        default: 640d4692cfcb570518bdb9fa6dc0eac86a0d21e9
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: checkpoint-pair-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate paired diagnostic source and recovery contracts
+        run: python3 -m unittest discover -s tools -p test_profile_checkpoint_pair.py -v
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.baseline_sha }}
+          path: pair-source/baseline
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: pair-source/candidate
+      - name: Prepare instrumentation before any measured trial
+        shell: bash
+        run: |
+          mkdir -p target/checkpoint-pair-host
+          sudo apt-get update > target/checkpoint-pair-host/apt.log 2>&1
+          sudo apt-get install -y strace >> target/checkpoint-pair-host/apt.log 2>&1
+          sudo apt-get install -y "linux-tools-$(uname -r)" >> target/checkpoint-pair-host/apt.log 2>&1 || true
+          lscpu > target/checkpoint-pair-host/cpu.txt
+          uname -a > target/checkpoint-pair-host/kernel.txt
+          findmnt -T "$RUNNER_TEMP" > target/checkpoint-pair-host/database-mount.txt
+          df -B1 "$RUNNER_TEMP" /dev/shm > target/checkpoint-pair-host/free-space.txt
+      - name: Compare sealed executables in balanced fresh-process order, then profile
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TMPDIR: ${{ runner.temp }}
+          BASELINE_RUN: ${{ inputs.baseline_run }}
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          python3 tools/profile_checkpoint_pair.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --baseline-run "$BASELINE_RUN" --baseline-sha "$BASELINE_SHA" \
+            --candidate-run "$CANDIDATE_RUN" --candidate-sha "$CANDIDATE_SHA" \
+            --baseline-source pair-source/baseline --candidate-source pair-source/candidate \
+            --output target/checkpoint-pair
+      - name: Preserve every timing, profile, transport failure and original archive
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: checkpoint-pair-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          path: |
+            target/checkpoint-pair/**
+            target/checkpoint-pair-host/**
+          if-no-files-found: error
