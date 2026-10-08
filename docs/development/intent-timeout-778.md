@@ -3,7 +3,7 @@
 The failed sanitized qualification run
 [37686932618](https://github.com/cntryl/midge/actions/runs/37686932618)
 at `eacf3d62128d3aabb5dae785904febe22a6c991b` timed out on the one-byte
-input `C` after 326 prior mutations. The configured per-input timeout was
+input `C` after hundreds of prior inputs. The configured per-input timeout was
 10 seconds. The existing 18-byte replay control passed first.
 
 ## Exact stack attribution
