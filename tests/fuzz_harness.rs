@@ -58,3 +58,29 @@ fn should_complete_recovery_when_replaying_the_preserved_intent_timeout_input() 
         Err(cntryl_midge::MidgeError::RecoveryFailed(_))
     ));
 }
+
+#[test]
+fn should_release_startup_workers_when_replaying_repeated_one_byte_intent_failures() {
+    // Arrange
+    let input = include_bytes!("fixtures/fuzz/intent_timeout_1.bin");
+
+    // Act: match the fuzz target's same-process seed/strict/salvage lifecycle.
+    for _ in 0..64 {
+        let directory = tempfile::tempdir().unwrap();
+        harness::seed_db(directory.path());
+        harness::write_relative(directory.path(), "intent_log.json", input);
+        let result = Engine::open(OpenOptions::local(directory.path()).build().unwrap());
+
+        // Assert: strict recovery still rejects malformed intent. The harness
+        // then exercises both strict failure and the existing salvage policy.
+        assert!(matches!(
+            result,
+            Err(cntryl_midge::MidgeError::RecoveryFailed(_))
+        ));
+        harness::exercise_open_and_verify(directory.path());
+        std::fs::remove_file(directory.path().join("intent_log.json")).unwrap();
+        let mut successor = Engine::open(OpenOptions::local(directory.path()).build().unwrap())
+            .expect("failed recovery must release its startup lease and workers");
+        successor.shutdown(Duration::from_secs(5)).unwrap();
+    }
+}

@@ -2,58 +2,88 @@ name: Fuzz Qualification
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
 
 permissions:
   contents: read
-  actions: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  reproduce:
+  bounded-smoke:
+    name: Bounded fuzz smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
+      FUZZ_TOOLCHAIN: nightly-2026-07-01
       RUSTUP_TOOLCHAIN: nightly-2026-07-01
+
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: eacf3d62128d3aabb5dae785904febe22a6c991b
-      - name: Install original toolchain and symbolizer
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned fuzz toolchain
         run: |
-          rustup toolchain install nightly-2026-07-01 --profile minimal
+          rustup toolchain install "${FUZZ_TOOLCHAIN}" --profile minimal
           cargo install cargo-fuzz --version 0.13.2 --locked
-          sudo apt-get update
-          sudo apt-get install -y llvm
-          echo "ASAN_SYMBOLIZER_PATH=$(command -v llvm-symbolizer)" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fuzz
-      - name: Preserve original corpus and input
-        env:
-          GH_TOKEN: ${{ github.token }}
+          shared-key: "fuzz"
+
+      - name: Build every fuzz target
+        run: cargo fuzz build
+
+      - name: Replay preserved intent timeout under sanitizers
+        run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_18.bin -- -runs=32 -timeout=10
+
+      - name: Replay preserved one-byte intent timeout under sanitizers
+        run: cargo fuzz run intent_log_replay tests/fixtures/fuzz/intent_timeout_1.bin -- -runs=128 -timeout=10
+
+      - name: Replay original intent mutation seed under sanitizers
         run: |
-          gh run download 37686932618 --repo cntryl/midge --name fuzz-qualification-eacf3d62128d3aabb5dae785904febe22a6c991b-1 --dir original
-          sha256sum original/artifacts/intent_log_replay/timeout-32096c2e0eff33d844ee6d675407ace18289357d
-      - name: Build original fuzz target
-        run: cargo fuzz build intent_log_replay
-      - name: Replay isolated one-byte timeout
-        run: cargo fuzz run intent_log_replay original/artifacts/intent_log_replay/timeout-32096c2e0eff33d844ee6d675407ace18289357d -- -runs=128 -timeout=10
-      - name: Replay original mutation seed from original starting corpus
-        if: ${{ !cancelled() }}
+          mkdir -p fuzz/timeout-seed-corpus
+          cp tests/fixtures/fuzz/intent_timeout_18.bin fuzz/timeout-seed-corpus/
+          cargo fuzz run intent_log_replay fuzz/timeout-seed-corpus -- -seed=1504688986 -max_total_time=30 -timeout=10
+
+      - name: Replay preserved intent failure corpus under sanitizers
         run: |
-          mkdir -p diagnostic-corpus
-          cp tests/fixtures/fuzz/intent_timeout_18.bin diagnostic-corpus/
-          cargo fuzz run intent_log_replay diagnostic-corpus -- -seed=1504688986 -runs=2048 -timeout=10
-      - name: Replay preserved failure corpus
-        if: ${{ !cancelled() }}
-        run: cargo fuzz run intent_log_replay original/corpus/intent_log_replay -- -runs=2048 -timeout=10
-      - name: Preserve symbolized diagnostic evidence
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          destination = Path("fuzz/timeout-regression-corpus")
+          destination.mkdir(parents=True, exist_ok=True)
+          corpus = json.loads(Path("tests/fixtures/fuzz/intent_timeout_corpus.json").read_text())
+          for name, encoded in corpus.items():
+              (destination / name).write_bytes(bytes.fromhex(encoded))
+          PYTHON
+          cargo fuzz run intent_log_replay fuzz/timeout-regression-corpus -- -runs=2048 -timeout=10
+
+      - name: Smoke WAL frame recovery
+        run: cargo fuzz run wal_frame_recovery -- -max_total_time=30 -timeout=10
+
+      - name: Smoke manifest journal replay
+        run: cargo fuzz run manifest_journal_replay -- -max_total_time=30 -timeout=10
+
+      - name: Smoke intent log replay
+        run: cargo fuzz run intent_log_replay -- -max_total_time=30 -timeout=10
+
+      - name: Smoke SST block decode
+        run: cargo fuzz run sst_block_decode -- -max_total_time=30 -timeout=10
+
+      - name: Preserve fuzz corpus and failure artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: intent-timeout-diagnostic-${{ github.run_id }}
+          name: fuzz-qualification-${{ github.sha }}-${{ github.run_attempt }}
           path: |
+            fuzz/corpus
             fuzz/artifacts
-            fuzz/target/x86_64-unknown-linux-gnu/release/intent_log_replay
-            diagnostic-corpus
-            original
+            fuzz/timeout-seed-corpus
+            fuzz/timeout-regression-corpus
+          if-no-files-found: ignore
