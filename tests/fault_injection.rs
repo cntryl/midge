@@ -7612,6 +7612,95 @@ mod cloud_persistence_hardening {
     }
 
     #[test]
+    #[cfg(feature = "failpoints")]
+    fn should_observe_converged_catalogs_when_retirement_is_quiescent() {
+        // Arrange
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let opts = opts_for_mode("cloud");
+        let db_path = cloud_db_path(&opts);
+        let mut engine = Engine::open(opts.to_open_options()).expect("open cloud engine");
+        put_default(
+            &engine,
+            b"catalog-retirement-key",
+            b"catalog-retirement-value",
+            WriteOptions::cloud_strict(),
+        );
+        let primary_path = db_path.join("cloud_store/wal/publication-catalog.v1.json");
+        let mirror_path = db_path.join("cloud_store/wal/publication-catalog.v1.mirror.json");
+        let before: serde_json::Value =
+            serde_json::from_slice(&fs::read(&primary_path).expect("read published catalog"))
+                .expect("decode published catalog");
+        assert_eq!(before["segments"].as_object().unwrap().len(), 1);
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (resume_tx, resume_rx) = crossbeam::channel::bounded(1);
+        let callback_primary = primary_path.clone();
+        let first_retirement = std::sync::atomic::AtomicBool::new(true);
+        let scenario = fail::FailScenario::setup();
+        fail::cfg_callback(
+            "midge::cloud::after_catalog_primary_before_mirror",
+            move || {
+                let primary: serde_json::Value = serde_json::from_slice(
+                    &fs::read(&callback_primary).expect("read primary at publication boundary"),
+                )
+                .expect("decode primary at publication boundary");
+                if primary["segments"].as_object().unwrap().is_empty()
+                    && first_retirement.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    entered_tx.send(()).expect("signal paused retirement");
+                    resume_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("resume catalog mirror synchronization");
+                }
+            },
+        )
+        .expect("pause retirement between primary and mirror publication");
+
+        // Act
+        let cf = engine.get_column_family("default").expect("default CF");
+        thread::scope(|scope| {
+            let flush = scope.spawn(|| engine.flush_cf(&cf));
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("retirement reached the publication gap");
+            let primary = fs::read(&primary_path).expect("read paused primary");
+            let mirror = fs::read(&mirror_path).expect("read paused mirror");
+            let value = get_default(&engine, b"catalog-retirement-key");
+            resume_tx.send(()).expect("resume retirement");
+            flush
+                .join()
+                .expect("flush thread")
+                .expect("flush recovered data");
+
+            // Assert
+            assert_eq!(value, Some(Bytes::from_static(b"catalog-retirement-value")));
+            assert_ne!(primary, mirror, "retirement is paused before mirror sync");
+            let primary: serde_json::Value = serde_json::from_slice(&primary).unwrap();
+            let mirror: serde_json::Value = serde_json::from_slice(&mirror).unwrap();
+            assert_eq!(primary["fencing_epoch"], before["fencing_epoch"]);
+            assert_eq!(mirror["fencing_epoch"], before["fencing_epoch"]);
+            assert!(primary["segments"].as_object().unwrap().is_empty());
+            assert_eq!(mirror["segments"], before["segments"]);
+        });
+        fail::remove("midge::cloud::after_catalog_primary_before_mirror");
+        scenario.teardown();
+        engine
+            .shutdown(Duration::from_secs(5))
+            .expect("quiesce catalog writers");
+        assert_eq!(
+            fs::read(&primary_path).expect("read quiescent primary"),
+            fs::read(&mirror_path).expect("read quiescent mirror"),
+        );
+        let reopened = Engine::open(opts.to_open_options()).expect("reopen after retirement");
+        assert_eq!(
+            get_default(&reopened, b"catalog-retirement-key"),
+            Some(Bytes::from_static(b"catalog-retirement-value")),
+        );
+        shutdown_test_engine(reopened);
+    }
+
+    #[test]
     fn should_recover_from_valid_catalog_mirror_when_primary_catalog_has_torn_tail() {
         // Arrange
         let _guard = failpoint_test_lock()
@@ -7647,7 +7736,7 @@ mod cloud_persistence_hardening {
         reset_dir(&db_path.join("wal"));
 
         // Act
-        let reopened =
+        let mut reopened =
             Engine::open(opts.to_open_options()).expect("recover through catalog mirror");
 
         // Assert
@@ -7655,12 +7744,25 @@ mod cloud_persistence_hardening {
             get_default(&reopened, b"catalog-mirror-key"),
             Some(Bytes::from_static(b"catalog-mirror-value"))
         );
-        assert_eq!(
-            fs::read(&primary_catalog).expect("read repaired primary WAL catalog"),
-            fs::read(&mirror_catalog).expect("read converged WAL catalog mirror"),
-            "startup must repair and fence both catalog copies"
+        // Runtime retirement may publish the primary before the mirror. Join
+        // all catalog writers before observing equality across the two files.
+        reopened
+            .shutdown(Duration::from_secs(5))
+            .expect("quiesce recovered engine before comparing catalog copies");
+        let repaired = fs::read(&primary_catalog).expect("read repaired primary WAL catalog");
+        let fenced: serde_json::Value =
+            serde_json::from_slice(&repaired).expect("decode repaired WAL catalog");
+        let previous: serde_json::Value =
+            serde_json::from_slice(&valid_catalog).expect("decode original WAL catalog");
+        assert_eq!(fenced["format_version"], previous["format_version"]);
+        assert!(
+            fenced["fencing_epoch"].as_u64().unwrap() > previous["fencing_epoch"].as_u64().unwrap()
         );
-        shutdown_test_engine(reopened);
+        assert_eq!(
+            repaired,
+            fs::read(&mirror_catalog).expect("read converged WAL catalog mirror"),
+            "quiescent catalogs must retain repaired, fenced authority"
+        );
     }
 
     #[test]

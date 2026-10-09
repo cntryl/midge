@@ -222,6 +222,7 @@ pub(super) fn commit_catalog_with_authority(
             validate,
         )
         .map_err(crate::storage::hybrid::backend::ControlWriteFailure::into_error)?;
+    crate::failpoints::fail_point!("midge::cloud::after_catalog_primary_before_mirror");
     sync_catalog_copy_with_authority(
         storage,
         crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
