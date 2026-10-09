@@ -41,7 +41,12 @@ fn main() -> fixture::Result<()> {
     let output = Path::new(args.last().ok_or("missing receipt")?);
     let capture = fixture::Capture::default();
     tracing_subscriber::registry()
-        .with(capture.clone())
+        .with(
+            capture.clone().with_filter(
+                tracing_subscriber::filter::Targets::new()
+                    .with_target("midge::recovery", tracing::Level::INFO),
+            ),
+        )
         .try_init()?;
     let source = command(&["rev-parse", "HEAD"])?;
     let clean = command(&["status", "--porcelain"])?.is_empty();

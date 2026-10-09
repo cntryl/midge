@@ -11,7 +11,12 @@ fn should_recover_same_engine_backup_when_bounded_probe_variant_changes() {
     let root = directory.path().join("fixture");
     let capture = fixture::Capture::default();
     tracing_subscriber::registry()
-        .with(capture.clone())
+        .with(
+            capture.clone().with_filter(
+                tracing_subscriber::filter::Targets::new()
+                    .with_target("midge::recovery", tracing::Level::INFO),
+            ),
+        )
         .try_init()
         .unwrap();
     let facts = fixture::create(&root, 512).unwrap();

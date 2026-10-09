@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import select
 import selectors
@@ -100,6 +101,11 @@ def run_cpu(command, directory):
         with (directory / "perf-report.txt").open("wb") as out, (directory / "perf-report-error.log").open("wb") as err:
             report = subprocess.run(["perf", "report", "--stdio", "--no-children", "-i", str(data)], stdout=out, stderr=err, check=False)
         receipt["report_exit_code"] = report.returncode
+        report_text = (directory / "perf-report.txt").read_text()
+        lost = re.search(r"Total Lost Samples: (\d+)", report_text)
+        samples = re.search(r"Samples: ([0-9.]+)([KMG]?)", report_text)
+        receipt["lost_samples"] = int(lost.group(1)) if lost else None
+        receipt["samples"] = int(float(samples.group(1))*{"":1,"K":1000,"M":1000000,"G":1000000000}[samples.group(2)]) if samples else None
         receipt["data_sha256"] = hashlib.sha256(data.read_bytes()).hexdigest()
     write(directory / "sampler.json", receipt)
     return receipt
@@ -179,7 +185,7 @@ def main():
             if outcome["exit_code"] != 0 or outcome["error"]:
                 raise ValueError("native process or sampling control failed")
             result = validate_native(directory / "native.json", source, binary, fixture_sha, variant)
-            if sampled and outcome.get("report_exit_code") != 0:
+            if sampled and (outcome.get("report_exit_code") != 0 or outcome.get("lost_samples") != 0 or not outcome.get("samples")):
                 raise ValueError("native profile report failed")
             row["open_ns"] = result["open_ns"]
             row["target_met"] = result["target_met"]

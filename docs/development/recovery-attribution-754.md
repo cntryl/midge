@@ -59,7 +59,9 @@ TTL/operation proof. An index admission miss uses the original linear fallback.
 The one-reader experiment reduces retention. Reader/proof/index state is released
 before checkpoints and at lifetime end; report shared limit/peak/final charges.
 
-Separate index construction, candidate traversal/predicate rejection, identity
+The candidate phase includes traversal, predicate rejection and coverage-state
+aggregation, excluding separately timed index construction and file proof.
+Separate index construction, candidate work, identity
 verification, reader construction and exact point work. Range attempt/completion/
 byte/time receipts describe the filesystem-backed remote adapter; they do not
 represent real-provider request billing. Observations never advance liveness.
