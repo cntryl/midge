@@ -1,7 +1,11 @@
 # Cold Engine recovery attribution (#754)
 
-Baseline: merged `897c833c46c20533f0a0f9ea7a7c5f036644f2b0`, after #753's
-diagnostic-only write-pressure work. No default recovery policy is changed here.
+The experiment was declared at merged
+`897c833c46c20533f0a0f9ea7a7c5f036644f2b0`, after #753's diagnostic-only
+write-pressure work. Qualification exposed a concurrent L0 read-heat sorting
+panic; the isolated correctness fix landed in #794 as
+`a2649a453c5f1f40134c2b5c3f2043f22ede24bb`. Final attribution uses that accepted
+base and requires a fresh full matrix. No default recovery policy is changed here.
 
 ## Predeclared finite experiment
 
