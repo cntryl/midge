@@ -157,6 +157,8 @@ pub struct OpenOptions {
     io_timeouts: IoTimeouts<Duration>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
+    #[cfg(feature = "internal-testing")]
+    recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -180,6 +182,8 @@ pub struct OpenOptionsBuilder {
     io_timeouts: IoTimeouts<Option<Duration>>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
+    #[cfg(feature = "internal-testing")]
+    recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -459,6 +463,13 @@ impl OpenOptions {
         self.lease.ttl
     }
 
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn recovery_probe(
+        &self,
+    ) -> crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant {
+        self.recovery_probe
+    }
+
     pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
         Arc::clone(&self.ttl_clock.0)
     }
@@ -488,6 +499,10 @@ impl OpenOptionsBuilder {
             },
             open_timeout: None,
             startup_observer: None,
+            #[cfg(feature = "internal-testing")]
+            recovery_probe:
+                crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant::default(
+                ),
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease: LeaseConfig::new(Duration::from_secs(30), None, None),
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
@@ -619,6 +634,18 @@ impl OpenOptionsBuilder {
         observer: Arc<dyn crate::runtime::StartupObserver>,
     ) -> Self {
         self.startup_observer = Some(observer);
+        self
+    }
+
+    /// Select a bounded, unsupported recovery experiment. Ordinary builds omit this option.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn recovery_probe_variant_for_testing(
+        mut self,
+        variant: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
+    ) -> Self {
+        self.recovery_probe = variant;
         self
     }
 
@@ -803,6 +830,8 @@ impl OpenOptionsBuilder {
             },
             open_timeout: self.open_timeout,
             startup_observer: self.startup_observer,
+            #[cfg(feature = "internal-testing")]
+            recovery_probe: self.recovery_probe,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease: self.lease,
             ttl_clock: self.ttl_clock,

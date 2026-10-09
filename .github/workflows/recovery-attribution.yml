@@ -1,0 +1,28 @@
+name: Recovery Attribution
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: recovery-attribution-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - name: Prepare native CPU sampling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-tools-$(uname -r)"
+          sudo sysctl -w kernel.perf_event_paranoid=1
+      - name: Execute the fixed immutable-fixture matrix
+        run: python3 tools/recovery_attribution.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: recovery-attribution-${{ github.sha }}
+          path: target/recovery-attribution/**

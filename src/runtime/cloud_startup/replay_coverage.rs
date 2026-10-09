@@ -9,8 +9,22 @@ use std::sync::Arc;
 mod candidate_index;
 #[cfg(feature = "internal-testing")]
 pub(crate) mod cost_probe;
+#[cfg(feature = "internal-testing")]
+mod key_index;
+#[cfg(feature = "internal-testing")]
+pub(crate) mod probe;
 
 pub(crate) struct ReplayCoverage {
+    #[cfg(feature = "internal-testing")]
+    variant: probe::RecoveryProbeVariant,
+    #[cfg(feature = "internal-testing")]
+    facts: probe::Facts,
+    #[cfg(feature = "internal-testing")]
+    key_index: RefCell<Option<key_index::KeyIndex>>,
+    #[cfg(feature = "internal-testing")]
+    reads: Arc<probe::Reads>,
+    #[cfg(feature = "internal-testing")]
+    reads_attached: bool,
     manifest: crate::metadata::Manifest,
     fs: Arc<dyn Fs>,
     // Keep immutable identities plus a small LRU of budgeted readers.
@@ -122,9 +136,28 @@ impl ReplayCoverage {
         fs: Arc<dyn Fs>,
         memory_bytes: usize,
     ) -> Self {
+        let fs = crate::telemetry::recovery_progress::observe_reads(fs);
+        #[cfg(feature = "internal-testing")]
+        let reads = Arc::new(probe::Reads::default());
+        #[cfg(feature = "internal-testing")]
+        let observed = fs.with_read_observer(reads.clone());
+        #[cfg(feature = "internal-testing")]
+        let reads_attached = observed.is_some();
+        #[cfg(feature = "internal-testing")]
+        let fs = observed.unwrap_or(fs);
         Self {
+            #[cfg(feature = "internal-testing")]
+            variant: probe::RecoveryProbeVariant::default(),
+            #[cfg(feature = "internal-testing")]
+            facts: probe::Facts::default(),
+            #[cfg(feature = "internal-testing")]
+            key_index: RefCell::new(None),
+            #[cfg(feature = "internal-testing")]
+            reads,
+            #[cfg(feature = "internal-testing")]
+            reads_attached,
             manifest,
-            fs: crate::telemetry::recovery_progress::observe_reads(fs),
+            fs,
             verified: RefCell::new(HashMap::new()),
             readers: RefCell::new(Vec::new()),
             // Retained decoded blocks may use at most a quarter of the budget
@@ -151,6 +184,26 @@ impl ReplayCoverage {
         }
     }
 
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn with_probe_variant(mut self, variant: probe::RecoveryProbeVariant) -> Self {
+        self.variant = variant;
+        self
+    }
+
+    fn reader_limit(&self) -> usize {
+        #[cfg(feature = "internal-testing")]
+        if self.variant == probe::RecoveryProbeVariant::SingleReader {
+            return 1;
+        }
+        MAX_READERS
+    }
+
+    pub(crate) fn release_for_checkpoint(&self) {
+        #[cfg(feature = "internal-testing")]
+        probe::add(&self.facts.checkpoint_releases, 1);
+        self.release_reader();
+    }
+
     pub(crate) fn contains(&self, record: &crate::wal::WalRecord) -> bool {
         self.contains_core(record, None).unwrap_or(false)
     }
@@ -172,6 +225,10 @@ impl ReplayCoverage {
         check_scope(scope)?;
         self.probes.set(self.probes.get().saturating_add(1));
         let result = self.contains_record(record, scope)?;
+        #[cfg(feature = "internal-testing")]
+        if result {
+            probe::add(&self.facts.exact_hits, 1);
+        }
         check_scope(scope)?;
         self.elapsed_ns.set(
             self.elapsed_ns
@@ -194,11 +251,15 @@ impl ReplayCoverage {
         if !matches!(record.op.role(), WalOpRole::ValueWrite) {
             return Ok(false);
         }
+        #[cfg(feature = "internal-testing")]
+        probe::add(&self.facts.point_probes, 1);
         let mut retained_value = None;
         let mut proof = ExactCoverageState::default();
         let mut visit = |file: &crate::metadata::FileMeta| {
             check_scope(scope)?;
             if !file_covers_wal_point_record(file, record) {
+                #[cfg(feature = "internal-testing")]
+                probe::add(&self.facts.predicate_rejections, 1);
                 self.progress.borrow_mut().completed_operation();
                 return Ok(true);
             }
@@ -214,13 +275,84 @@ impl ReplayCoverage {
             self.progress.borrow_mut().completed_operation();
             Ok(true)
         };
+        #[cfg(feature = "internal-testing")]
+        let clock = probe::clock(self.variant);
+        #[cfg(feature = "internal-testing")]
+        let nested_before = self
+            .facts
+            .proof_inclusive_ns
+            .get()
+            .saturating_add(self.facts.index_build_ns.get());
+        let complete = self.visit_candidates(record, scope, &mut visit);
+        #[cfg(feature = "internal-testing")]
+        {
+            let nested = self
+                .facts
+                .proof_inclusive_ns
+                .get()
+                .saturating_add(self.facts.index_build_ns.get())
+                .saturating_sub(nested_before);
+            probe::add(
+                &self.facts.candidate_ns,
+                probe::elapsed(clock).saturating_sub(nested),
+            );
+        }
+        if !complete? {
+            return Ok(false);
+        }
+        Ok(proof.exactly_covers_wal_point(record))
+    }
+
+    fn visit_candidates(
+        &self,
+        record: &crate::wal::WalRecord,
+        scope: Option<&crate::common::DeadlineScope>,
+        visitor: &mut impl FnMut(&crate::metadata::FileMeta) -> crate::common::MidgeResult<bool>,
+    ) -> crate::common::MidgeResult<bool> {
+        #[cfg(feature = "internal-testing")]
+        if self.variant == probe::RecoveryProbeVariant::KeyIndex {
+            let mut index = self.key_index.borrow_mut();
+            if index.is_none() {
+                probe::add(&self.facts.index_build_attempts, 1);
+                let _clock = probe::Phase::start(&self.facts.index_build_ns, self.variant);
+                *index = key_index::KeyIndex::new(&self.manifest.files, &self.read_budget, scope)?;
+                if index.is_some() {
+                    probe::add(&self.facts.index_builds, 1);
+                }
+            }
+            if let Some(index) = index.as_ref() {
+                return index.visit(
+                    &self.manifest.files,
+                    record,
+                    scope,
+                    &self.manifest_scanned,
+                    visitor,
+                );
+            }
+            for file in &self.manifest.files {
+                self.manifest_scanned
+                    .set(self.manifest_scanned.get().saturating_add(1));
+                if !visitor(file)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         let mut index = self.candidate_index.borrow_mut();
         if index.is_none() {
+            #[cfg(feature = "internal-testing")]
+            probe::add(&self.facts.index_build_attempts, 1);
+            #[cfg(feature = "internal-testing")]
+            let _clock = probe::Phase::start(&self.facts.index_build_ns, self.variant);
             *index = candidate_index::CandidateIndex::new(
                 &self.manifest.files,
                 &self.read_budget,
                 scope,
             )?;
+            #[cfg(feature = "internal-testing")]
+            if index.is_some() {
+                probe::add(&self.facts.index_builds, 1);
+            }
         }
         if let Some(index) = index.as_ref() {
             if !index.visit(
@@ -228,7 +360,7 @@ impl ReplayCoverage {
                 record,
                 scope,
                 &self.manifest_scanned,
-                &mut visit,
+                visitor,
             )? {
                 return Ok(false);
             }
@@ -238,12 +370,12 @@ impl ReplayCoverage {
             for file in &self.manifest.files {
                 self.manifest_scanned
                     .set(self.manifest_scanned.get().saturating_add(1));
-                if !visit(file)? {
+                if !visitor(file)? {
                     return Ok(false);
                 }
             }
         }
-        Ok(proof.exactly_covers_wal_point(record))
+        Ok(true)
     }
 
     fn file_state(
@@ -252,6 +384,8 @@ impl ReplayCoverage {
         key: &[u8],
         scope: Option<&crate::common::DeadlineScope>,
     ) -> crate::common::MidgeResult<Option<crate::types::KeyState>> {
+        #[cfg(feature = "internal-testing")]
+        let _clock = probe::Phase::start(&self.facts.proof_inclusive_ns, self.variant);
         check_scope(scope)?;
         let observed = self.try_file_state(file, key)?;
         check_scope(scope)?;
@@ -269,6 +403,8 @@ impl ReplayCoverage {
         file: &crate::metadata::FileMeta,
         path: &FsPath,
     ) -> crate::common::MidgeResult<Option<Arc<dyn Fs>>> {
+        #[cfg(feature = "internal-testing")]
+        let _clock = probe::Phase::start(&self.facts.identity_ns, self.variant);
         let Some(crc) = file.content_crc32c else {
             return Ok(None);
         };
@@ -317,11 +453,13 @@ impl ReplayCoverage {
             let cached = readers.remove(position);
             self.reader_hits
                 .set(self.reader_hits.get().saturating_add(1));
+            #[cfg(feature = "internal-testing")]
+            let _clock = probe::Phase::start(&self.facts.point_ns, self.variant);
             let result = conservative(cached.reader.get_state_at_with_time(key, u64::MAX, 0));
             readers.push(cached);
             return result;
         }
-        while readers.len() >= MAX_READERS {
+        while readers.len() >= self.reader_limit() {
             let evicted = readers.remove(0);
             self.record_reader(&evicted);
             self.reader_evictions
@@ -351,21 +489,32 @@ impl ReplayCoverage {
         };
         self.reader_opens
             .set(self.reader_opens.get().saturating_add(1));
-        let Some(reader) = conservative(crate::sst::fs::SstFileIo::open_for_recovery(
-            &path.0,
-            Arc::clone(fs),
-            self.read_budget.clone(),
-            MAX_BLOCKS_PER_READER,
-            self.block_cap_per_reader,
-        ))?
-        else {
-            return Ok(None);
+        let reader = {
+            #[cfg(feature = "internal-testing")]
+            let _clock = probe::Phase::start(&self.facts.reader_ns, self.variant);
+            let Some(reader) = conservative(crate::sst::fs::SstFileIo::open_for_recovery(
+                &path.0,
+                Arc::clone(fs),
+                self.read_budget.clone(),
+                MAX_BLOCKS_PER_READER,
+                self.block_cap_per_reader,
+            ))?
+            else {
+                return Ok(None);
+            };
+            reader
         };
+        #[cfg(feature = "internal-testing")]
+        let _clock = probe::Phase::start(&self.facts.point_ns, self.variant);
         let result = conservative(reader.get_state_at_with_time(key, u64::MAX, 0));
         readers.push(CachedReader {
             name: file.name.clone(),
             reader,
         });
+        #[cfg(feature = "internal-testing")]
+        self.facts
+            .peak_readers
+            .set(self.facts.peak_readers.get().max(readers.len()));
         result
     }
 
@@ -387,6 +536,10 @@ impl ReplayCoverage {
         self.release_cached_all();
         *self.verified.borrow_mut() = HashMap::new();
         *self.candidate_index.borrow_mut() = None;
+        #[cfg(feature = "internal-testing")]
+        {
+            *self.key_index.borrow_mut() = None;
+        }
     }
 
     fn release_cached_all(&self) {
@@ -417,6 +570,22 @@ impl ReplayCoverage {
 impl Drop for ReplayCoverage {
     fn drop(&mut self) {
         self.release_reader();
+        #[cfg(feature = "internal-testing")]
+        {
+            let facts = serde_json::json!({
+                "variant": self.variant, "manifest_files": self.manifest.files.len(),
+                "point_probes": self.facts.point_probes.get(), "exact_hits": self.facts.exact_hits.get(),
+                "predicate_rejections": self.facts.predicate_rejections.get(), "index_build_attempts": self.facts.index_build_attempts.get(),
+                "index_builds": self.facts.index_builds.get(), "index_build_ns": self.facts.index_build_ns.get(),
+                "candidate_ns": self.facts.candidate_ns.get(), "identity_ns": self.facts.identity_ns.get(),
+                "reader_ns": self.facts.reader_ns.get(), "point_ns": self.facts.point_ns.get(),
+                "proof_inclusive_ns": self.facts.proof_inclusive_ns.get(), "checkpoint_releases": self.facts.checkpoint_releases.get(),
+                "peak_readers": self.facts.peak_readers.get(), "reader_limit": self.reader_limit(),
+                "budget_limit": self.read_budget.limit(), "budget_peak": self.read_budget.peak(), "budget_final": self.read_budget.used(),
+                "remote_observer_attached": self.reads_attached, "remote_ranges": self.reads.snapshot(),
+            });
+            tracing::info!(target: "midge::recovery", phase = "coverage_attribution", attribution = %facts, "bounded recovery attribution");
+        }
         tracing::info!(target: "midge::recovery", phase = "coverage",
             probes = self.probes.get(), reader_opens = self.reader_opens.get(),
             verified_sst_bytes = self.verified_bytes.get(), elapsed_ns = self.elapsed_ns.get(),
@@ -433,6 +602,8 @@ impl Drop for ReplayCoverage {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "internal-testing")]
+    mod probe_variants;
     use super::*;
     use crate::sst::SstFactory;
     use crate::wal::{WalOpKind, WalRecord};

@@ -22,7 +22,7 @@ on:
         type: choice
         required: true
         default: all
-        options: [all, comparisons, profiles, probes]
+        options: [all, comparisons, profiles, probes, recovery]
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   comparison:
-    if: inputs.campaign != 'probes' && inputs.campaign != 'profiles'
+    if: inputs.campaign != 'recovery' && inputs.campaign != 'probes' && inputs.campaign != 'profiles'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     strategy:
@@ -103,7 +103,7 @@ jobs:
         run: docker compose down -v
 
   admission-profile:
-    if: inputs.campaign != 'probes'
+    if: inputs.campaign != 'recovery' && inputs.campaign != 'probes'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     strategy:
@@ -173,7 +173,7 @@ jobs:
         run: docker compose down -v
 
   probe:
-    if: inputs.campaign != 'comparisons' && inputs.campaign != 'profiles'
+    if: inputs.campaign != 'recovery' && inputs.campaign != 'comparisons' && inputs.campaign != 'profiles'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     strategy:
@@ -197,3 +197,7 @@ jobs:
         with:
           name: investigation-${{ matrix.mode }}-${{ github.sha }}
           path: target/investigation/**
+
+  recovery-attribution:
+    if: inputs.campaign == 'recovery'
+    uses: ./.github/workflows/recovery-attribution.yml

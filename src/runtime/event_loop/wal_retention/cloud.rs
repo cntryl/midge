@@ -129,6 +129,8 @@ impl EventLoop {
     }
 
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
+        // A cleanup omission retains native WAL authority for recovery fixtures.
+        crate::failpoints::fail_point!("midge::cloud::defer_wal_prune_admission", |_| ());
         // Shutdown must settle admitted durability work without admitting a
         // fresh optional proof from flush/upload completion or maintenance.
         // Retain recovery authority for a later engine lifetime instead.

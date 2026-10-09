@@ -22,6 +22,8 @@ mod names;
 mod tests;
 
 pub(super) struct CloudReplay {
+    #[cfg(feature = "internal-testing")]
+    pub probe: coverage::probe::RecoveryProbeVariant,
     pub fs: Arc<dyn Fs>,
     pub limits: StreamingReplayLimits,
     /// Sequences at or below this belong to WAL salvage set aside unreplayed.
@@ -90,6 +92,8 @@ impl CloudReplay {
                 .unwrap_or_else(|| Arc::clone(&materialized.state.fs)),
             self.limits.max_frame_bytes,
         );
+        #[cfg(feature = "internal-testing")]
+        let coverage = coverage.with_probe_variant(self.probe);
         let scope = self
             .scope
             .clone()
@@ -124,7 +128,7 @@ impl CloudReplay {
                 ..ReplayOptions::default()
             },
             &mut |tables, _stats| {
-                coverage.release_reader();
+                coverage.release_for_checkpoint();
                 checkpoint(materialized, &mut actor, &rx, tables, &mut names)
             },
         );
