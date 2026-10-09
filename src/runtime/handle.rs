@@ -731,7 +731,7 @@ impl RuntimeHandle {
     /// accepting new write transactions.
     #[cfg(test)]
     pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
-        self.check_write_stall_status(cf_id)
+        self.check_write_stall_status(cf_id, false)
             .map(|(stalled, _)| stalled)
     }
 
@@ -739,7 +739,7 @@ impl RuntimeHandle {
         &self,
         cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<bool> {
-        let (stalled, mask) = self.check_write_stall_status(cf_id)?;
+        let (stalled, mask) = self.check_write_stall_status(cf_id, true)?;
         if stalled {
             self.diagnostics.record_ingest_hint_pressure(mask);
         }
@@ -749,6 +749,7 @@ impl RuntimeHandle {
     fn check_write_stall_status(
         &self,
         cf_id: crate::types::ColumnFamilyId,
+        ingest_admission: bool,
     ) -> MidgeResult<(bool, u8)> {
         let response = self.send_and_wait_timeout(
             RuntimeMsg::CheckWriteStall {
@@ -756,7 +757,18 @@ impl RuntimeHandle {
                 cf_id,
             },
             WRITE_STALL_STATUS_TIMEOUT,
-        )?;
+        );
+        let response = match response {
+            Err(error @ MidgeError::WriteStall(_)) if ingest_admission => {
+                // A full queue can reject the admission check itself. Generic
+                // control requests remain excluded by map_submission_error.
+                self.diagnostics.record_write_admission_rejection(
+                    crate::diagnostics::WriteAdmissionRejection::Queue,
+                );
+                return Err(error);
+            }
+            other => other?,
+        };
 
         match response {
             Some(RuntimeResponse::WriteStallStatus {

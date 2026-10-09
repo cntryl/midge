@@ -81,6 +81,27 @@ fn should_retain_conservative_preflight_when_pressure_check_times_out() {
 }
 
 #[test]
+fn should_count_preflight_queue_pressure_when_ingest_cannot_submit_its_check() {
+    // Arrange: the preflight itself cannot enter a full bounded runtime queue.
+    let (_runtime, mut handle) = Runtime::new();
+    let (tx, rx) = crossbeam::channel::bounded(1);
+    handle.msg_tx = tx;
+    handle.send(RuntimeMsg::RetryGc).unwrap();
+    // Act
+    let rejected = handle.check_ingest_write_stall(0);
+    let operator = handle.check_write_stall(0);
+    // Assert
+    assert!(matches!(rejected, Err(MidgeError::WriteStall(_))));
+    assert!(matches!(operator, Err(MidgeError::WriteStall(_))));
+    let counts = handle.diagnostics.write_admission_snapshot();
+    assert_eq!(counts.queue_total, 1);
+    assert_eq!(counts.ingest_hint_total, 0);
+    assert_eq!(handle.router.pending_len(), 0);
+    assert!(matches!(rx.try_recv(), Ok(RuntimeMsg::RetryGc)));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn should_count_transaction_queue_rejections_once_without_retaining_requests() {
     // Arrange: no event loop can drain the bounded submission queue.
     let (_runtime, mut handle) = Runtime::new();

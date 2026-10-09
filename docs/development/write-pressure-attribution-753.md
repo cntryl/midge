@@ -44,7 +44,8 @@ finite target and regression scenario. Diagnostic completion is not an optimizat
 diagnostics interface. The commit count is recorded only when submission returns
 WriteStall before an applied sequence. Origin counters record the first rejecting
 gate; the queue counts transaction messages and excludes control requests and
-disconnected channels. Rejected admissions do not enter success populations.
+disconnected channels. A queue rejection of the ingest check itself also counts
+as queue admission; unrelated control checks remain excluded. Rejected admissions do not enter success populations.
 Ingest-hint rejection reasons describe the runtime response at the advisory
 check: global stall, L0, memory, pending cloud uploads and stalled upload
 admission. They can overlap and must not be summed as independent rejections.
