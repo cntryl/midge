@@ -13,7 +13,11 @@ import subprocess
 import time
 import zipfile
 
-WORKLOAD = "checkpoint_local_256x1mib_1cf"
+CELLS = {
+    "A": ("checkpoint_local_256x1mib_1cf", 256, 1024, 1),
+    "B": ("checkpoint_local_512x256kib_16cf", 512, 256, 16),
+    "C": ("checkpoint_local_1024x64kib_1cf", 1024, 64, 1),
+}
 BINARY = "tier4_system_checkpoint_write_amplification"
 BENCHMARK_ENV = ("STRESS_PROFILE", "STRESS_SAMPLES", "STRESS_WARMUP_SAMPLES",
                  "STRESS_COOLDOWN_SAMPLES", "STRESS_CONFIRM_REGRESSIONS",
@@ -109,7 +113,9 @@ def download_build(repository, run, sha, source, root):
             "run_id": run, "artifact_id": artifact["id"], "archive_sha256": digest(archive)}
 
 
-def native_result(root, sha):
+def native_result(root, sha, cell="A"):
+    workload, cycles, rows, families = CELLS[cell]
+    warmup = math.ceil(cycles / 10)
     paths = list((root / "midge").glob("*/workload-status.json"))
     if len(paths) != 1:
         raise ValueError("missing unique actual engine receipt")
@@ -118,15 +124,19 @@ def native_result(root, sha):
     if not (status["git_commit"] == sha and status["status"] == "passed"
             and status["phase"] == "complete" and status["terminal_error"] is None
             and status["verified"] and status["reopened_verified"]
-            and status["completed_cycles"] == status["total_cycles"] == 256
-            and status["rows_per_cycle"] == 1024 and status["families"] == 1
-            and status["acknowledged_rows"] == 256 * 1024):
+            and status["cell"] == cell and status["benchmark_workload"] == workload
+            and status["completed_cycles"] == status["total_cycles"] == cycles
+            and status["warmup_cycles"] == warmup
+            and status["rows_per_cycle"] == rows and status["families"] == families
+            and status["acknowledged_rows"] == cycles * rows):
         raise ValueError("source/shape/ACK/reopen proof failed")
     window = json.loads((directory / "accounting-window.json").read_text())
     observations = json.loads((directory / "ingestion-observations.json").read_text())
     latencies = sorted(observations["flush_latencies_ns"])
-    if len(latencies) != status["measured_cycles"] or len(latencies) != 230:
+    if len(latencies) != status["measured_cycles"] or len(latencies) != cycles - warmup:
         raise ValueError("public flush distribution does not cover fixed measured cycles")
+    if not window["gate"]["valid"]:
+        raise ValueError("native accounting gate is invalid")
     before = json.loads((directory / "runtime-before.json").read_text())
     after = json.loads((directory / "runtime-after.json").read_text())
     return {"measured_elapsed_ns": window["measured_elapsed_ns"],
@@ -147,7 +157,18 @@ def cpu_command(command, root, environment):
             "dwarf", "-o", str(root / "perf.data"), "--"] + child
 
 
-def trial(build, block, root, instrument=None):
+def render_cpu_profile(root, result):
+    # The data file now belongs to the runner; analysis uses that same identity.
+    with (root / "perf-report.txt").open("wb") as output:
+        completed = subprocess.run(["perf", "report", "--stdio", "--no-children",
+                                    "-i", str(root / "perf.data")],
+                                   stdout=output, stderr=subprocess.STDOUT)
+    result["profile_report_returncode"] = completed.returncode
+    if completed.returncode != 0:
+        result.update(valid=False, error="CPU profile analysis failed; raw data retained")
+
+
+def trial(build, block, root, instrument=None, cell="A"):
     root.mkdir()
     for directory in ("native", "midge"):
         (root / directory).mkdir()
@@ -168,7 +189,7 @@ def trial(build, block, root, instrument=None):
     # GITHUB_SHA remains the real diagnostic workflow head. STRESS_GIT_SHA
     # declares the separately verified, actual immutable benchmark checkout.
     command = ["/usr/bin/time", "-v", "-o", str(root / "process-time.txt"),
-               str(build["binary"]), "--workload", WORKLOAD, "--bench"]
+               str(build["binary"]), "--workload", CELLS[cell][0], "--bench"]
     if instrument == "sync":
         command = ["strace", "-f", "-c", "-e", "trace=fsync,fdatasync",
                    "-o", str(root / "sync-summary.txt")] + command
@@ -203,17 +224,15 @@ def trial(build, block, root, instrument=None):
         shutil.copytree(memory_root / directory, root / directory, dirs_exist_ok=True)
     shutil.rmtree(memory_root)
     try:
-        result.update(native_result(root, build["sha"]))
+        result.update(native_result(root, build["sha"], cell))
         if result["returncode"] != 0:
             raise ValueError("benchmark/instrument process failed")
         result["valid"] = True
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
         result["error"] = str(error)
-    save(root / "trial.json", result)
     if instrument == "cpu" and result["valid"]:
-        with (root / "perf-report.txt").open("wb") as output:
-            subprocess.run(["sudo", "-n", "perf", "report", "--stdio", "--no-children",
-                            "-i", str(root / "perf.data")], stdout=output, stderr=subprocess.STDOUT)
+        render_cpu_profile(root, result)
+    save(root / "trial.json", result)
     return result
 
 
@@ -227,13 +246,16 @@ def main():
     parser.add_argument("--baseline-source", type=Path, required=True)
     parser.add_argument("--candidate-source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cells", nargs="+", choices=CELLS, default=["A"])
+    parser.add_argument("--host-repeat", type=int, choices=(1, 2, 3), default=1)
     args = parser.parse_args()
     args.output = args.output.resolve()
     args.output.mkdir()
     report = {"schema_version": "midge-checkpoint-pair-diagnostic.v1", "accepted": False,
-              "workflow_sha": os.environ.get("GITHUB_SHA"), "workload": WORKLOAD,
+              "workflow_sha": os.environ.get("GITHUB_SHA"), "cells": args.cells,
+              "host_repeat": args.host_repeat,
               "original_workload_limits_unchanged": True, "complete": False,
-              "planned_uninstrumented_trials": 12, "trials": [], "profiles": []}
+              "planned_uninstrumented_trials": 12 * len(args.cells), "trials": [], "profiles": []}
     save(args.output / "report.json", report)
     builds = {}
     try:
@@ -246,28 +268,36 @@ def main():
         toolchain = builds["baseline"]["manifest"]["toolchain"]
         subprocess.run(["rustup", "toolchain", "install", toolchain, "--profile", "minimal"], check=True)
         subprocess.run(["rustup", "default", toolchain], check=True)
-        for index, (block, role) in enumerate(plan(), 1):
-            item = trial(builds[role], block, args.output / f"timing-{index:02}-{role}")
-            item.update(block=block, role=role, index=index)
-            report["trials"].append(item)
-            save(args.output / "report.json", report)
-            print(json.dumps({key: item.get(key) for key in
-                              ("index", "role", "valid", "measured_elapsed_ns", "flush_p95_ns",
-                               "completed_compactions", "error")}), flush=True)
-        report["complete"] = len(report["trials"]) == 12 and all(t["valid"] for t in report["trials"])
+        # Rotate cell order across hosts without changing any native workload.
+        offset = (args.host_repeat - 1) % len(args.cells)
+        ordered_cells = args.cells[offset:] + args.cells[:offset]
+        for cell in ordered_cells:
+            for index, (block, role) in enumerate(plan(), 1):
+                item = trial(builds[role], block,
+                             args.output / f"timing-{cell}-{index:02}-{role}", cell=cell)
+                item.update(cell=cell, block=block, role=role, index=index)
+                report["trials"].append(item)
+                save(args.output / "report.json", report)
+                print(json.dumps({key: item.get(key) for key in
+                                  ("cell", "index", "role", "valid", "measured_elapsed_ns", "flush_p95_ns",
+                                   "completed_compactions", "error")}), flush=True)
+        report["complete"] = (len(report["trials"]) == report["planned_uninstrumented_trials"]
+                              and all(t["valid"] for t in report["trials"]))
         save(args.output / "report.json", report)
         # Instrumentation begins only after the uninstrumented comparison.
-        for instrument in ("sync", "cpu"):
-            for role in ("baseline", "candidate"):
-                try:
-                    item = trial(builds[role], 1, args.output / f"profile-{instrument}-{role}", instrument)
-                except (ValueError, OSError, subprocess.SubprocessError) as error:
-                    item = {"valid": False, "instrument": instrument, "error": str(error)}
-                item["role"] = role
-                report["profiles"].append(item)
-                save(args.output / "report.json", report)
-                print(json.dumps({"profile": instrument, "role": role,
-                                  "valid": item["valid"], "error": item.get("error")}), flush=True)
+        for cell in ordered_cells:
+            for instrument in ("sync", "cpu"):
+                for role in ("baseline", "candidate"):
+                    try:
+                        item = trial(builds[role], 1,
+                                     args.output / f"profile-{cell}-{instrument}-{role}", instrument, cell)
+                    except (ValueError, OSError, subprocess.SubprocessError) as error:
+                        item = {"valid": False, "instrument": instrument, "error": str(error)}
+                    item.update(role=role, cell=cell)
+                    report["profiles"].append(item)
+                    save(args.output / "report.json", report)
+                    print(json.dumps({"cell": cell, "profile": instrument, "role": role,
+                                      "valid": item["valid"], "error": item.get("error")}), flush=True)
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
         report["error"] = str(error)
         report["complete"] = False

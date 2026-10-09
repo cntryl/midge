@@ -47,3 +47,28 @@ This restores an observed payload cost; performance causation and acceptance sti
 Source 640d4692cfcb570518bdb9fa6dc0eac86a0d21e9 passed all-platform CI 37841020105, fuzz replay 37841109237, transport smoke 37841105678 and all nine measurements 37841786212. Sealed raw-artifact readback is complete. Against baseline 37834100918, A/r2--r3 elapsed ratios are 1.645/1.333 and flush-p95 2.708/2.506; C/r1 is also adverse at 1.661/2.021. B retains >93 percent checkpoint time and >96 percent byte savings, C 100 percent. All rows remain in /tmp/midge-752-v3-comparison.json and /tmp/midge-752-v3-full-*. No merge or full-hour acceptance follows. A 25-case release Engine diagnostic recovered exact values and retained at most 8235 tail bytes/15 records; record 16 and oversized keys checkpointed. Its observed 13.86 MB process RSS and <=37.714 ms reopen are finite-case observations, not stable performance acceptance.
 
 Further small policy guesses are not justified by these controls. The `checkpoint-pair` diagnostic mode downloads the original provider-sealed build archives, verifies their actual immutable source/tree/lock/executable, executes A in three balanced ABBA/BAAB blocks on one host, then separately profiles sync/CPU work. It preserves original workload/configuration/deadlines and real-disk databases with tmpfs companion receipts. The diagnostic workflow head is recorded separately from actual benchmark checkout heads; no Git head or original receipt is rewritten. Instrumented timings cannot replace the uninstrumented comparison or original nine-cell campaign. Warmup SST/compaction state is retained to investigate the observed 96/100-compaction timing split in both sources. No causal or acceptance conclusion is predeclared.
+
+## Same-host A isolation result
+
+Diagnostic run 37844882145 at controller fdc9d9ec6dae4fdbf7c18511758cc3ce328105d8 completed all twelve plain fresh-process A trials. Original provider ZIP SHA-256 is 8d615b740b04e1617e24e55ca45eff0d701bf74d3cc8b7f7ef13f56658f24967; captured REST metadata, originating build archives and actual executables were independently verified. Baseline source remains d5bcb607; candidate runtime remains 640d4692. Both sources use identical original workloads and limits. All trials verify every acknowledgement and reopened value. The diagnostic controller's exact-head three-platform CI 37844872529 passed.
+
+| Block | Source | Elapsed seconds | Public flush p95 ms | Compactions |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline | 5.699 | 37.847 | 100 |
+| 1 | candidate | 5.703 | 41.252 | 100 |
+| 1 | candidate | 5.517 | 39.173 | 99 |
+| 1 | baseline | 5.601 | 39.655 | 99 |
+| 2 | candidate | 5.538 | 40.510 | 100 |
+| 2 | baseline | 5.443 | 40.074 | 100 |
+| 2 | baseline | 5.455 | 38.382 | 100 |
+| 2 | candidate | 5.597 | 39.638 | 100 |
+| 3 | baseline | 5.524 | 38.026 | 99 |
+| 3 | candidate | 5.358 | 36.888 | 100 |
+| 3 | candidate | 5.995 | 40.334 | 100 |
+| 3 | baseline | 5.566 | 38.219 | 99 |
+
+Candidate/baseline overall median ratios are 1.004 elapsed and 1.044 public flush p95. Within-block elapsed ratios are 0.993/1.022/1.024 and p95 ratios 1.038/1.022/1.013. This one host does not reproduce the earlier large source difference, but does not erase the original adverse rows or establish a mechanism. All rows enter measurement with the same SST count/bytes, no active compaction and eight completed warmup compactions. Compaction counts vary 99--100 on this host for both sources; they are not established as the cause. Whole-process sync profiles record 7,738/7,741 fsync calls and 0.564/0.550 traced syscall seconds, including warmup, verification and reopen.
+
+Both CPU-instrumented benchmarks passed, but CPU report rendering failed after ownership restoration because the analyzer still ran as root against a runner-owned file. Those reports are invalid analysis; raw perf data remains retained. The controller now analyzes as the runner and records an unsuccessful analysis explicitly. The earlier transport failure 37844054046 has no usable uploaded archive and remains separate.
+
+Next controlled comparison uses all three original cells, three independently provisioned hosts and twelve balanced plain trials per cell per host. Cell order rotates across hosts; each native warmup, value/flush count, compaction admission, data/reopen checks and deadline remains unchanged. This diagnoses stability and preserves every row; it does not replace the original nine-cell artifacts or fourteen final-source full-hour cases. No additional runtime policy change follows from an unproven cause.

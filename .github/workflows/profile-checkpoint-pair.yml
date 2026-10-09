@@ -44,6 +44,10 @@ concurrency:
 
 jobs:
   profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [1, 2, 3]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
@@ -77,18 +81,20 @@ jobs:
           BASELINE_SHA: ${{ inputs.baseline_sha }}
           CANDIDATE_RUN: ${{ inputs.candidate_run }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          HOST_REPEAT: ${{ matrix.host }}
         run: |
           python3 tools/profile_checkpoint_pair.py \
             --repository "$GITHUB_REPOSITORY" \
             --baseline-run "$BASELINE_RUN" --baseline-sha "$BASELINE_SHA" \
             --candidate-run "$CANDIDATE_RUN" --candidate-sha "$CANDIDATE_SHA" \
             --baseline-source pair-source/baseline --candidate-source pair-source/candidate \
+            --cells A B C --host-repeat "$HOST_REPEAT" \
             --output target/checkpoint-pair
       - name: Preserve every timing, profile, transport failure and original archive
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: checkpoint-pair-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
+          name: checkpoint-pair-host${{ matrix.host }}-${{ github.sha }}-${{ github.run_id }}-a${{ github.run_attempt }}
           path: |
             target/checkpoint-pair/**
             target/checkpoint-pair-host/**

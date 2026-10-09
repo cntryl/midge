@@ -2,12 +2,43 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import profile_checkpoint_pair as pair
 
 
 class CheckpointPairTests(unittest.TestCase):
+    def test_should_retain_failed_analysis_when_cpu_capture_exits_successfully(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = {"valid": True, "returncode": 0}
+            # Act
+            with patch.object(pair.subprocess, "run", return_value=SimpleNamespace(returncode=1)) as run:
+                pair.render_cpu_profile(root, result)
+            # Assert
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["profile_report_returncode"], 1)
+            self.assertIn("raw data retained", result["error"])
+            self.assertEqual(run.call_args.args[0][0], "perf")
+
+    def test_should_reject_wrong_cell_when_acknowledgements_match_another_workload(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "midge" / "actual-attempt"
+            directory.mkdir(parents=True)
+            status = {"git_commit": "a" * 40, "status": "passed", "phase": "complete",
+                      "terminal_error": None, "verified": True, "reopened_verified": True,
+                      "cell": "A", "benchmark_workload": pair.CELLS["A"][0],
+                      "completed_cycles": 256, "total_cycles": 256, "warmup_cycles": 26,
+                      "rows_per_cycle": 1024, "families": 1, "acknowledged_rows": 262144}
+            (directory / "workload-status.json").write_text(json.dumps(status))
+            # Act / Assert
+            with self.assertRaisesRegex(ValueError, "ACK/reopen proof"):
+                pair.native_result(root, "a" * 40, "B")
+
     def test_should_keep_benchmark_unprivileged_when_cpu_sampler_requires_root(self):
         # Arrange
         environment = {key: "original-" + key for key in pair.BENCHMARK_ENV}
