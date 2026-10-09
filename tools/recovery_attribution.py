@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import select
 import selectors
+import shutil
 import subprocess
 import time
 
@@ -34,6 +35,15 @@ def parse_perf_ack(payload):
     return "ack"
 
 
+def parse_perf_report(report_text):
+    lost = re.findall(r"^# Total Lost Samples: (\d+)\s*$", report_text, re.MULTILINE)
+    samples = re.findall(r"^# Samples: ([0-9.]+)([KMG]?) of event '[^']+'\s*$", report_text, re.MULTILINE)
+    return {
+        "lost_samples": int(lost[0]) if len(lost) == 1 else None,
+        "samples": int(float(samples[0][0])*{"":1,"K":1000,"M":1000000,"G":1000000000}[samples[0][1]]) if len(samples) == 1 else None,
+    }
+
+
 def run_cpu(command, directory):
     control, ack = directory / "control.fifo", directory / "ack.fifo"
     os.mkfifo(control, 0o600)
@@ -41,6 +51,7 @@ def run_cpu(command, directory):
     ctl_fd = os.open(control, os.O_RDWR | os.O_NONBLOCK)
     ack_fd = os.open(ack, os.O_RDWR | os.O_NONBLOCK)
     perf_command = ["sudo", "-n", "perf", "record", "-F", "999", "-g", "--call-graph", "dwarf",
+                    "--no-buildid", "--no-buildid-cache",
                     "--delay=-1", f"--control=fifo:{control},{ack}", "-o", str(directory / "perf.data"),
                     "--", "runuser", "-u", os.environ.get("USER", "runner"), "--", "env",
                     "MIDGE_RECOVERY_CPU_CONTROL=stdio", *command]
@@ -104,14 +115,18 @@ def run_cpu(command, directory):
     data = directory / "perf.data"
     if data.exists():
         subprocess.run(["sudo", "-n", "chown", f"{os.getuid()}:{os.getgid()}", str(data)], check=True)
+        report_command = ["perf", "report", "--stdio", "--no-children", "--no-inline", "-i", str(data)]
+        receipt["report_command"] = report_command
+        receipt["report_exit_code"] = None
         with (directory / "perf-report.txt").open("wb") as out, (directory / "perf-report-error.log").open("wb") as err:
-            report = subprocess.run(["perf", "report", "--stdio", "--no-children", "-i", str(data)], stdout=out, stderr=err, check=False)
-        receipt["report_exit_code"] = report.returncode
+            try:
+                report = subprocess.run(report_command, stdout=out, stderr=err, timeout=60, check=False,
+                                        env={**os.environ, "DEBUGINFOD_URLS": ""})
+                receipt["report_exit_code"] = report.returncode
+            except subprocess.TimeoutExpired:
+                receipt["report_error"] = "fixed 60-second report bound exceeded"
         report_text = (directory / "perf-report.txt").read_text()
-        lost = re.search(r"Total Lost Samples: (\d+)", report_text)
-        samples = re.search(r"Samples: ([0-9.]+)([KMG]?)", report_text)
-        receipt["lost_samples"] = int(lost.group(1)) if lost else None
-        receipt["samples"] = int(float(samples.group(1))*{"":1,"K":1000,"M":1000000,"G":1000000000}[samples.group(2)]) if samples else None
+        receipt.update(parse_perf_report(report_text))
         receipt["data_sha256"] = hashlib.sha256(data.read_bytes()).hexdigest()
     write(directory / "sampler.json", receipt)
     return receipt
@@ -167,6 +182,12 @@ def main():
             executable = record["executable"]
     if executable is None:
         raise ValueError("missing Cargo executable receipt")
+    # Record against the archived, immutable executable so skipped perf build-id
+    # postprocessing cannot accidentally resolve a later rebuild at that pathname.
+    archived_executable = root / "binary" / "recovery_attribution"
+    archived_executable.parent.mkdir()
+    shutil.copy2(executable, archived_executable)
+    executable = str(archived_executable)
     binary = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
     fixture = root / "fixture"
     seed = root / "seed"
@@ -177,6 +198,7 @@ def main():
         raise ValueError("immutable fixture construction failed; retained native failure")
     fixture_sha = json.loads((fixture / "fixture.json").read_text())["inventory"]["sha256"]
     manifest = {"source_sha": source, "binary_sha256": binary, "fixture_sha256": fixture_sha, "command": build,
+                "binary_path": "binary/recovery_attribution",
                 "profile_release_debug": 1, "planned_plain": 12, "planned_cpu": 4, "trials": [], "complete": False}
     write(root / "campaign.json", manifest)
     planned = [(variant, repeat, False) for repeat in range(1, 4) for variant in VARIANTS[repeat-1:]+VARIANTS[:repeat-1]]

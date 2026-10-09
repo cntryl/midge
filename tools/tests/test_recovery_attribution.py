@@ -7,10 +7,19 @@ import tempfile
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import unittest
-from recovery_attribution import parse_perf_ack, validate_native
+from recovery_attribution import parse_perf_ack, parse_perf_report, validate_native
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_should_read_event_samples_when_lost_sample_header_precedes_them(self):
+        # Arrange: exact header order retained in the hosted baseline profile.
+        header = "# Total Lost Samples: 0\n#\n# Samples: 2K of event 'cycles:P'\n"
+        # Act / Assert
+        self.assertEqual(parse_perf_report(header), {"samples": 2000, "lost_samples": 0})
+        self.assertEqual(parse_perf_report("# Total Lost Samples: 0\n"), {"samples": None, "lost_samples": 0})
+        self.assertIsNone(parse_perf_report(header + "# Samples: 1K of event 'other'\n")["samples"])
+        self.assertEqual(parse_perf_report(header.replace("Lost Samples: 0", "Lost Samples: 3"))["lost_samples"], 3)
+
     def test_should_accept_native_packet_when_perf_ack_has_c_terminator(self):
         # Arrange: packet retained in all four original failed sampler controls.
         packet = b"ack\n\x00"

@@ -41,6 +41,12 @@ sampling enable/disable immediately around `Engine::open`. Restore, fixture
 construction, verification and shutdown are outside CPU sampling. Each profiled
 trial retains its own native data/resource receipts and a plain same-mode control.
 Report any lost samples, failures and perturbation; never substitute a failed run.
+Perf records native DWARF callchains without build-id postprocessing/cache updates;
+the exact executable is archived and executed from its immutable artifact path.
+Reports retain native symbols/callchains with inline expansion disabled and a fixed
+sixty-second postprocessing bound. The process bound remains three hundred seconds.
+These tooling controls avoid slow addr2line finalization outside measured open;
+they do not change sampling boundaries, frequency, fixture or acceptance targets.
 
 A cost is dominant only with at least half of exclusive coverage work in all
 three accepted-baseline repeats and native CPU support. Inclusive phase durations
