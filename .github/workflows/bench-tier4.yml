@@ -27,23 +27,6 @@ on:
         default: "1"
         description: Exact attempt of the completed transport smoke
 
-      baseline_run:
-        type: string
-        default: '37834100918'
-        description: Original baseline campaign for checkpoint-pair diagnosis
-      baseline_sha:
-        type: string
-        default: d5bcb607b75b1fa5cf5e4f4f910d7e49f9ebe12b
-        description: Immutable baseline source for checkpoint-pair diagnosis
-      candidate_run:
-        type: string
-        default: '37841786212'
-        description: Original candidate campaign for checkpoint-pair diagnosis
-      candidate_sha:
-        type: string
-        default: 640d4692cfcb570518bdb9fa6dc0eac86a0d21e9
-        description: Immutable candidate source for checkpoint-pair diagnosis
-
 permissions:
   contents: read
   actions: read
@@ -56,11 +39,6 @@ jobs:
   checkpoint-pair:
     if: inputs.mode == 'checkpoint-pair'
     uses: ./.github/workflows/profile-checkpoint-pair.yml
-    with:
-      baseline_run: ${{ inputs.baseline_run }}
-      baseline_sha: ${{ inputs.baseline_sha }}
-      candidate_run: ${{ inputs.candidate_run }}
-      candidate_sha: ${{ inputs.candidate_sha }}
   bench:
     if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint","checkpoint-pair"]'), inputs.mode) }}
     runs-on: ubuntu-24.04-arm
