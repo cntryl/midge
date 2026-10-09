@@ -133,6 +133,8 @@ impl CloudReplay {
             },
         );
         // Accepted worker work stays owned while the outer startup worker holds its lease.
+        #[cfg(test)]
+        super::test_control::actor_join_started();
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;
         shutdown?;
@@ -318,6 +320,8 @@ fn publish_checkpoint_output(
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         })?;
+        #[cfg(test)]
+        super::test_control::before_publish_receive();
         let FlushWorkerResult::Publish(completion) =
             receive_completion(rx, state.startup_scope.as_ref(), "recovery flush publish")?
         else {

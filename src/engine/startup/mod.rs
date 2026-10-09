@@ -14,6 +14,8 @@ mod epoch_floor;
 mod recovery;
 mod storage;
 mod streaming_recovery;
+#[cfg(test)]
+mod test_control;
 mod timing;
 
 struct StartupStoragePath {
