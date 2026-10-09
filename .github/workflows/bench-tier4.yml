@@ -10,7 +10,7 @@ on:
         description: Ordinary scenarios; smoke keeps short windows, standard measures 10 minutes, full 60 minutes
       mode:
         type: choice
-        options: [all, checkpoint-smoke, checkpoint]
+        options: [all, checkpoint-smoke, checkpoint, checkpoint-pair]
         default: all
       expected_sha:
         type: string
@@ -36,8 +36,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  checkpoint-pair:
+    if: inputs.mode == 'checkpoint-pair'
+    uses: ./.github/workflows/profile-checkpoint-pair.yml
   bench:
-    if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint"]'), inputs.mode) }}
+    if: ${{ !contains(fromJSON('["checkpoint-smoke","checkpoint","checkpoint-pair"]'), inputs.mode) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     strategy:

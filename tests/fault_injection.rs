@@ -836,13 +836,35 @@ mod failure_injection {
             ],
             "the retained oldest immutable and younger flush need distinct stable identities"
         );
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(temp_dir.path().join("manifest.snapshot.json"))
-                .expect("read manifest snapshot"),
-        )
-        .expect("parse manifest");
-        assert_eq!(manifest["files"].as_array().map(Vec::len), Some(2));
-        assert_eq!(manifest["next_sst_seqs"][cf.id().to_string()], 3);
+        // A deferred snapshot need not contain the two publications yet.
+        // Reopen the actual snapshot+journal authority, then require its next
+        // SST identity rather than inspecting snapshot-only state.
+        shutdown_engine(engine);
+        let reopened = open_local_engine(temp_dir.path());
+        let cf = default_cf(&reopened);
+        let mut tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"successor".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        tx.commit(WriteOptions::sync()).unwrap();
+        reopened.flush_cf(&cf).unwrap();
+        let layout = reopened.metrics().get_storage_layout().unwrap();
+        let mut recovered_names: Vec<_> = layout
+            .levels
+            .iter()
+            .flat_map(|level| level.files.iter())
+            .map(|file| file.name.clone())
+            .collect();
+        recovered_names.sort();
+        assert_eq!(
+            recovered_names,
+            vec![
+                "000000_00_00000000000000000001.sst".to_string(),
+                "000000_00_00000000000000000002.sst".to_string(),
+                "000000_00_00000000000000000003.sst".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1426,8 +1448,34 @@ mod failure_injection {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let engine = open_local_engine(db_path);
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let cf = default_cf(&engine);
+        let mut families = vec![cf.clone()];
+        for n in 1..4 {
+            families.push(
+                engine
+                    .create_column_family(&format!("checkpoint-primer-{n}"))
+                    .unwrap(),
+            );
+        }
+        // Reach the deferred checkpoint trigger without hitting L0 pressure.
+        // These real flushes precede the best-effort writes under test.
+        for n in 0..15 {
+            let family = &families[n % 4];
+            let mut tx = engine
+                .begin_tx(family.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(format!("primer-{n}").into_bytes(), b"primer".to_vec(), None)
+                .unwrap();
+            tx.commit(WriteOptions::sync()).unwrap();
+            engine.flush_cf(family).unwrap();
+        }
 
         for index in 0..12 {
             let key = format!("checkpoint-flush-{index:02}");
@@ -2698,8 +2746,8 @@ mod failure_injection {
     #[test]
     fn should_not_delete_sst_referenced_by_dropped_journal_edit_when_runtime_publish_hits_corrupt_journal(
     ) {
-        // Arrange: two flushes whose AddSst edits stay in the journal because
-        // snapshot saves fail, then one of those journal records goes bad.
+        // Arrange: two ordinary flushes naturally defer their checkpoint;
+        // one of those durable AddSst journal records then goes bad.
         let _guard = failpoint_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2716,15 +2764,10 @@ mod failure_injection {
         };
         let engine = open(RecoveryPolicy::Salvage).expect("open salvage engine");
         let cf = default_cf(&engine);
-        let scenario = fail::FailScenario::setup();
-        fail::cfg("midge::manifest::inject_snapshot_write_failure", "return")
-            .expect("configure snapshot write failpoint");
         write_cf_value(&engine, &cf, b"a", b"value-a");
         engine.flush_cf(&cf).expect("flush a");
         write_cf_value(&engine, &cf, b"b", b"value-b");
         engine.flush_cf(&cf).expect("flush b");
-        fail::remove("midge::manifest::inject_snapshot_write_failure");
-        scenario.teardown();
         let flushed = sst_file_names(db_path);
         assert_eq!(flushed.len(), 2, "both flushes should publish an SST");
         assert!(
@@ -3122,6 +3165,8 @@ mod chaos_real {
 
         // Act
         match scenario.to_string_lossy().as_ref() {
+            "local_deferred_checkpoint" => child_local_deferred_checkpoint(&db_path),
+            "local_forced_checkpoint_failure" => child_local_forced_checkpoint_failure(&db_path),
             "flush_after_sst_write" => child_flush_after_sst_write(&db_path),
             "flush_after_sst_write_best_effort" => {
                 child_flush_after_sst_write_best_effort(&db_path);
@@ -3534,6 +3579,156 @@ mod chaos_real {
         committed
     }
 
+    #[test]
+    fn should_recover_acknowledged_sst_data_when_crashing_with_deferred_local_checkpoint() {
+        // Arrange
+        let directory = TempDir::new().expect("private crash database");
+        let db_path = directory.path();
+
+        // Act: abort only after two real, acknowledged flush publications.
+        run_child_expect_abort("local_deferred_checkpoint", db_path, &[]);
+        expire_crashed_process_lease(db_path);
+        let committed = read_committed_records(db_path);
+        assert_eq!(committed.len(), 16);
+        assert!(!fs::read(db_path.join("manifest.journal"))
+            .unwrap()
+            .is_empty());
+        // Every tracked write was already flushed. Removing WAL in this
+        // private fixture prevents WAL replay from masking missing SST authority.
+        fs::remove_dir_all(db_path.join("wal")).expect("remove flushed fixture WAL");
+        let engine = open_local_engine(db_path);
+
+        // Assert
+        assert_committed_records_visible(&engine, &committed);
+    }
+
+    fn child_local_deferred_checkpoint(db_path: &Path) {
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let cf = default_cf(&engine);
+        let committed_path = committed_log_path(db_path);
+        for round in 0..2 {
+            for index in 0..8 {
+                let key = format!("deferred-{round}-{index}");
+                let value = format!("value-{round}-{index}");
+                put_and_track_commit(
+                    &engine,
+                    &cf,
+                    key.as_bytes(),
+                    value.as_bytes(),
+                    WriteOptions::sync(),
+                    &committed_path,
+                );
+            }
+            engine
+                .flush_cf(&cf)
+                .expect("acknowledged flush publication");
+        }
+        assert!(!fs::read(db_path.join("manifest.journal"))
+            .unwrap()
+            .is_empty());
+        crash::abort_at_trigger(
+            "local_deferred_checkpoint",
+            "manual::after_deferred_flush_ack",
+        );
+    }
+
+    #[test]
+    fn should_recover_acknowledged_sst_data_when_cheap_forced_checkpoint_fails_before_crash() {
+        // Arrange
+        let directory = TempDir::new().unwrap();
+        let db_path = directory.path();
+
+        // Act: the second cheap flush ACK requires the frontier fallback.
+        run_child_expect_abort("local_forced_checkpoint_failure", db_path, &[]);
+        expire_crashed_process_lease(db_path);
+        let committed = read_committed_records(db_path);
+        let journal = fs::read(db_path.join("manifest.journal")).unwrap();
+        fs::remove_dir_all(db_path.join("wal")).expect("remove acknowledged fixture WAL");
+        let engine = open_local_engine(db_path);
+
+        // Assert: WAL replay cannot mask missing SST or frontier authority.
+        assert_eq!(committed.len(), 2);
+        assert!(!journal.is_empty());
+        assert!(journal.len() < 20 * 1024);
+        assert_committed_records_visible(&engine, &committed);
+        let layout = engine.metrics().get_storage_layout().unwrap();
+        assert_eq!(
+            layout
+                .levels
+                .iter()
+                .map(|level| level.files.len())
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    fn child_local_forced_checkpoint_failure(db_path: &Path) {
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let cf = default_cf(&engine);
+        // Deterministic incompressible data makes SST payload large enough
+        // that checkpointing stays below the declared five-percent gate.
+        let mut value = vec![0_u8; 128 * 1024];
+        let mut generator = 0x1234_5678_u32;
+        for chunk in value.chunks_exact_mut(4) {
+            generator ^= generator << 13;
+            generator ^= generator >> 17;
+            generator ^= generator << 5;
+            chunk.copy_from_slice(&generator.to_le_bytes());
+        }
+        for round in 0..2 {
+            put_and_track_commit(
+                &engine,
+                &cf,
+                format!("cheap-{round}").as_bytes(),
+                &value,
+                WriteOptions::sync(),
+                &committed_log_path(db_path),
+            );
+            if round == 1 {
+                fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
+            }
+            engine.flush_cf(&cf).expect("acknowledged cheap flush");
+            if round == 0 {
+                assert!(fs::read(db_path.join("manifest.journal"))
+                    .unwrap()
+                    .is_empty());
+                let snapshot_bytes = fs::metadata(db_path.join("manifest.snapshot.json"))
+                    .unwrap()
+                    .len();
+                let layout = engine.metrics().get_storage_layout().unwrap();
+                let sst_bytes = layout
+                    .levels
+                    .iter()
+                    .flat_map(|level| &level.files)
+                    .map(|file| file.size_bytes)
+                    .sum::<u64>();
+                assert!(
+                    snapshot_bytes * 20 < sst_bytes,
+                    "fixture must take cheap forced path"
+                );
+            }
+        }
+        assert!(!fs::read(db_path.join("manifest.journal"))
+            .unwrap()
+            .is_empty());
+        crash::abort_at_trigger(
+            "local_forced_checkpoint_failure",
+            "manual::after_forced_flush_ack",
+        );
+    }
+
     fn child_flush_after_sst_write(db_path: &Path) {
         crash::configure_abort_failpoint(
             "midge::flush::after_sst_write_before_publish",
@@ -3804,6 +3999,8 @@ mod chaos_real {
 
     fn crash_trigger(scenario: &str) -> &'static str {
         match scenario {
+            "local_deferred_checkpoint" => "manual::after_deferred_flush_ack",
+            "local_forced_checkpoint_failure" => "manual::after_forced_flush_ack",
             "flush_after_sst_write" | "flush_after_sst_write_best_effort" => {
                 "midge::flush::after_sst_write_before_publish"
             }
