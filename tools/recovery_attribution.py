@@ -27,6 +27,13 @@ def run_plain(command, directory):
             return {"exit_code": None, "error": "fixed 300-second process bound exceeded"}
 
 
+def parse_perf_ack(payload):
+    # perf writes sizeof(EVLIST_CTL_CMD_ACK_TAG), including its C terminator.
+    if payload not in (b"ack\n", b"ack\n\x00"):
+        raise ValueError(f"unexpected sampler acknowledgement {payload!r}")
+    return "ack"
+
+
 def run_cpu(command, directory):
     control, ack = directory / "control.fifo", directory / "ack.fifo"
     os.mkfifo(control, 0o600)
@@ -71,10 +78,9 @@ def run_cpu(command, directory):
                         os.write(ctl_fd, (action + "\n").encode())
                         if not select.select([ack_fd], [], [], 5)[0]:
                             raise TimeoutError("sampler did not acknowledge within five seconds")
-                        reply = os.read(ack_fd, 4096).decode().strip()
-                        if reply != "ack":
-                            raise ValueError(f"unexpected sampler acknowledgement {reply!r}")
-                        receipt["boundaries"].append({"action": action, "ack": reply, "elapsed_ns": time.monotonic_ns()-started})
+                        raw_reply = os.read(ack_fd, 4096)
+                        reply = parse_perf_ack(raw_reply)
+                        receipt["boundaries"].append({"action": action, "ack": reply, "ack_raw_hex": raw_reply.hex(), "elapsed_ns": time.monotonic_ns()-started})
                         write(directory / "sampler.json", receipt)
                         process.stdin.write(b"CONTINUE\n")
                         process.stdin.flush()

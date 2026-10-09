@@ -7,10 +7,19 @@ import tempfile
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import unittest
-from recovery_attribution import validate_native
+from recovery_attribution import parse_perf_ack, validate_native
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_should_accept_native_packet_when_perf_ack_has_c_terminator(self):
+        # Arrange: packet retained in all four original failed sampler controls.
+        packet = b"ack\n\x00"
+        # Act / Assert
+        self.assertEqual(parse_perf_ack(packet), "ack")
+        for malformed in (b"ack", b"bad\n\x00", b"ack\n\x00\x00", b"ack\nother"):
+            with self.assertRaises(ValueError):
+                parse_perf_ack(malformed)
+
     def test_should_reject_false_acceptance_when_native_evidence_is_partial(self):
         # Arrange: one internally consistent receipt and independent bad mutations.
         checks = [{"passed": True, "value_mismatches": 0, "expected_rows": 8192, "actual_rows": 8192} for _ in range(6)]
