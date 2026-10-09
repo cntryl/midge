@@ -114,6 +114,14 @@ pub mod __internal {
         };
     }
     pub mod diagnostics {
+        pub use crate::diagnostics::WriteAdmissionSnapshot;
+
+        /// Capture this engine's transaction admission counters after joining callers.
+        #[must_use]
+        pub fn write_admission_snapshot(engine: &crate::Engine) -> WriteAdmissionSnapshot {
+            engine.write_admission_snapshot()
+        }
+
         pub use crate::diagnostics::{
             disable_transaction_commit_timing_for_benchmarks,
             drain_transaction_commit_timings_for_benchmarks,

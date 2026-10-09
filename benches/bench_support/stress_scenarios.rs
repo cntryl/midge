@@ -32,6 +32,8 @@ use recovery_progress::{is_recovery_work, RecoveryProgressLayer, RecoveryScope};
 #[path = "stress_scenarios/checkpoint_accounting.rs"]
 mod checkpoint_accounting;
 use checkpoint_accounting::CheckpointAccounting;
+#[path = "stress_scenarios/admission.rs"]
+mod admission;
 #[cfg(all(test, feature = "failpoints"))]
 #[path = "stress_scenarios/final_flush_watchdog.rs"]
 mod final_flush_watchdog;
@@ -686,6 +688,8 @@ struct StageReport<'a> {
     stats: &'a StageStats,
     before: &'a RuntimeMetricsSnapshot,
     after: &'a RuntimeMetricsSnapshot,
+    admission_before: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+    admission_after: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
 }
 
 pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
@@ -703,7 +707,12 @@ pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
     let run_dir = tempfile::tempdir().expect("create isolated stress directory");
     let mut opened = open_case(case, run_dir.path(), &progress, &artifacts);
     let sampler = ResourceSampler::start(&artifacts, &opened.database, progress.clone());
+    let maintenance =
+        admission::MaintenanceSampler::start(&opened.engine, &artifacts.path, artifacts.started);
     let expected = run_stages(ctx, case, duration, &mut opened, &progress, &mut artifacts);
+    if let Some(maintenance) = maintenance {
+        maintenance.finish();
+    }
     finish_case(opened, &expected, &progress, &mut artifacts);
     let (resource_start, resource_end, peak_rss) = sampler.finish();
     record_resources(ctx, resource_start, resource_end, peak_rss);
@@ -812,6 +821,8 @@ fn run_stages(
         let started = Instant::now();
         let before = runtime_metrics(&opened.engine);
         capture_prestate(case, stage_index, clients, opened, artifacts, &before);
+        let admission_before =
+            cntryl_midge::__internal::diagnostics::write_admission_snapshot(&opened.engine);
         let (stage, outcomes) = run_stage(
             case,
             stage_index,
@@ -839,11 +850,13 @@ fn run_stages(
         }
         let elapsed = started.elapsed().max(Duration::from_nanos(1));
         let after = runtime_metrics(&opened.engine);
+        let admission_after =
+            cntryl_midge::__internal::diagnostics::write_admission_snapshot(&opened.engine);
         write_atomic_json(
             &artifacts
                 .path
                 .join(format!("stage-{stage_index:02}-endstate.json")),
-            &json!({ "stage_index": stage_index, "runtime": after }),
+            &json!({ "stage_index": stage_index, "runtime": after, "write_admission": admission_after }),
         )
         .expect("persist measured end-stage runtime state");
         record_stage(
@@ -856,6 +869,8 @@ fn run_stages(
                 stats: &stage,
                 before: &before,
                 after: &after,
+                admission_before,
+                admission_after,
             },
         );
     }
@@ -919,6 +934,7 @@ fn capture_prestate(
             "prior_stage_count": stage_index,
             "database_logical_file_bytes": directory_bytes(&opened.database),
             "runtime": before,
+            "write_admission": cntryl_midge::__internal::diagnostics::write_admission_snapshot(&opened.engine),
             "storage_layout": layout,
         }),
     )
@@ -1804,6 +1820,8 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
         stats,
         before,
         after,
+        admission_before,
+        admission_after,
     } = report;
     let name = format!(
         "{}/{}/{}",
@@ -1849,19 +1867,8 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
             after.write_stalls_no_space_total,
         );
     record_stage_diagnostics(ctx, stats, before, after);
-    for (name, quantile) in [
-        ("transaction_latency_p50_us", 0.50),
-        ("transaction_latency_p95_us", 0.95),
-        ("transaction_latency_p99_us", 0.99),
-    ] {
-        let value = observation_value(self::quantile(&stats.latency_us, quantile));
-        ctx.record_observation(
-            name,
-            value,
-            ObservationUnit::Microseconds,
-            ObservationDirection::LowerIsBetter,
-        );
-    }
+    record_admission_diagnostics(ctx, stats, admission_before, admission_after);
+    record_legacy_latency(ctx, stats);
     ctx.record_observation(
         "logical_operations",
         observation_value(stats.logical_operations),
@@ -1898,12 +1905,64 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
     );
 }
 
+fn record_legacy_latency(ctx: &mut StressContext, stats: &StageStats) {
+    for (name, rank) in [
+        ("transaction_latency_p50_us", 0.50),
+        ("transaction_latency_p95_us", 0.95),
+        ("transaction_latency_p99_us", 0.99),
+    ] {
+        ctx.record_observation(
+            name,
+            observation_value(quantile(&stats.latency_us, rank)),
+            ObservationUnit::Microseconds,
+            ObservationDirection::LowerIsBetter,
+        );
+    }
+}
+
 fn record_stage_diagnostics(
     ctx: &mut StressContext,
     stats: &StageStats,
     before: &RuntimeMetricsSnapshot,
     after: &RuntimeMetricsSnapshot,
 ) {
+    for (name, initial, final_value) in [
+        (
+            "flush_build_count",
+            before.flush_build_count,
+            after.flush_build_count,
+        ),
+        (
+            "flush_build_ns",
+            before.flush_build_ns_total,
+            after.flush_build_ns_total,
+        ),
+        (
+            "flush_publish_count",
+            before.flush_publish_count,
+            after.flush_publish_count,
+        ),
+        (
+            "flush_publish_ns",
+            before.flush_publish_ns_total,
+            after.flush_publish_ns_total,
+        ),
+        ("compactions", before.compactions_run, after.compactions_run),
+        (
+            "compaction_bytes",
+            before.compaction_bytes_rewritten,
+            after.compaction_bytes_rewritten,
+        ),
+        (
+            "write_stall_ns",
+            before.write_stall_ns_total,
+            after.write_stall_ns_total,
+        ),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        ctx.parameter(format!("midge_{name}_delta_valid"), delta.is_some())
+            .parameter(format!("midge_{name}_delta"), delta.unwrap_or(0));
+    }
     for (name, initial, final_value) in [
         (
             "memory",
@@ -1957,6 +2016,44 @@ fn observation_value(value: u64) -> f64 {
         .to_string()
         .parse::<f64>()
         .expect("integer observations fit in f64")
+}
+
+fn record_admission_diagnostics(
+    ctx: &mut StressContext,
+    stats: &StageStats,
+    before: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+    after: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+) {
+    let mut origins = Some(0_u64);
+    for (name, initial, final_value) in [
+        ("queue", before.queue_total, after.queue_total),
+        ("l0", before.l0_total, after.l0_total),
+        (
+            "cloud_generation",
+            before.cloud_generation_total,
+            after.cloud_generation_total,
+        ),
+        ("cloud_wal", before.cloud_wal_total, after.cloud_wal_total),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        origins = origins
+            .zip(delta)
+            .and_then(|(sum, count)| sum.checked_add(count));
+        ctx.parameter(
+            format!("midge_admission_{name}_delta_valid"),
+            delta.is_some(),
+        )
+        .parameter(format!("midge_admission_{name}_delta"), delta.unwrap_or(0));
+    }
+    let commits = after
+        .commit_write_stall_total
+        .checked_sub(before.commit_write_stall_total);
+    ctx.parameter("midge_admission_commit_delta_valid", commits.is_some())
+        .parameter("midge_admission_commit_delta", commits.unwrap_or(0))
+        .parameter(
+            "midge_admission_counts_reconcile",
+            commits == Some(stats.saturation.write_stall) && origins == commits,
+        );
 }
 
 fn append_stage_csv(path: &Path, stage: &str, stats: &StageStats) {

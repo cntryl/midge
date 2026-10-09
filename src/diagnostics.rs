@@ -39,6 +39,36 @@ pub struct ReadPathDiagnosticsSnapshot {
     pub remote_range_latency_ns_max: u64,
 }
 
+/// Transaction rejection counts, distinct from runtime stall transitions.
+#[cfg(any(test, feature = "internal-testing"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct WriteAdmissionSnapshot {
+    pub commit_write_stall_total: u64,
+    pub queue_total: u64,
+    pub l0_total: u64,
+    pub cloud_generation_total: u64,
+    pub cloud_wal_total: u64,
+}
+
+#[cfg(any(test, feature = "internal-testing"))]
+#[derive(Debug, Default)]
+struct WriteAdmissionCounters {
+    commit_write_stall: AtomicU64,
+    queue: AtomicU64,
+    l0: AtomicU64,
+    cloud_generation: AtomicU64,
+    cloud_wal: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum WriteAdmissionRejection {
+    Commit,
+    Queue,
+    L0,
+    CloudGeneration,
+    CloudWal,
+}
+
 /// Read-path counters owned by one runtime.
 ///
 /// A runtime owns its cache and snapshot state, so the counters must follow
@@ -46,6 +76,8 @@ pub struct ReadPathDiagnosticsSnapshot {
 /// from leaking work into each other's benchmark windows.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeDiagnostics {
+    #[cfg(any(test, feature = "internal-testing"))]
+    admission: WriteAdmissionCounters,
     counters: EngineCounters,
     read_only_begin_tx_count: AtomicU64,
     read_only_snapshot_cache_hits: AtomicU64,
@@ -90,6 +122,32 @@ impl Default for EngineCounters {
 }
 
 impl RuntimeDiagnostics {
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn write_admission_snapshot(&self) -> WriteAdmissionSnapshot {
+        WriteAdmissionSnapshot {
+            commit_write_stall_total: self.admission.commit_write_stall.load(Ordering::Relaxed),
+            queue_total: self.admission.queue.load(Ordering::Relaxed),
+            l0_total: self.admission.l0.load(Ordering::Relaxed),
+            cloud_generation_total: self.admission.cloud_generation.load(Ordering::Relaxed),
+            cloud_wal_total: self.admission.cloud_wal.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub(crate) fn record_write_admission_rejection(&self, reason: WriteAdmissionRejection) {
+        let counter = match reason {
+            WriteAdmissionRejection::Commit => &self.admission.commit_write_stall,
+            WriteAdmissionRejection::Queue => &self.admission.queue,
+            WriteAdmissionRejection::L0 => &self.admission.l0,
+            WriteAdmissionRejection::CloudGeneration => &self.admission.cloud_generation,
+            WriteAdmissionRejection::CloudWal => &self.admission.cloud_wal,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(not(any(test, feature = "internal-testing")))]
+    pub(crate) fn record_write_admission_rejection(&self, _: WriteAdmissionRejection) {}
+
     /// Record an operational event for this engine, and mirror it to process
     /// global telemetry when an exporter has been set up.
     pub(crate) fn record(&self, event: impl Fn(&crate::telemetry::Metrics)) {

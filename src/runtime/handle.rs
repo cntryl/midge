@@ -81,9 +81,21 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
-    fn map_submission_error(error: crossbeam::channel::TrySendError<RuntimeMsg>) -> MidgeError {
+    fn map_submission_error(
+        &self,
+        error: crossbeam::channel::TrySendError<RuntimeMsg>,
+    ) -> MidgeError {
         match error {
             crossbeam::channel::TrySendError::Full(message) => {
+                if matches!(
+                    message,
+                    RuntimeMsg::ApplyTransaction { .. }
+                        | RuntimeMsg::ApplySpilledTransaction { .. }
+                ) {
+                    self.diagnostics.record_write_admission_rejection(
+                        crate::diagnostics::WriteAdmissionRejection::Queue,
+                    );
+                }
                 drop(message);
                 MidgeError::WriteStall("runtime request queue is full".to_string())
             }
@@ -191,7 +203,7 @@ impl RuntimeHandle {
         let result = self
             .msg_tx
             .try_send(msg)
-            .map_err(Self::map_submission_error);
+            .map_err(|error| self.map_submission_error(error));
         drop(submission_guard);
         result
     }
@@ -326,7 +338,7 @@ impl RuntimeHandle {
         // react to than by silently spending its response budget queueing.
         if let Err(error) = self.msg_tx.try_send(msg) {
             self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
+            return Err(self.map_submission_error(error));
         }
         drop(submission_guard);
 
@@ -635,7 +647,7 @@ impl RuntimeHandle {
             response_tx: None,
         }) {
             self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
+            return Err(self.map_submission_error(error));
         }
         drop(submission_guard);
 
@@ -664,7 +676,7 @@ impl RuntimeHandle {
             response_tx: None,
         }) {
             self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
+            return Err(self.map_submission_error(error));
         }
         drop(submission_guard);
 

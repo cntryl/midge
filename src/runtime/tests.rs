@@ -12,6 +12,84 @@ mod compaction_deadline_tests;
 const RUNTIME_PANIC_CHILD: &str = "MIDGE_RUNTIME_PANIC_CHILD";
 
 #[test]
+fn should_count_transaction_queue_rejections_once_without_retaining_requests() {
+    // Arrange: no event loop can drain the bounded submission queue.
+    let (_runtime, mut handle) = Runtime::new();
+    let (tx, rx) = crossbeam::channel::bounded(1);
+    handle.msg_tx = tx;
+    handle.send(RuntimeMsg::RetryGc).expect("fill queue");
+    let op = TransactionOp::Put {
+        cf_id: 0,
+        key: bytes::Bytes::from_static(b"rejected"),
+        value: bytes::Bytes::from_static(b"value"),
+        ttl_seconds: None,
+        insert_only: false,
+    };
+    let submission = || TransactionSubmission {
+        ops: vec![op.clone()],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    };
+
+    // Act
+    let rejected = handle.send_apply_transaction_and_wait(7001, submission());
+    let control = handle.send(RuntimeMsg::RetryGc);
+
+    // Assert
+    assert!(matches!(rejected, Err(MidgeError::WriteStall(_))));
+    assert!(matches!(control, Err(MidgeError::WriteStall(_))));
+    assert_eq!(handle.diagnostics.write_admission_snapshot().queue_total, 1);
+    assert_eq!(handle.router.pending_len(), 0);
+    let directory = tempfile::tempdir().expect("spill directory");
+    let mut writes = transaction_spill::TransactionWriteSet::new(
+        Arc::new(transaction_spill::TransactionMemoryPool::new(512)),
+        directory.path(),
+        false,
+        7003,
+    );
+    writes
+        .push(TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"rejected-spill"),
+            value: bytes::Bytes::from(vec![1; 4096]),
+            ttl_seconds: None,
+            insert_only: false,
+        })
+        .expect("spill rejected transaction");
+    assert!(writes.has_spills());
+    let spilled = handle.send_spilled_transaction_and_wait(
+        7003,
+        SpilledTransactionSubmission {
+            source: writes.take_source(),
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: 0,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        },
+    );
+    assert!(matches!(spilled, Err(MidgeError::WriteStall(_))));
+    assert_eq!(handle.diagnostics.write_admission_snapshot().queue_total, 2);
+    assert_eq!(handle.router.pending_len(), 0);
+    assert!(matches!(rx.try_recv(), Ok(RuntimeMsg::RetryGc)));
+    assert!(
+        rx.try_recv().is_err(),
+        "rejected writes never enter the queue"
+    );
+    drop(rx);
+    let disconnected = handle.send_apply_transaction_and_wait(7002, submission());
+    assert!(matches!(disconnected, Err(MidgeError::Internal(_))));
+    assert_eq!(handle.diagnostics.write_admission_snapshot().queue_total, 2);
+    assert_eq!(handle.router.pending_len(), 0);
+    let (_other_runtime, other) = Runtime::new();
+    assert_eq!(
+        other.diagnostics.write_admission_snapshot(),
+        crate::diagnostics::WriteAdmissionSnapshot::default()
+    );
+}
+
+#[test]
 fn should_reject_new_transactions_given_runtime_is_closing_when_beginning() {
     // Arrange
     let lifecycle = Arc::new(RuntimeLifecycle::new());

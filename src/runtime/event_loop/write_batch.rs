@@ -74,6 +74,9 @@ impl EventLoop {
     ) -> Result<(), MidgeError> {
         for cf_id in cf_ids {
             if self.state.l0_write_slot_unavailable(*cf_id) {
+                self.state.diagnostics.record_write_admission_rejection(
+                    crate::diagnostics::WriteAdmissionRejection::L0,
+                );
                 self.state.diagnostics.record(|m| {
                     m.record_write_stall_compaction();
                 });

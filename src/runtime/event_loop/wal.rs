@@ -451,6 +451,12 @@ impl WalCoordinator {
                 .upload_backlog
                 .is_empty()
             {
+                event_loop
+                    .state
+                    .diagnostics
+                    .record_write_admission_rejection(
+                        crate::diagnostics::WriteAdmissionRejection::CloudWal,
+                    );
                 event_loop.respond(
                     request_id,
                     RuntimeResponse::Error {
@@ -464,6 +470,14 @@ impl WalCoordinator {
             }
             if let Some(storage) = &event_loop.cloud_coordinator.hybrid_storage {
                 if let Err(error) = storage.ensure_wal_write_admission() {
+                    if matches!(error, crate::common::MidgeError::WriteStall(_)) {
+                        event_loop
+                            .state
+                            .diagnostics
+                            .record_write_admission_rejection(
+                                crate::diagnostics::WriteAdmissionRejection::CloudWal,
+                            );
+                    }
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                     return false;
                 }

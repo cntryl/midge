@@ -1746,6 +1746,16 @@ fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> Mi
         wal_appends_after_first,
         "a stalled transaction must not mutate the WAL"
     );
+    assert_eq!(
+        fixture
+            .event_loop
+            .state
+            .diagnostics
+            .write_admission_snapshot()
+            .l0_total,
+        1,
+        "count the rejected transaction once, independently of stall transitions"
+    );
     Ok(())
 }
 
