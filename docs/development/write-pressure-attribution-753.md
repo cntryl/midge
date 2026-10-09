@@ -16,8 +16,8 @@ shutdowns. No failed repeat may be removed. The source, executable, initial stat
 provider artifact hashes and all native diagnostics must be retained.
 
 Every caller-observed WriteStall must reconcile with one commit rejection and
-exactly one origin: bounded transaction queue, L0, cloud generation or cloud WAL
-admission. Unattributed or duplicate counts fail attribution acceptance. Counts
+exactly one origin: bounded transaction queue, L0, cloud generation, cloud WAL
+admission or the frontend ingest-hint gate. Unattributed or duplicate counts fail attribution acceptance. Counts
 are per rejected admission, not per blocked family, retry sleep, waiter wakeup,
 state transition or post-apply durability failure. Unknown outcomes remain terminal.
 Snapshots are taken with all measured callers joined; they are not an atomic
@@ -45,6 +45,11 @@ diagnostics interface. The commit count is recorded only when submission returns
 WriteStall before an applied sequence. Origin counters record the first rejecting
 gate; the queue counts transaction messages and excludes control requests and
 disconnected channels. Rejected admissions do not enter success populations.
+Ingest-hint rejection reasons describe the runtime response at the advisory
+check: global stall, L0, memory, pending cloud uploads and stalled upload
+admission. They can overlap and must not be summed as independent rejections.
+An unavailable response retains the existing conservative rejection and records
+an unknown reason. Operator checks do not increment these admission counters.
 The readback checks native parameters against both cumulative endpoints, and
 reconciles the origin sum with caller-reported rejections.
 
@@ -57,7 +62,7 @@ Sampled gauge fractions are observations at sample times, not exact busy-time
 integrals; errors and missed short tasks remain visible. Polling adds at most one
 runtime request per sample, with a 250-ms caller bound, and is part of this baseline.
 
-The separate profiling job runs plain and 99-Hz user-space CPU sampled 60-second
+The separate profiling job runs plain and 99-Hz CPU sampled 60-second
 fresh-process trials on the same hosted ARM machine at local 16 and S3 4 clients.
 Each retains its own native receipts and correctness checks. Profiles include
 setup, ingestion and verification, so startup symbols must be separated from write
@@ -79,3 +84,9 @@ Read every original archive and verify the 24 planned cells with
 with the same script and a 60-second minimum. Publish all outcomes, counter
 reconciliation, completed-task duration deltas, sampled gauges, native profile
 attribution and any instrument failure before issue closure.
+
+The initial `4638c22e` campaign is retained as negative attribution evidence: its
+commit counts matched caller rejections, but origin sums omitted the frontend
+ingest hint. Both first CPU trials failed before workload execution because the
+selected `cpu-clock:u` event was unsupported. The corrected full matrix and
+profiles must be read back independently; none of those failed controls is waived.

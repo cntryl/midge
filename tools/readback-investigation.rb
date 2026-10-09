@@ -72,7 +72,7 @@ rows = statuses.map do |path|
     admission_after = json(File.join(directory, format('stage-%02d-endstate.json', index)))['write_admission']
     if admission_before || admission_after
       check(admission_before && admission_after, 'incomplete admission endpoints')
-      origin_sum = %w[queue l0 cloud_generation cloud_wal].sum do |reason|
+      origin_sum = %w[queue l0 cloud_generation cloud_wal ingest_hint].sum do |reason|
         delta = admission_after.fetch("#{reason}_total") - admission_before.fetch("#{reason}_total")
         check(delta >= 0 && parameters.fetch("midge_admission_#{reason}_delta_valid") == 'true', 'admission counter reset')
         check(Integer(parameters.fetch("midge_admission_#{reason}_delta")) == delta, 'admission origin mismatch')
@@ -82,6 +82,10 @@ rows = statuses.map do |path|
       check(commits >= 0 && parameters.fetch('midge_admission_commit_delta_valid') == 'true', 'commit rejection counter reset')
       check(Integer(parameters.fetch('midge_admission_commit_delta')) == commits, 'commit rejection endpoint mismatch')
       check(commits == Integer(parameters.fetch('write_stall_responses')) && origin_sum == commits && parameters.fetch('midge_admission_counts_reconcile') == 'true', 'unattributed or duplicate rejection')
+      %w[runtime l0 memory cloud_pending upload_stalled unknown].each do |reason|
+        delta = admission_after.fetch("hint_#{reason}_total") - admission_before.fetch("hint_#{reason}_total")
+        check(delta >= 0 && parameters.fetch("midge_hint_#{reason}_delta_valid") == 'true' && Integer(parameters.fetch("midge_hint_#{reason}_delta")) == delta, 'hint pressure endpoint mismatch')
+      end
       {'flush_build_count'=>'flush_build_count', 'flush_build_ns'=>'flush_build_ns_total', 'flush_publish_count'=>'flush_publish_count', 'flush_publish_ns'=>'flush_publish_ns_total', 'compactions'=>'compactions_run', 'compaction_bytes'=>'compaction_bytes_rewritten', 'write_stall_ns'=>'write_stall_ns_total'}.each do |name, field|
         check(parameters.fetch("midge_#{name}_delta_valid") == 'true' && Integer(parameters.fetch("midge_#{name}_delta")) == after.fetch(field) - before.fetch(field), 'maintenance delta mismatch')
       end

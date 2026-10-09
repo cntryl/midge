@@ -48,6 +48,13 @@ pub struct WriteAdmissionSnapshot {
     pub l0_total: u64,
     pub cloud_generation_total: u64,
     pub cloud_wal_total: u64,
+    pub ingest_hint_total: u64,
+    pub hint_runtime_total: u64,
+    pub hint_l0_total: u64,
+    pub hint_memory_total: u64,
+    pub hint_cloud_pending_total: u64,
+    pub hint_upload_stalled_total: u64,
+    pub hint_unknown_total: u64,
 }
 
 #[cfg(any(test, feature = "internal-testing"))]
@@ -58,6 +65,13 @@ struct WriteAdmissionCounters {
     l0: AtomicU64,
     cloud_generation: AtomicU64,
     cloud_wal: AtomicU64,
+    ingest_hint: AtomicU64,
+    hint_runtime: AtomicU64,
+    hint_l0: AtomicU64,
+    hint_memory: AtomicU64,
+    hint_cloud_pending: AtomicU64,
+    hint_upload_stalled: AtomicU64,
+    hint_unknown: AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -67,7 +81,20 @@ pub(crate) enum WriteAdmissionRejection {
     L0,
     CloudGeneration,
     CloudWal,
+    IngestHint,
+    HintRuntime,
+    HintL0,
+    HintMemory,
+    HintCloudPending,
+    HintUploadStalled,
+    HintUnknown,
 }
+
+pub(crate) const PRESSURE_RUNTIME: u8 = 1;
+pub(crate) const PRESSURE_L0: u8 = 2;
+pub(crate) const PRESSURE_MEMORY: u8 = 4;
+pub(crate) const PRESSURE_CLOUD_PENDING: u8 = 8;
+pub(crate) const PRESSURE_UPLOAD_STALLED: u8 = 16;
 
 /// Read-path counters owned by one runtime.
 ///
@@ -130,6 +157,13 @@ impl RuntimeDiagnostics {
             l0_total: self.admission.l0.load(Ordering::Relaxed),
             cloud_generation_total: self.admission.cloud_generation.load(Ordering::Relaxed),
             cloud_wal_total: self.admission.cloud_wal.load(Ordering::Relaxed),
+            ingest_hint_total: self.admission.ingest_hint.load(Ordering::Relaxed),
+            hint_runtime_total: self.admission.hint_runtime.load(Ordering::Relaxed),
+            hint_l0_total: self.admission.hint_l0.load(Ordering::Relaxed),
+            hint_memory_total: self.admission.hint_memory.load(Ordering::Relaxed),
+            hint_cloud_pending_total: self.admission.hint_cloud_pending.load(Ordering::Relaxed),
+            hint_upload_stalled_total: self.admission.hint_upload_stalled.load(Ordering::Relaxed),
+            hint_unknown_total: self.admission.hint_unknown.load(Ordering::Relaxed),
         }
     }
 
@@ -141,12 +175,43 @@ impl RuntimeDiagnostics {
             WriteAdmissionRejection::L0 => &self.admission.l0,
             WriteAdmissionRejection::CloudGeneration => &self.admission.cloud_generation,
             WriteAdmissionRejection::CloudWal => &self.admission.cloud_wal,
+            WriteAdmissionRejection::IngestHint => &self.admission.ingest_hint,
+            WriteAdmissionRejection::HintRuntime => &self.admission.hint_runtime,
+            WriteAdmissionRejection::HintL0 => &self.admission.hint_l0,
+            WriteAdmissionRejection::HintMemory => &self.admission.hint_memory,
+            WriteAdmissionRejection::HintCloudPending => &self.admission.hint_cloud_pending,
+            WriteAdmissionRejection::HintUploadStalled => &self.admission.hint_upload_stalled,
+            WriteAdmissionRejection::HintUnknown => &self.admission.hint_unknown,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(not(any(test, feature = "internal-testing")))]
     pub(crate) fn record_write_admission_rejection(&self, _: WriteAdmissionRejection) {}
+
+    pub(crate) fn record_ingest_hint_pressure(&self, mask: u8) {
+        self.record_write_admission_rejection(WriteAdmissionRejection::IngestHint);
+        if mask == 0 {
+            self.record_write_admission_rejection(WriteAdmissionRejection::HintUnknown);
+        }
+        for (bit, reason) in [
+            (PRESSURE_RUNTIME, WriteAdmissionRejection::HintRuntime),
+            (PRESSURE_L0, WriteAdmissionRejection::HintL0),
+            (PRESSURE_MEMORY, WriteAdmissionRejection::HintMemory),
+            (
+                PRESSURE_CLOUD_PENDING,
+                WriteAdmissionRejection::HintCloudPending,
+            ),
+            (
+                PRESSURE_UPLOAD_STALLED,
+                WriteAdmissionRejection::HintUploadStalled,
+            ),
+        ] {
+            if mask & bit != 0 {
+                self.record_write_admission_rejection(reason);
+            }
+        }
+    }
 
     /// Record an operational event for this engine, and mirror it to process
     /// global telemetry when an exporter has been set up.

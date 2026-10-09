@@ -22,7 +22,7 @@ on:
         type: choice
         required: true
         default: all
-        options: [all, comparisons, probes]
+        options: [all, comparisons, profiles, probes]
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   comparison:
-    if: inputs.campaign != 'probes'
+    if: inputs.campaign != 'probes' && inputs.campaign != 'profiles'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     strategy:
@@ -152,7 +152,7 @@ jobs:
             mkdir -p target/midge-stress/emulator-logs
             docker compose logs --no-color sqrzl > target/midge-stress/emulator-logs/sqrzl.log 2>&1 || true
             python3 tools/finalize_stress_artifacts.py --workload "$SELECTED_WORKLOAD" --suite tier5-stress-workloads --sha "$GITHUB_SHA" --outcome "$state"
-            if [[ "$instrument" == cpu && -f target/midge-stress/runner-logs/perf.data ]]; then
+            if [[ "$instrument" == cpu && -s target/midge-stress/runner-logs/perf.data ]]; then
               perf report --stdio --no-children -i target/midge-stress/runner-logs/perf.data > target/midge-stress/runner-logs/perf-report.txt
             fi
             mkdir -p "target/admission-profile/$instrument"
@@ -173,7 +173,7 @@ jobs:
         run: docker compose down -v
 
   probe:
-    if: inputs.campaign != 'comparisons'
+    if: inputs.campaign != 'comparisons' && inputs.campaign != 'profiles'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     strategy:

@@ -688,8 +688,8 @@ struct StageReport<'a> {
     stats: &'a StageStats,
     before: &'a RuntimeMetricsSnapshot,
     after: &'a RuntimeMetricsSnapshot,
-    admission_before: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
-    admission_after: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+    admission_before: &'a cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+    admission_after: &'a cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
 }
 
 pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
@@ -869,8 +869,8 @@ fn run_stages(
                 stats: &stage,
                 before: &before,
                 after: &after,
-                admission_before,
-                admission_after,
+                admission_before: &admission_before,
+                admission_after: &admission_after,
             },
         );
     }
@@ -1867,7 +1867,7 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
             after.write_stalls_no_space_total,
         );
     record_stage_diagnostics(ctx, stats, before, after);
-    record_admission_diagnostics(ctx, stats, admission_before, admission_after);
+    record_admission_diagnostics(ctx, stats, *admission_before, *admission_after);
     record_legacy_latency(ctx, stats);
     ctx.record_observation(
         "logical_operations",
@@ -2034,6 +2034,11 @@ fn record_admission_diagnostics(
             after.cloud_generation_total,
         ),
         ("cloud_wal", before.cloud_wal_total, after.cloud_wal_total),
+        (
+            "ingest_hint",
+            before.ingest_hint_total,
+            after.ingest_hint_total,
+        ),
     ] {
         let delta = final_value.checked_sub(initial);
         origins = origins
@@ -2054,6 +2059,34 @@ fn record_admission_diagnostics(
             "midge_admission_counts_reconcile",
             commits == Some(stats.saturation.write_stall) && origins == commits,
         );
+    for (name, initial, final_value) in [
+        (
+            "runtime",
+            before.hint_runtime_total,
+            after.hint_runtime_total,
+        ),
+        ("l0", before.hint_l0_total, after.hint_l0_total),
+        ("memory", before.hint_memory_total, after.hint_memory_total),
+        (
+            "cloud_pending",
+            before.hint_cloud_pending_total,
+            after.hint_cloud_pending_total,
+        ),
+        (
+            "upload_stalled",
+            before.hint_upload_stalled_total,
+            after.hint_upload_stalled_total,
+        ),
+        (
+            "unknown",
+            before.hint_unknown_total,
+            after.hint_unknown_total,
+        ),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        ctx.parameter(format!("midge_hint_{name}_delta_valid"), delta.is_some())
+            .parameter(format!("midge_hint_{name}_delta"), delta.unwrap_or(0));
+    }
 }
 
 fn append_stage_csv(path: &Path, stage: &str, stats: &StageStats) {

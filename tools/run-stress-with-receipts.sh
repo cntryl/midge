@@ -24,9 +24,25 @@ export MIDGE_STRESS_BINARY_SHA256="${hash_line%% *}"
 printf '%s  %s\n' "$MIDGE_STRESS_BINARY_SHA256" "$executable" > "target/midge-stress/runner-logs/binary-${bench_target}.sha256"
 # Execute the exact Cargo artifact, avoiding another compile between hash/run.
 if [[ "${MIDGE_STRESS_CPU_PROFILE:-0}" == "1" ]]; then
-  perf record -e cpu-clock:u -F 99 -g --call-graph dwarf \
+  # Keep the workload under the runner identity; only the sampler is privileged.
+  profile_environment=()
+  while IFS= read -r -d '' variable; do
+    case "$variable" in
+      MIDGE_*|STRESS_*|SQRZL_*|TMPDIR=*|RUST_LOG=*) profile_environment+=("$variable") ;;
+    esac
+  done < <(env -0)
+  profile_user="$(id -un)"
+  set +e
+  sudo -n perf record -F 99 -g --call-graph dwarf \
     -o target/midge-stress/runner-logs/perf.data -- \
-    "$executable" --workload "$selected_workload" --bench
+    runuser -u "$profile_user" -- env "${profile_environment[@]}" \
+      "$executable" --workload "$selected_workload" --bench
+  profile_result=$?
+  set -e
+  if [[ -f target/midge-stress/runner-logs/perf.data ]]; then
+    sudo -n chown "$(id -u):$(id -g)" target/midge-stress/runner-logs/perf.data
+  fi
+  exit "$profile_result"
 else
   "$executable" --workload "$selected_workload" --bench
 fi

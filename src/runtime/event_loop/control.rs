@@ -40,6 +40,7 @@ impl EventLoop {
             RuntimeResponse::WriteStallStatus {
                 request_id,
                 is_stalled,
+                pressure_mask: self.write_pressure_mask(cf_id),
             },
         );
     }

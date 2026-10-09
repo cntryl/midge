@@ -729,7 +729,27 @@ impl RuntimeHandle {
     ///
     /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
+    #[cfg(test)]
     pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
+        self.check_write_stall_status(cf_id)
+            .map(|(stalled, _)| stalled)
+    }
+
+    pub(crate) fn check_ingest_write_stall(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> MidgeResult<bool> {
+        let (stalled, mask) = self.check_write_stall_status(cf_id)?;
+        if stalled {
+            self.diagnostics.record_ingest_hint_pressure(mask);
+        }
+        Ok(stalled)
+    }
+
+    fn check_write_stall_status(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> MidgeResult<(bool, u8)> {
         let response = self.send_and_wait_timeout(
             RuntimeMsg::CheckWriteStall {
                 request_id: next_request_id()?,
@@ -739,12 +759,16 @@ impl RuntimeHandle {
         )?;
 
         match response {
-            Some(RuntimeResponse::WriteStallStatus { is_stalled, .. }) => Ok(is_stalled),
+            Some(RuntimeResponse::WriteStallStatus {
+                is_stalled,
+                pressure_mask,
+                ..
+            }) => Ok((is_stalled, pressure_mask)),
             Some(RuntimeResponse::Error { error, .. }) => Err(error),
             Some(_) => Err(MidgeError::Internal(
                 "Unexpected response to CheckWriteStall".to_string(),
             )),
-            None => Ok(true),
+            None => Ok((true, 0)),
         }
     }
 }

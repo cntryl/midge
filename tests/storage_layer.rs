@@ -394,7 +394,7 @@ mod sst_regressions {
         );
         let counts = cntryl_midge::__internal::diagnostics::write_admission_snapshot(&engine);
         assert_eq!(counts.commit_write_stall_total, rejected);
-        assert_eq!(counts.l0_total, rejected);
+        assert_eq!(counts.l0_total + counts.ingest_hint_total, rejected);
         assert_eq!(
             counts.queue_total + counts.cloud_generation_total + counts.cloud_wal_total,
             0

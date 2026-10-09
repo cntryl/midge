@@ -12,6 +12,75 @@ mod compaction_deadline_tests;
 const RUNTIME_PANIC_CHILD: &str = "MIDGE_RUNTIME_PANIC_CHILD";
 
 #[test]
+fn should_count_ingest_hint_origin_once_when_pressure_flags_overlap() {
+    // Arrange
+    let (_runtime, mut handle) = Runtime::new();
+    let (tx, rx) = crossbeam::channel::bounded(1);
+    handle.msg_tx = tx;
+    let mask = crate::diagnostics::PRESSURE_MEMORY | crate::diagnostics::PRESSURE_CLOUD_PENDING;
+
+    // Act
+    let stalled = thread::scope(|scope| {
+        let check = scope.spawn(|| handle.check_ingest_write_stall(0));
+        let RuntimeMsg::CheckWriteStall { request_id, cf_id } = rx.recv().unwrap() else {
+            panic!("expected advisory preflight");
+        };
+        assert_eq!(cf_id, 0);
+        handle.router.complete(RuntimeResponse::WriteStallStatus {
+            request_id,
+            is_stalled: true,
+            pressure_mask: mask,
+        });
+        check.join().unwrap().unwrap()
+    });
+
+    // Assert: overlapping causes describe one rejected preflight.
+    assert!(stalled);
+    let counts = handle.diagnostics.write_admission_snapshot();
+    assert_eq!(counts.ingest_hint_total, 1);
+    assert_eq!(counts.hint_memory_total, 1);
+    assert_eq!(counts.hint_cloud_pending_total, 1);
+    assert_eq!(counts.hint_unknown_total, 0);
+    assert_eq!(counts.commit_write_stall_total, 0);
+    assert_eq!(handle.router.pending_len(), 0);
+    assert!(rx.try_recv().is_err(), "no transaction was admitted");
+    thread::scope(|scope| {
+        let check = scope.spawn(|| handle.check_write_stall(0));
+        let RuntimeMsg::CheckWriteStall { request_id, .. } = rx.recv().unwrap() else {
+            panic!("expected control check");
+        };
+        handle.router.complete(RuntimeResponse::WriteStallStatus {
+            request_id,
+            is_stalled: true,
+            pressure_mask: mask,
+        });
+        assert!(check.join().unwrap().unwrap());
+    });
+    assert_eq!(
+        handle.diagnostics.write_admission_snapshot(),
+        counts,
+        "operator checks are not admission rejections"
+    );
+}
+
+#[test]
+fn should_retain_conservative_preflight_when_pressure_check_times_out() {
+    // Arrange
+    let (_runtime, mut handle) = Runtime::new();
+    let (tx, _rx) = crossbeam::channel::bounded(1);
+    handle.msg_tx = tx;
+    // Act
+    let stalled = handle.check_ingest_write_stall(0).unwrap();
+    // Assert
+    assert!(stalled);
+    let counts = handle.diagnostics.write_admission_snapshot();
+    assert_eq!(counts.ingest_hint_total, 1);
+    assert_eq!(counts.hint_unknown_total, 1);
+    assert_eq!(handle.router.pending_len(), 0);
+    assert_eq!(counts.commit_write_stall_total, 0);
+}
+
+#[test]
 fn should_count_transaction_queue_rejections_once_without_retaining_requests() {
     // Arrange: no event loop can drain the bounded submission queue.
     let (_runtime, mut handle) = Runtime::new();
