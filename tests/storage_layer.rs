@@ -359,9 +359,11 @@ mod sst_regressions {
         )
         .unwrap();
         let cf = engine.create_column_family("l0-pressure").unwrap();
+        let mut rejected = 0_u64;
         // Act: 32 separate flushes exceed the default hard L0 ceiling. Only the
         // production pressure-recovery path can restore admission in this process.
         for index in 0_u32..32 {
+            let before = engine.metrics().get_runtime_metrics().unwrap();
             let commit = || {
                 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
                 tx.put(index.to_be_bytes().to_vec(), b"value".to_vec(), None)?;
@@ -370,6 +372,13 @@ mod sst_regressions {
             match commit() {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_)) => {
+                    rejected += 1;
+                    let after = engine.metrics().get_runtime_metrics().unwrap();
+                    assert_eq!(after.current_sequence, before.current_sequence);
+                    assert_eq!(after.wal_append_count, before.wal_append_count);
+                    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+                    assert_eq!(read.get(&index.to_be_bytes()).unwrap(), None);
+                    drop(read);
                     assert!(engine
                         .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
                         .unwrap());
@@ -379,6 +388,17 @@ mod sst_regressions {
             }
             engine.flush_cf(&cf).unwrap();
         }
+        assert!(
+            rejected > 0,
+            "the public fixture must exercise admission pressure"
+        );
+        let counts = cntryl_midge::__internal::diagnostics::write_admission_snapshot(&engine);
+        assert_eq!(counts.commit_write_stall_total, rejected);
+        assert_eq!(counts.l0_total + counts.ingest_hint_total, rejected);
+        assert_eq!(
+            counts.queue_total + counts.cloud_generation_total + counts.cloud_wal_total,
+            0
+        );
         engine.shutdown(Duration::from_secs(30)).unwrap();
         let reopened = Engine::open(
             OpenOptions::local(dir.path())

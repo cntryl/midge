@@ -68,12 +68,54 @@ impl EventLoop {
                 .is_some_and(|storage| storage.is_wal_upload_stalled())
     }
 
+    pub(super) fn write_pressure_mask(&self, cf_id: crate::types::ColumnFamilyId) -> u8 {
+        #[cfg(any(test, feature = "internal-testing"))]
+        {
+            use crate::diagnostics::{
+                PRESSURE_CLOUD_PENDING, PRESSURE_L0, PRESSURE_MEMORY, PRESSURE_RUNTIME,
+                PRESSURE_UPLOAD_STALLED,
+            };
+            let mut mask = 0;
+            if self.state.write_stalled() {
+                mask |= PRESSURE_RUNTIME;
+            }
+            if self.state.l0_write_slot_unavailable(cf_id) {
+                mask |= PRESSURE_L0;
+            }
+            if self.state.is_immutable_memtable_queue_full(cf_id)
+                || self.state.is_total_memtable_hard_limit_exceeded()
+            {
+                mask |= PRESSURE_MEMORY;
+            }
+            if self.cloud_coordinator.cloud_wal.has_pending_uploads() {
+                mask |= PRESSURE_CLOUD_PENDING;
+            }
+            if self
+                .cloud_coordinator
+                .hybrid_storage
+                .as_ref()
+                .is_some_and(|storage| storage.is_wal_upload_stalled())
+            {
+                mask |= PRESSURE_UPLOAD_STALLED;
+            }
+            mask
+        }
+        #[cfg(not(any(test, feature = "internal-testing")))]
+        {
+            let _ = cf_id;
+            0
+        }
+    }
+
     pub(super) fn ensure_l0_write_admission(
         &self,
         cf_ids: &[crate::types::ColumnFamilyId],
     ) -> Result<(), MidgeError> {
         for cf_id in cf_ids {
             if self.state.l0_write_slot_unavailable(*cf_id) {
+                self.state.diagnostics.record_write_admission_rejection(
+                    crate::diagnostics::WriteAdmissionRejection::L0,
+                );
                 self.state.diagnostics.record(|m| {
                     m.record_write_stall_compaction();
                 });

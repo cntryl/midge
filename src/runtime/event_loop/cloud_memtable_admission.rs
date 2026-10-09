@@ -72,6 +72,9 @@ impl EventLoop {
                 if self.state.is_immutable_memtable_queue_full(cf_id)
                     || self.state.l0_slot_usage(cf_id) >= self.state.l0_hard_ceiling()
                 {
+                    self.state.diagnostics.record_write_admission_rejection(
+                        crate::diagnostics::WriteAdmissionRejection::CloudGeneration,
+                    );
                     return Err(MidgeError::WriteStall(format!(
                         "column family {cf_id} must publish an immutable before admitting another cloud generation"
                     )));
@@ -247,6 +250,109 @@ mod tests {
             "WAL must not consume the last flush staging bytes"
         );
         assert!(hybrid.budget_snapshot().total_committed_bytes > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_count_only_rejected_cloud_transactions_when_pressure_clears() -> MidgeResult<()> {
+        // Arrange
+        let (_directory, mut event_loop, _hybrid) = fixture()?;
+        event_loop.state.limits.max_immutable_memtables = 1;
+        let cf = event_loop.state.get_cf(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"accepted".to_vec(), vec![1; 20 * 1024], 1, None)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf_mut(0)
+            .unwrap()
+            .immutable_memtables
+            .push(Arc::new(crate::memtable::SkipListMemtable::new()));
+        let ops = || {
+            vec![TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"retry"),
+                value: bytes::Bytes::from(vec![2; 16 * 1024]),
+                ttl_seconds: None,
+                insert_only: false,
+            }]
+        };
+        let request = |request_id| super::super::wal::ApplyTransactionRequest {
+            request_id,
+            ops: ops(),
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        };
+        let before = event_loop.state.runtime_metrics_snapshot();
+        let (_, messages) = crossbeam::channel::unbounded();
+        let (responses, response_rx) = crossbeam::channel::unbounded();
+
+        // Act
+        super::super::wal::WalCoordinator::apply_transaction(
+            &mut event_loop,
+            &messages,
+            request(7101),
+            Some(responses.clone()),
+        );
+
+        // Assert
+        assert!(matches!(
+            response_rx.try_recv(),
+            Ok(crate::runtime::RuntimeResponse::Error {
+                error: MidgeError::WriteStall(_),
+                ..
+            })
+        ));
+        assert!(
+            response_rx.try_recv().is_err(),
+            "no acknowledgement follows rejection"
+        );
+        let after = event_loop.state.runtime_metrics_snapshot();
+        assert_eq!(after.current_sequence, before.current_sequence);
+        assert_eq!(after.wal_append_count, before.wal_append_count);
+        assert_eq!(after.flush_enqueued_total, before.flush_enqueued_total);
+        assert_eq!(
+            after.write_stalls_cloud_total,
+            before.write_stalls_cloud_total
+        );
+        assert_eq!(
+            event_loop.state.get_cf(0).unwrap().memtable.get(b"retry")?,
+            None
+        );
+        let counts = event_loop.state.diagnostics.write_admission_snapshot();
+        assert_eq!(counts.cloud_generation_total, 1);
+        assert_eq!(counts.l0_total, 0);
+        // A completed immutable publication removes this admission barrier.
+        event_loop
+            .state
+            .get_cf_mut(0)
+            .unwrap()
+            .immutable_memtables
+            .clear();
+        super::super::wal::WalCoordinator::apply_transaction(
+            &mut event_loop,
+            &messages,
+            request(7102),
+            Some(responses),
+        );
+        assert!(matches!(
+            response_rx.try_recv(),
+            Ok(crate::runtime::RuntimeResponse::TransactionApplied { .. })
+        ));
+        assert_eq!(
+            event_loop
+                .state
+                .diagnostics
+                .write_admission_snapshot()
+                .cloud_generation_total,
+            1
+        );
+        assert_eq!(
+            event_loop.state.get_cf(0).unwrap().memtable.get(b"retry")?,
+            Some(vec![2; 16 * 1024])
+        );
         Ok(())
     }
 

@@ -990,6 +990,7 @@ pub enum RuntimeResponse {
     WriteStallStatus {
         request_id: u64,
         is_stalled: bool,
+        pressure_mask: u8,
     },
 }
 

@@ -687,7 +687,16 @@ impl Transaction {
                 CommitTiming::record_durability(&mut timing, durability_started_at);
                 result
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if matches!(error, MidgeError::WriteStall(_)) {
+                    self.runtime_handle
+                        .diagnostics
+                        .record_write_admission_rejection(
+                            crate::diagnostics::WriteAdmissionRejection::Commit,
+                        );
+                }
+                Err(error)
+            }
         };
 
         let unregister_started_at = CommitTiming::phase_start(timing.as_ref());

@@ -76,7 +76,7 @@ impl IngestCoordinator {
 
     fn check_write_stall(&self, runtime: &RuntimeHandle) -> MidgeResult<()> {
         if self.stall_flag.load(Ordering::Acquire) {
-            if runtime.check_write_stall(self.cf_id)? {
+            if runtime.check_ingest_write_stall(self.cf_id)? {
                 return Err(MidgeError::WriteStall(format!(
                     "Memory budget exceeded for CF {}",
                     self.cf_id

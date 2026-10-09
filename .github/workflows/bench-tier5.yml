@@ -14,7 +14,7 @@ on:
         type: choice
         required: true
         default: none
-        options: [none, comparisons, probes, all]
+        options: [none, comparisons, profiles, probes, all]
   schedule:
     - cron: "17 5 * * 2"
 

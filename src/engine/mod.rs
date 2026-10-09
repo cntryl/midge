@@ -474,6 +474,11 @@ impl Engine {
         self.runtime_handle.read_path_diagnostics_snapshot()
     }
 
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn write_admission_snapshot(&self) -> crate::diagnostics::WriteAdmissionSnapshot {
+        self.runtime_handle.diagnostics.write_admission_snapshot()
+    }
+
     /// Wait for a write stall to clear for `cf_id`.
     ///
     /// Returns `Ok(true)` if the stall cleared within `timeout`, `Ok(false)` on timeout.

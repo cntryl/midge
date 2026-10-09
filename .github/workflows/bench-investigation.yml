@@ -22,7 +22,7 @@ on:
         type: choice
         required: true
         default: all
-        options: [all, comparisons, probes]
+        options: [all, comparisons, profiles, probes]
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   comparison:
-    if: inputs.campaign != 'probes'
+    if: inputs.campaign != 'probes' && inputs.campaign != 'profiles'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     strategy:
@@ -55,6 +55,7 @@ jobs:
       STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
       MIDGE_STRESS_COMPARISON_CLIENTS: ${{ matrix.cell.clients }}
       MIDGE_COMPARISON_REPEAT: ${{ matrix.repeat }}
+      MIDGE_STRESS_ADMISSION_SAMPLE_MS: "1000"
     steps:
       - uses: actions/checkout@v7
       - name: Resolve original duration and watchdog allowance
@@ -101,8 +102,78 @@ jobs:
         if: always() && matrix.cell.cloud
         run: docker compose down -v
 
+  admission-profile:
+    if: inputs.campaign != 'probes'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          - {workload: tier5_write_heavy_local, clients: 16, cloud: false}
+          - {workload: tier5_write_pressure_s3, clients: 4, cloud: true}
+    env:
+      CARGO_INCREMENTAL: 0
+      STRESS_PROFILE: smoke
+      STRESS_NO_PROGRESS_TIMEOUT_SECS: "60"
+      STRESS_TIMEOUT_SECS: "960"
+      MIDGE_TIER5_DURATION_SECS: "60"
+      MIDGE_STRESS_COMPARISON_CLIENTS: ${{ matrix.cell.clients }}
+      MIDGE_COMPARISON_REPEAT: "profile"
+      MIDGE_STRESS_ADMISSION_SAMPLE_MS: "1000"
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - name: Prepare native CPU sampler before measurement
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-tools-$(uname -r)"
+          sudo sysctl -w kernel.perf_event_paranoid=1
+      - name: Start Sqrzl
+        if: matrix.cell.cloud
+        run: docker compose up -d sqrzl
+      - name: Retain plain and sampled fresh-process trials
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+          SELECTED_WORKLOAD: ${{ matrix.cell.workload }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/admission-profile
+          for instrument in plain cpu; do
+            export MIDGE_STRESS_CPU_PROFILE=0
+            if [[ "$instrument" == cpu ]]; then export MIDGE_STRESS_CPU_PROFILE=1; fi
+            mkdir -p target/midge-stress/runner-logs
+            set +e
+            bash tools/run-stress-with-receipts.sh tier5_stress_workloads "$SELECTED_WORKLOAD" > target/midge-stress/runner-logs/workload.log 2>&1
+            outcome=$?
+            set -e
+            state=failure
+            if [[ "$outcome" == 0 ]]; then state=success; fi
+            mkdir -p target/midge-stress/emulator-logs
+            docker compose logs --no-color sqrzl > target/midge-stress/emulator-logs/sqrzl.log 2>&1 || true
+            python3 tools/finalize_stress_artifacts.py --workload "$SELECTED_WORKLOAD" --suite tier5-stress-workloads --sha "$GITHUB_SHA" --outcome "$state"
+            if [[ "$instrument" == cpu && -s target/midge-stress/runner-logs/perf.data ]]; then
+              perf report --stdio --no-children -i target/midge-stress/runner-logs/perf.data > target/midge-stress/runner-logs/perf-report.txt
+            fi
+            mkdir -p "target/admission-profile/$instrument"
+            mv target/midge-stress "target/admission-profile/$instrument/"
+            if [[ -d target/stress ]]; then mv target/stress "target/admission-profile/$instrument/"; fi
+            if [[ "$outcome" != 0 ]]; then exit "$outcome"; fi
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: admission-profile-${{ matrix.cell.workload }}-${{ github.sha }}
+          path: |
+            target/admission-profile/**
+            target/midge-stress/**
+            target/stress/**
+      - name: Stop Sqrzl
+        if: always() && matrix.cell.cloud
+        run: docker compose down -v
+
   probe:
-    if: inputs.campaign != 'comparisons'
+    if: inputs.campaign != 'comparisons' && inputs.campaign != 'profiles'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     strategy:
