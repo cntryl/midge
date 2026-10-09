@@ -41,6 +41,14 @@ sampling enable/disable immediately around `Engine::open`. Restore, fixture
 construction, verification and shutdown are outside CPU sampling. Each profiled
 trial retains its own native data/resource receipts and a plain same-mode control.
 Report any lost samples, failures and perturbation; never substitute a failed run.
+Fixture construction and every plain/profiled process must also have retained
+stderr with no Rust `panicked at` marker. A zero exit code, complete native JSON,
+six exact checks and two shutdowns cannot override a worker-thread panic, including
+one after sampling has stopped. Force `RUST_BACKTRACE=1` for seed/plain native
+processes and inside the profiled `runuser` environment to locate future failures.
+Keep all sixteen planned outcomes and failed process/profile artifacts; any failed
+trial leaves the campaign incomplete and the command exits nonzero. An explicit
+null attribution result does not qualify failed evidence or permit a retry.
 Perf records native DWARF callchains without build-id postprocessing/cache updates;
 the exact executable is archived and executed from its immutable artifact path.
 Reports retain native symbols/callchains with inline expansion disabled and a fixed

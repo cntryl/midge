@@ -22,7 +22,8 @@ def write(path, value):
 def run_plain(command, directory):
     with (directory / "stdout.log").open("wb") as out, (directory / "stderr.log").open("wb") as err:
         try:
-            result = subprocess.run(command, stdout=out, stderr=err, timeout=300, check=False)
+            result = subprocess.run(command, stdout=out, stderr=err, timeout=300, check=False,
+                                    env={**os.environ, "RUST_BACKTRACE": "1"})
             return {"exit_code": result.returncode, "error": None}
         except subprocess.TimeoutExpired:
             return {"exit_code": None, "error": "fixed 300-second process bound exceeded"}
@@ -54,7 +55,7 @@ def run_cpu(command, directory):
                     "--no-buildid", "--no-buildid-cache",
                     "--delay=-1", f"--control=fifo:{control},{ack}", "-o", str(directory / "perf.data"),
                     "--", "runuser", "-u", os.environ.get("USER", "runner"), "--", "env",
-                    "MIDGE_RECOVERY_CPU_CONTROL=stdio", *command]
+                    "MIDGE_RECOVERY_CPU_CONTROL=stdio", "RUST_BACKTRACE=1", *command]
     receipt = {"command": perf_command, "boundaries": [], "exit_code": None, "error": None}
     write(directory / "sampler.json", receipt)
     process = None
@@ -132,6 +133,15 @@ def run_cpu(command, directory):
     return receipt
 
 
+def validate_process(outcome, directory):
+    if outcome["exit_code"] != 0 or outcome["error"]:
+        raise ValueError("native process or sampling control failed")
+    # A caught worker-thread panic can leave both exit status and JSON successful.
+    # Require the retained stderr too, including after the sampled open boundary.
+    if b"panicked at" in (directory / "stderr.log").read_bytes():
+        raise ValueError("native process stderr contains Rust panic; retained native failure")
+
+
 def validate_native(path, source, binary, fixture, variant):
     receipt = json.loads(path.read_text())
     if not receipt["complete"] or not receipt["source_clean"] or receipt["source_sha"] != source or receipt["binary_sha256"] != binary:
@@ -194,8 +204,7 @@ def main():
     seed.mkdir()
     outcome = run_plain([executable, "seed", str(fixture), str(seed / "native.json")], seed)
     write(seed / "process.json", outcome)
-    if outcome["exit_code"] != 0:
-        raise ValueError("immutable fixture construction failed; retained native failure")
+    validate_process(outcome, seed)
     fixture_sha = json.loads((fixture / "fixture.json").read_text())["inventory"]["sha256"]
     manifest = {"source_sha": source, "binary_sha256": binary, "fixture_sha256": fixture_sha, "command": build,
                 "binary_path": "binary/recovery_attribution",
@@ -212,8 +221,7 @@ def main():
         outcome = run_cpu(command, directory) if sampled else run_plain(command, directory)
         row = {"name": name, "variant": variant, "repeat": repeat, "sampled": sampled, "process": outcome, "accepted": False}
         try:
-            if outcome["exit_code"] != 0 or outcome["error"]:
-                raise ValueError("native process or sampling control failed")
+            validate_process(outcome, directory)
             result = validate_native(directory / "native.json", source, binary, fixture_sha, variant)
             if sampled and (outcome.get("report_exit_code") != 0 or outcome.get("lost_samples") != 0 or not outcome.get("samples")):
                 raise ValueError("native profile report failed")

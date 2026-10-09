@@ -131,6 +131,7 @@ tools/*
 tools/tests/*
 !tools/tests/test_finalize_stress_artifacts.py
 !tools/tests/test_recovery_attribution.py
+!tools/tests/fixtures/
 tmp/
 .docker/bench/results
 .docker/bench/target
