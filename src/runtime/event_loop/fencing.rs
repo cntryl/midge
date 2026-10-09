@@ -258,7 +258,21 @@ mod takeover_tests {
             )
             .unwrap(),
         );
-        let _new_guard = Arc::clone(&successor).try_acquire().unwrap();
+        // Persisted UTC expiry can lag the predecessor's monotonic deadline
+        // when filesystem work delays publication. Wait only for confirmed
+        // contention; ambiguous ownership and other errors remain terminal.
+        let takeover_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let _new_guard = loop {
+            match Arc::clone(&successor).try_acquire() {
+                Ok(guard) => break guard,
+                Err(crate::lease::LeaseError::AcquisitionFailed(_))
+                    if std::time::Instant::now() < takeover_deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(error) => panic!("successor acquisition after real expiry failed: {error}"),
+            }
+        };
         assert!(healthy.load(std::sync::atomic::Ordering::Acquire));
         // Act
         let result = fence.check_health();
