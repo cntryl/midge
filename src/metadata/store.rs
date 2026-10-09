@@ -24,6 +24,7 @@ use crate::metadata::accounting::{Medium, OperationKind, Origin, Owner};
 use crate::metadata::journal::{self, ManifestEdit};
 use crate::metadata::persistence::{JournalPosition, WrittenCheckpoint};
 use crate::metadata::{Manifest, ManifestPersistence};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The journal position the store last wrote, and the file lengths that
@@ -41,10 +42,20 @@ struct FileLengths {
     snapshot: u64,
 }
 
+// Candidate bounds for #752. One bounded flush record may cross the byte
+// trigger; the next append must first checkpoint successfully. Forced
+// publications continue to checkpoint on every call.
+pub(crate) const LOCAL_CHECKPOINT_EDITS: u64 = 16;
+pub(crate) const LOCAL_CHECKPOINT_BYTES: u64 = 16_384;
+pub(crate) const LOCAL_FLUSH_RECORD_BYTES: usize = 4_096;
+
 /// Owns the manifest journal and snapshot of one open database.
 pub(crate) struct ManifestStore {
     fs: Arc<dyn Fs>,
     known: parking_lot::Mutex<Option<KnownPosition>>,
+    // A frontier fallback may refresh `known` after a failed snapshot. Only
+    // a successful checkpoint can release publication backpressure.
+    checkpoint_retry_required: AtomicBool,
     accounting: Owner,
     medium: Medium,
 }
@@ -58,6 +69,55 @@ impl std::fmt::Debug for ManifestStore {
 }
 
 impl ManifestStore {
+    /// Cheap, already checkpointed flushes can retain the original forced
+    /// path. Append still checks file lengths under the writer lock and the
+    /// following snapshot reconciles any intervening edits. Unknown, stale
+    /// or deferred cached authority must take the full checkpoint preflight.
+    pub(crate) fn can_use_forced_flush_path(&self, applied_edit_id: u64, sst_bytes: u64) -> bool {
+        self.known.lock().is_some_and(|cached| {
+            !self.checkpoint_retry_required.load(Ordering::Acquire)
+                && cached.lengths.snapshot > 0
+                && cached.lengths.journal == 0
+                && cached.position.checkpoint_edit_id == cached.position.highest_edit_id
+                && cached.position.highest_edit_id == applied_edit_id
+                && u128::from(cached.lengths.snapshot) * 20 < u128::from(sst_bytes)
+        })
+    }
+
+    /// Use the last successful checkpoint's payload, not an uncharged JSON
+    /// serialization, to apply #715's predeclared five-percent byte-cost gate.
+    /// Unknown authority cannot establish a cost justification for deferral.
+    pub(crate) fn local_checkpoint_is_costly(&self, sst_bytes: u64) -> bool {
+        self.known.lock().is_some_and(|cached| {
+            sst_bytes > 0 && u128::from(cached.lengths.snapshot) * 20 >= u128::from(sst_bytes)
+        })
+    }
+
+    /// Unknown, externally changed or stale authority must never defer a
+    /// checkpoint. This query only stats files; it does not repair/replay them.
+    pub(crate) fn local_checkpoint_due(&self, applied_edit_id: u64) -> bool {
+        journal::with_manifest_writer_lock(&self.fs, || {
+            if self.checkpoint_retry_required.load(Ordering::Acquire) {
+                return true;
+            }
+            let known = self.known.lock();
+            let Some(cached) = *known else {
+                return true;
+            };
+            if Self::lengths_with_fs(&self.fs).ok() != Some(cached.lengths)
+                || applied_edit_id != cached.position.highest_edit_id
+            {
+                return true;
+            }
+            cached
+                .position
+                .highest_edit_id
+                .saturating_sub(cached.position.checkpoint_edit_id)
+                >= LOCAL_CHECKPOINT_EDITS
+                || cached.lengths.journal >= LOCAL_CHECKPOINT_BYTES
+        })
+    }
+
     #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn new(fs: Arc<dyn Fs>) -> Self {
         Self::new_with_accounting(fs, Owner::new(), Medium::MemoryOnly)
@@ -84,6 +144,7 @@ impl ManifestStore {
             accounting,
             medium,
             known: parking_lot::Mutex::new(None),
+            checkpoint_retry_required: AtomicBool::new(false),
         }
     }
 
@@ -149,13 +210,14 @@ impl ManifestStore {
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
         let result = journal::with_manifest_writer_lock(&fs, || {
             let mut known = self.known.lock();
-            let position = Self::position_with_fs(&fs, &mut known)?;
-            let result = ManifestPersistence::save_snapshot_unlocked_observed(
-                &fs,
-                manifest,
-                Some(position),
-                Some(&operation),
-            );
+            let result = Self::position_with_fs(&fs, &mut known).and_then(|position| {
+                ManifestPersistence::save_snapshot_unlocked_observed(
+                    &fs,
+                    manifest,
+                    Some(position),
+                    Some(&operation),
+                )
+            });
             *known = match &result {
                 Ok(written) => Self::remember_with_fs(
                     &fs,
@@ -166,6 +228,8 @@ impl ManifestStore {
                 ),
                 Err(_) => None,
             };
+            self.checkpoint_retry_required
+                .store(result.is_err(), Ordering::Release);
             result
         });
         operation.finish(result.is_ok());
