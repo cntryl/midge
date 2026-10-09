@@ -107,6 +107,92 @@ fn add_sst(sequence: u64) -> ManifestEdit {
 }
 
 #[test]
+fn should_force_checkpoint_when_cached_authority_is_unknown_or_stale() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let fs = observed(&directory);
+    let store = ManifestStore::new(fs.clone());
+    let mut manifest = Manifest::default();
+    assert!(store.local_checkpoint_due(0));
+    store
+        .save_snapshot(&manifest)
+        .unwrap()
+        .adopt_into(&mut manifest);
+    assert!(!store.local_checkpoint_due(manifest.edit_checkpoint_id));
+
+    // Act
+    let edit = ManifestEdit::BumpWalSeq { seq: 42 };
+    let id = store.append(&edit).unwrap();
+    manifest.apply_edit(&edit);
+    manifest.note_applied_journal_edit(id);
+
+    // Assert: neither a stale caller nor a changed file can defer authority.
+    assert!(store.local_checkpoint_due(id - 1));
+    assert!(!store.local_checkpoint_due(id));
+    crate::metadata::journal::append_edit_with_fs(
+        &(fs as Arc<dyn Fs>),
+        &ManifestEdit::BumpWalSeq { seq: 43 },
+    )
+    .unwrap();
+    assert!(store.local_checkpoint_due(id));
+}
+
+#[test]
+fn should_reduce_fixed_cardinality_checkpoint_payload_without_losing_deferred_edits() {
+    fn measure(force: bool) -> u64 {
+        let directory = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let owner = Owner::new();
+        let store =
+            ManifestStore::new_with_accounting(fs.clone(), owner.clone(), Medium::Persistent);
+        let mut manifest = Manifest::default();
+        for n in 1..=128 {
+            manifest.apply_edit(&add_sst(n));
+        }
+        store
+            .save_snapshot_for(Origin::Ddl, &manifest)
+            .unwrap()
+            .adopt_into(&mut manifest);
+        for n in 1..=128 {
+            let edit = ManifestEdit::BumpWalSeq { seq: n };
+            let id = store.append_for(Origin::OrdinaryLocalFlush, &edit).unwrap();
+            manifest.apply_edit(&edit);
+            manifest.note_applied_journal_edit(id);
+            let recovered = ManifestPersistence::load_with_fs_and_policy_typed(
+                &fs,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .unwrap();
+            assert_eq!(recovered.files.len(), 128);
+            assert_eq!(recovered.last_persisted_sequence, n);
+            assert_eq!(recovered.edit_checkpoint_id, id);
+            if force || store.local_checkpoint_due(id) {
+                store
+                    .save_snapshot_for(Origin::OrdinaryLocalFlush, &manifest)
+                    .unwrap()
+                    .adopt_into(&mut manifest);
+            }
+        }
+        owner
+            .handle()
+            .snapshot()
+            .bucket(Origin::OrdinaryLocalFlush, Medium::Persistent)
+            .counters
+            .issued_bytes[0]
+    }
+
+    // Arrange
+    let forced_bytes = measure(true);
+    // Act
+    let deferred_bytes = measure(false);
+    // Assert
+    assert!(
+        deferred_bytes * 10 <= forced_bytes,
+        "{deferred_bytes} vs {forced_bytes}"
+    );
+}
+
+#[test]
 fn should_not_read_snapshot_when_appending_journal_edit() {
     // Arrange: a database with a snapshot and a store that has written.
     let directory = tempfile::tempdir().expect("tempdir");
@@ -167,6 +253,41 @@ fn should_report_no_space_when_snapshot_write_hits_enospc() {
 
     // Assert
     assert!(matches!(result, Err(MidgeError::NoSpace(_))), "{result:?}");
+}
+
+#[test]
+fn should_require_checkpoint_retry_when_append_refreshes_cache_after_snapshot_failure() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let fs = observed(&directory);
+    let store = ManifestStore::new(fs.clone());
+    let mut manifest = Manifest::default();
+    store
+        .save_snapshot(&manifest)
+        .unwrap()
+        .adopt_into(&mut manifest);
+    fs.snapshot_no_space.store(true, Ordering::SeqCst);
+    assert!(store.save_snapshot(&manifest).is_err());
+
+    // Act: a durable frontier fallback refreshes the cached position, but
+    // must not erase the failed checkpoint's publication backpressure.
+    let edit = ManifestEdit::BumpWalSeq { seq: 42 };
+    let id = store.append(&edit).unwrap();
+    manifest.apply_edit(&edit);
+    manifest.note_applied_journal_edit(id);
+    let retry_required = store.local_checkpoint_due(id);
+    fs.snapshot_no_space.store(false, Ordering::SeqCst);
+    store
+        .save_snapshot(&manifest)
+        .unwrap()
+        .adopt_into(&mut manifest);
+
+    // Assert: only a successful checkpoint releases that pressure.
+    assert!(retry_required);
+    assert!(!store.local_checkpoint_due(id));
+    assert!(store.can_use_forced_flush_path(id, 2 * 1024 * 1024));
+    let recovered = ManifestPersistence::load(directory.path()).unwrap();
+    assert_eq!(recovered.last_persisted_sequence, 42);
 }
 
 #[test]
