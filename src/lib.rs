@@ -156,6 +156,7 @@ pub mod __internal {
             RecoveryProgressFixtureResult,
         };
         pub use crate::runtime::cloud_startup::replay_coverage::cost_probe::run_recovery_cost_probe;
+        pub use crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant;
     }
     pub mod sst {
         pub mod bloom {

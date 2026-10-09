@@ -22,6 +22,8 @@ mod names;
 mod tests;
 
 pub(super) struct CloudReplay {
+    #[cfg(feature = "internal-testing")]
+    pub probe: coverage::probe::RecoveryProbeVariant,
     pub fs: Arc<dyn Fs>,
     pub limits: StreamingReplayLimits,
     /// Sequences at or below this belong to WAL salvage set aside unreplayed.
@@ -90,6 +92,8 @@ impl CloudReplay {
                 .unwrap_or_else(|| Arc::clone(&materialized.state.fs)),
             self.limits.max_frame_bytes,
         );
+        #[cfg(feature = "internal-testing")]
+        let coverage = coverage.with_probe_variant(self.probe);
         let scope = self
             .scope
             .clone()
@@ -124,11 +128,13 @@ impl CloudReplay {
                 ..ReplayOptions::default()
             },
             &mut |tables, _stats| {
-                coverage.release_reader();
+                coverage.release_for_checkpoint();
                 checkpoint(materialized, &mut actor, &rx, tables, &mut names)
             },
         );
         // Accepted worker work stays owned while the outer startup worker holds its lease.
+        #[cfg(test)]
+        super::test_control::actor_join_started();
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;
         shutdown?;
@@ -314,6 +320,8 @@ fn publish_checkpoint_output(
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         })?;
+        #[cfg(test)]
+        super::test_control::before_publish_receive();
         let FlushWorkerResult::Publish(completion) =
             receive_completion(rx, state.startup_scope.as_ref(), "recovery flush publish")?
         else {

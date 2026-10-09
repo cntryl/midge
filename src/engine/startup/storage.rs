@@ -889,6 +889,8 @@ impl RuntimeStorageMaterialization {
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
+                #[cfg(feature = "internal-testing")]
+                probe: opts.recovery_probe(),
                 fs: streaming.fs,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
@@ -1042,6 +1044,8 @@ impl RuntimeStorageMaterialization {
             cloud_storage_for_restore: Some(sst_storage),
             cloud_metadata_storage_for_mirror: Some(metadata_storage),
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
+                #[cfg(feature = "internal-testing")]
+                probe: opts.recovery_probe(),
                 fs: streaming.fs,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,

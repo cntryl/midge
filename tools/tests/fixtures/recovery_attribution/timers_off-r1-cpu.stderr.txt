@@ -1,0 +1,9 @@
+Events disabled
+Events enabled
+Events disabled
+
+thread 'midge-runtime' (7728) panicked at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/slice/sort/shared/smallsort.rs:854:5:
+user-provided comparison function does not correctly implement a total order
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+[ perf record: Woken up 69 times to write data ]
+[ perf record: Captured and wrote 17.022 MB /home/runner/work/midge/midge/target/recovery-attribution/timers_off-r1-cpu/perf.data ]

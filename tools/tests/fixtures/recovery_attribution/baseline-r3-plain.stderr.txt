@@ -1,0 +1,4 @@
+
+thread 'midge-runtime' (7527) panicked at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/slice/sort/shared/smallsort.rs:854:5:
+user-provided comparison function does not correctly implement a total order
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

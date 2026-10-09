@@ -23,7 +23,22 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
             "open timeout cannot be represented at startup".into(),
         ));
     }
+    #[cfg(test)]
+    let mut test_control = super::test_control::take();
+    #[cfg(test)]
+    let deadline = if test_control
+        .as_ref()
+        .is_some_and(|control| control.expire.is_some())
+    {
+        OperationDeadline::unbounded()
+    } else {
+        deadline
+    };
     let scope = DeadlineScope::new(deadline);
+    #[cfg(test)]
+    let test_expire = test_control
+        .as_mut()
+        .and_then(|control| control.expire.take());
     let slot: ReadySlot = Arc::new(Mutex::new(None));
     let (ready_tx, ready_rx) = channel::bounded(1);
     let (decision_tx, decision_rx) = channel::bounded(1);
@@ -34,6 +49,8 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
     std::thread::Builder::new()
         .name("midge-startup".into())
         .spawn(move || {
+            #[cfg(test)]
+            let _observation = super::test_control::enter_worker(test_control);
             tracing::dispatcher::with_default(&caller_dispatch, || {
                 caller_span.in_scope(|| {
                     run_worker(
@@ -51,7 +68,14 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
             MidgeError::ResourceLimit(format!("cannot spawn startup worker: {error}"))
         })?;
 
-    match ready_rx.recv_timeout(scope.clamp(Duration::MAX)) {
+    #[cfg(test)]
+    let readiness = match test_expire {
+        Some(expire) => super::test_control::controlled_readiness(&ready_rx, &expire, &scope)?,
+        None => ready_rx.recv_timeout(scope.clamp(Duration::MAX)),
+    };
+    #[cfg(not(test))]
+    let readiness = ready_rx.recv_timeout(scope.clamp(Duration::MAX));
+    match readiness {
         Ok(()) => accept_ready(&slot, &scope, &decision_tx, start),
         Err(channel::RecvTimeoutError::Timeout) => Err(cancelled_error(&scope)),
         Err(channel::RecvTimeoutError::Disconnected) => {
