@@ -26,3 +26,4 @@ jobs:
         with:
           name: recovery-attribution-${{ github.sha }}
           path: target/recovery-attribution/**
+          include-hidden-files: true

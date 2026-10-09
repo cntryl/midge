@@ -122,6 +122,8 @@ def validate_native(path, source, binary, fixture, variant):
         raise ValueError("six exact checks and two shutdowns required")
     if (result["memory_bytes"], result["local_storage_bytes"], result["memtable_bytes"], result["open_deadline_seconds"]) != (134217728, 1073741824, 262144, 30):
         raise ValueError("resource/deadline policy differs")
+    if result["runtime"]["wal_cloud_durable_seq"] != result["committed_wal_frontier"] or result["runtime"]["current_sequence"] < result["committed_wal_frontier"] or result["committed_wal_frontier"] > result["frontier"] or result["runtime"]["salvage_mode_opens"] != 0:
+        raise ValueError("durable WAL frontier or salvage policy differs")
     events = result["native_open_events"]
     facts = [event["attribution"] for event in events if "attribution" in event]
     coverage = [event for event in events if event.get("phase") == "coverage"]

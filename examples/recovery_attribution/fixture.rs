@@ -122,17 +122,48 @@ pub fn create(root: &Path, rows: usize) -> Result<Value> {
         }
     }
     engine.flush_cf(&families[0])?;
-    let committed_wal_frontier = engine.metrics().get_runtime_metrics()?.current_sequence;
+    let committed_wal_frontier = engine
+        .metrics()
+        .get_runtime_metrics()?
+        .wal_cloud_durable_seq;
     engine.compact_all()?;
     let metrics = engine.metrics().get_runtime_metrics()?;
     if rows == 8192 && metrics.sst_count < 8 {
         return Err("fixture did not produce multiple partitioned SSTs".into());
     }
-    let manifest = engine.backup_to(root.join("backup"), Duration::from_secs(30))?;
+    let capture_started = Instant::now();
+    let mut capture_attempts = Vec::new();
+    let manifest = loop {
+        let remaining = Duration::from_secs(30).saturating_sub(capture_started.elapsed());
+        if remaining.is_zero() {
+            return Err("fixed backup capture bound exceeded".into());
+        }
+        match engine.backup_to(root.join("backup"), remaining) {
+            Ok(manifest) => {
+                capture_attempts.push(json!({"outcome":"success"}));
+                break manifest;
+            }
+            Err(error) => {
+                let retryable = matches!(&error, cntryl_midge::MidgeError::Busy(_))
+                    || matches!(&error, cntryl_midge::MidgeError::Io(error) if error.kind()==std::io::ErrorKind::NotFound);
+                capture_attempts.push(
+                    json!({"outcome":"failure","error":error.to_string(),"retryable":retryable}),
+                );
+                std::fs::write(
+                    root.join("capture-attempts.json"),
+                    serde_json::to_vec_pretty(&capture_attempts)?,
+                )?;
+                if !retryable || capture_attempts.len() >= 3 {
+                    return Err(format!("backup capture: {error}").into());
+                }
+                std::thread::sleep(Duration::from_millis(100).min(remaining));
+            }
+        }
+    };
     engine.shutdown(Duration::from_secs(30))?;
     drop(engine);
     scenario.teardown();
-    let facts = json!({"rows_per_family":rows,"value_bytes":512,"seed_sst_count":metrics.sst_count,"frontier":manifest.durability_frontier,"committed_wal_frontier":committed_wal_frontier,"backup":manifest,"inventory":inventory(&root.join("backup"),None)?});
+    let facts = json!({"rows_per_family":rows,"value_bytes":512,"seed_sst_count":metrics.sst_count,"frontier":manifest.durability_frontier,"committed_wal_frontier":committed_wal_frontier,"capture_attempts":capture_attempts,"backup":manifest,"inventory":inventory(&root.join("backup"),None)?});
     std::fs::write(
         root.join("fixture.json"),
         serde_json::to_vec_pretty(&facts)?,
@@ -248,13 +279,14 @@ pub fn trial(
     let committed = facts["committed_wal_frontier"]
         .as_u64()
         .ok_or("committed frontier")?;
-    if metrics.current_sequence != committed
+    if metrics.wal_cloud_durable_seq != committed
+        || metrics.current_sequence < committed
         || committed > manifest.durability_frontier
         || metrics.salvage_mode_opens != 0
     {
         return Err(format!(
-            "recovery frontier or policy mismatch: current={}, backup={}, salvage={}",
-            metrics.current_sequence, manifest.durability_frontier, metrics.salvage_mode_opens
+            "recovery frontier or policy mismatch: durable_wal={}, backup={}, salvage={}",
+            metrics.wal_cloud_durable_seq, manifest.durability_frontier, metrics.salvage_mode_opens
         )
         .into());
     }
@@ -267,7 +299,7 @@ pub fn trial(
     Ok(
         json!({"variant":variant,"fixture_sha256":restored["sha256"],"rows_per_family":rows,"open_ns":open_ns,"target_ns":5_000_000_000u64,
         "target_met":open_ns<=5_000_000_000,"memory_bytes":128*1024*1024,"local_storage_bytes":1024*1024*1024,"memtable_bytes":memtable,"open_deadline_seconds":30,
-        "frontier":manifest.durability_frontier,"runtime":metrics,"native_open_events":native,"verification":checks,"shutdowns":2,
+        "frontier":manifest.durability_frontier,"committed_wal_frontier":committed,"runtime":metrics,"native_open_events":native,"verification":checks,"shutdowns":2,
         "sampling_control_enable_ns":enabled_ns,"sampling_control_disable_ns":disabled_ns,"cpu_scope":"Engine::open_only","production_optimization_accepted":false}),
     )
 }

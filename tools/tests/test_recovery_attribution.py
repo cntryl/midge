@@ -20,12 +20,13 @@ class AcceptanceTests(unittest.TestCase):
                 "remote_observer_attached": True, "remote_ranges": {"attempts": 40, "completed": 40, "failures": 0}}
         result = {"fixture_sha256": "fixture", "variant": "baseline", "verification": checks, "shutdowns": 2,
                   "memory_bytes": 134217728, "local_storage_bytes": 1073741824, "memtable_bytes": 262144,
-                  "open_deadline_seconds": 30, "native_open_events": [{"attribution": fact}, {"phase": "coverage", "reader_evictions": 20}]}
+                  "frontier": 100, "committed_wal_frontier": 98, "runtime": {"wal_cloud_durable_seq": 98, "current_sequence": 120, "salvage_mode_opens": 0}, "open_deadline_seconds": 30, "native_open_events": [{"attribution": fact}, {"phase": "coverage", "reader_evictions": 20}]}
         receipt = {"complete": True, "source_clean": True, "source_sha": "source", "binary_sha256": "binary", "result": result}
         mutations = [
             lambda r: r.update(complete=False), lambda r: r.update(source_sha="other"),
             lambda r: r["result"].update(fixture_sha256="other"),
             lambda r: r["result"]["verification"][0].update(value_mismatches=1),
+            lambda r: r["result"]["runtime"].update(wal_cloud_durable_seq=97),
             lambda r: r["result"].update(shutdowns=1), lambda r: r["result"].update(memory_bytes=268435456),
             lambda r: r["result"]["native_open_events"][0]["attribution"].update(budget_final=1),
             lambda r: r["result"]["native_open_events"][0]["attribution"].update(peak_readers=5),

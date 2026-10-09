@@ -19,7 +19,7 @@ fn should_recover_same_engine_backup_when_bounded_probe_variant_changes() {
         )
         .try_init()
         .unwrap();
-    let facts = fixture::create(&root, 512).unwrap();
+    let facts = fixture::create(&root, 4096).unwrap();
     // Act
     let mut results = Vec::new();
     for variant in [
@@ -29,7 +29,7 @@ fn should_recover_same_engine_backup_when_bounded_probe_variant_changes() {
         RecoveryProbeVariant::TimersOff,
     ] {
         let target = directory.path().join(format!("trial-{variant:?}"));
-        results.push(fixture::trial(&root, &target, variant, 16 * 1024, &capture).unwrap());
+        results.push(fixture::trial(&root, &target, variant, 256 * 1024, &capture).unwrap());
     }
     // Assert
     for result in results {

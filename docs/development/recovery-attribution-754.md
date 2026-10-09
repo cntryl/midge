@@ -12,6 +12,9 @@ Use 8,192 deterministic 512-byte values in each of two families. Alternate
 one family and compact it into multiple real SSTs; retain the other family's WAL.
 A failpoints-only optional cleanup deferral retains WAL publication authority.
 It does not synthesize WAL records, SSTs, metadata, catalog entries or leases.
+Fixture capture may retry Busy or missing-file I/O at most three times inside
+one fixed thirty-second bound; every attempt is retained. This occurs before
+measurement and does not extend the open target or deadline.
 Keep the backup inventory and every object SHA256; every trial restores exactly
 those bytes into a private fresh database before measurement. Require genuine
 coverage probes, predicate rejections, reader churn, recovery checkpoint releases
@@ -69,8 +72,10 @@ represent real-provider request billing. Observations never advance liveness.
 Each trial verifies every point and a full scan in both families after recovery,
 then both full scans after clean shutdown/reopen: six exact checks and two
 shutdowns. Require the exact pre-compaction committed WAL frontier and reject salvage.
-The backup barrier also includes a reserved compaction generation; that
-maintenance-only sequence has no corresponding WAL record. Controls retain sparse/
+Check `wal_cloud_durable_seq` against the captured strict-ACK frontier. Runtime
+`current_sequence` and the backup barrier also include reserved compaction/SST
+generations; recovery checkpoints can allocate further generations without new
+WAL records. Those allocator counters must not be mistaken for the WAL frontier. Controls retain sparse/
 overlapping candidate equality, arbitrary/missing keys, duplicate/TTL/operation
 semantics, insufficient-budget fallback, corruption/identity changes, typed
 cancellation/deadlines and full reservation release.
