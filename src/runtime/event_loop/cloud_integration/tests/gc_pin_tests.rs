@@ -79,3 +79,60 @@ fn should_preserve_gc_pin_when_catalog_retirement_uses_a_stale_writer_epoch(
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
+
+#[test]
+fn should_preserve_gc_pin_when_local_unlink_fails_after_catalog_retirement(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 1, 10);
+    install_prune_gc_pins_for_test(&mut el, 1, 10);
+    let path = el.state.wal_dir.join(crate::wal::segment_file_name(1));
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir(&path)?;
+    el.cloud_coordinator.cloud_wal.prune_inflight.insert(1);
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPruneComplete {
+        segment_id: 1,
+        result: crate::storage::StorageOutcome::Ok(()),
+    });
+
+    // Assert
+    assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
+    assert!(!el
+        .cloud_coordinator
+        .cloud_wal
+        .acked_segments
+        .contains_key(&1));
+    assert!(el.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
+fn should_preserve_gc_pin_when_absent_local_copy_has_unsynced_directory(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: NotFound after a previous unlink is still uncertain without sync.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 1, 10);
+    install_prune_gc_pins_for_test(&mut el, 1, 10);
+    let fs = Arc::new(crate::io::MockFs::new());
+    fs.set_sync_dir_failure(true);
+    el.state.fs = fs;
+    el.cloud_coordinator.cloud_wal.prune_inflight.insert(1);
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPruneComplete {
+        segment_id: 1,
+        result: crate::storage::StorageOutcome::Ok(()),
+    });
+
+    // Assert
+    assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
+    assert!(el.state.persistence_anomaly_detected());
+    Ok(())
+}
