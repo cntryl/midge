@@ -338,7 +338,11 @@ fn should_abort_physical_history_when_child_requested() {
         let path = case.root.join("db");
         // Deterministic regression probe: the cloud deletion proof cannot be
         // collected while its authoritative WAL generations are retained.
-        let _scenario = fail::FailScenario::setup();
+        crate::common::crash::configure_nth_abort_failpoint(
+            &case.failpoint,
+            &case.scenario,
+            case.ordinal,
+        );
         if matches!(case.backend, Backend::CloudSimulated) {
             fail::cfg("midge::cloud::defer_wal_prune_admission", "return").unwrap();
         }
@@ -350,11 +354,6 @@ fn should_abort_physical_history_when_child_requested() {
         tx.delete_range(b"key-".to_vec(), b"key.".to_vec()).unwrap();
         tx.commit(write_options(case.backend)).unwrap();
         engine.flush_cf(&cf).unwrap();
-        crate::common::crash::configure_nth_abort_failpoint(
-            &case.failpoint,
-            &case.scenario,
-            case.ordinal,
-        );
         engine.compact_all().unwrap();
     }
 
