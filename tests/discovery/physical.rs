@@ -416,8 +416,8 @@ fn should_abort_physical_history_when_child_requested() {
         .unwrap();
     } else {
         let path = case.root.join("db");
-        // Deterministic regression probe: the cloud deletion proof cannot be
-        // collected while its authoritative WAL generations are retained.
+        // Hold WAL through deletion flush, then prove catalog retirement and
+        // reopen before testing the named remove-only publication abort.
         crate::common::crash::configure_nth_abort_failpoint(
             &case.failpoint,
             &case.scenario,
@@ -444,4 +444,87 @@ fn should_abort_physical_history_when_child_requested() {
 
     // Assert
     panic!("named crash boundary was not reached");
+}
+
+#[test]
+fn should_collect_tombstone_when_live_runtime_receives_cloud_wal_retirement() {
+    // Arrange: both puts and the deletion retain WAL until the explicit release.
+    let scenario = fail::FailScenario::setup();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fail::cfg(DEFER_WAL_PRUNE, "return").unwrap();
+    let mut engine = Engine::open(options(path, Backend::CloudSimulated).unwrap()).unwrap();
+    let cf = engine.get_column_family("default").unwrap();
+    let mut put = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    put.put(b"key-00".to_vec(), b"value".to_vec(), None)
+        .unwrap();
+    put.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(&cf).unwrap();
+    let mut delete = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    delete
+        .delete_range(b"key-".to_vec(), b"key.".to_vec())
+        .unwrap();
+    delete.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(&cf).unwrap();
+    let retained = cloud_wal_catalogs(path);
+    let expected = retained[0]["segments"].as_object().unwrap().len();
+    assert!(expected >= 2);
+    assert!(!catalogs_are_retired(&retained));
+    let delivered = "midge::cloud::after_wal_prune_complete";
+    let (tx, rx) = std::sync::mpsc::channel();
+    fail::cfg_callback(delivered, move || {
+        tx.send(()).unwrap();
+    })
+    .unwrap();
+
+    // Act: every completion is observed after event-loop delivery. No reopen or
+    // catalog polling substitutes for the live runtime moving its horizon.
+    fail::remove(DEFER_WAL_PRUNE);
+    engine.flush_cf(&cf).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..expected {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("live event loop must deliver every admitted prune completion");
+    }
+    fail::remove(delivered);
+    assert!(catalogs_are_retired(&cloud_wal_catalogs(path)));
+    engine.compact_all().unwrap();
+
+    // Assert: real compaction collects the tombstone in this same Engine.
+    assert!(engine
+        .metrics()
+        .get_storage_layout()
+        .unwrap()
+        .levels
+        .iter()
+        .flat_map(|level| &level.files)
+        .all(|file| file.cf_id != cf.id()));
+    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+    assert!(read
+        .scan(&Query::new())
+        .unwrap()
+        .try_collect()
+        .unwrap()
+        .is_empty());
+    drop(read);
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+    drop(engine);
+    scenario.teardown();
+    let mut reopened = Engine::open(options(path, Backend::CloudSimulated).unwrap()).unwrap();
+    let cf = reopened.get_column_family("default").unwrap();
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    assert!(read
+        .scan(&Query::new())
+        .unwrap()
+        .try_collect()
+        .unwrap()
+        .is_empty());
+    drop(read);
+    reopened.shutdown(Duration::from_secs(10)).unwrap();
 }

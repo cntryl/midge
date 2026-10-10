@@ -428,6 +428,8 @@ impl EventLoop {
                 );
             }
         }
+        // Tests observe delivery after the live runtime has moved its GC pin.
+        crate::failpoints::fail_point!("midge::cloud::after_wal_prune_complete");
     }
 
     /// Shared cloud budget for the work that answers `segment_id`.
