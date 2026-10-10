@@ -20,7 +20,7 @@ jobs:
           sudo apt-get install -y "linux-tools-$(uname -r)"
           sudo sysctl -w kernel.perf_event_paranoid=1
       - name: Execute the fixed immutable-fixture matrix
-        run: python3 tools/recovery_attribution.py
+        run: ruby tools/recovery_attribution.rb
       - uses: actions/upload-artifact@v7
         if: always()
         with:

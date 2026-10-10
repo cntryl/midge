@@ -317,7 +317,7 @@ jobs:
           if test -d "$MIDGE_STRESS_ARTIFACT_DIR"; then cp -a "$MIDGE_STRESS_ARTIFACT_DIR/." target/checkpoint-attempt/midge/; fi
           jq -n --arg outcome "${WORKLOAD_OUTCOME:-skipped}" '{workload_step_outcome:$outcome}' > target/checkpoint-attempt/exit-outcome.json
           cat /proc/loadavg /proc/stat > target/checkpoint-attempt/host-after.txt
-          python3 tools/finalize_stress_artifacts.py --stress-root target/checkpoint-attempt/native --artifact-root target/checkpoint-attempt/midge --workload "$SELECTED_WORKLOAD" --suite tier4-system-checkpoint-write-amplification --sha "$GITHUB_SHA" --outcome "${WORKLOAD_OUTCOME:-skipped}" > target/checkpoint-attempt/finalization.json
+          ruby tools/finalize_stress_artifacts.rb --stress-root target/checkpoint-attempt/native --artifact-root target/checkpoint-attempt/midge --workload "$SELECTED_WORKLOAD" --suite tier4-system-checkpoint-write-amplification --sha "$GITHUB_SHA" --outcome "${WORKLOAD_OUTCOME:-skipped}" > target/checkpoint-attempt/finalization.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

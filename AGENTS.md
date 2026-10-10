@@ -21,6 +21,8 @@ Use Rust 2021 style and `rustfmt` defaults. Prefer clear subsystem boundaries; l
 
 ## Testing Guidelines
 
+Keep engine tests and test runners in Rust and run them through Cargo. Do not add Python files to this repository. Use `cntryl-tools` as the first choice for additional static analysis rather than adding repository-specific analysis scripts.
+
 All new behavior should include tests. Put public API coverage in `tests/`; use inline `#[cfg(test)] mod tests` for focused internal logic. Use deterministic failpoints and crash/recovery tests for durability-sensitive changes. For cloud, WAL, SST, and manifest changes, prefer TDD regression tests that first demonstrate unsafe deletion, corrupt recovery, stale metadata, or incorrect frontier movement.
 
 ## Commit & Pull Request Guidelines

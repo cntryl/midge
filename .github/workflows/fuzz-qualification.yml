@@ -53,15 +53,14 @@ jobs:
 
       - name: Replay preserved intent failure corpus under sanitizers
         run: |
-          python3 - <<'PYTHON'
-          import json
-          from pathlib import Path
-          destination = Path("fuzz/timeout-regression-corpus")
-          destination.mkdir(parents=True, exist_ok=True)
-          corpus = json.loads(Path("tests/fixtures/fuzz/intent_timeout_corpus.json").read_text())
-          for name, encoded in corpus.items():
-              (destination / name).write_bytes(bytes.fromhex(encoded))
-          PYTHON
+          ruby -rjson -rfileutils -e '
+            destination = "fuzz/timeout-regression-corpus"
+            FileUtils.mkdir_p(destination)
+            JSON.parse(File.read("tests/fixtures/fuzz/intent_timeout_corpus.json")).each do |name, encoded|
+              raise "invalid corpus entry" unless File.basename(name) == name && encoded.match?(/\A(?:[0-9a-fA-F]{2})*\z/)
+              File.binwrite(File.join(destination, name), [encoded].pack("H*"))
+            end
+          '
           cargo fuzz run intent_log_replay fuzz/timeout-regression-corpus -- -runs=2048 -timeout=10
 
       - name: Smoke WAL frame recovery

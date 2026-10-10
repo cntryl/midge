@@ -40,7 +40,7 @@ is disabled in production builds and is removed with replay spooling in #808.
 Run from a clean checkout, with receipts outside the checkout:
 
 ```sh
-python3 tools/run-wal-redesign-regressions.py --baseline \
+cargo run --locked --all-features --example wal_redesign_baselines -- --baseline \
   --output /tmp/midge-wal-baseline
 ```
 
@@ -51,7 +51,7 @@ A registry with no executed cases fails. To require the provider regression:
 
 ```sh
 docker compose up -d sqrzl
-SQRZL_SECRET_ACCESS_KEY=easy-peasy python3 tools/run-wal-redesign-regressions.py \
+SQRZL_SECRET_ACCESS_KEY=easy-peasy cargo run --locked --all-features --example wal_redesign_baselines -- \
   --baseline --with-sqrzl --output /tmp/midge-wal-provider-baseline
 ```
 
@@ -71,7 +71,7 @@ is baseline maintenance, not a complete cross-platform redesign campaign.
 Omit `--baseline` and select Sqrzl to require all GREEN:
 
 ```sh
-SQRZL_SECRET_ACCESS_KEY=easy-peasy python3 tools/run-wal-redesign-regressions.py \
+SQRZL_SECRET_ACCESS_KEY=easy-peasy cargo run --locked --all-features --example wal_redesign_baselines -- \
   --with-sqrzl --output /tmp/midge-wal-acceptance
 ```
 

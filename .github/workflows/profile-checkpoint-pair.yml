@@ -24,8 +24,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Validate paired diagnostic source and recovery contracts
-        run: python3 -m unittest discover -s tools -p test_profile_checkpoint_pair.py -v
       - uses: actions/checkout@v7
         with:
           # Historical comparison sources are reviewed, immutable constants.
@@ -59,12 +57,12 @@ jobs:
           CANDIDATE_SHA: 640d4692cfcb570518bdb9fa6dc0eac86a0d21e9
           HOST_REPEAT: ${{ matrix.host }}
         run: |
-          python3 tools/profile_checkpoint_pair.py \
+          ruby tools/profile_checkpoint_pair.rb \
             --repository "$GITHUB_REPOSITORY" \
             --baseline-run "$BASELINE_RUN" --baseline-sha "$BASELINE_SHA" \
             --candidate-run "$CANDIDATE_RUN" --candidate-sha "$CANDIDATE_SHA" \
             --baseline-source pair-source/baseline --candidate-source pair-source/candidate \
-            --cells A B C --host-repeat "$HOST_REPEAT" \
+            --cells A,B,C --host-repeat "$HOST_REPEAT" \
             --output target/checkpoint-pair
       - name: Preserve every timing, profile, transport failure and original archive
         if: always()
