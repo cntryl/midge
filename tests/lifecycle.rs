@@ -2667,6 +2667,7 @@ mod local_wal_retention {
         ids
     }
 
+    #[cfg(any(target_os = "macos", feature = "internal-testing"))]
     fn segment_path(path: &Path, id: u64) -> std::path::PathBuf {
         path.join("wal").join(format!("{id:020}.wal"))
     }
@@ -2704,11 +2705,11 @@ mod local_wal_retention {
         let before = wal_segment_ids(&live);
         #[cfg(target_os = "macos")]
         let older = *before.first().expect("an older sealed segment is retained");
+        #[cfg(not(target_os = "macos"))]
+        assert!(!fail_older_removal, "unlink fault fixture requires macOS");
+        #[cfg(target_os = "macos")]
         if fail_older_removal {
-            #[cfg(target_os = "macos")]
             set_immutable(&segment_path(&live, older), true);
-            #[cfg(not(target_os = "macos"))]
-            panic!("unlink fault fixture requires macOS");
         }
         engine.flush_cf(&idle).expect("flush idle");
         // flush_cf returns before the post-publication prune; shutdown
@@ -2716,9 +2717,9 @@ mod local_wal_retention {
         engine.shutdown(Duration::from_secs(10)).expect("shutdown");
         drop(engine);
         let after = wal_segment_ids(&live);
+        #[cfg(target_os = "macos")]
         if fail_older_removal {
             // The fault was transient; the file is ordinary again on restart.
-            #[cfg(target_os = "macos")]
             set_immutable(&segment_path(&live, older), false);
         }
         let reopened = Engine::open(options(&live)).expect("reopen");
