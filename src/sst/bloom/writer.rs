@@ -156,6 +156,7 @@ impl BloomWriter {
     }
 
     /// Get the current size in bytes
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn size_bytes(&self) -> usize {
         self.bits.len()
