@@ -299,17 +299,15 @@ fn invoke_child_with_samples(
     {
         command.env("RUST_LOG", "off");
     }
-    // These healthy end-to-end fixtures include real publication/control-file
-    // I/O under host contention. The held controls still prove the unchanged
-    // one-second native no-progress decision with zero completed units.
-    let no_progress_timeout = if matches!(
-        workload,
-        "delayed_final_flush_publication" | "metadata_inventory_recovery_with_flat_cache"
-    ) {
-        "3"
-    } else {
-        "1"
-    };
+    // Healthy end-to-end and policy fixtures include real I/O under host
+    // contention. The deliberate no-work controls retain a one-second native
+    // deadline and must still fail with zero completed units.
+    let no_progress_timeout =
+        if workload.starts_with("held_") || workload == "rejected_clients_with_disk_churn" {
+            "1"
+        } else {
+            "3"
+        };
     command
         .arg("--workload")
         .arg(workload)
