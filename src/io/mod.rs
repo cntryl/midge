@@ -27,14 +27,11 @@
 pub(crate) mod buffered_read;
 #[cfg(test)]
 mod conformance_tests;
-#[cfg(any(test, feature = "internal-testing"))]
-pub mod crash_fs;
 pub(crate) mod durable_dir;
 pub mod mock;
 pub mod real;
 mod scoped_fs;
 pub mod staging;
-mod subdirectory;
 pub mod traits;
 #[cfg(test)]
 pub(crate) mod transient_read;
@@ -42,7 +39,6 @@ pub(crate) mod transient_read;
 pub use mock::MockFs;
 pub use real::RealFs;
 pub(crate) use scoped_fs::scope_fs;
-pub(crate) use subdirectory::subdirectory;
 pub use traits::{
     Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions,
 };

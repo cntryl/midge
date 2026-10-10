@@ -25,15 +25,6 @@ fn for_each_backend(check: impl Fn(&str, &dyn Fs)) {
     let real = RealFs::new(temp_dir.path()).expect("create RealFs");
     check("RealFs", &real);
     check("MockFs", &MockFs::new());
-    check("CrashFs", &super::crash_fs::CrashFs::new());
-    check(
-        "ScheduledFs",
-        &crate::simulation::filesystem::ScheduledFs::new(
-            std::sync::Arc::new(super::crash_fs::CrashFs::new()),
-            crate::simulation::scheduler::Scheduler::eager(),
-            1,
-        ),
-    );
 }
 
 fn write_file(fs: &dyn Fs, path: &str, data: &'static [u8]) {

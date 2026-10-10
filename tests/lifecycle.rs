@@ -2710,6 +2710,10 @@ mod local_wal_retention {
         #[cfg(target_os = "macos")]
         if fail_older_removal {
             set_immutable(&segment_path(&live, older), true);
+            assert!(
+                std::fs::remove_file(segment_path(&live, older)).is_err(),
+                "the immutable-file unlink fault must be active"
+            );
         }
         engine.flush_cf(&idle).expect("flush idle");
         // flush_cf returns before the post-publication prune; shutdown
@@ -2808,6 +2812,10 @@ mod local_wal_retention {
             .expect("shutdown run 2");
         drop(engine);
         let after_run2 = wal_segment_ids(temp.path());
+        assert!(
+            !after_run2.is_empty(),
+            "the idle family must retain a run-2 segment"
+        );
         let epochs: Vec<_> = after_run2
             .iter()
             .map(|id| (id, wal_record_epochs(&segment_path(temp.path(), *id))))

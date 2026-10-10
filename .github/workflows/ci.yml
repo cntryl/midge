@@ -90,6 +90,29 @@ jobs:
           path: target/discovery-031
           if-no-files-found: ignore
 
+      - name: Start Sqrzl for named WAL audit baselines
+        run: docker compose up -d sqrzl
+
+      - name: Wait for Sqrzl health
+        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
+
+      - name: Check named WAL audit baseline (includes ignored regressions)
+        env:
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+        run: python3 tools/run-wal-redesign-regressions.py --baseline --with-sqrzl --output "${{ runner.temp }}/wal-audit-baseline"
+
+      - name: Retain named WAL audit baseline
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wal-audit-baseline-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/wal-audit-baseline
+          if-no-files-found: error
+
+      - name: Stop WAL audit emulator
+        if: always()
+        run: docker compose down -v
+
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
 
@@ -141,11 +164,20 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo test --lib io::real::tests --all-features
 
-      - name: Test portable crash adapters on Windows
-        if: runner.os == 'Windows'
-        run: >-
-          cargo test --lib --all-features -- io::crash_fs:: io::conformance_tests::
-          io::subdirectory:: simulation:: storage::backend_contract_tests:: --test-threads=1
+      - name: Compile all named WAL audit fixtures
+        run: cargo test --all-features --no-run --lib --test lifecycle --test fault_injection --test wal_retention_regressions --test wal_replay_io_failure
+
+      - name: Check native WAL audit baseline on macOS
+        if: runner.os == 'macOS'
+        run: python3 tools/run-wal-redesign-regressions.py --baseline --output "${{ runner.temp }}/wal-audit-baseline"
+
+      - name: Retain native WAL audit baseline
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: wal-audit-baseline-macos-${{ github.sha }}
+          path: ${{ runner.temp }}/wal-audit-baseline
+          if-no-files-found: error
 
       - name: Test cloud WAL salvage on Windows
         if: matrix.os == 'windows-latest'

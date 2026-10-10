@@ -20,7 +20,7 @@ use thiserror::Error;
 /// Only `internal-testing` builds can name this type. Internal code converts it
 /// with the crate-private [`FsError::into_midge`] rather than a `From` impl, so
 /// `MidgeError`'s public API does not expose it.
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum FsError {
     #[error("not found: {0}")]
     NotFound(String),
@@ -156,14 +156,6 @@ pub trait File: Send {
     ///
     /// Returns an error when the file length cannot be queried.
     fn len(&self) -> FsResult<u64>;
-
-    /// Whether the file contains no bytes.
-    ///
-    /// # Errors
-    /// Returns the same metadata errors as [`Self::len`].
-    fn is_empty(&self) -> FsResult<bool> {
-        self.len().map(|len| len == 0)
-    }
 
     /// Sync to storage device according to durability level
     ///

@@ -45,16 +45,12 @@
 
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::Fs;
-#[cfg(test)]
 use crate::io::FsError;
-#[cfg(test)]
-use crate::io::RealFs;
+use crate::io::{Fs, RealFs};
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 use apply_op::TransactionApplyOp;
-#[cfg(test)]
 use std::path::PathBuf;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -597,7 +593,6 @@ impl WalActor {
         self.segment_max_sequence = self.segment_max_sequence.max(sequence);
     }
 
-    #[cfg(test)]
     pub fn new(
         wal_dir: PathBuf,
         durability_policy: DurabilityPolicy,
@@ -606,36 +601,16 @@ impl WalActor {
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
-        let fs = if memory_mode {
-            None
-        } else {
-            Some(Arc::new(RealFs::new(wal_dir).map_err(FsError::into_midge)?) as Arc<dyn Fs>)
-        };
-        Self::with_filesystem(
-            fs,
-            durability_policy,
-            batch_config,
-            writer_epoch,
-            storage_io_timeout,
-        )
-    }
-
-    pub(crate) fn with_filesystem(
-        fs: Option<Arc<dyn Fs>>,
-        durability_policy: DurabilityPolicy,
-        batch_config: BatchConfig,
-        writer_epoch: u64,
-        storage_io_timeout: Duration,
-    ) -> MidgeResult<Self> {
         let counters = crate::telemetry::CounterSink::default();
-        let io = if let Some(fs) = fs {
+        let io = if memory_mode {
+            WalIoState::Memory
+        } else {
+            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir).map_err(FsError::into_midge)?);
             let factory = FsWalFactoryIo::new(Arc::clone(&fs))
                 .with_io_timeout(storage_io_timeout)
                 .with_counters(counters.clone());
             let writer = factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?;
             WalIoState::Open { fs, writer }
-        } else {
-            WalIoState::Memory
         };
 
         let actor = Self {

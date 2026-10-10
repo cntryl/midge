@@ -827,6 +827,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     let storage = fixture(&[("1.wal", epoch_one), ("2.wal", epoch_two)], 1024);
     let mut memtables = HashMap::new();
     let mut checkpoints = 0;
+    let mut recovered = std::collections::BTreeSet::new();
 
     // Act
     let result = replay_wal_with_checkpoint(
@@ -838,6 +839,9 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
         limits(),
         &mut |tables, _| {
             checkpoints += 1;
+            for table in tables.values() {
+                recovered.extend(table.iter_all().into_iter().map(|entry| entry.0));
+            }
             tables.clear();
             Ok(())
         },
@@ -846,4 +850,13 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     // Assert
     assert!(result.is_ok(), "replay failed: {result:?}");
     assert!(checkpoints > 0);
+    for table in memtables.values() {
+        recovered.extend(table.iter_all().into_iter().map(|entry| entry.0));
+    }
+    assert!(recovered.contains(b"seed".as_slice()));
+    for seq in 5..=400 {
+        assert!(recovered.contains(format!("next-{seq}").as_bytes()));
+    }
+    assert!(!recovered.contains(b"abandoned".as_slice()));
+    assert_eq!(recovered.len(), 397);
 }

@@ -2935,6 +2935,18 @@ mod failure_injection {
             .expect("begin");
         tx.put(b"k".to_vec(), b"v".to_vec(), None).expect("put");
         let commit = tx.commit(WriteOptions::sync());
+        assert!(
+            commit.is_err(),
+            "the configured WAL sync fault must fail the commit"
+        );
+        assert!(
+            commit
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("no space on WAL sync"),
+            "the configured WAL sync fault must be the commit failure: {commit:?}"
+        );
         fail::remove("midge::wal::inject_no_space_on_sync");
         scenario.teardown();
         let visible_before_restart = read_cf_value(&engine, &cf, b"k");

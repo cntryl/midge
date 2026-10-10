@@ -243,7 +243,8 @@ impl EventLoop {
             flush_worker_mode.is_inline(),
             flush_worker_mode.worker_msg_tx(),
         );
-        let (sst_dir, memory_mode, initial_segment_id) = (
+        let (wal_dir, sst_dir, memory_mode, initial_segment_id) = (
+            state.wal_dir.clone(),
             state.sst_dir.clone(),
             state.is_memory_mode(),
             state.wal.current_segment_id,
@@ -268,10 +269,11 @@ impl EventLoop {
             flush_completion_tx,
             config.flush_memory_limit,
         )?;
-        let mut wal_actor = WalActor::with_filesystem(
-            (!memory_mode).then(|| crate::io::subdirectory(Arc::clone(&state.fs), "wal")),
+        let mut wal_actor = WalActor::new(
+            wal_dir,
             config.wal_durability_policy,
             config.wal_batch_config,
+            memory_mode,
             config.writer_epoch,
             config.storage_io_timeout,
         )?;
