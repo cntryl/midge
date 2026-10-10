@@ -14,6 +14,9 @@ mod compaction_deadline;
 #[path = "fault_injection/local_wal_gc.rs"]
 mod local_wal_gc;
 
+#[path = "fault_injection/l0_pressure.rs"]
+mod l0_pressure;
+
 mod crash_validation {
     use crate::common::crash;
 
