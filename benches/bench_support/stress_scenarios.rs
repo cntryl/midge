@@ -39,6 +39,9 @@ mod admission;
 mod final_flush_watchdog;
 #[path = "stress_scenarios/latency.rs"]
 mod latency;
+#[cfg(test)]
+#[path = "stress_scenarios/watchdog_preparation.rs"]
+mod watchdog_preparation;
 #[cfg(all(test, feature = "failpoints"))]
 #[allow(
     unused_imports,
@@ -46,8 +49,10 @@ mod latency;
 )]
 pub(super) use final_flush_watchdog::{
     prepare_final_flush_watchdog_fixture, run_final_flush_terminal_policy_fixture,
-    run_final_flush_watchdog_fixture,
+    run_final_flush_watchdog_fixture, FlushFixtureKind,
 };
+#[cfg(test)]
+pub(super) use watchdog_preparation::PreparationGuard;
 
 const VALUE_SIZE: usize = 128;
 const SEED_ROWS: usize = 512;
@@ -2582,12 +2587,10 @@ fn signed_gcs_json_namespace(bucket: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-static PREPARED_RECOVERY: Mutex<
-    Option<(
-        WorkloadArtifacts,
-        cntryl_midge::__internal::recovery::PreparedRecoveryProgressFixture,
-    )>,
-> = Mutex::new(None);
+static PREPARED_RECOVERY: watchdog_preparation::PreparedSlot<(
+    WorkloadArtifacts,
+    cntryl_midge::__internal::recovery::PreparedRecoveryProgressFixture,
+)> = watchdog_preparation::PreparedSlot::new();
 
 #[cfg(test)]
 #[allow(
@@ -2683,7 +2686,9 @@ pub(super) fn run_watchdog_fixture(ctx: &mut StressContext, resume_successes: bo
 )]
 pub(super) fn prepare_recovery_watchdog_fixture(
     mode: cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode,
-) {
+    samples: usize,
+    setup_delay: Duration,
+) -> impl PreparationGuard {
     use cntryl_midge::__internal::recovery::{
         prepare_recovery_progress_fixture, RecoveryProgressFixtureMode,
     };
@@ -2706,15 +2711,34 @@ pub(super) fn prepare_recovery_watchdog_fixture(
         workload: "recovery-fixture",
         stages: &[],
     };
-    let artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(8));
-    let fixture_root = artifacts.path.join("recovery-fixture");
-    let database = fixture_root.join("local");
-    fs::create_dir_all(&database).expect("create empty recovery fixture database");
-    let prepared = prepare_recovery_progress_fixture(&fixture_root, mode)
-        .expect("seed recovery before activating the watchdog");
-    *PREPARED_RECOVERY
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((artifacts, prepared));
+    let scope = PREPARED_RECOVERY.install(Vec::new(), |(mut artifacts, _)| {
+        artifacts.terminal_error = Some("prepared fixture was not invoked".into());
+        // Seal the cancellation receipt before the fallback Drop marks unfinished work failed.
+        artifacts.complete = true;
+        artifacts.persist("canceled");
+    });
+    for _ in 0..samples {
+        let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(8));
+        let fixture_root = artifacts.path.join("recovery-fixture");
+        let database = fixture_root.join("local");
+        fs::create_dir_all(&database).expect("create empty recovery fixture database");
+        let prepared = prepare_recovery_progress_fixture(&fixture_root, mode, setup_delay)
+            .unwrap_or_else(|error| {
+                artifacts.terminal_error = Some(format!("fixture preparation failed: {error}"));
+                artifacts.persist("failed");
+                panic!("recovery fixture preparation failed: {error}");
+            });
+        write_atomic_json(
+            &artifacts.path.join("fixture-preparation.json"),
+            &json!({
+                "setup_elapsed_ms": prepared.setup_elapsed().as_millis(),
+                "mode": prepared.mode(),
+            }),
+        )
+        .expect("retain actual component preparation time");
+        scope.push((artifacts, prepared));
+    }
+    scope
 }
 
 #[cfg(test)]
@@ -2722,18 +2746,23 @@ pub(super) fn prepare_recovery_watchdog_fixture(
     dead_code,
     reason = "Only the watchdog integration target calls this fixture"
 )]
-pub(super) fn run_recovery_watchdog_fixture(ctx: &mut StressContext) {
-    let (mut artifacts, prepared) = PREPARED_RECOVERY
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-        .expect("recovery fixture prepared before harness activation");
+pub(super) fn run_recovery_watchdog_fixture(
+    ctx: &mut StressContext,
+    mode: cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode,
+) {
+    let (mut artifacts, prepared) = PREPARED_RECOVERY.take();
+    assert_eq!(
+        prepared.mode(),
+        mode,
+        "run the workload whose input was prepared"
+    );
     let database = artifacts.path.join("recovery-fixture/local");
     let progress = ctx.progress_handle();
-    let mut prepared = Some(prepared);
-    ctx.metadata(
-        "fixture_setup_elapsed_ms",
-        artifacts.started.elapsed().as_millis(),
+    ctx.record_observation(
+        "fixture_setup_elapsed_ns",
+        prepared.setup_elapsed().as_secs_f64() * 1e9,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
     );
     artifacts.enter_phase("recovery", "actual-planner-and-replay", &progress);
     let _sampler = ResourceSampler::start_with_interval(
@@ -2744,21 +2773,26 @@ pub(super) fn run_recovery_watchdog_fixture(ctx: &mut StressContext) {
     );
     // The real planner and replay own successful work. The fixture delays or
     // holds their provider responses and retains independent observations.
-    let (result, recovery_units) = ctx
-        .measure("actual cloud WAL recovery", || {
-            let before = progress.completed_units();
-            let _scope =
-                RecoveryScope::enter(&progress, &artifacts.resource_phase, artifacts.phase);
-            prepared
-                .take()
-                .expect("run the prepared recovery exactly once")
-                .run()
-                .map(|result| (result, progress.completed_units() - before))
-        })
-        .expect("actual planner and replay fixture completes");
+    let before = progress.completed_units();
+    let result = {
+        let _scope = RecoveryScope::enter(&progress, &artifacts.resource_phase, artifacts.phase);
+        prepared
+            .run()
+            .expect("actual planner and replay fixture completes")
+    };
+    let recovery_units = progress.completed_units() - before;
+    // This is a complete fixture invocation, not a repeatable timing closure.
+    // Native warmup/measured/cooldown samples each consume their own input.
+    ctx.record_external_outcome(
+        "actual cloud WAL recovery",
+        Duration::from_millis(result.elapsed_ms),
+        LogicalUnit::new("recovery"),
+        OperationOutcome::success(1),
+    );
     write_atomic_json(
         &artifacts.path.join("recovery-result.json"),
         &json!({
+            "progress_units": recovery_units,
             "expected_records": result.expected_records,
             "verified_records": result.verified_records,
             "mismatches": result.mismatches,
@@ -2779,9 +2813,7 @@ pub(super) fn run_recovery_watchdog_fixture(ctx: &mut StressContext) {
         }),
     )
     .expect("persist successful actual recovery fixture result");
-    ctx.metadata("fixture_recovery_elapsed_ms", result.elapsed_ms);
     ctx.metadata("fixture_recovery_verified_records", result.verified_records);
-    ctx.metadata("fixture_recovery_progress_units", recovery_units);
     progress.advance();
     artifacts.enter_phase("complete", "actual-planner-and-replay", &progress);
     artifacts.complete = true;
@@ -2829,6 +2861,7 @@ pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
     write_atomic_json(
         &artifacts.path.join("recovery-result.json"),
         &json!({
+            "progress_units": recovery_units,
             "expected_edits": result.expected_edits,
             "verified_edits": result.verified_edits,
             "max_edit_id": result.max_edit_id,

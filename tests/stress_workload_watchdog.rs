@@ -9,11 +9,29 @@ use std::process::{Command, Output};
 mod stress_scenarios;
 
 const CHILD_FLAG: &str = "MIDGE_WATCHDOG_TEST_CHILD";
-const CONTROL_FLAG: &str = "MIDGE_WATCHDOG_TEST_CONTROL";
 
-fn prepare_child(workload: &str) {
+fn control_artifacts(label: &str) -> tempfile::TempDir {
+    if let Some(root) = std::env::var_os("MIDGE_WATCHDOG_EVIDENCE_DIR") {
+        fs::create_dir_all(&root).expect("create watchdog evidence directory");
+        let artifacts = tempfile::Builder::new()
+            .prefix(label)
+            .disable_cleanup(true)
+            .tempdir_in(root)
+            .expect("retain watchdog control artifacts");
+        eprintln!("watchdog evidence: {}", artifacts.path().display());
+        artifacts
+    } else {
+        tempfile::tempdir().expect("create watchdog control artifacts")
+    }
+}
+
+fn prepare_child(
+    workload: &str,
+    samples: usize,
+) -> Vec<Box<dyn stress_scenarios::PreparationGuard>> {
     use cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode as Mode;
-
+    use std::time::Duration;
+    let mut scopes: Vec<Box<dyn stress_scenarios::PreparationGuard>> = Vec::new();
     let mode = match workload {
         "delayed_recovery_with_flat_cache" => Some(Mode::DelayedRanges),
         "held_recovery_with_flat_cache" => Some(Mode::HeldFirstRange),
@@ -23,22 +41,36 @@ fn prepare_child(workload: &str) {
         _ => None,
     };
     if let Some(mode) = mode {
-        stress_scenarios::prepare_recovery_watchdog_fixture(mode);
+        let delay = if mode == Mode::MetadataInventory {
+            Duration::from_millis(1_200)
+        } else {
+            Duration::ZERO
+        };
+        scopes.push(Box::new(
+            stress_scenarios::prepare_recovery_watchdog_fixture(mode, samples, delay),
+        ));
     }
     #[cfg(feature = "failpoints")]
-    if workload.ends_with("final_flush_publication") {
-        stress_scenarios::prepare_final_flush_watchdog_fixture(
-            workload == "held_final_flush_publication",
-        );
-    }
-    // Deliberately exceed the active-work budget during fixture setup. This
-    // must neither consume its deadline nor fabricate completed-work pulses.
-    if workload == "metadata_inventory_recovery_with_flat_cache"
-        || workload.ends_with("final_flush_publication")
-        || workload == "held_inventory_recovery_with_flat_cache"
     {
-        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        use stress_scenarios::FlushFixtureKind as Kind;
+        let kind = match workload {
+            "delayed_final_flush_publication" => Some(Kind::Delayed),
+            "held_final_flush_publication" => Some(Kind::Held),
+            "terminal_final_flush_retry_policy" => Some(Kind::TerminalPolicy),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let delay = if kind == Kind::Held {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(1_200)
+            };
+            scopes.push(Box::new(
+                stress_scenarios::prepare_final_flush_watchdog_fixture(kind, samples, delay),
+            ));
+        }
     }
+    scopes
 }
 
 mod child_harness {
@@ -54,27 +86,42 @@ mod child_harness {
 
     #[cntryl_stress::stress(tier = 5)]
     fn delayed_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
+        super::stress_scenarios::run_recovery_watchdog_fixture(
+            ctx,
+            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::DelayedRanges,
+        );
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn held_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
+        super::stress_scenarios::run_recovery_watchdog_fixture(
+            ctx,
+            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::HeldFirstRange,
+        );
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn cached_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
+        super::stress_scenarios::run_recovery_watchdog_fixture(
+            ctx,
+            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::CachedCoverage,
+        );
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn metadata_inventory_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
+        super::stress_scenarios::run_recovery_watchdog_fixture(
+            ctx,
+            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::MetadataInventory,
+        );
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn held_inventory_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
+        super::stress_scenarios::run_recovery_watchdog_fixture(
+            ctx,
+            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::HeldInventory,
+        );
     }
 
     #[cntryl_stress::stress(tier = 5)]
@@ -113,6 +160,16 @@ mod child_harness {
 }
 
 fn invoke_child(artifacts: &Path, workload: &str) -> Output {
+    invoke_child_with_samples(artifacts, workload, 1, 0, 0)
+}
+
+fn invoke_child_with_samples(
+    artifacts: &Path,
+    workload: &str,
+    samples: usize,
+    warmup: usize,
+    cooldown: usize,
+) -> Output {
     let mut command = Command::new(std::env::current_exe().expect("watchdog test executable"));
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("STRESS_") {
@@ -125,22 +182,28 @@ fn invoke_child(artifacts: &Path, workload: &str) -> Output {
     {
         command.env("RUST_LOG", "off");
     }
-    command
+    let output = command
         .arg("--workload")
         .arg(workload)
         .env(CHILD_FLAG, "1")
-        .env_remove(CONTROL_FLAG)
         .env("STRESS_PROFILE", "smoke")
-        .env("STRESS_SAMPLES", "1")
-        .env("STRESS_WARMUP_SAMPLES", "0")
-        .env("STRESS_COOLDOWN_SAMPLES", "0")
+        .env("STRESS_SAMPLES", samples.to_string())
+        .env("STRESS_WARMUP_SAMPLES", warmup.to_string())
+        .env("STRESS_COOLDOWN_SAMPLES", cooldown.to_string())
         .env("STRESS_NO_PROGRESS_TIMEOUT_SECS", "1")
         .env("STRESS_JSON", "true")
         .env("STRESS_OUTPUT_DIR", artifacts.join("stress"))
         .env("MIDGE_STRESS_ARTIFACT_DIR", artifacts.join("midge"))
         .env_remove("GITHUB_ACTIONS")
         .output()
-        .expect("execute real stress watchdog child")
+        .expect("execute real stress watchdog child");
+    fs::write(artifacts.join("child-stdout.json"), &output.stdout)
+        .expect("retain native child receipt");
+    fs::write(artifacts.join("child-stderr.log"), &output.stderr)
+        .expect("retain child diagnostics");
+    fs::write(artifacts.join("child-status.txt"), output.status.to_string())
+        .expect("retain child exit status");
+    output
 }
 
 fn receipt(output: &Output) -> Value {
@@ -182,7 +245,7 @@ fn client_snapshot(workload: &Path) -> Value {
 
 fn should_report_no_progress_when_rejected_clients_keep_database_bytes_changing() {
     // Arrange
-    let artifacts = tempfile::tempdir().expect("create child artifact directory");
+    let artifacts = control_artifacts("rejected-clients-");
 
     // Act: only the actual cntryl-stress harness owns the failure decision.
     let output = invoke_child(artifacts.path(), "rejected_clients_with_disk_churn");
@@ -229,7 +292,7 @@ fn should_report_no_progress_when_rejected_clients_keep_database_bytes_changing(
 fn should_remain_healthy_when_successful_clients_resume_before_watchdog_expiry() {
     // Arrange: initial stall and one later resource rejection are followed by
     // successful operations on a 100ms script, within the one-second watchdog.
-    let artifacts = tempfile::tempdir().expect("create resumed child artifact directory");
+    let artifacts = control_artifacts("resumed-successes-");
 
     // Act
     let output = invoke_child(artifacts.path(), "resumed_successes_with_disk_churn");
@@ -316,12 +379,9 @@ fn assert_successful_recovery_work(output: &Output, workload: &Path) -> Value {
     assert!(specs
         .iter()
         .all(|spec| spec["metadata"]["failure_kind"] != "no_progress_timeout"));
-    assert!(specs.iter().any(|spec| {
-        spec["metadata"]["fixture_recovery_progress_units"]
-            .as_str()
-            .and_then(|units| units.parse::<u64>().ok())
-            .is_some_and(|units| units > 0)
-    }));
+    assert!(result["progress_units"]
+        .as_u64()
+        .is_some_and(|units| units > 0));
     assert_database_stays_empty(workload);
     result
 }
@@ -338,7 +398,7 @@ fn assert_successful_recovery(output: &Output, workload: &Path) -> Value {
 fn should_remain_healthy_when_actual_cloud_recovery_completes_read_only_work() {
     // Arrange: the real CRC/inspection/replay scans receive successful delayed
     // identity-bound ranges, with RUST_LOG=off and a flat local cache.
-    let artifacts = tempfile::tempdir().expect("create delayed recovery artifacts");
+    let artifacts = control_artifacts("delayed-recovery-");
 
     // Act
     let output = invoke_child(artifacts.path(), "delayed_recovery_with_flat_cache");
@@ -354,7 +414,7 @@ fn should_remain_healthy_when_actual_cloud_recovery_completes_read_only_work() {
 
 fn should_report_no_progress_when_actual_cloud_recovery_holds_first_range() {
     // Arrange
-    let artifacts = tempfile::tempdir().expect("create held recovery artifacts");
+    let artifacts = control_artifacts("held-recovery-");
 
     // Act: only the actual external watchdog classifies the held callback.
     let output = invoke_child(artifacts.path(), "held_recovery_with_flat_cache");
@@ -383,7 +443,7 @@ fn should_report_no_progress_when_actual_cloud_recovery_holds_first_range() {
 
 fn should_report_no_progress_when_actual_inventory_holds_first_head() {
     // Arrange
-    let artifacts = tempfile::tempdir().expect("create held inventory artifacts");
+    let artifacts = control_artifacts("held-inventory-");
 
     // Act: the mandatory inventory check submits a real HEAD, whose callback
     // the fixture retains before any response or size validation completes.
@@ -415,7 +475,7 @@ fn should_report_no_progress_when_actual_inventory_holds_first_head() {
 fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
     // Arrange: sixteen real SST HEADs complete on a 100ms response script,
     // beyond the one-second idle budget, with RUST_LOG=off and an empty cache.
-    let artifacts = tempfile::tempdir().expect("create delayed inventory artifacts");
+    let artifacts = control_artifacts("delayed-inventory-");
 
     // Act
     let output = invoke_child(
@@ -427,16 +487,12 @@ fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
     // Assert: only completed and correctly sized authoritative entries count;
     // the fixture independently verifies exact retained manifest equality.
     let result = assert_successful_recovery_work(&output, &workload);
-    let receipt = receipt(&output);
-    assert!(receipt["benchmark_specs"]
-        .as_array()
-        .expect("canonical inventory specs")
-        .iter()
-        .any(|spec| spec["metadata"]["fixture_setup_elapsed_ms"]
-            .as_str()
-            .and_then(|elapsed| elapsed.parse::<u64>().ok())
-            .is_some_and(|elapsed| elapsed >= 1_200)));
-    eprintln!("inventory active-work observations: {result}");
+    assert!(
+        read_json(&workload.join("fixture-preparation.json"))["setup_elapsed_ms"]
+            .as_u64()
+            .unwrap()
+            >= 1_200
+    );
     assert_eq!(result["expected_inventory_entries"], 16);
     assert_eq!(
         result["retained_inventory_entries"],
@@ -460,7 +516,7 @@ fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
 fn should_remain_healthy_when_cached_recovery_finishes_verified_coverage_work() {
     // Arrange: the real replay and exact SST coverage checks finish over
     // buffered/local data for longer than the watchdog, without new ranges.
-    let artifacts = tempfile::tempdir().expect("create cached recovery artifacts");
+    let artifacts = control_artifacts("cached-recovery-");
 
     // Act
     let output = invoke_child(artifacts.path(), "cached_recovery_with_flat_cache");
@@ -477,7 +533,7 @@ fn should_remain_healthy_when_cached_recovery_finishes_verified_coverage_work() 
 fn should_remain_healthy_when_actual_journal_restores_its_durable_frontier() {
     // Arrange: the real manifest loader reads sixteen committed edit and
     // marker pairs through delayed local reads, with RUST_LOG=off.
-    let artifacts = tempfile::tempdir().expect("create delayed journal artifacts");
+    let artifacts = control_artifacts("delayed-journal-");
 
     // Act
     let output = invoke_child(artifacts.path(), "journal_recovery_with_flat_cache");
@@ -502,7 +558,7 @@ fn should_remain_healthy_when_actual_journal_restores_its_durable_frontier() {
 
 fn should_count_recovery_work_only_within_its_active_caller_scope() {
     // Arrange
-    let artifacts = tempfile::tempdir().expect("create listener isolation artifacts");
+    let artifacts = control_artifacts("listener-isolation-");
 
     // Act: the child drives the real event layer, with its fmt filter off.
     let output = invoke_child(artifacts.path(), "scoped_recovery_listener");
@@ -525,14 +581,14 @@ fn should_count_recovery_work_only_within_its_active_caller_scope() {
 fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     // Arrange: one genuine publication is delayed 350ms, with a healthy
     // acquired primary lease and actual callers waiting only 50ms each.
-    let artifacts = tempfile::tempdir().expect("create delayed final flush artifacts");
+    let artifacts = control_artifacts("delayed-final-flush-");
 
     // Act: the native child invokes the same final-flush boundary as the soaks.
     let output = invoke_child(artifacts.path(), "delayed_final_flush_publication");
     let receipt = receipt(&output);
     let workload = workload_directory(artifacts.path());
     let publication = read_json(&workload.join("publication-observations.json"));
-    let activation = read_json(&workload.join("watchdog-activation.json"));
+    let activation = read_json(&workload.join("active-work-start.json"));
     let outcomes = read_json(&workload.join("flush-attempt-observations.json"));
 
     // Assert: a timeout is not successful flush, and abandoned callers cannot
@@ -560,7 +616,6 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     }));
     assert_eq!(attempts.last().unwrap()["success"], true);
     let result = read_json(&workload.join("flush-result.json"));
-    eprintln!("flush active-work observations: activation={activation}; publication={publication}; result={result}");
     assert_eq!(
         result["attempts"].as_u64(),
         Some(u64::try_from(attempts.len()).expect("fixture attempts fit u64"))
@@ -605,7 +660,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
 #[cfg(feature = "failpoints")]
 fn should_report_no_progress_when_final_flush_publication_remains_held() {
     // Arrange: accepted real publication is retained while caller slots expire.
-    let artifacts = tempfile::tempdir().expect("create held final flush artifacts");
+    let artifacts = control_artifacts("held-final-flush-");
 
     // Act: only the native watchdog decides that retries made no progress.
     let output = invoke_child(artifacts.path(), "held_final_flush_publication");
@@ -662,7 +717,7 @@ fn should_report_no_progress_when_final_flush_publication_remains_held() {
 fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
     // Arrange: errors originate at the benchmark callback boundary. A real
     // healthy Engine backs the control and any unexpected second invocation.
-    let artifacts = tempfile::tempdir().expect("create terminal retry-policy artifacts");
+    let artifacts = control_artifacts("terminal-retry-policy-");
 
     // Act: this proves benchmark classification, not provider error behavior.
     let output = invoke_child(artifacts.path(), "terminal_final_flush_retry_policy");
@@ -674,6 +729,12 @@ fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
         output.status.success(),
         "terminal policy controls failed; receipt={receipt}; stderr={}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        read_json(&workload.join("fixture-preparation.json"))["setup_elapsed_ms"]
+            .as_u64()
+            .unwrap()
+            >= 1_200
     );
     let results = read_json(&workload.join("retry-policy-results.json"));
     assert_eq!(results["fixture_scope"], "benchmark_retry_policy");
@@ -716,6 +777,128 @@ fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
     assert!(!workload.join("verification-summary.json").exists());
 }
 
+fn should_reject_invalid_configuration_before_preparing_watchdog_resources() {
+    // Arrange
+    let artifacts = control_artifacts("rejected-configuration-");
+    // Act
+    let output = invoke_child_with_samples(
+        artifacts.path(),
+        "metadata_inventory_recovery_with_flat_cache",
+        0,
+        0,
+        0,
+    );
+    // Assert
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid STRESS_SAMPLES"));
+    assert!(!artifacts.path().join("midge").exists());
+}
+
+fn should_cancel_unused_inputs_when_preparation_scope_ends() {
+    // Arrange: the custom parent runs controls serially, with no live worker.
+    let artifacts = control_artifacts("canceled-preparation-");
+    let original = std::env::var_os("MIDGE_STRESS_ARTIFACT_DIR");
+    std::env::set_var("MIDGE_STRESS_ARTIFACT_DIR", artifacts.path());
+    let original_log = std::env::var_os("RUST_LOG");
+    std::env::set_var("RUST_LOG", "off");
+    // Act: unused scopes release every input; a new scope can reuse the slot.
+    for _ in 0..2 {
+        drop(prepare_child("held_inventory_recovery_with_flat_cache", 2));
+    }
+    #[cfg(feature = "failpoints")]
+    drop(prepare_child("held_final_flush_publication", 2));
+    match original {
+        Some(value) => std::env::set_var("MIDGE_STRESS_ARTIFACT_DIR", value),
+        None => std::env::remove_var("MIDGE_STRESS_ARTIFACT_DIR"),
+    }
+    match original_log {
+        Some(value) => std::env::set_var("RUST_LOG", value),
+        None => std::env::remove_var("RUST_LOG"),
+    }
+    // Assert
+    let paths: Vec<_> = fs::read_dir(artifacts.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(
+        paths.len(),
+        if cfg!(feature = "failpoints") { 6 } else { 4 }
+    );
+    for path in paths {
+        let status = read_json(&path.join("workload-status.json"));
+        assert_eq!(status["status"], "canceled");
+        let error = status["terminal_error"].as_str().unwrap();
+        assert!(error.contains("prepared fixture was not invoked"));
+        if status["backend"] == "cloud-simulated" {
+            assert!(error.contains("shutdown=Ok(())"));
+        }
+    }
+}
+
+fn should_prepare_fresh_inputs_when_native_samples_repeat() {
+    // Arrange
+    let workloads = [
+        "metadata_inventory_recovery_with_flat_cache",
+        "delayed_recovery_with_flat_cache",
+    ];
+    for workload in workloads {
+        let artifacts = control_artifacts("repeated-recovery-");
+        // Act: two measured samples plus warmup/cooldown, each with its own input.
+        let output = invoke_child_with_samples(artifacts.path(), workload, 2, 1, 1);
+        // Assert
+        assert!(
+            output.status.success(),
+            "repeated {workload}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt = receipt(&output);
+        assert_eq!(receipt["samples"].as_array().unwrap().len(), 4);
+        let paths: Vec<_> = fs::read_dir(artifacts.path().join("midge"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(paths.len(), 4);
+        for path in paths {
+            let result = assert_successful_recovery_work(&output, &path);
+            assert_eq!(result["mismatches"], 0);
+        }
+    }
+    #[cfg(feature = "failpoints")]
+    for workload in [
+        "delayed_final_flush_publication",
+        "terminal_final_flush_retry_policy",
+    ] {
+        let artifacts = control_artifacts("repeated-publication-");
+        let output = invoke_child_with_samples(artifacts.path(), workload, 2, 1, 1);
+        assert!(
+            output.status.success(),
+            "repeated {workload}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(receipt(&output)["samples"].as_array().unwrap().len(), 4);
+        let paths: Vec<_> = fs::read_dir(artifacts.path().join("midge"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(paths.len(), 4);
+        for path in paths {
+            assert_eq!(
+                read_json(&path.join("workload-status.json"))["status"],
+                "passed"
+            );
+            if workload == "delayed_final_flush_publication" {
+                assert_eq!(read_json(&path.join("flush-result.json"))["mismatches"], 0);
+            } else {
+                assert!(read_json(&path.join("retry-policy-results.json"))["cases"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|case| case["calls"] == 1));
+            }
+        }
+    }
+}
+
 fn main() {
     if std::env::var_os(CHILD_FLAG).is_some() {
         let args: Vec<_> = std::env::args().collect();
@@ -724,12 +907,41 @@ fn main() {
             .find(|pair| pair[0] == "--workload")
             .map(|pair| pair[1].as_str())
             .expect("child workload selector");
-        prepare_child(workload);
+        assert_eq!(
+            args.len(),
+            3,
+            "private child accepts only --workload; configure samples through STRESS_* environment"
+        );
+        let config = cntryl_stress::StressRunnerConfig::from_env();
+        assert!(
+            config.validation_errors().is_empty(),
+            "invalid child configuration: {:?}",
+            config.validation_errors()
+        );
+        assert!(
+            config.tier.is_none_or(|tier| tier == 5),
+            "watchdog fixtures are tier 5"
+        );
+        let samples = config
+            .samples
+            .checked_add(config.warmup_samples)
+            .and_then(|n| n.checked_add(config.cooldown_samples))
+            .expect("sample count overflow");
+        let _preparation = prepare_child(workload, samples);
         child_harness::run();
         return;
     }
-    if let Ok(control) = std::env::var(CONTROL_FLAG) {
-        match control.as_str() {
+    let args: Vec<_> = std::env::args().collect();
+    if let Some(control) = args
+        .windows(2)
+        .find(|pair| pair[0] == "--control")
+        .map(|pair| pair[1].as_str())
+    {
+        match control {
+            "lifecycle" => {
+                should_reject_invalid_configuration_before_preparing_watchdog_resources();
+                should_cancel_unused_inputs_when_preparation_scope_ends();
+            }
             "inventory" => should_remain_healthy_when_actual_inventory_validates_delayed_heads(),
             #[cfg(feature = "failpoints")]
             "final-flush" => {
@@ -737,9 +949,14 @@ fn main() {
             }
             _ => panic!("unknown isolated watchdog control: {control}"),
         }
-        println!("isolated {control} watchdog control passed");
+        println!(
+            "isolated {control} watchdog control passed (explicit subset; full suite not run)"
+        );
         return;
     }
+    should_reject_invalid_configuration_before_preparing_watchdog_resources();
+    should_cancel_unused_inputs_when_preparation_scope_ends();
+    should_prepare_fresh_inputs_when_native_samples_repeat();
     should_report_no_progress_when_rejected_clients_keep_database_bytes_changing();
     should_remain_healthy_when_successful_clients_resume_before_watchdog_expiry();
     should_count_recovery_work_only_within_its_active_caller_scope();
@@ -754,8 +971,8 @@ fn main() {
         should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
         should_report_no_progress_when_final_flush_publication_remains_held();
         should_stop_retry_policy_when_callback_returns_a_terminal_error();
-        println!("twelve real stress watchdog integration checks passed");
+        println!("fifteen real stress watchdog integration checks passed");
     }
     #[cfg(not(feature = "failpoints"))]
-    println!("nine real stress watchdog integration checks passed");
+    println!("twelve real stress watchdog integration checks passed");
 }
