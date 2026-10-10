@@ -9376,3 +9376,40 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
     );
     Ok(())
 }
+
+#[test]
+#[ignore = "#808 PR 2: out-of-order-publication"]
+fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: upload both immutable bodies without publishing either one.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, _) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    assert!(second > first);
+    let catalog_path = el
+        .state
+        .db_path
+        .join("cloud_store")
+        .join(crate::wal::cloud_catalog::OBJECT_KEY);
+
+    // Act: deliver only the later upload receipt through the real handler.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence,
+    });
+    let catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&std::fs::read(catalog_path)?)
+            .expect("catalog decode");
+
+    // Assert: publication itself, not just the acknowledgement frontier, waits.
+    assert!(
+        catalog.segments.is_empty(),
+        "catalog published across an unacknowledged predecessor: {:?}",
+        catalog.segments.keys().collect::<Vec<_>>()
+    );
+    Ok(())
+}

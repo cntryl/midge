@@ -2558,6 +2558,13 @@ mod local_wal_retention {
         engine.flush_cf(&default).expect("flush put");
         match delete_kind {
             "delete" => delete(&engine, &default, b"k"),
+            "best_effort_delete" => {
+                let mut tx = engine
+                    .begin_tx(default.id(), TransactionMode::ReadWrite)
+                    .expect("begin");
+                tx.delete(b"k".to_vec()).expect("delete");
+                tx.commit(WriteOptions::best_effort()).expect("commit");
+            }
             _ => delete_range(&engine, &default, b"a", b"z"),
         }
         engine.flush_cf(&default).expect("flush delete");
@@ -2618,6 +2625,211 @@ mod local_wal_retention {
         assert_eq!(
             value, None,
             "range-deleted key resurrected after crash recovery"
+        );
+    }
+
+    #[test]
+    #[ignore = "#808 PR 4: best-effort-delete"]
+    fn should_not_resurrect_best_effort_deleted_key_when_reopening_after_clean_shutdown() {
+        // Arrange / Act
+        let value = deleted_key_after_recovery("best_effort_delete", "clean");
+        // Assert
+        assert_eq!(
+            value, None,
+            "best_effort delete resurrected after clean restart"
+        );
+    }
+
+    #[test]
+    #[ignore = "#808 PR 4: best-effort-delete"]
+    fn should_not_resurrect_best_effort_deleted_key_when_recovering_a_crash_image() {
+        // Arrange / Act
+        let value = deleted_key_after_recovery("best_effort_delete", "crash");
+        // Assert
+        assert_eq!(
+            value, None,
+            "best_effort delete resurrected after crash recovery"
+        );
+    }
+
+    // ---- audit V1 (LT-A) ----
+
+    fn wal_segment_ids(path: &Path) -> Vec<u64> {
+        let mut ids: Vec<u64> = std::fs::read_dir(path.join("wal"))
+            .expect("read wal dir")
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                name.strip_suffix(".wal")?.parse::<u64>().ok()
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[cfg(any(target_os = "macos", feature = "internal-testing"))]
+    fn segment_path(path: &Path, id: u64) -> std::path::PathBuf {
+        path.join("wal").join(format!("{id:020}.wal"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_immutable(file: &Path, immutable: bool) {
+        let status = std::process::Command::new("chflags")
+            .arg(if immutable { "uchg" } else { "nouchg" })
+            .arg(file)
+            .status()
+            .expect("run chflags");
+        assert!(status.success(), "chflags failed on {}", file.display());
+    }
+
+    /// LT-A, removal-failure variant. Segment 1 holds `put k`; segment 2 holds
+    /// `delete k`. Compaction drops both from the SSTs. The idle family's
+    /// flush then lifts the floor past both segments. Removing segment 1
+    /// fails (immutable file -> EPERM, standing in for EIO/EACCES); the pass
+    /// must not then remove segment 2.
+    fn deleted_key_after_failed_floor_retirement(
+        fail_older_removal: bool,
+    ) -> (Option<Vec<u8>>, Vec<u64>, Vec<u64>) {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let live = temp.path().join("live");
+        let mut engine = Engine::open(options(&live)).expect("open");
+        let default = engine.get_column_family("default").expect("default");
+        let idle = engine.create_column_family("idle").expect("idle");
+        put(&engine, &idle, b"idle-key");
+        put(&engine, &default, b"k");
+        engine.flush_cf(&default).expect("flush put");
+        delete(&engine, &default, b"k");
+        engine.flush_cf(&default).expect("flush delete");
+        engine.compact_all().expect("compact");
+        assert_eq!(get(&engine, "default", b"k"), None, "live engine");
+        let before = wal_segment_ids(&live);
+        #[cfg(target_os = "macos")]
+        let older = *before.first().expect("an older sealed segment is retained");
+        #[cfg(not(target_os = "macos"))]
+        assert!(!fail_older_removal, "unlink fault fixture requires macOS");
+        #[cfg(target_os = "macos")]
+        if fail_older_removal {
+            set_immutable(&segment_path(&live, older), true);
+            assert!(
+                std::fs::remove_file(segment_path(&live, older)).is_err(),
+                "the immutable-file unlink fault must be active"
+            );
+        }
+        engine.flush_cf(&idle).expect("flush idle");
+        // flush_cf returns before the post-publication prune; shutdown
+        // drains the event loop, so list the segments after it.
+        engine.shutdown(Duration::from_secs(10)).expect("shutdown");
+        drop(engine);
+        let after = wal_segment_ids(&live);
+        #[cfg(target_os = "macos")]
+        if fail_older_removal {
+            // The fault was transient; the file is ordinary again on restart.
+            set_immutable(&segment_path(&live, older), false);
+        }
+        let reopened = Engine::open(options(&live)).expect("reopen");
+        (get(&reopened, "default", b"k"), before, after)
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "#808 PR 4: failed-local-unlink"]
+    fn should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails() {
+        // Arrange
+        let fail_older_removal = true;
+
+        // Act
+        let (value, before, after) = deleted_key_after_failed_floor_retirement(fail_older_removal);
+
+        // Assert
+        let value = value.map(|bytes| bytes.len());
+        eprintln!("segments before idle flush: {before:?}; after: {after:?}");
+        assert_eq!(
+            value, None,
+            "deleted key resurrected: segments before idle flush {before:?}, after {after:?}"
+        );
+    }
+
+    #[test]
+    fn should_not_resurrect_deleted_key_when_flushed_segments_retire_without_failure() {
+        // Arrange: control for the test above.
+        let fail_older_removal = false;
+
+        // Act
+        let (value, before, after) = deleted_key_after_failed_floor_retirement(fail_older_removal);
+
+        // Assert
+        let value = value.map(|bytes| bytes.len());
+        eprintln!("control segments before idle flush: {before:?}; after: {after:?}");
+        assert_eq!(value, None);
+    }
+
+    #[cfg(feature = "internal-testing")]
+    fn wal_record_epochs(file: &Path) -> Vec<u64> {
+        use cntryl_midge::__internal::wal::{encoding, frame};
+        let bytes = std::fs::read(file).expect("read WAL file");
+        let mut epochs = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let header_end = offset + frame::WAL_FRAME_HEADER_LEN;
+            let (payload_len, _) =
+                frame::decode_frame_header(&bytes[offset..header_end]).expect("frame header");
+            let payload = &bytes[header_end..header_end + payload_len];
+            epochs.push(encoding::decode(payload).expect("decode").writer_epoch);
+            offset = header_end + payload_len;
+        }
+        epochs
+    }
+
+    /// LT-C: segment ids are derived from the files present at open, so a
+    /// full prune followed by a restart hands out id 1 again.
+    #[test]
+    #[cfg(feature = "internal-testing")]
+    #[ignore = "#808 PR 2: restarted-segment-id"]
+    fn should_allocate_wal_segment_ids_above_previous_runs_when_all_sealed_segments_were_pruned() {
+        // Arrange: run 1 seals and fully retires segments 1 and 2.
+        let temp = tempfile::TempDir::new().expect("temp");
+        let mut engine = Engine::open(options(temp.path())).expect("open");
+        let default = engine.get_column_family("default").expect("default");
+        put(&engine, &default, b"run1-a");
+        engine.flush_cf(&default).expect("flush 1");
+        put(&engine, &default, b"run1-b");
+        engine.flush_cf(&default).expect("flush 2");
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown run 1");
+        drop(engine);
+        let after_run1 = wal_segment_ids(temp.path());
+
+        // Act: run 2 seals one segment that an idle family keeps.
+        let mut engine = Engine::open(options(temp.path())).expect("reopen");
+        let default = engine.get_column_family("default").expect("default");
+        let idle = engine.create_column_family("idle").expect("idle");
+        put(&engine, &idle, b"idle-key");
+        put(&engine, &default, b"run2-a");
+        engine.flush_cf(&default).expect("flush run 2");
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown run 2");
+        drop(engine);
+        let after_run2 = wal_segment_ids(temp.path());
+        assert!(
+            !after_run2.is_empty(),
+            "the idle family must retain a run-2 segment"
+        );
+        let epochs: Vec<_> = after_run2
+            .iter()
+            .map(|id| (id, wal_record_epochs(&segment_path(temp.path(), *id))))
+            .collect();
+
+        // Assert
+        eprintln!("after run 1: {after_run1:?}; after run 2: {after_run2:?}; epochs {epochs:?}");
+        assert!(
+            after_run1.is_empty(),
+            "run 1 must retire every sealed segment"
+        );
+        assert!(
+            after_run2.iter().all(|id| *id > 2),
+            "run 2 reused a segment id from run 1: {after_run2:?}"
         );
     }
 }

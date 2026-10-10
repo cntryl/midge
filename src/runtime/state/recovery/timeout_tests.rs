@@ -442,3 +442,36 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
     assert_preserved_read(&wal_dir, target, &before, &evidence);
     assert_eq!(std::fs::read_dir(wal_dir).unwrap().count(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore = "#808 PR 2: allocation and linked history"]
+fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Arrange: sealed segments 5 and 6 exist, but the directory listing
+    // fails (EACCES here; EMFILE/EIO in the field).
+    let directory = tempfile::tempdir().unwrap();
+    let wal_dir = directory.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    for id in [5_u64, 6] {
+        std::fs::write(wal_dir.join(crate::wal::segment_file_name(id)), b"x").unwrap();
+    }
+    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), b"").unwrap();
+    std::fs::set_permissions(&wal_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let listing_fails = std::fs::read_dir(&wal_dir).is_err();
+
+    // Act
+    let result = RuntimeState::recover_next_segment_id(false, &wal_dir, None);
+    std::fs::set_permissions(&wal_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Assert: either the open fails, or the id stays above every present id.
+    assert!(listing_fails, "test setup: listing must fail");
+    match result {
+        Err(_) => {}
+        Ok(next) => assert!(
+            next > 6,
+            "next segment id regressed to {next} with segments 5 and 6 present"
+        ),
+    }
+}
