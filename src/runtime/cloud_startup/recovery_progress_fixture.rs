@@ -18,7 +18,7 @@ use crate::wal::{WalOpKind, WalRecord};
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -71,17 +71,27 @@ struct FixtureWal {
     catalog: WalPublicationCatalog,
 }
 
-/// Run actual startup inventory or catalog planner/replay without local WAL staging.
+/// Seed fixture input before the external watchdog begins observing recovery.
+#[doc(hidden)]
+pub struct PreparedRecoveryProgressFixture {
+    root: PathBuf,
+    mode: RecoveryProgressFixtureMode,
+    observations: Arc<FixtureObservations>,
+    wal: Option<FixtureWal>,
+    #[cfg(any(test, feature = "cloud-common"))]
+    inventory: Vec<crate::metadata::FileMeta>,
+}
+
+/// Prepare actual startup inventory or catalog planner/replay input.
 ///
 /// # Errors
 ///
 /// Returns any setup, proof, replay, or independent-evidence persistence error.
 #[doc(hidden)]
-pub fn run_recovery_progress_fixture(
+pub fn prepare_recovery_progress_fixture(
     root: &Path,
     mode: RecoveryProgressFixtureMode,
-) -> MidgeResult<RecoveryProgressFixtureResult> {
-    let started = Instant::now();
+) -> MidgeResult<PreparedRecoveryProgressFixture> {
     let local = root.join("local");
     std::fs::create_dir_all(local.join("wal"))?;
     if local_wal_state(&local)? != (0, 0) {
@@ -90,18 +100,74 @@ pub fn run_recovery_progress_fixture(
         ));
     }
     let observations = Arc::new(FixtureObservations::new(root, mode, 0)?);
-    if matches!(
+    let inventory_mode = matches!(
         mode,
         RecoveryProgressFixtureMode::MetadataInventory | RecoveryProgressFixtureMode::HeldInventory
-    ) {
-        #[cfg(any(test, feature = "cloud-common"))]
-        return inventory_fixture(root, mode, &local, &observations, started);
-        #[cfg(not(any(test, feature = "cloud-common")))]
+    );
+    #[cfg(any(test, feature = "cloud-common"))]
+    let inventory = if inventory_mode {
+        let inventory = seed_inventory(root)?;
+        observations.set_expected_inventory(inventory.len())?;
+        inventory
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(any(test, feature = "cloud-common")))]
+    if inventory_mode {
         return Err(MidgeError::InvalidArgument(
             "metadata inventory fixture requires cloud-common".into(),
         ));
     }
-    wal_fixture(root, mode, &local, &observations, started)
+    let wal = if inventory_mode {
+        None
+    } else {
+        let wal = seed_wal(root, mode)?;
+        observations.set_expected_records(wal.records.len())?;
+        Some(wal)
+    };
+    Ok(PreparedRecoveryProgressFixture {
+        root: root.to_path_buf(),
+        mode,
+        observations,
+        wal,
+        #[cfg(any(test, feature = "cloud-common"))]
+        inventory,
+    })
+}
+
+impl PreparedRecoveryProgressFixture {
+    /// Execute recovery of the prepared input, with no fixture seeding.
+    ///
+    /// # Errors
+    ///
+    /// Returns any proof, replay, or independent-evidence persistence error.
+    pub fn run(self) -> MidgeResult<RecoveryProgressFixtureResult> {
+        let started = Instant::now();
+        let local = self.root.join("local");
+        if let Some(wal) = self.wal {
+            return wal_fixture(
+                &self.root,
+                self.mode,
+                &local,
+                &self.observations,
+                &wal,
+                started,
+            );
+        }
+        #[cfg(any(test, feature = "cloud-common"))]
+        return inventory_fixture(
+            &self.root,
+            self.mode,
+            &local,
+            &self.observations,
+            self.inventory,
+            started,
+        );
+        #[cfg(not(any(test, feature = "cloud-common")))]
+        Err(MidgeError::InvalidArgument(
+            "metadata inventory fixture requires cloud-common".into(),
+        ))
+    }
 }
 
 fn wal_fixture(
@@ -109,10 +175,9 @@ fn wal_fixture(
     mode: RecoveryProgressFixtureMode,
     local: &Path,
     observations: &Arc<FixtureObservations>,
+    wal: &FixtureWal,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
-    let wal = seed_wal(root, mode)?;
-    observations.set_expected_records(wal.records.len())?;
     let remote: Arc<dyn StorageBackend> = Arc::new(ObservedBackend::new(
         root.join("cloud"),
         mode,
@@ -200,12 +265,11 @@ fn inventory_fixture(
     mode: RecoveryProgressFixtureMode,
     local: &Path,
     observations: &Arc<FixtureObservations>,
+    files: Vec<crate::metadata::FileMeta>,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
-    let files = seed_inventory(root)?;
     let expected_inventory = serde_json::to_vec(&files)
         .map_err(|error| MidgeError::Internal(format!("inventory fixture metadata: {error}")))?;
-    observations.set_expected_inventory(files.len())?;
     let backend = backend::InventoryCloudBackend::new(
         root.join("cloud"),
         mode,

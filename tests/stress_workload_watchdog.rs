@@ -9,6 +9,37 @@ use std::process::{Command, Output};
 mod stress_scenarios;
 
 const CHILD_FLAG: &str = "MIDGE_WATCHDOG_TEST_CHILD";
+const CONTROL_FLAG: &str = "MIDGE_WATCHDOG_TEST_CONTROL";
+
+fn prepare_child(workload: &str) {
+    use cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode as Mode;
+
+    let mode = match workload {
+        "delayed_recovery_with_flat_cache" => Some(Mode::DelayedRanges),
+        "held_recovery_with_flat_cache" => Some(Mode::HeldFirstRange),
+        "cached_recovery_with_flat_cache" => Some(Mode::CachedCoverage),
+        "metadata_inventory_recovery_with_flat_cache" => Some(Mode::MetadataInventory),
+        "held_inventory_recovery_with_flat_cache" => Some(Mode::HeldInventory),
+        _ => None,
+    };
+    if let Some(mode) = mode {
+        stress_scenarios::prepare_recovery_watchdog_fixture(mode);
+    }
+    #[cfg(feature = "failpoints")]
+    if workload.ends_with("final_flush_publication") {
+        stress_scenarios::prepare_final_flush_watchdog_fixture(
+            workload == "held_final_flush_publication",
+        );
+    }
+    // Deliberately exceed the active-work budget during fixture setup. This
+    // must neither consume its deadline nor fabricate completed-work pulses.
+    if workload == "metadata_inventory_recovery_with_flat_cache"
+        || workload.ends_with("final_flush_publication")
+        || workload == "held_inventory_recovery_with_flat_cache"
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+    }
+}
 
 mod child_harness {
     #[cntryl_stress::stress(tier = 5)]
@@ -23,42 +54,27 @@ mod child_harness {
 
     #[cntryl_stress::stress(tier = 5)]
     fn delayed_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(
-            ctx,
-            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::DelayedRanges,
-        );
+        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn held_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(
-            ctx,
-            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::HeldFirstRange,
-        );
+        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn cached_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(
-            ctx,
-            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::CachedCoverage,
-        );
+        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn metadata_inventory_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(
-            ctx,
-            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::MetadataInventory,
-        );
+        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
     }
 
     #[cntryl_stress::stress(tier = 5)]
     fn held_inventory_recovery_with_flat_cache(ctx: &mut cntryl_stress::StressContext) {
-        super::stress_scenarios::run_recovery_watchdog_fixture(
-            ctx,
-            cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode::HeldInventory,
-        );
+        super::stress_scenarios::run_recovery_watchdog_fixture(ctx);
     }
 
     #[cntryl_stress::stress(tier = 5)]
@@ -113,6 +129,7 @@ fn invoke_child(artifacts: &Path, workload: &str) -> Output {
         .arg("--workload")
         .arg(workload)
         .env(CHILD_FLAG, "1")
+        .env_remove(CONTROL_FLAG)
         .env("STRESS_PROFILE", "smoke")
         .env("STRESS_SAMPLES", "1")
         .env("STRESS_WARMUP_SAMPLES", "0")
@@ -410,6 +427,16 @@ fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
     // Assert: only completed and correctly sized authoritative entries count;
     // the fixture independently verifies exact retained manifest equality.
     let result = assert_successful_recovery_work(&output, &workload);
+    let receipt = receipt(&output);
+    assert!(receipt["benchmark_specs"]
+        .as_array()
+        .expect("canonical inventory specs")
+        .iter()
+        .any(|spec| spec["metadata"]["fixture_setup_elapsed_ms"]
+            .as_str()
+            .and_then(|elapsed| elapsed.parse::<u64>().ok())
+            .is_some_and(|elapsed| elapsed >= 1_200)));
+    eprintln!("inventory active-work observations: {result}");
     assert_eq!(result["expected_inventory_entries"], 16);
     assert_eq!(
         result["retained_inventory_entries"],
@@ -505,6 +532,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     let receipt = receipt(&output);
     let workload = workload_directory(artifacts.path());
     let publication = read_json(&workload.join("publication-observations.json"));
+    let activation = read_json(&workload.join("watchdog-activation.json"));
     let outcomes = read_json(&workload.join("flush-attempt-observations.json"));
 
     // Assert: a timeout is not successful flush, and abandoned callers cannot
@@ -517,6 +545,8 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     );
     assert_eq!(publication["worker_entries"], 1);
     assert_eq!(publication["worker_released"], true);
+    assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 1_200);
+    assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 350);
     let attempts = outcomes["attempts"]
         .as_array()
         .expect("actual flush attempts");
@@ -530,6 +560,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     }));
     assert_eq!(attempts.last().unwrap()["success"], true);
     let result = read_json(&workload.join("flush-result.json"));
+    eprintln!("flush active-work observations: activation={activation}; publication={publication}; result={result}");
     assert_eq!(
         result["attempts"].as_u64(),
         Some(u64::try_from(attempts.len()).expect("fixture attempts fit u64"))
@@ -687,7 +718,26 @@ fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
 
 fn main() {
     if std::env::var_os(CHILD_FLAG).is_some() {
+        let args: Vec<_> = std::env::args().collect();
+        let workload = args
+            .windows(2)
+            .find(|pair| pair[0] == "--workload")
+            .map(|pair| pair[1].as_str())
+            .expect("child workload selector");
+        prepare_child(workload);
         child_harness::run();
+        return;
+    }
+    if let Ok(control) = std::env::var(CONTROL_FLAG) {
+        match control.as_str() {
+            "inventory" => should_remain_healthy_when_actual_inventory_validates_delayed_heads(),
+            #[cfg(feature = "failpoints")]
+            "final-flush" => {
+                should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
+            }
+            _ => panic!("unknown isolated watchdog control: {control}"),
+        }
+        println!("isolated {control} watchdog control passed");
         return;
     }
     should_report_no_progress_when_rejected_clients_keep_database_bytes_changing();

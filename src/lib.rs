@@ -152,8 +152,8 @@ pub mod __internal {
             run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
         };
         pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
-            run_recovery_progress_fixture, RecoveryProgressFixtureMode,
-            RecoveryProgressFixtureResult,
+            prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
+            RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
         };
         pub use crate::runtime::cloud_startup::replay_coverage::cost_probe::run_recovery_cost_probe;
         pub use crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant;

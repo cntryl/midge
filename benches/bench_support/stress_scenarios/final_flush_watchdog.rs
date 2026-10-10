@@ -14,13 +14,16 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const PUBLICATION_FAILPOINT: &str = "midge::flush_worker::before_publication";
 const CALLER_SLICE: Duration = Duration::from_millis(50);
 const PUBLICATION_DELAY: Duration = Duration::from_millis(350);
+
+static PREPARED_FLUSH: Mutex<Option<(WorkloadArtifacts, Engine, ColumnFamilyHandle)>> =
+    Mutex::new(None);
 
 struct PublicationPause {
     release: Arc<AtomicBool>,
@@ -68,7 +71,7 @@ fn open_fixture_engine(artifacts: &mut WorkloadArtifacts) -> (Engine, ColumnFami
     dead_code,
     reason = "Only the watchdog integration target calls this fixture"
 )]
-pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_publication: bool) {
+pub(crate) fn prepare_final_flush_watchdog_fixture(hold_publication: bool) {
     enable_phase_tracing();
     let case = WorkloadCase {
         benchmark: if hold_publication {
@@ -82,12 +85,32 @@ pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_pub
         workload: "write-heavy",
         stages: &[],
     };
-    let progress = ctx.progress_handle();
     let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(5));
-    let (mut engine, family) = open_fixture_engine(&mut artifacts);
+    let (engine, family) = open_fixture_engine(&mut artifacts);
+    *PREPARED_FLUSH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((artifacts, engine, family));
+}
+
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_publication: bool) {
+    let (mut artifacts, mut engine, family) = PREPARED_FLUSH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .expect("flush fixture prepared before harness activation");
+    let progress = ctx.progress_handle();
     let scenario = fail::FailScenario::setup();
     let (pause, worker_entries) = pause_actual_publication(&artifacts, hold_publication);
     let started = Instant::now();
+    write_atomic_json(
+        &artifacts.path.join("watchdog-activation.json"),
+        &json!({ "setup_elapsed_ms": artifacts.started.elapsed().as_millis() }),
+    )
+    .expect("retain actual watchdog activation boundary");
     let (attempts, flush_progress_units) =
         flush_fixture_data(&engine, &family, &progress, &mut artifacts);
     let metrics = engine
@@ -133,6 +156,7 @@ pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_pub
             "authoritative_sst_count": metrics.sst_count,
             "verified_rows": verified_rows,
             "mismatches": mismatches,
+            "active_elapsed_ms": started.elapsed().as_millis(),
         }),
     )
     .expect("retain actual flush and verification result");
@@ -175,6 +199,7 @@ fn pause_actual_publication(
     // Engine. No test gate can block the worker's read-side failpoint guard.
     // Its only effect is to hold real accepted publication before execution.
     fail::cfg_callback(PUBLICATION_FAILPOINT, move || {
+        let publication_started = Instant::now();
         let entries = observed_entries.fetch_add(1, Ordering::AcqRel) + 1;
         write_atomic_json(
             &publication_observations,
@@ -198,6 +223,7 @@ fn pause_actual_publication(
                 "worker_entries": entries,
                 "worker_released": true,
                 "released_elapsed_ms": origin.elapsed().as_millis(),
+                "publication_elapsed_ms": publication_started.elapsed().as_millis(),
             }),
         )
         .expect("retain actual publication release");
