@@ -128,7 +128,8 @@ fn should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache()
             Some(b"successor-K".to_vec()),
             Some(b"successor-Q".to_vec()),
             None
-        )
+        ),
+        "foreign predecessor cache overrode successor authority"
     );
 }
 

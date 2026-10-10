@@ -42,7 +42,7 @@ def main():
         summary = re.search(r'test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;', text)
         executed = summary is not None and int(summary[1]) + int(summary[2]) == 1 and int(summary[3]) == 0
         green = result.returncode == 0 and executed and int(summary[1]) == 1
-        red = result.returncode != 0 and executed and int(summary[2]) == 1
+        red = result.returncode != 0 and executed and int(summary[2]) == 1 and case.get('failure_marker', '') in text
         expected = case['baseline'] if args.baseline else 'green'
         matches = green if expected == 'green' else red
         accepted &= matches

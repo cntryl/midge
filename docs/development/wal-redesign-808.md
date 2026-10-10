@@ -74,10 +74,22 @@ python3 tools/run-wal-redesign-regressions.py --output /tmp/midge-808-acceptance
 ```
 
 The second command requires GREEN even for ignored tests. Both commands
-verify that each selector executes exactly one test, reject compile failures
-as RED evidence, and record source identity and dirty-source fingerprints.
+verify that each selector executes exactly one test and require its specific
+failure marker for RED evidence, rejecting compilation or setup failures, and record source identity and dirty-source fingerprints.
 An unsupported platform is incomplete qualification, never a passing receipt.
 Use a clean immutable source revision for acceptance evidence.
+
+## Current local evidence
+
+- Formatting and strict all-target, all-feature Clippy pass.
+- The 43 focused adapter, oracle, scheduler, and shipping-writer checks pass.
+- The pure object-storage scheduler campaign passes 512 seeds × 256 operations.
+  This exercises provider effects and responses; it is not an engine WAL campaign.
+- `cargo machete` reports no unused dependencies.
+- The invariant-reference validator fails on both this branch and unchanged
+  baseline (242 errors on the baseline). The docs validator emits the same 463
+  broken-anchor errors on both. These failures are recorded, not waived.
+- The full serial unit suite and remaining qualification are still in progress.
 
 ## Remaining stage 1 exit work
 
@@ -85,8 +97,9 @@ Use a clean immutable source revision for acceptance evidence.
   flush, compaction, and recovery, keeping the shipping transition paths.
 - Add a simulated lease using the production lease interface and scheduler.
 - Provide engine counterexample replay and shrinking commands.
-- Run the required pure scheduler, local/CloudSimulated, and Sqrzl campaigns
-  at the fixed PR budgets; install their CI gates.
+- Run local/CloudSimulated and Sqrzl engine campaigns at the fixed PR budgets;
+  install campaign CI gates. Broaden the pure scheduler histories with the
+  shipping authority protocol as its owners become available.
 - Complete immutable-diff review and all required checks before opening this
   stage for merge. The remaining five redesign stages and qualified main
   promotion follow only after that merge and readback.
