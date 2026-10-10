@@ -138,7 +138,7 @@
   "tests/solid_governance.rs": "3671d8871241d65aeabf668885ded1364e5d1afa579053dfa14b297094d69bbb",
   "tests/storage_invariants.rs": "9ad483731fa102265b789680a0366de0aafab76e5b8fd9286484f571fe607c29",
   "tests/storage_layer.rs": "f41508a5fa5b58591f73a6406fbee370da09baa81c44e84e180e7b81de44a1e5",
-  "tests/stress_workload_watchdog.rs": "b741442433436791bc8c1dfe124ee88d9ac91d4d72f177859bd8245ea4724da7",
+  "tests/stress_workload_watchdog.rs": "68ab626be4699a01f43a079d0bdac0a86d0071061f10672ed3fe4dc6b95d8b1b",
   "tests/transactions.rs": "83254f2abeac901845ab36fabd071a0f9835d5ce0bfc3c0ca23692bc31f73921",
   "tests/verification_cli.rs": "51eadcf49e6f7374758ab266147a3a230625c4d6806e35acbb4b17a769c05d07"
 }

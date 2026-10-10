@@ -1311,7 +1311,13 @@ fn append_final_flush_attempt(artifacts: &WorkloadArtifacts, attempt: &serde_jso
         .append(true)
         .open(artifacts.path.join("final-flush-attempts.jsonl"))
         .expect("open final-flush attempt report");
-    writeln!(output, "{attempt}").expect("retain actual final-flush result");
+    // Serialize before I/O so JSON formatting does not turn every field into a
+    // separate filesystem write inside the active watchdog window.
+    let mut record = serde_json::to_vec(attempt).expect("encode final-flush result");
+    record.push(b'\n');
+    output
+        .write_all(&record)
+        .expect("retain actual final-flush result");
 }
 
 fn shutdown_engine(
@@ -2598,7 +2604,7 @@ static PREPARED_RECOVERY: watchdog_preparation::PreparedSlot<(
     reason = "Only the watchdog integration target calls this fixture"
 )]
 pub(super) fn run_watchdog_fixture(ctx: &mut StressContext, resume_successes: bool) {
-    let duration = Duration::from_secs(if resume_successes { 2 } else { 4 });
+    let duration = Duration::from_secs(4);
     let case = WorkloadCase {
         benchmark: if resume_successes {
             "resumed_successes_with_disk_churn"

@@ -12,6 +12,7 @@ mod stress_scenarios;
 const CHILD_FLAG: &str = "MIDGE_WATCHDOG_TEST_CHILD";
 const PREPARATION_READY_ENV: &str = "MIDGE_WATCHDOG_PREPARATION_READY";
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(30);
+const NO_PROGRESS_TIMEOUT_SECS: u64 = 3;
 
 #[derive(Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +39,11 @@ fn run_bounded_child(
     let stdout = artifacts.join("child-stdout.json");
     let stderr = artifacts.join("child-stderr.log");
     let prepared = artifacts.join("preparation-complete.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .env(PREPARATION_READY_ENV, &prepared)
         .stdout(Stdio::from(
@@ -73,9 +79,15 @@ fn run_bounded_child(
             },
         );
         if origin.elapsed() >= limit {
-            child
-                .kill()
-                .expect("kill watchdog child after parent deadline");
+            #[cfg(unix)]
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status();
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .status();
+            let _ = child.kill();
             let status = child.wait().expect("reap killed watchdog child");
             timeout = Some(ChildTimeout {
                 failure_kind: kind,
@@ -121,10 +133,37 @@ fn should_bound_child_wait_when_preparation_never_completes() {
     let timeout = result.expect_err("hung preparation must fail within the parent budget");
     assert_eq!(timeout.failure_kind, ChildTimeoutKind::PreparationTimeout);
     assert!(timeout.child_reaped);
+    assert!((100..5_000).contains(&timeout.elapsed_ms));
     let report = read_json(&artifacts.path().join("child-timeout.json"));
     assert_eq!(report["failure_kind"], "preparation_timeout");
     assert_eq!(report["child_reaped"], true);
     assert!(!artifacts.path().join("preparation-complete.json").exists());
+}
+
+fn should_bound_child_wait_when_execution_never_completes() {
+    // Arrange: this private child signals preparation and then parks forever.
+    let artifacts = control_artifacts("held-execution-");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.arg("--hold-execution");
+    // Act
+    let result = run_bounded_child(
+        &mut command,
+        artifacts.path(),
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    );
+    // Assert: active execution is independently bounded and the child reaped.
+    let timeout = result.expect_err("hung execution must fail within the parent budget");
+    assert_eq!(
+        timeout.failure_kind,
+        ChildTimeoutKind::ChildExecutionTimeout
+    );
+    assert!(timeout.child_reaped);
+    assert!((100..5_000).contains(&timeout.elapsed_ms));
+    let report = read_json(&artifacts.path().join("child-timeout.json"));
+    assert_eq!(report["failure_kind"], "child_execution_timeout");
+    assert_eq!(report["child_reaped"], true);
+    assert!(artifacts.path().join("preparation-complete.json").is_file());
 }
 
 fn control_artifacts(label: &str) -> tempfile::TempDir {
@@ -159,7 +198,7 @@ fn prepare_child(
     };
     if let Some(mode) = mode {
         let delay = if mode == Mode::MetadataInventory {
-            Duration::from_millis(1_200)
+            Duration::from_millis(3_200)
         } else {
             Duration::ZERO
         };
@@ -180,7 +219,7 @@ fn prepare_child(
             let delay = if kind == Kind::Held {
                 Duration::ZERO
             } else {
-                Duration::from_millis(1_200)
+                Duration::from_millis(3_200)
             };
             scopes.push(Box::new(
                 stress_scenarios::prepare_final_flush_watchdog_fixture(kind, samples, delay),
@@ -299,18 +338,9 @@ fn invoke_child_with_samples(
     {
         command.env("RUST_LOG", "off");
     }
-    // Healthy end-to-end and policy fixtures include real I/O under host
-    // contention, including synchronous evidence writes. A retained macOS run
-    // exceeded three seconds despite a 423ms publication pause. Give these
-    // test-only success controls ten seconds; production settings are unchanged.
-    // Deliberate no-work controls retain a one-second native deadline and must
-    // still fail with zero completed units.
-    let no_progress_timeout =
-        if workload.starts_with("held_") || workload == "rejected_clients_with_disk_churn" {
-            "1"
-        } else {
-            "10"
-        };
+    // Pair progressing and deliberately held controls at the same budget.
+    // Healthy recovery and client work must outlast it; end-only progress must
+    // not pass. These test settings do not change production configuration.
     command
         .arg("--workload")
         .arg(workload)
@@ -319,7 +349,10 @@ fn invoke_child_with_samples(
         .env("STRESS_SAMPLES", samples.to_string())
         .env("STRESS_WARMUP_SAMPLES", warmup.to_string())
         .env("STRESS_COOLDOWN_SAMPLES", cooldown.to_string())
-        .env("STRESS_NO_PROGRESS_TIMEOUT_SECS", no_progress_timeout)
+        .env(
+            "STRESS_NO_PROGRESS_TIMEOUT_SECS",
+            NO_PROGRESS_TIMEOUT_SECS.to_string(),
+        )
         .env("STRESS_JSON", "true")
         .env("STRESS_OUTPUT_DIR", artifacts.join("stress"))
         .env("MIDGE_STRESS_ARTIFACT_DIR", artifacts.join("midge"))
@@ -329,8 +362,8 @@ fn invoke_child_with_samples(
         .saturating_add(cooldown)
         .max(1);
     let execution_timeout =
-        Duration::from_secs(15).saturating_mul(u32::try_from(total).unwrap_or(u32::MAX));
-    run_bounded_child(
+        Duration::from_secs(60).saturating_mul(u32::try_from(total).unwrap_or(u32::MAX));
+    let output = run_bounded_child(
         &mut command,
         artifacts,
         PREPARATION_TIMEOUT,
@@ -341,7 +374,16 @@ fn invoke_child_with_samples(
             "watchdog fixture child exceeded parent deadline: {}",
             serde_json::to_string(&timeout).unwrap()
         )
-    })
+    });
+    let prepared = artifacts.join("preparation-complete.json");
+    if prepared.is_file() {
+        assert_eq!(
+            read_json(&prepared)["no_progress_timeout_ms"],
+            NO_PROGRESS_TIMEOUT_SECS * 1_000,
+            "the child must use the paired native watchdog budget"
+        );
+    }
+    output
 }
 
 fn receipt(output: &Output) -> Value {
@@ -429,6 +471,16 @@ fn should_reject_malformed_committed_attempts_when_watchdog_aborts() {
     assert!(result.is_err());
 }
 
+#[cfg(feature = "failpoints")]
+fn should_reject_uncommitted_attempt_when_child_reports_success() {
+    // Arrange: the final JSON value is valid but has no commit newline.
+    let bytes = b"{\"success\":false}\n{\"success\":true}";
+    // Act
+    let result = decode_final_flush_attempts(bytes, false);
+    // Assert: only an aborted child may discard an incomplete tail.
+    assert!(result.is_err());
+}
+
 fn client_snapshot(workload: &Path) -> Value {
     read_json(&workload.join("client-snapshots/stage-00/client-00.json"))
 }
@@ -455,7 +507,7 @@ fn should_report_no_progress_when_rejected_clients_keep_database_bytes_changing(
             )
         });
     assert!(!output.status.success());
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     assert_eq!(failure["metadata"]["progress_completed_units"], "0");
     let workload = workload_directory(artifacts.path());
     let status = read_json(&workload.join("workload-status.json"));
@@ -562,7 +614,15 @@ fn assert_successful_recovery_work(output: &Output, workload: &Path) -> Value {
     assert_eq!(result["mismatches"], 0);
     assert_eq!(result["local_wal_bytes"], 0);
     assert_eq!(result["staged_wal_count"], 0);
-    assert!(result["elapsed_ms"].as_u64().unwrap() > 1_000);
+    let control = workload.parent().unwrap().parent().unwrap();
+    let budget_ms = read_json(&control.join("preparation-complete.json"))["no_progress_timeout_ms"]
+        .as_u64()
+        .expect("actual configured native idle budget");
+    assert_eq!(budget_ms, NO_PROGRESS_TIMEOUT_SECS * 1_000);
+    assert!(
+        result["elapsed_ms"].as_u64().unwrap() > budget_ms,
+        "healthy recovery must outlast its actual idle budget to detect missing or end-only progress"
+    );
     let specs = receipt["benchmark_specs"]
         .as_array()
         .expect("canonical recovery specs");
@@ -620,7 +680,7 @@ fn should_report_no_progress_when_actual_cloud_recovery_holds_first_range() {
         .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
         .unwrap_or_else(|| panic!("held range must emit typed no-progress: {receipt}"));
     assert!(!output.status.success());
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     let status = read_json(&workload.join("workload-status.json"));
     assert_eq!(status["phase"], "recovery");
     let observations = recovery_observations(&workload);
@@ -649,7 +709,7 @@ fn should_report_no_progress_when_actual_inventory_holds_first_head() {
         .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
         .unwrap_or_else(|| panic!("held HEAD must emit typed no-progress: {receipt}"));
     assert!(!output.status.success());
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     assert_eq!(failure["metadata"]["progress_completed_units"], "0");
     let status = read_json(&workload.join("workload-status.json"));
     assert_eq!(status["phase"], "recovery");
@@ -663,8 +723,8 @@ fn should_report_no_progress_when_actual_inventory_holds_first_head() {
 }
 
 fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
-    // Arrange: sixteen real SST HEADs complete on a 100ms response script,
-    // beyond the one-second idle budget, with RUST_LOG=off and an empty cache.
+    // Arrange: sixteen real SST HEADs complete on a 250ms response script,
+    // beyond the three-second idle budget, with RUST_LOG=off and an empty cache.
     let artifacts = control_artifacts("delayed-inventory-");
 
     // Act
@@ -681,7 +741,7 @@ fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
         read_json(&workload.join("fixture-preparation.json"))["setup_elapsed_ms"]
             .as_u64()
             .unwrap()
-            >= 1_200
+            >= 3_200
     );
     assert_eq!(result["expected_inventory_entries"], 16);
     assert_eq!(
@@ -791,7 +851,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     );
     assert_eq!(publication["worker_entries"], 1);
     assert_eq!(publication["worker_released"], true);
-    assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 1_200);
+    assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 3_200);
     assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 350);
     let attempts = outcomes["attempts"]
         .as_array()
@@ -865,7 +925,7 @@ fn should_report_no_progress_when_final_flush_publication_remains_held() {
         .iter()
         .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
         .unwrap_or_else(|| panic!("held publication must native-timeout: {receipt}"));
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     assert_eq!(failure["metadata"]["progress_completed_units"], "0");
     let status = read_json(&workload.join("workload-status.json"));
     assert_eq!(status["phase"], "flush");
@@ -924,7 +984,7 @@ fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
         read_json(&workload.join("fixture-preparation.json"))["setup_elapsed_ms"]
             .as_u64()
             .unwrap()
-            >= 1_200
+            >= 3_200
     );
     let results = read_json(&workload.join("retry-policy-results.json"));
     assert_eq!(results["fixture_scope"], "benchmark_retry_policy");
@@ -1090,6 +1150,16 @@ fn should_prepare_fresh_inputs_when_native_samples_repeat() {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--hold-execution") {
+        fs::write(
+            std::env::var_os(PREPARATION_READY_ENV).expect("parent preparation signal"),
+            b"{\"prepared\":true}",
+        )
+        .unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
     if std::env::args().any(|arg| arg == "--hold-preparation") {
         loop {
             std::thread::park();
@@ -1124,7 +1194,16 @@ fn main() {
             .expect("sample count overflow");
         let _preparation = prepare_child(workload, samples);
         if let Some(path) = std::env::var_os(PREPARATION_READY_ENV) {
-            fs::write(path, b"{\"prepared\":true}").expect("signal completed child preparation");
+            fs::write(
+                path,
+                serde_json::to_vec(&serde_json::json!({
+                    "prepared": true,
+                    "no_progress_timeout_ms": config.no_progress_timeout
+                        .expect("native idle budget configured").as_millis(),
+                }))
+                .unwrap(),
+            )
+            .expect("signal completed child preparation");
         }
         child_harness::run();
         return;
@@ -1138,6 +1217,7 @@ fn main() {
         match control {
             "lifecycle" => {
                 should_bound_child_wait_when_preparation_never_completes();
+                should_bound_child_wait_when_execution_never_completes();
                 should_reject_invalid_configuration_before_preparing_watchdog_resources();
                 should_cancel_unused_inputs_when_preparation_scope_ends();
             }
@@ -1146,6 +1226,7 @@ fn main() {
             "receipts" => {
                 should_read_committed_attempts_when_watchdog_aborts_mid_record();
                 should_reject_malformed_committed_attempts_when_watchdog_aborts();
+                should_reject_uncommitted_attempt_when_child_reports_success();
             }
             #[cfg(feature = "failpoints")]
             "policy" => should_stop_retry_policy_when_callback_returns_a_terminal_error(),
@@ -1160,7 +1241,12 @@ fn main() {
         );
         return;
     }
+    qualification::run(run_suite);
+}
+
+fn run_suite() {
     should_bound_child_wait_when_preparation_never_completes();
+    should_bound_child_wait_when_execution_never_completes();
     should_reject_invalid_configuration_before_preparing_watchdog_resources();
     should_cancel_unused_inputs_when_preparation_scope_ends();
     should_prepare_fresh_inputs_when_native_samples_repeat();
@@ -1177,11 +1263,81 @@ fn main() {
     {
         should_read_committed_attempts_when_watchdog_aborts_mid_record();
         should_reject_malformed_committed_attempts_when_watchdog_aborts();
+        should_reject_uncommitted_attempt_when_child_reports_success();
         should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
         should_report_no_progress_when_final_flush_publication_remains_held();
         should_stop_retry_policy_when_callback_returns_a_terminal_error();
-        println!("eighteen real stress watchdog integration checks passed");
+        println!("twenty real stress watchdog integration checks passed");
     }
     #[cfg(not(feature = "failpoints"))]
-    println!("thirteen real stress watchdog integration checks passed");
+    println!("fourteen real stress watchdog integration checks passed");
+}
+
+mod qualification {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct CpuLoad {
+        stop: Arc<AtomicBool>,
+        workers: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    impl CpuLoad {
+        fn start(count: usize) -> Self {
+            let mut load = Self {
+                stop: Arc::new(AtomicBool::new(false)),
+                workers: Vec::new(),
+            };
+            for _ in 0..count {
+                let stop = Arc::clone(&load.stop);
+                load.workers.push(std::thread::spawn(move || {
+                    let mut value = std::hint::black_box(1_u64);
+                    while !stop.load(Ordering::Acquire) {
+                        for _ in 0..10_000 {
+                            value = value.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        }
+                        std::hint::black_box(value);
+                    }
+                }));
+            }
+            load
+        }
+    }
+
+    impl Drop for CpuLoad {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            for worker in self.workers.drain(..) {
+                worker.join().expect("CPU contender must stop and join");
+            }
+        }
+    }
+
+    fn number(name: &str, default: usize, maximum: usize) -> usize {
+        let value = std::env::var(name).map_or(default, |raw| {
+            raw.parse().expect("integer qualification setting")
+        });
+        assert!(value <= maximum, "{name} must be at most {maximum}");
+        value
+    }
+
+    pub(super) fn run(suite: fn()) {
+        let workers = number("MIDGE_WATCHDOG_CPU_WORKERS", 0, 64);
+        let repeats = number("MIDGE_WATCHDOG_REPEATS", 1, 100);
+        assert!(repeats > 0, "MIDGE_WATCHDOG_REPEATS must be positive");
+        let root = std::env::var_os("MIDGE_WATCHDOG_EVIDENCE_DIR");
+        let _load = CpuLoad::start(workers);
+        for repeat in 1..=repeats {
+            if let Some(root) = &root {
+                let path = std::path::PathBuf::from(root).join(format!("run-{repeat:02}"));
+                std::env::set_var("MIDGE_WATCHDOG_EVIDENCE_DIR", path);
+            }
+            let started = std::time::Instant::now();
+            suite();
+            eprintln!("full watchdog suite {repeat}/{repeats} passed in {:.3}s with {workers} CPU contenders", started.elapsed().as_secs_f64());
+        }
+        if let Some(root) = root {
+            std::env::set_var("MIDGE_WATCHDOG_EVIDENCE_DIR", root);
+        }
+    }
 }

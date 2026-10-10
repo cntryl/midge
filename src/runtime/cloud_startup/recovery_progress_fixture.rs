@@ -28,7 +28,8 @@ use backend::{FixtureObservations, ObservedBackend};
 const READ_WINDOW: usize = 64 * 1024;
 const WRITER_EPOCH: u64 = 7;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(5);
-const COVERAGE_PAUSE: Duration = Duration::from_millis(75);
+// Thirty-two completed coverage checks must outlast the paired 3s idle budget.
+const COVERAGE_PAUSE: Duration = Duration::from_millis(125);
 
 /// Fault policy owned by a fixture child, outside the supported public API.
 #[doc(hidden)]

@@ -66,7 +66,9 @@
       "complete": true,
       "planned_attempts": 9,
       "valid_attempts": 9,
-      "qualification_errors": [],
+      "qualification_errors": [
+
+      ],
       "cells": [
         {
           "cell": "A",
@@ -6980,134 +6982,159 @@
       "tests": [
         {
           "path": "tests/stress_workload_watchdog.rs",
-          "line": 321,
+          "line": 648,
           "symbol": "should_remain_healthy_when_actual_cloud_recovery_completes_read_only_work",
-          "claim": "Actual planner/replay exceeds 1s idle window with >=16 successful reads, >=1 MiB bytes, maximum 64 KiB range, exact records/values/epoch 7, no staged local WAL and zero sampled local DB bytes.",
+          "claim": "Actual planner/replay exceeds its recorded 3s idle window with >=16 successful reads, >=1 MiB bytes, maximum 64 KiB range, exact records/values/epoch 7, no staged local WAL and zero sampled local DB bytes.",
           "scope": "actual main-driven native watchdog case or explicitly constructed consumer helper; see preconditions",
           "assertions": [
             {
-              "line": 333,
+              "line": 660,
               "marker": "assert!(result[\"completed_range_reads\"].as_u64().unwrap() >= 16);"
             },
             {
-              "line": 334,
+              "line": 661,
               "marker": "assert!(result[\"completed_range_bytes\"].as_u64().unwrap() >= 1_024 * 1_024);"
             },
             {
-              "line": 335,
+              "line": 662,
               "marker": "assert!(result[\"maximum_range_bytes\"].as_u64().unwrap() <= 64 * 1_024);"
             }
           ]
         },
         {
           "path": "tests/stress_workload_watchdog.rs",
-          "line": 433,
+          "line": 766,
           "symbol": "should_remain_healthy_when_cached_recovery_finishes_verified_coverage_work",
           "claim": "Actual cached replay exceeds idle window, verifies exact rows and coverage checks >= records while replay remote reads=0.",
           "scope": "actual main-driven native watchdog case or explicitly constructed consumer helper; see preconditions",
           "assertions": [
             {
-              "line": 444,
+              "line": 777,
               "marker": "assert!("
             },
             {
-              "line": 447,
+              "line": 780,
               "marker": "assert_eq!(result[\"replay_completed_range_reads\"], 0);"
             }
           ]
         },
         {
           "path": "tests/stress_workload_watchdog.rs",
-          "line": 367,
+          "line": 694,
           "symbol": "should_report_no_progress_when_actual_inventory_holds_first_head",
           "claim": "Actual held inventory request has held_requests=1, no successful HEAD/size/range work, no_progress_timeout and zero completed progress units.",
           "scope": "actual main-driven native watchdog case or explicitly constructed consumer helper; see preconditions",
           "assertions": [
             {
-              "line": 384,
+              "line": 711,
               "marker": "assert!(!output.status.success());"
             },
             {
-              "line": 385,
-              "marker": "assert_eq!(failure[\"metadata\"][\"no_progress_timeout_secs\"], \"1\");"
+              "line": 712,
+              "marker": "assert_eq!(failure[\"metadata\"][\"no_progress_timeout_secs\"], \"3\");"
             },
             {
-              "line": 386,
+              "line": 713,
               "marker": "assert_eq!(failure[\"metadata\"][\"progress_completed_units\"], \"0\");"
             },
             {
-              "line": 388,
+              "line": 715,
               "marker": "assert_eq!(status[\"phase\"], \"recovery\");"
             },
             {
-              "line": 390,
+              "line": 717,
               "marker": "assert_eq!(observations[\"held_requests\"], 1);"
             },
             {
-              "line": 391,
+              "line": 718,
               "marker": "assert_eq!(observations[\"completed_inventory_heads\"], 0);"
             },
             {
-              "line": 392,
+              "line": 719,
               "marker": "assert_eq!(observations[\"completed_inventory_size_validations\"], 0);"
             },
             {
-              "line": 393,
+              "line": 720,
               "marker": "assert_eq!(observations[\"completed_range_reads\"], 0);"
             },
             {
-              "line": 394,
+              "line": 721,
               "marker": "assert_eq!(observations[\"local_wal_bytes\"], 0);"
             },
             {
-              "line": 395,
+              "line": 722,
               "marker": "assert_database_stays_empty(&workload);"
             }
           ]
         },
         {
           "path": "tests/stress_workload_watchdog.rs",
-          "line": 450,
+          "line": 783,
           "symbol": "should_remain_healthy_when_actual_journal_restores_its_durable_frontier",
           "claim": "Actual manifest journal replay has exact 16 edits/frontier and successful delayed local reads, flat sampled database bytes and healthy workload.",
           "scope": "actual main-driven native watchdog case or explicitly constructed consumer helper; see preconditions",
           "assertions": [
             {
-              "line": 462,
+              "line": 795,
               "marker": "assert_eq!(result[\"expected_edits\"], 16);"
             },
             {
-              "line": 463,
+              "line": 796,
               "marker": "assert_eq!(result[\"verified_edits\"], result[\"expected_edits\"]);"
             },
             {
-              "line": 464,
+              "line": 797,
               "marker": "assert_eq!(result[\"max_edit_id\"], result[\"expected_edits\"]);"
             },
             {
-              "line": 465,
+              "line": 798,
               "marker": "assert_eq!("
             },
             {
-              "line": 469,
+              "line": 802,
               "marker": "assert_eq!(result[\"restored_cf_count\"], result[\"expected_edits\"]);"
             },
             {
-              "line": 470,
+              "line": 803,
               "marker": "assert!(result[\"completed_local_reads\"].as_u64().unwrap() > 0);"
             },
             {
-              "line": 472,
+              "line": 805,
               "marker": "assert!(journal_bytes > 0);"
             },
             {
-              "line": 473,
+              "line": 806,
               "marker": "assert!(result[\"completed_local_read_bytes\"].as_u64().unwrap() >= journal_bytes);"
+            }
+          ]
+        },
+        {
+          "path": "tests/stress_workload_watchdog.rs",
+          "line": 725,
+          "symbol": "should_remain_healthy_when_actual_inventory_validates_delayed_heads",
+          "claim": "Sixteen actual authoritative SST HEADs on a 250ms response script sustain recovery beyond the recorded 3s idle budget, with exact retained inventory, size validation and zero sampled database bytes.",
+          "scope": "actual main-driven native watchdog case; see preconditions",
+          "assertions": [
+            {
+              "line": 746,
+              "marker": "assert_eq!(result[\"expected_inventory_entries\"], 16);"
+            },
+            {
+              "line": 747,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 751,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 755,
+              "marker": "assert_eq!("
             }
           ]
         }
       ],
-      "preconditions": "Custom native watchdog executable (main-driven functions, not ordinary #[test] filtering), internal-testing actual fixture and stress-soak; child logs can have recovery formatting off. Independent observation files outlive failed child.",
+      "preconditions": "Custom native watchdog executable (main-driven functions, not ordinary #[test] filtering), internal-testing actual fixture and stress-soak; child logs can have recovery formatting off. Independent observation files outlive failed child. Progressing and held fixtures share a three-second native idle budget recorded by the child after preparation. Healthy recovery elapsed time must exceed that actual configured budget; CPU contention qualification is Cargo-native. Preparation and execution have independent parent deadlines.",
       "uncovered": "The 500ms partial emission happens only after successful positive bounded work; it is not a timer pulse. Completed work need not mean whole startup success. These are actual bounded fixtures, not full one-hour provider soak qualification."
     },
     {
@@ -7131,17 +7158,17 @@
       "tests": [
         {
           "path": "tests/stress_workload_watchdog.rs",
-          "line": 476,
+          "line": 809,
           "symbol": "should_count_recovery_work_only_within_its_active_caller_scope",
           "claim": "Actual subscriber child accepts exactly five intended positive units while unrelated/background, wrong schema, failure/empty, old generation and completed scopes remain uncredited.",
           "scope": "actual main-driven native watchdog case or explicitly constructed consumer helper; see preconditions",
           "assertions": [
             {
-              "line": 485,
+              "line": 818,
               "marker": "assert!("
             },
             {
-              "line": 490,
+              "line": 823,
               "marker": "assert!(receipt[\"benchmark_specs\"]"
             }
           ]
@@ -9888,7 +9915,9 @@
     "preview": false,
     "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
     "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
-    "changed_hash_bound_paths": [],
+    "changed_hash_bound_paths": [
+
+    ],
     "preserved_ids": 63,
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
@@ -9904,11 +9933,20 @@
     "fixture_before_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
     "fixture_after_sha256": "0ca5d2b7d855b258923486ab4306de0866c62156d5485c078fbb1cd77b4e468d",
     "helper": "assert_fenced_publication_response",
-    "changed_hash_bound_paths": [],
+    "changed_hash_bound_paths": [
+
+    ],
     "preserved_ids": 63,
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
     "preserved_source_hashes": 136,
     "scope": "mechanical extraction of the unchanged pre-GC Fenced and settled intent-clear contextual error assertions into one called helper in an unreferenced feature fixture; source/reference lint only, no historical qualification upgrade"
+  },
+  "watchdog_fixture_reference_refresh": {
+    "issue": 796,
+    "fixture_path": "tests/stress_workload_watchdog.rs",
+    "fixture_after_sha256": "68ab626be4699a01f43a079d0bdac0a86d0071061f10672ed3fe4dc6b95d8b1b",
+    "native_idle_budget_seconds": 3,
+    "scope": "Refresh current watchdog fixture claims, locations and assertion markers. Historical qualification objects are unchanged; current exact-head qualification is reported in PR #809."
   }
 }
