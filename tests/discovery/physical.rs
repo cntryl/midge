@@ -5,10 +5,11 @@ use cntryl_midge::{Engine, Query, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CHILD_ENV: &str = "MIDGE_DISCOVERY_CRASH_CASE";
 const CHILD_TEST: &str = "physical::should_abort_physical_history_when_child_requested";
+const DEFER_WAL_PRUNE: &str = "midge::cloud::defer_wal_prune_admission";
 const RESTORE_TRIGGER: &str = "midge::backup::after_restore_object_copy";
 const COMPACTION_TRIGGERS: [&str; 3] = [
     "slice7::after_compaction_output_durable_before_manifest_publish",
@@ -130,6 +131,68 @@ fn assert_remove_only_intent(path: &Path) {
     );
 }
 
+fn cloud_wal_catalogs(path: &Path) -> [serde_json::Value; 2] {
+    [
+        "publication-catalog.v1.json",
+        "publication-catalog.v1.mirror.json",
+    ]
+    .map(|name| {
+        serde_json::from_slice(&std::fs::read(path.join("cloud_store/wal").join(name)).unwrap())
+            .unwrap()
+    })
+}
+
+fn catalogs_are_retired(catalogs: &[serde_json::Value; 2]) -> bool {
+    catalogs.iter().all(|catalog| {
+        catalog["segments"]
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    })
+}
+
+fn retire_cloud_wal_before_compaction(mut engine: Engine, case: &CrashCase) -> Engine {
+    let path = case.root.join("db");
+    let retained = cloud_wal_catalogs(&path);
+    assert!(
+        retained.iter().all(|catalog| {
+            catalog["segments"]
+                .as_object()
+                .is_some_and(|segments| !segments.is_empty())
+        }),
+        "the regression must start with authoritative WAL still retained"
+    );
+    fail::remove(DEFER_WAL_PRUNE);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if catalogs_are_retired(&cloud_wal_catalogs(&path)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cloud WAL retirement did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Catalog publication precedes delivery of the prune completion to the
+    // event loop. Reopen captures the retired authority instead of racing that
+    // delivery or guessing when the runtime's tombstone horizon moved.
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+    drop(engine);
+    let engine = Engine::open(options(&path, case.backend).unwrap()).unwrap();
+    let retired = cloud_wal_catalogs(&path);
+    assert!(catalogs_are_retired(&retired));
+    std::fs::write(
+        case.root.join("wal-retirement.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "retained_before": retained,
+            "retired_after_reopen": retired,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    engine
+}
+
 fn expire_aborted_local_owner(path: &Path) {
     let local = path.join(".midge_leader");
     if local.exists() {
@@ -174,6 +237,21 @@ fn expire_aborted_local_owner(path: &Path) {
 
 fn assert_empty_compaction_recovery(case: &CrashCase, counters: &mut Counters) {
     let path = case.root.join("db");
+    if matches!(case.backend, Backend::CloudSimulated) {
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(case.root.join("wal-retirement.json")).unwrap())
+                .unwrap();
+        assert!(evidence["retained_before"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|catalog| { !catalog["segments"].as_object().unwrap().is_empty() }));
+        assert!(evidence["retired_after_reopen"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|catalog| { catalog["segments"].as_object().unwrap().is_empty() }));
+    }
     assert_remove_only_intent(&path);
     expire_aborted_local_owner(&path);
     // Repeat reopen to detect publication/cleanup state that succeeds only once.
@@ -344,7 +422,7 @@ fn should_abort_physical_history_when_child_requested() {
             case.ordinal,
         );
         if matches!(case.backend, Backend::CloudSimulated) {
-            fail::cfg("midge::cloud::defer_wal_prune_admission", "return").unwrap();
+            fail::cfg(DEFER_WAL_PRUNE, "return").unwrap();
         }
         let engine = Engine::open(options(&path, case.backend).unwrap()).unwrap();
         let cf = engine.get_column_family("default").unwrap();
@@ -354,6 +432,11 @@ fn should_abort_physical_history_when_child_requested() {
         tx.delete_range(b"key-".to_vec(), b"key.".to_vec()).unwrap();
         tx.commit(write_options(case.backend)).unwrap();
         engine.flush_cf(&cf).unwrap();
+        let engine = if matches!(case.backend, Backend::CloudSimulated) {
+            retire_cloud_wal_before_compaction(engine, &case)
+        } else {
+            engine
+        };
         engine.compact_all().unwrap();
     }
 
