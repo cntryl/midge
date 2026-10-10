@@ -26,8 +26,12 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
-        tx.put(index.to_be_bytes().to_vec(), b"value".to_vec(), None)
-            .unwrap();
+        tx.put(
+            index.to_be_bytes().to_vec(),
+            b"attempt-value".to_vec(),
+            None,
+        )
+        .unwrap();
         match tx.commit(WriteOptions::sync()) {
             Ok(()) => engine.flush_cf(&cf).unwrap(),
             Err(MidgeError::WriteStall(_)) => {
@@ -45,7 +49,11 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
     let index = rejected.expect("held recovery must force public WriteStall coverage on every run");
     let counts = cntryl_midge::__internal::diagnostics::write_admission_snapshot(&engine);
     assert_eq!(counts.commit_write_stall_total, 1);
-    assert_eq!(counts.l0_total + counts.ingest_hint_total, 1);
+    assert_eq!(
+        counts.l0_total, 1,
+        "the runtime L0 gate must reject the commit"
+    );
+    assert_eq!(counts.ingest_hint_total, 0);
     assert_eq!(
         counts.queue_total + counts.cloud_generation_total + counts.cloud_wal_total,
         0
@@ -56,33 +64,63 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
     assert!(engine
         .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
         .unwrap());
-    let mut retry = engine
-        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-        .unwrap();
-    retry
-        .put(index.to_be_bytes().to_vec(), b"value".to_vec(), None)
-        .unwrap();
-    retry.commit(WriteOptions::sync()).unwrap();
-    engine.flush_cf(&cf).unwrap();
 
-    // Assert: release allows actual compaction publication, then durable retry.
-    let recovered = engine.metrics().get_runtime_metrics().unwrap();
-    assert!(recovered.compactions_run > 0);
-    assert!(recovered.compaction_bytes_rewritten > 0);
+    // Assert: release publishes actual compaction; recovery must still omit
+    // the rejected attempt before any retry could overwrite leaked WAL data.
+    wait_for_compaction(&engine);
     engine.shutdown(Duration::from_secs(10)).unwrap();
     drop(engine);
     scenario.teardown();
     let mut reopened = Engine::open(options()).unwrap();
     let cf = reopened.get_column_family("held-l0-pressure").unwrap();
-    let read = reopened
-        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+    assert_values(&reopened, &cf, index, false);
+
+    let mut retry = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .unwrap();
-    for acknowledged in 0..=index {
+    retry
+        .put(index.to_be_bytes().to_vec(), b"retry-value".to_vec(), None)
+        .unwrap();
+    retry.commit(WriteOptions::sync()).unwrap();
+    reopened.flush_cf(&cf).unwrap();
+    reopened.shutdown(Duration::from_secs(10)).unwrap();
+    drop(reopened);
+    let mut reopened = Engine::open(options()).unwrap();
+    let cf = reopened.get_column_family("held-l0-pressure").unwrap();
+    assert_values(&reopened, &cf, index, true);
+    reopened.shutdown(Duration::from_secs(10)).unwrap();
+}
+
+fn wait_for_compaction(engine: &Engine) {
+    let started = std::time::Instant::now();
+    loop {
+        let metrics = engine.metrics().get_runtime_metrics().unwrap();
+        if metrics.compactions_run > 0 && metrics.compaction_bytes_rewritten > 0 {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "released pressure recovery must publish and account for a real compaction"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_values(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    rejected: u32,
+    retried: bool,
+) {
+    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+    for acknowledged in 0..rejected {
         assert_eq!(
             read.get(&acknowledged.to_be_bytes()).unwrap().as_deref(),
-            Some(b"value".as_slice())
+            Some(b"attempt-value".as_slice())
         );
     }
-    drop(read);
-    reopened.shutdown(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        read.get(&rejected.to_be_bytes()).unwrap().as_deref(),
+        retried.then_some(b"retry-value".as_slice())
+    );
 }
