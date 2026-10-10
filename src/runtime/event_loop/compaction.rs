@@ -196,6 +196,15 @@ impl EventLoop {
         // admission. Use the same authority and worker gates for
         // pressure recovery at startup, after flush, and during live maintenance.
         let background_enabled = self.state.compaction_enabled();
+        if !background_enabled && !manual {
+            crate::failpoints::fail_point!("midge::compaction::defer_pressure_recovery", |_| {
+                // Recheck held fixtures promptly when released. This hook and
+                // its scheduling override are absent from ordinary builds.
+                self.background_compaction_schedule
+                    .defer_for(Duration::from_millis(10));
+                Ok(false)
+            });
+        }
         if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
             return Ok(false);
         }

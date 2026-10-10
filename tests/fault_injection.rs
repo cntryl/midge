@@ -7,6 +7,9 @@ mod common;
 #[path = "fault_injection/compaction_deadline.rs"]
 mod compaction_deadline;
 
+#[path = "fault_injection/l0_pressure.rs"]
+mod l0_pressure;
+
 mod crash_validation {
     use crate::common::crash;
 
