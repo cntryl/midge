@@ -401,7 +401,11 @@ impl EventLoop {
             tracing::debug!(segment_id, "ignored stale cloud WAL prune completion");
             return;
         }
-        self.wal_transition.retire_gc_pin(segment_id);
+        // Catalog retirement does not disable startup replay of a local copy.
+        // Keep deletion proof until unlink and its directory barrier both settle.
+        if self.remove_cloud_durable_local_wal_segment(segment_id) {
+            self.wal_transition.retire_gc_pin(segment_id);
+        }
         self.background_compaction_schedule.mark_due();
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
