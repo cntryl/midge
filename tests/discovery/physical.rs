@@ -162,6 +162,8 @@ fn retire_cloud_wal_before_compaction(mut engine: Engine, case: &CrashCase) -> E
         "the regression must start with authoritative WAL still retained"
     );
     fail::remove(DEFER_WAL_PRUNE);
+    let family = engine.get_column_family("default").unwrap();
+    engine.flush_cf(&family).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if catalogs_are_retired(&cloud_wal_catalogs(&path)) {
