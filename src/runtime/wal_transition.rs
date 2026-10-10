@@ -193,8 +193,9 @@ impl WalTransitionProtocol {
     }
 
     /// Called only for a matching admitted prune completion. The storage
-    /// worker has confirmed lease-fenced oldest-prefix catalog retirement;
-    /// physical deletion may subsequently fail without retaining the proof.
+    /// worker has confirmed lease-fenced oldest-prefix catalog retirement,
+    /// and the event loop has durably removed every replayable local copy.
+    /// A remote orphan is ignored by recovery and may safely remain.
     pub(crate) fn retire_gc_pin(&mut self, generation: u64) {
         if self.gc_active_generation != Some(generation) {
             self.gc_pins.remove(&generation);
