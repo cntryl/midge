@@ -130,7 +130,6 @@ tools/*
 !tools/run-stress-with-receipts.sh
 !tools/tests/
 tools/tests/*
-!tools/tests/test_wal_redesign_regressions.py
 !tools/tests/test_finalize_stress_artifacts.py
 !tools/tests/test_recovery_attribution.py
 !tools/tests/fixtures/
