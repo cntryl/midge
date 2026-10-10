@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub enum CrashMode {
     /// Lose all effects that have not passed the appropriate durability barrier.
     DiscardVolatile,
-    /// Model a process failure while the operating system retains dirty pages.
+    /// Retain dirty OS pages and names across a process failure without making
+    /// them durable against a later power failure.
     PreserveVolatile,
     /// Persist reproducible partial writes and unbarriered directory snapshots.
     Torn { seed: u64 },
@@ -242,7 +243,7 @@ impl CrashFs {
                 Node::Directory(directory) => {
                     let keep_live = match mode {
                         CrashMode::DiscardVolatile => false,
-                        CrashMode::PreserveVolatile => true,
+                        CrashMode::PreserveVolatile => continue,
                         CrashMode::Torn { .. } => next_random(&mut random) & 1 == 1,
                     };
                     if keep_live {
@@ -253,7 +254,7 @@ impl CrashFs {
                 Node::Data(data) => {
                     match mode {
                         CrashMode::DiscardVolatile => data.live.clone_from(&data.durable),
-                        CrashMode::PreserveVolatile => {}
+                        CrashMode::PreserveVolatile => continue,
                         CrashMode::Torn { .. } => {
                             let mut image = data.durable.clone();
                             for mutation in &data.pending {

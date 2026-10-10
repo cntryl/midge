@@ -173,3 +173,70 @@ fn should_retain_unbarriered_bytes_when_only_process_fails() {
         ))
         .is_err());
 }
+
+#[test]
+fn should_keep_buffered_bytes_volatile_when_power_loss_follows_process_restart() {
+    // Arrange
+    let fs = CrashFs::new();
+    let mut file = fs.open(&FsPath::new("wal"), CREATE).unwrap();
+    file.append(Bytes::from_static(b"stable")).unwrap();
+    file.sync(Durability::Durable).unwrap();
+    fs.sync_dir(&FsPath::new("."), Durability::Durable).unwrap();
+    file.append(Bytes::from_static(b"buffered")).unwrap();
+    drop(file);
+    fs.crash(CrashMode::PreserveVolatile);
+    assert_eq!(bytes(&fs, "wal"), b"stablebuffered");
+
+    // Act
+    fs.crash(CrashMode::DiscardVolatile);
+
+    // Assert: retaining OS pages does not complete a missing file barrier.
+    assert_eq!(bytes(&fs, "wal"), b"stable");
+}
+
+#[test]
+fn should_keep_created_name_volatile_when_power_loss_follows_process_restart() {
+    // Arrange
+    let fs = CrashFs::new();
+    let mut file = fs.open(&FsPath::new("new"), CREATE).unwrap();
+    file.append(Bytes::from_static(b"synced bytes")).unwrap();
+    file.sync(Durability::Durable).unwrap();
+    drop(file);
+    fs.crash(CrashMode::PreserveVolatile);
+    assert_eq!(bytes(&fs, "new"), b"synced bytes");
+
+    // Act
+    fs.crash(CrashMode::DiscardVolatile);
+
+    // Assert: retaining OS names does not complete a missing directory barrier.
+    assert!(!fs.exists(&FsPath::new("new")).unwrap());
+}
+
+#[test]
+fn should_allow_torn_buffer_persistence_when_power_loss_follows_process_restart() {
+    let mut observed_partial_tail = false;
+    for seed in 0..64 {
+        // Arrange
+        let fs = CrashFs::new();
+        let mut file = fs.open(&FsPath::new("wal"), CREATE).unwrap();
+        file.append(Bytes::from_static(b"stable")).unwrap();
+        file.sync(Durability::Durable).unwrap();
+        fs.sync_dir(&FsPath::new("."), Durability::Durable).unwrap();
+        file.append(Bytes::from_static(b"buffered")).unwrap();
+        drop(file);
+        fs.crash(CrashMode::PreserveVolatile);
+
+        // Act
+        fs.crash(CrashMode::Torn { seed });
+
+        // Assert: pending OS writes retain the same possible torn images.
+        let recovered = bytes(&fs, "wal");
+        assert!(recovered.starts_with(b"stable"));
+        assert!(b"stablebuffered".starts_with(&recovered));
+        observed_partial_tail |= recovered.len() > 6 && recovered.len() < 14;
+    }
+    assert!(
+        observed_partial_tail,
+        "process restart discarded pending writes"
+    );
+}

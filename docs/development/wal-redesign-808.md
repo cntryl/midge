@@ -13,8 +13,9 @@ not qualify the redesign or authorize closing #808.
 identities; rename and unlink leave existing handles attached to their inodes.
 File sync persists bytes, directory sync persists immediate child names, and
 ancestor barriers remain necessary. A crash invalidates old process handles.
-The supported failure selections discard volatile effects, retain OS pages
-for a process-only failure, or deterministically persist torn writes and
+The supported failure selections discard volatile effects, retain volatile
+OS pages and names across a process-only failure without upgrading their
+power-loss durability, or deterministically persist torn writes and
 unbarriered directory snapshots. This is a portable conservative model, not an
 emulation of one host filesystem's journal or physical block allocation.
 Its space counter includes data retained by durable names and open handles.
@@ -87,7 +88,8 @@ fingerprints when necessary.
 ## Current local evidence
 
 - Formatting and strict all-target, all-feature Clippy pass.
-- The original 45 focused adapter, oracle, scheduler, and shipping-writer checks pass; a further shipping-lease delayed-effect test also passes.
+- All 49 focused adapter, oracle, scheduler, shipping-writer, and delayed
+  shipping-lease checks pass, including the three double-crash regressions.
 - The pure object-storage scheduler campaign passes 512 seeds × 256 operations.
   This exercises provider effects and responses; it is not an engine WAL campaign.
 - `cargo machete` reports no unused dependencies.
@@ -117,6 +119,14 @@ fingerprints when necessary.
   Callbacks are duplicated separately from effects. This uses the existing
   lease protocol and wall clock; engine lease injection and simulated time
   remain pending.
+- Review found and reproduced a simulator bug where a process-only failure
+  promoted dirty bytes and names to durable state. Three double-crash tests
+  demonstrated the incorrect survival and lost torn-write possibilities; the
+  adapter now retains volatile snapshots and pending writes across process
+  restart.
+- A concurrent bulk run hit the existing aggregate-deadline fixture; the
+  focused isolated rerun passed both native 600 ms child scenarios. Bulk
+  qualification will run serially after the simulator correction.
 - Remaining qualification and stage 1 exit work are still in progress.
 
 ## Remaining stage 1 exit work
