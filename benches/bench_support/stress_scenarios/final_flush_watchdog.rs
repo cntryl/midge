@@ -137,7 +137,20 @@ pub(crate) fn prepare_final_flush_watchdog_fixture(
     for _ in 0..samples {
         let mut artifacts = WorkloadArtifacts::begin(kind.case(), Duration::from_secs(5));
         let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            open_fixture_engine(&mut artifacts, setup_delay)
+            let (engine, family, setup_elapsed) = open_fixture_engine(&mut artifacts, setup_delay);
+            let publication_started = Instant::now();
+            if kind == FlushFixtureKind::TerminalPolicy {
+                // Policy callbacks deliberately reject without flushing. Finish
+                // seed publication here so timed cleanup has no deferred data.
+                engine
+                    .flush_cf(&family)
+                    .expect("persist terminal-policy fixture seed");
+            }
+            (
+                engine,
+                family,
+                setup_elapsed + publication_started.elapsed(),
+            )
         }));
         let (engine, family, setup_elapsed) = prepared.unwrap_or_else(|panic| {
             artifacts.terminal_error = Some("engine fixture preparation panicked".into());
@@ -353,6 +366,14 @@ fn flush_fixture_data(
 pub(crate) fn run_final_flush_terminal_policy_fixture(ctx: &mut StressContext) {
     let (mut artifacts, mut engine, family, setup_elapsed, kind) = PREPARED_FLUSH.take();
     assert_eq!(kind, FlushFixtureKind::TerminalPolicy);
+    let prepared = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("prepared policy state");
+    assert_eq!(
+        prepared.manifest_last_persisted_sequence, prepared.current_sequence,
+        "terminal policy fixture must not defer seed publication to timed cleanup"
+    );
     let progress = ctx.progress_handle();
     ctx.record_observation(
         "fixture_setup_elapsed_ns",
