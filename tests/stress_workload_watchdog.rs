@@ -201,8 +201,11 @@ fn invoke_child_with_samples(
         .expect("retain native child receipt");
     fs::write(artifacts.join("child-stderr.log"), &output.stderr)
         .expect("retain child diagnostics");
-    fs::write(artifacts.join("child-status.txt"), output.status.to_string())
-        .expect("retain child exit status");
+    fs::write(
+        artifacts.join("child-status.txt"),
+        output.status.to_string(),
+    )
+    .expect("retain child exit status");
     output
 }
 
