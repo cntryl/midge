@@ -300,13 +300,16 @@ fn invoke_child_with_samples(
         command.env("RUST_LOG", "off");
     }
     // Healthy end-to-end and policy fixtures include real I/O under host
-    // contention. The deliberate no-work controls retain a one-second native
-    // deadline and must still fail with zero completed units.
+    // contention, including synchronous evidence writes. A retained macOS run
+    // exceeded three seconds despite a 423ms publication pause. Give these
+    // test-only success controls ten seconds; production settings are unchanged.
+    // Deliberate no-work controls retain a one-second native deadline and must
+    // still fail with zero completed units.
     let no_progress_timeout =
         if workload.starts_with("held_") || workload == "rejected_clients_with_disk_churn" {
             "1"
         } else {
-            "3"
+            "10"
         };
     command
         .arg("--workload")
@@ -551,7 +554,7 @@ fn assert_successful_recovery_work(output: &Output, workload: &Path) -> Value {
     let observations = recovery_observations(workload);
     assert!(
         output.status.success(),
-        "actual progressing recovery must survive the one-second watchdog; status={}, observations={observations}; receipt={receipt}; stderr={}",
+        "actual progressing recovery must survive its fixture watchdog; status={}, observations={observations}; receipt={receipt}; stderr={}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );

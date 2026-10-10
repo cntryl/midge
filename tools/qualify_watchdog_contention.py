@@ -28,6 +28,7 @@ def collect_receipts(directory):
     held = []
     unexpected = []
     publication = []
+    preparation_timeouts = []
     for path in directory.rglob("child-stdout.json"):
         if path.stat().st_size == 0:
             continue
@@ -45,7 +46,10 @@ def collect_receipts(directory):
         data = json.loads(path.read_text())
         if data.get("worker_released"):
             publication.append({"path": str(path.relative_to(directory)), **data})
-    return held, unexpected, publication
+    for path in directory.rglob("child-timeout.json"):
+        data = json.loads(path.read_text())
+        preparation_timeouts.append({"path": str(path.relative_to(directory)), **data})
+    return held, unexpected, publication, preparation_timeouts
 
 
 def main():
@@ -81,16 +85,22 @@ def main():
             started = time.monotonic()
             with (directory / "full-harness.log").open("w") as log:
                 result = subprocess.run(summary["command"], env=env, stdout=log,
-                                        stderr=subprocess.STDOUT, timeout=180)
-            held, unexpected, publication = collect_receipts(directory)
+                                        stderr=subprocess.STDOUT, timeout=300)
+            held, unexpected, publication, preparation = collect_receipts(directory)
             record = {"run": index + 1, "exit_code": result.returncode,
                       "elapsed_secs": time.monotonic() - started,
                       "held_no_progress": held, "unexpected_no_progress": unexpected,
-                      "completed_publications": publication}
+                      "completed_publications": publication, "parent_timeouts": preparation}
             summary["runs"].append(record)
             (evidence / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             print(f"run {index + 1}: exit={result.returncode}, held={len(held)}, unexpected={len(unexpected)}", flush=True)
-            if result.returncode or unexpected or len(held) < 4:
+            held_controls = {Path(item["receipt"]).parts[0].rsplit("-", 1)[0] for item in held}
+            expected_held = {prefix.rstrip("-") for prefix in ("rejected-clients-", "held-recovery-", "held-inventory-", "held-final-flush-")}
+            expected_preparation = (len(preparation) == 1
+                                    and preparation[0]["failure_kind"] == "preparation_timeout"
+                                    and preparation[0]["child_reaped"] is True
+                                    and Path(preparation[0]["path"]).parts[0].startswith("held-preparation-"))
+            if result.returncode or unexpected or held_controls != expected_held or not expected_preparation:
                 raise SystemExit("watchdog contention qualification failed; retained receipts identify the control")
     finally:
         stop.set()
