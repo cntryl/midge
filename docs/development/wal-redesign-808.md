@@ -56,8 +56,11 @@ remain to be wired into this infrastructure.
 PR stage. Multiple tests cover best-effort restart, dropped-family variants,
 and the retired cloud/local-copy regression. The latter is GREEN after #805;
 the other 13 classes reproduced RED on the baseline. Supplemental RED tests
-cover a failed allocation listing and epoch history ordered by reused IDs.
-They belong to stage 2.
+cover a failed allocation listing, epoch history ordered by reused IDs, and
+a completed lease release whose acquisition lock returns after power loss
+([#811](https://github.com/cntryl/midge/issues/811)). The registry keeps these
+three cases separate from the original audit inventory, and the runner executes
+all 20 tests. They belong to stage 2.
 
 Unresolved cases have explicit `#808 PR N` ignore reasons for this initial
 simulator stage. All must become active before final acceptance. The unlink
@@ -77,12 +80,14 @@ The second command requires GREEN even for ignored tests. Both commands
 verify that each selector executes exactly one test and require its specific
 failure marker for RED evidence, rejecting compilation or setup failures, and record source identity and dirty-source fingerprints.
 An unsupported platform is incomplete qualification, never a passing receipt.
-Use a clean immutable source revision for acceptance evidence.
+Acceptance requires a clean source revision; the runner stops if the source
+identity changes during any test. Baseline receipts also record dirty-source
+fingerprints when necessary.
 
 ## Current local evidence
 
 - Formatting and strict all-target, all-feature Clippy pass.
-- The 45 focused adapter, oracle, scheduler, and shipping-writer checks pass.
+- The original 45 focused adapter, oracle, scheduler, and shipping-writer checks pass; a further shipping-lease delayed-effect test also passes.
 - The pure object-storage scheduler campaign passes 512 seeds × 256 operations.
   This exercises provider effects and responses; it is not an engine WAL campaign.
 - `cargo machete` reports no unused dependencies.
@@ -90,17 +95,28 @@ Use a clean immutable source revision for acceptance evidence.
   baseline (242 errors on the baseline). The docs validator emits the same 463
   broken-anchor errors on both. These failures are recorded, not waived.
 - Default all-target checking and test-convention validation pass.
-- Windows CI explicitly runs the portable adapter contracts and pure scheduler
+- The Windows workflow command passes `actionlint`; GitHub CI must confirm
+  the corrected block command on the latest head. Windows CI explicitly runs the portable adapter contracts and pure scheduler
   campaign. Subdirectory views preserve portable key separators on every host.
 - The initial full serial unit run passed 2,948 tests, with one failure and 12
   ignored. Its prune fixture enabled a directory-sync fault before writer
   initialization; after the new shared adapter exposed that earlier failure,
   the fixture was corrected to inject it during pruning. The focused test is
-  GREEN, and the full serial suite is being rerun.
+  GREEN. The subsequent frozen run on `eba04f40e242149c1cf5ae18bdeef1e7bb10777b`
+  passed 2,951 library tests and 6 binary tests, with 12 ignored. Public API tests,
+  doctests, public naming checks, and `cargo package --locked` also passed.
+  Its production dead-code gate found the unused file-emptiness helper; journal
+  creation now uses that helper on its opened inode, and all 22 journal tests
+  pass. The latest source needs a fresh full qualification run.
 - Shared adapter RED/GREEN evidence also corrected simulated CAS to condition
   on provider identity, keeping size verification specific to bounded reads.
 - The registry runner matches all 17 expected classifications on clean source
   `2eb272a928e0d876d08dfbb92936a76fc425ca91`.
+- A shipping `FsLeaderStore` test proves that a predecessor release whose
+  actual I/O starts after successor acquisition cannot expire the successor.
+  Callbacks are duplicated separately from effects. This uses the existing
+  lease protocol and wall clock; engine lease injection and simulated time
+  remain pending.
 - Remaining qualification and stage 1 exit work are still in progress.
 
 ## Remaining stage 1 exit work

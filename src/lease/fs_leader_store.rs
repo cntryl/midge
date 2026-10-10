@@ -506,6 +506,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "#808 PR 2 / #811: acquisition-lock unlink is not directory-durable"]
+    fn should_allow_successor_when_power_loss_follows_completed_lease_release() {
+        // Arrange: use the shipping leader store and real durability barriers
+        // on a device whose directory entries can survive an unbarriered unlink.
+        let fs = Arc::new(crate::io::crash_fs::CrashFs::new());
+        let store = FsLeaderStore::new(fs.clone());
+        let predecessor = store.acquire_leadership("node-a").unwrap();
+        assert!(store.release_if_owner("node-a", predecessor.epoch).unwrap());
+        assert!(!fs.exists(&FsPath::new(LEADER_LOCK_FILE)).unwrap());
+
+        // Act: no process owns a lock, but the last directory barrier included
+        // the acquisition lock that was removed by the completed release.
+        fs.crash(crate::io::crash_fs::CrashMode::DiscardVolatile);
+        let successor = FsLeaderStore::new(fs.clone()).acquire_leadership("node-b");
+
+        // Assert: cleanly released ownership must remain reacquirable after
+        // power loss, and its durable epoch must never reset.
+        let successor =
+            successor.expect("completed lease release must not resurrect its acquisition lock");
+        assert!(successor.epoch > predecessor.epoch);
+    }
+
+    #[test]
     fn should_read_current_when_record_exists() {
         // Arrange
         let store = make_store();

@@ -270,4 +270,61 @@ mod tests {
         assert_eq!(recovered.read_at(0, 9).unwrap().as_ref(), b"committed");
         assert_eq!(scheduler.pending(), Vec::new());
     }
+
+    #[test]
+    fn should_preserve_successor_when_delayed_predecessor_release_effect_lands() {
+        use crate::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
+
+        // Arrange: the old release has been submitted, but its first actual
+        // storage effect has not run. Use the shipping lease implementation.
+        let fs = Arc::new(CrashFs::new());
+        let healthy = FsLeaderStore::new(fs.clone());
+        let predecessor = healthy.acquire_leadership("predecessor").unwrap();
+        let scheduler = Scheduler::manual();
+        let delayed = FsLeaderStore::new(Arc::new(ScheduledFs::new(
+            fs,
+            scheduler.clone(),
+            predecessor.epoch,
+        )));
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            finished_tx
+                .send(delayed.release_if_owner("predecessor", predecessor.epoch))
+                .unwrap();
+        });
+        let first_id = wait_for_command(&scheduler);
+        let first = scheduler.pending()[0].0.clone();
+        assert_eq!(first.kind, "open");
+        assert_eq!(first.key, ".midge_leader.lock");
+        let successor = healthy.acquire_leadership("successor").unwrap();
+
+        // Act: land the predecessor's delayed I/O after the successor's
+        // authority change, duplicating callbacks without rerunning effects.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let released = loop {
+            if let Ok(result) = finished_rx.try_recv() {
+                break result.unwrap();
+            }
+            assert!(Instant::now() < deadline, "lease worker did not finish");
+            for (command, completed) in scheduler.pending() {
+                if !completed {
+                    scheduler.apply(Action::Effect(command.id)).unwrap();
+                }
+                scheduler.apply(Action::Duplicate(command.id)).unwrap();
+                scheduler.apply(Action::Deliver(command.id)).unwrap();
+            }
+            std::thread::yield_now();
+        };
+        worker.join().unwrap();
+
+        // Assert: matching the expected holder and epoch happens after the
+        // delayed effect, so it cannot expire the successor's leader record.
+        assert!(!released);
+        assert_eq!(healthy.read_current().unwrap(), Some(successor));
+        assert_eq!(scheduler.pending(), Vec::new());
+        assert!(scheduler.trace().iter().any(|event| matches!(
+            event,
+            crate::simulation::scheduler::TraceEvent::Action(Action::Effect(id)) if *id == first_id
+        )));
+    }
 }

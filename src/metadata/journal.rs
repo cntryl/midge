@@ -476,10 +476,6 @@ fn append_record_and_marker_with_fs(
         .unwrap_or(u64::MAX)
         .saturating_add(u64::try_from(marker.len()).unwrap_or(u64::MAX));
     let journal_path = FsPath::new(JOURNAL_FILE);
-    // A missing or still-empty journal has never had its directory entry
-    // made durable, whether this append creates it or a crash left it empty.
-    let creating_journal = !fs.exists(&journal_path).map_err(FsError::into_midge)?
-        || fs.metadata(&journal_path).map_err(FsError::into_midge)?.len == 0;
     let mut file = fs
         .open(
             &journal_path,
@@ -491,6 +487,9 @@ fn append_record_and_marker_with_fs(
             },
         )
         .map_err(FsError::into_midge)?;
+    // Check the opened inode under the manifest writer lock. A newly created
+    // or still-empty journal needs its directory entry made durable too.
+    let creating_journal = file.is_empty().map_err(FsError::into_midge)?;
 
     let write_start = std::time::Instant::now();
     file.append(bytes::Bytes::from(record))
