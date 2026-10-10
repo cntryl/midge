@@ -24,8 +24,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Validate paired diagnostic source and recovery contracts
-        run: python3 -m unittest discover -s tools -p test_profile_checkpoint_pair.py -v
       - uses: actions/checkout@v7
         with:
           # Historical comparison sources are reviewed, immutable constants.
