@@ -336,6 +336,12 @@ fn should_abort_physical_history_when_child_requested() {
         .unwrap();
     } else {
         let path = case.root.join("db");
+        // Deterministic regression probe: the cloud deletion proof cannot be
+        // collected while its authoritative WAL generations are retained.
+        let _scenario = fail::FailScenario::setup();
+        if matches!(case.backend, Backend::CloudSimulated) {
+            fail::cfg("midge::cloud::defer_wal_prune_admission", "return").unwrap();
+        }
         let engine = Engine::open(options(&path, case.backend).unwrap()).unwrap();
         let cf = engine.get_column_family("default").unwrap();
         let mut tx = engine
