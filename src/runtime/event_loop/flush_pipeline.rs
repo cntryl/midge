@@ -2838,7 +2838,6 @@ mod tests {
             },
         )
         .map_err(FsError::into_midge)?;
-        sync_fs.set_sync_dir_failure(true);
         state.fs = sync_fs.clone();
         let router = Arc::new(crate::runtime::ResponseRouter::new());
         let mut event_loop = EventLoop::new(
@@ -2849,14 +2848,17 @@ mod tests {
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
 
+        let calls_before_prune = sync_fs.sync_dir_calls().len();
+        sync_fs.set_sync_dir_failure(true);
+
         // Act
         event_loop.prune_local_wal_segments_covered_by_manifest();
 
         // Assert
         assert!(event_loop.state.persistence_anomaly_detected());
         assert_eq!(
-            sync_fs.sync_dir_calls(),
-            [(
+            &sync_fs.sync_dir_calls()[calls_before_prune..],
+            &[(
                 crate::io::FsPath::new("wal"),
                 crate::io::Durability::Durable
             )]

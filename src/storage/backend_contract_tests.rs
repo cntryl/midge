@@ -736,3 +736,44 @@ fn should_echo_caller_key_when_completing_operations_through_every_storage_backe
         }
     }
 }
+
+#[test]
+fn should_apply_conditional_write_when_provider_identity_matches_despite_size_hint() {
+    // Arrange: size is a read hint; If-Match carries the provider identity.
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/identity-with-size-hint");
+        let (tx, rx) = mpsc::channel();
+        backend.write_for_test(&key, b"original".to_vec(), tx);
+        rx.recv().expect("seed write");
+        let request = || {
+            super::StorageRequest::new(
+                &key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            )
+        };
+        let (tx, rx) = mpsc::channel();
+        backend.submit_metadata_read_request(request(), tx);
+        let (_, mut identity) = rx.recv().expect("read callback").expect("metadata");
+        identity.size += 1;
+        // Act
+        let (tx, rx) = mpsc::channel();
+        backend.submit_write_request(
+            request().with_precondition(super::StoragePrecondition::IfMatch(identity)),
+            b"replacement".to_vec(),
+            tx,
+        );
+        // Assert
+        assert!(
+            matches!(
+                rx.recv().expect("write callback"),
+                StorageEvent::WriteComplete {
+                    result: StorageOutcome::Ok(()),
+                    ..
+                }
+            ),
+            "{name}: matching provider identity must be sufficient for CAS"
+        );
+    }
+}

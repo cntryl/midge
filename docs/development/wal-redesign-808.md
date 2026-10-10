@@ -82,14 +82,24 @@ Use a clean immutable source revision for acceptance evidence.
 ## Current local evidence
 
 - Formatting and strict all-target, all-feature Clippy pass.
-- The 43 focused adapter, oracle, scheduler, and shipping-writer checks pass.
+- The 44 focused adapter, oracle, scheduler, and shipping-writer checks pass.
 - The pure object-storage scheduler campaign passes 512 seeds × 256 operations.
   This exercises provider effects and responses; it is not an engine WAL campaign.
 - `cargo machete` reports no unused dependencies.
 - The invariant-reference validator fails on both this branch and unchanged
   baseline (242 errors on the baseline). The docs validator emits the same 463
   broken-anchor errors on both. These failures are recorded, not waived.
-- The full serial unit suite and remaining qualification are still in progress.
+- Default all-target checking and test-convention validation pass.
+- The initial full serial unit run passed 2,948 tests, with one failure and 12
+  ignored. Its prune fixture enabled a directory-sync fault before writer
+  initialization; after the new shared adapter exposed that earlier failure,
+  the fixture was corrected to inject it during pruning. The focused test is
+  GREEN, and the full serial suite is being rerun.
+- Shared adapter RED/GREEN evidence also corrected simulated CAS to condition
+  on provider identity, keeping size verification specific to bounded reads.
+- The registry runner matches all 17 expected classifications on clean source
+  `2eb272a928e0d876d08dfbb92936a76fc425ca91`.
+- Remaining qualification and stage 1 exit work are still in progress.
 
 ## Remaining stage 1 exit work
 

@@ -155,9 +155,19 @@ fn check_match(
     let satisfied = match condition {
         StoragePrecondition::None => true,
         StoragePrecondition::IfAbsent => object.is_none(),
-        StoragePrecondition::IfMatch(expected) => {
-            object.is_some_and(|object| expected.same_version(&object.metadata))
-        }
+        StoragePrecondition::IfMatch(expected) => object.is_some_and(|object| {
+            if let Some(generation) = expected
+                .generation
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                object.metadata.generation.as_deref().map(str::trim) == Some(generation)
+            } else {
+                let etag = expected.etag.trim().trim_matches('"');
+                !etag.is_empty() && etag == object.metadata.etag.trim().trim_matches('"')
+            }
+        }),
     };
     if satisfied {
         Ok(())
@@ -276,7 +286,7 @@ impl StorageBackend for ObjectStore {
     ) {
         self.submit("range", request, callback, move |state, request| {
             check_budget(request)?;
-            let StoragePrecondition::IfMatch(_) = &request.precondition else {
+            let StoragePrecondition::IfMatch(expected) = &request.precondition else {
                 return Err(StorageError::protocol(
                     "range read requires object identity",
                 ));
@@ -285,7 +295,11 @@ impl StorageBackend for ObjectStore {
                 .objects
                 .get(&request.key)
                 .ok_or_else(|| StorageError::not_found(&request.key))?;
-            check_match(Some(object), &request.precondition)?;
+            if !expected.same_version(&object.metadata) {
+                return Err(StorageError::precondition_failed(
+                    "simulated range metadata changed",
+                ));
+            }
             let start = usize::try_from(range.start)
                 .map_err(|_| StorageError::protocol("range overflow"))?;
             let end =
