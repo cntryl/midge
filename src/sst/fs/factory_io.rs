@@ -25,6 +25,8 @@ pub struct FsSstFactoryIo {
     compression_policy: CompressionPolicy,
     scratch_outstanding: Arc<std::sync::atomic::AtomicUsize>,
     compaction_scratch_directory: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    legacy_size_preflights: bool,
 }
 
 impl FsSstFactoryIo {
@@ -53,6 +55,8 @@ impl FsSstFactoryIo {
             compression_policy: CompressionPolicy::default(),
             scratch_outstanding: Arc::default(),
             compaction_scratch_directory: None,
+            #[cfg(test)]
+            legacy_size_preflights: false,
         }
     }
 
@@ -61,6 +65,12 @@ impl FsSstFactoryIo {
         directory: std::path::PathBuf,
     ) -> Self {
         self.compaction_scratch_directory = Some(directory);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_legacy_size_preflights_for_test(mut self) -> Self {
+        self.legacy_size_preflights = true;
         self
     }
 
@@ -150,6 +160,7 @@ struct FsSstWriter {
     fs: Arc<dyn Fs>,
     entries: Vec<PendingEntry>,
     range_tombstones: Vec<RangeTombstone>,
+    range_tombstone_size_upper_bound: usize,
     block_size: usize,
     compression_policy: CompressionPolicy,
     /// Activated only by `add_sorted_with_meta`, which is the compaction
@@ -161,6 +172,8 @@ struct FsSstWriter {
     /// Only budgeted compaction writers may rewrite existing entries beyond
     /// new-write admission limits. Oversized output blocks stay uncompressed.
     preserve_legacy_entries: bool,
+    #[cfg(test)]
+    legacy_size_preflights: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -223,17 +236,19 @@ impl DynSstWriter for FsSstWriter {
     }
 
     fn encoded_size_upper_bound(&self) -> Option<usize> {
+        #[cfg(test)]
+        if self.legacy_size_preflights {
+            return self.legacy_encoded_size_upper_bound();
+        }
         // A trie has at most two nodes per boundary key; each node and edge
         // uses fewer than 64 bytes of integer framing. Key payloads also
         // appear in the block index and the two metadata bounds. The factors
         // below allow their copies plus worst-case fixed-compressor growth.
-        let ranges = self.range_tombstones.iter().fold(0usize, |total, range| {
-            total.saturating_add(
-                self.additional_range_tombstone_size_upper_bound(&range.start, &range.end)
-                    .unwrap_or(usize::MAX),
-            )
-        });
-        let fixed = ranges.saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
+        #[cfg(test)]
+        size_preflight_tests::record_work(1);
+        let fixed = self
+            .range_tombstone_size_upper_bound
+            .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
                 total.saturating_add(crate::memtable::size_bound::point_bytes(
@@ -243,20 +258,14 @@ impl DynSstWriter for FsSstWriter {
             }));
         };
         let pipeline = &streaming.pipeline;
-        let index = pipeline
-            .block_index_entries
-            .iter()
-            .fold(0usize, |total, (key, _)| {
-                total
-                    .saturating_add(256)
-                    .saturating_add(key.len().saturating_mul(8))
-            });
+        #[cfg(test)]
+        size_preflight_tests::record_work(1);
+        let index = pipeline.block_index_size_upper_bound;
         let current_index = pipeline.current_first_key.as_ref().map_or(0, |key| {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
         let current_bloom =
-            crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
-                .size_bytes();
+            crate::sst::bloom::BloomWriter::default_size_bytes(pipeline.current_block_keys.len());
         let key_bounds = pipeline
             .smallest_key
             .as_ref()
@@ -284,25 +293,28 @@ impl DynSstWriter for FsSstWriter {
     }
 
     fn estimated_size_bytes(&self) -> usize {
+        #[cfg(test)]
+        if self.legacy_size_preflights {
+            return self.legacy_estimated_size_bytes();
+        }
         if let Some(streaming) = &self.streaming {
             let pipeline = &streaming.pipeline;
             let persisted =
                 usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX)).unwrap_or(usize::MAX);
-            let index = pipeline.block_index_entries.iter().fold(
-                pipeline
-                    .block_index_entries
-                    .len()
-                    .saturating_mul(
-                        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
-                    ),
-                |total, (key, _)| total.saturating_add(key.len()),
-            );
+            #[cfg(test)]
+            size_preflight_tests::record_work(1);
+            let index = pipeline
+                .block_index_entries
+                .len()
+                .saturating_mul(std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>())
+                .saturating_add(pipeline.block_index_key_bytes);
             let current_bloom = if pipeline.current_block_keys.is_empty() {
                 0
             } else {
-                crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
-                    .size_bytes()
-                    .saturating_add(13)
+                crate::sst::bloom::BloomWriter::default_size_bytes(
+                    pipeline.current_block_keys.len(),
+                )
+                .saturating_add(13)
             };
             let bloom = pipeline
                 .block_bloom
@@ -415,7 +427,13 @@ impl DynSstWriter for FsSstWriter {
         }
         let retained_bytes = std::mem::size_of::<RangeTombstone>()
             .saturating_add(start.len())
-            .saturating_add(end.len());
+            .saturating_add(end.len())
+            // Charge the range total when its first retained range is admitted.
+            .saturating_add(if self.range_tombstones.is_empty() {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            });
         let reservation = self
             .budget
             .as_ref()
@@ -423,6 +441,10 @@ impl DynSstWriter for FsSstWriter {
             .transpose()?;
         self.range_tombstones
             .push(RangeTombstone::new(start.to_vec(), end.to_vec(), seq));
+        self.range_tombstone_size_upper_bound =
+            self.range_tombstone_size_upper_bound.saturating_add(
+                crate::memtable::size_bound::range_bytes(start.len(), end.len()),
+            );
         if let Some(reservation) = reservation {
             self.range_tombstone_reservations.push(reservation);
         }
@@ -440,12 +462,10 @@ impl DynSstWriter for FsSstWriter {
             fs,
             entries,
             range_tombstones,
-            block_size: _,
             compression_policy,
             streaming,
-            budget: _,
             range_tombstone_reservations: _range_tombstone_reservations,
-            preserve_legacy_entries: _,
+            ..
         } = *self;
         debug_assert!(entries.is_empty());
         let scratch = Self::finish_streaming(
@@ -525,6 +545,10 @@ impl SstFactory for FsSstFactoryIo {
             self.compaction_scratch_directory.as_deref(),
         )?);
         writer.preserve_legacy_entries = true;
+        #[cfg(test)]
+        {
+            writer.legacy_size_preflights = self.legacy_size_preflights;
+        }
         Ok(Box::new(writer))
     }
 
@@ -547,3 +571,6 @@ mod sink;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod size_preflight_tests;

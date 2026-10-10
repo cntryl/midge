@@ -192,7 +192,13 @@ impl BlockSink for ScratchBlockSink {
                         std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
                     )
             })
-            .saturating_add(key_count.saturating_mul(16));
+            .saturating_add(key_count.saturating_mul(16))
+            // The first retained index entry also owns the two size totals.
+            .saturating_add(if self.persistent_reservations.is_empty() {
+                2 * std::mem::size_of::<usize>()
+            } else {
+                0
+            });
         let persistent = self
             .budget
             .as_ref()

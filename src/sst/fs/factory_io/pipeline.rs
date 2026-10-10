@@ -22,6 +22,8 @@ use std::sync::Arc;
 /// Mutable state shared by both writer entry paths before blocks are emitted.
 pub(super) struct BlockPipeline {
     pub(super) block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
+    pub(super) block_index_key_bytes: usize,
+    pub(super) block_index_size_upper_bound: usize,
     key_profiler: KeyStructureProfiler,
     pub(super) current_block: Vec<u8>,
     pub(super) current_block_keys: Vec<Vec<u8>>,
@@ -38,6 +40,8 @@ impl BlockPipeline {
     pub(super) fn new() -> Self {
         Self {
             block_index_entries: Vec::new(),
+            block_index_key_bytes: 0,
+            block_index_size_upper_bound: 0,
             key_profiler: KeyStructureProfiler::new(),
             current_block: Vec::new(),
             current_block_keys: Vec::new(),
@@ -132,6 +136,11 @@ impl BlockPipeline {
         )?;
         let handle = Self::append_block(sink, &self.current_block, compression_policy)?;
         if let Some(first_key) = self.current_first_key.take() {
+            self.block_index_key_bytes = self.block_index_key_bytes.saturating_add(first_key.len());
+            self.block_index_size_upper_bound = self
+                .block_index_size_upper_bound
+                .saturating_add(256)
+                .saturating_add(first_key.len().saturating_mul(8));
             self.block_index_entries.push((first_key, handle));
         }
         let mut bloom = BloomWriter::with_defaults(self.current_block_keys.len().max(1));
@@ -255,12 +264,15 @@ impl FsSstWriter {
             fs,
             entries: Vec::new(),
             range_tombstones: Vec::new(),
+            range_tombstone_size_upper_bound: 0,
             block_size,
             compression_policy,
             streaming: None,
             budget,
             range_tombstone_reservations: Vec::new(),
             preserve_legacy_entries: false,
+            #[cfg(test)]
+            legacy_size_preflights: false,
         }
     }
 

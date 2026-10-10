@@ -213,6 +213,126 @@ mod tests {
     use crate::sst::traits::SstFactory;
     use tempfile::tempdir;
 
+    fn size_preflight_policies() -> [crate::codec::CompressionPolicy; 6] {
+        use crate::codec::{CompressionAlgo, CompressionPolicy};
+        [
+            CompressionPolicy::None,
+            CompressionPolicy::Fixed(CompressionAlgo::None),
+            CompressionPolicy::Fixed(CompressionAlgo::Lz4),
+            CompressionPolicy::Fixed(CompressionAlgo::Zstd3),
+            CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
+            CompressionPolicy::default(),
+        ]
+    }
+
+    #[test]
+    fn should_preserve_partition_results_when_size_preflights_use_cached_totals() -> MidgeResult<()>
+    {
+        use crate::codec::CompressionPolicy;
+        use crate::common::resource_budget::ResourceBudget;
+        use std::sync::Arc;
+
+        for policy in size_preflight_policies() {
+            // Arrange: the real compactor reads overlapping versions, deletes, TTLs and ranges.
+            let dir = tempdir()?;
+            let fs: Arc<dyn crate::io::Fs> =
+                Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
+            let input_factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096)
+                .with_compression_policy(policy.clone());
+            let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
+            plan.target_sst_size = 32 * 1024;
+            plan.snapshot_horizon = Some(1);
+            for sequence in [5, 3] {
+                let name = format!("input-{sequence}.sst");
+                let mut writer = input_factory.create()?;
+                for index in 0..128_u32 {
+                    let key = index.to_be_bytes();
+                    let deleted = index.is_multiple_of(11) && sequence == 5;
+                    writer.add_with_meta(
+                        &key,
+                        (!deleted).then_some([b'v'; 1024].as_slice()),
+                        sequence,
+                        if deleted {
+                            EntryType::Delete
+                        } else {
+                            EntryType::Put
+                        },
+                        Some(u64::MAX),
+                    )?;
+                    if index.is_multiple_of(8) {
+                        writer.add_range_tombstone(&key, &(index + 2).to_be_bytes(), 2)?;
+                    }
+                }
+                writer.finish_to_path(&dir.path().join(&name))?;
+                plan.add_test_source(name);
+            }
+            for limit in [None, Some(0), Some(64 * 1024), Some(128 * 1024)] {
+                let mut results = Vec::new();
+                for legacy in [false, true] {
+                    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096)
+                        .with_compression_policy(policy.clone());
+                    let factory = if legacy {
+                        factory.with_legacy_size_preflights_for_test()
+                    } else {
+                        factory
+                    };
+                    let budget = ResourceBudget::new(plan.compaction_memory_limit);
+                    // Act: only the sizing formulas differ; the executor and writer are real.
+                    let result = execute_compaction_at_target(
+                        &plan,
+                        CompactionResources {
+                            // A bounded case must reach the hard limit before its soft target.
+                            target_sst_size: limit.map_or(plan.target_sst_size, |_| 256 * 1024),
+                            source_fan_in: 8,
+                            budget: budget.clone(),
+                        },
+                        &factory,
+                        dir.path(),
+                        None,
+                        None,
+                        limit,
+                    );
+                    let recorded = match result {
+                        Ok(outputs) => {
+                            if policy == CompressionPolicy::None {
+                                assert!(outputs.len() > 1, "exercise actual soft or hard rollover");
+                            }
+                            let mut bytes = Vec::new();
+                            for output in outputs {
+                                let path = dir.path().join(output);
+                                let data = std::fs::read(&path)?;
+                                if let Some(limit) = limit {
+                                    assert!(data.len() <= limit);
+                                }
+                                bytes.push(data);
+                                std::fs::remove_file(path)?;
+                            }
+                            Ok(bytes)
+                        }
+                        Err(error) => {
+                            assert_eq!(
+                                limit,
+                                Some(0),
+                                "positive staging limits must allow rollover"
+                            );
+                            assert!(matches!(error, MidgeError::ResourceLimit(_)));
+                            Err(error.to_string())
+                        }
+                    };
+                    // Assert: include complete release and scratch cleanup on success and failure.
+                    assert_eq!(budget.used(), 0);
+                    assert!(factory.compaction_scratch_cleanup_verified());
+                    results.push(recorded);
+                }
+                assert_eq!(
+                    results[0], results[1],
+                    "policy={policy:?}, staging_limit={limit:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn should_merge_repair_component_above_fan_in_without_losing_tombstone_or_ttl(
     ) -> MidgeResult<()> {

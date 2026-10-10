@@ -86,6 +86,11 @@ impl BloomWriter {
         Self::new(estimated_keys, 0.01)
     }
 
+    /// Size of the default bit vector without constructing a filter or hashes.
+    pub(crate) fn default_size_bytes(estimated_keys: usize) -> usize {
+        Self::calculate_bit_size(estimated_keys, 0.01).div_ceil(8)
+    }
+
     /// Calculate optimal k: `k_opt` = round((m/n) * ln(2)), clamped to [1, 8]
     fn calculate_optimal_k(num_bits: usize, estimated_keys: usize) -> u8 {
         if estimated_keys == 0 || num_bits == 0 {
