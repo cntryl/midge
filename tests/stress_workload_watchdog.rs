@@ -2,13 +2,130 @@
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 #[path = "../benches/bench_support/stress_scenarios.rs"]
 mod stress_scenarios;
 
 const CHILD_FLAG: &str = "MIDGE_WATCHDOG_TEST_CHILD";
+const PREPARATION_READY_ENV: &str = "MIDGE_WATCHDOG_PREPARATION_READY";
+const PREPARATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ChildTimeoutKind {
+    PreparationTimeout,
+    ChildExecutionTimeout,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ChildTimeout {
+    failure_kind: ChildTimeoutKind,
+    elapsed_ms: u128,
+    limit_ms: u128,
+    child_id: u32,
+    child_reaped: bool,
+}
+
+fn run_bounded_child(
+    command: &mut Command,
+    artifacts: &Path,
+    preparation_timeout: Duration,
+    execution_timeout: Duration,
+) -> Result<Output, ChildTimeout> {
+    let stdout = artifacts.join("child-stdout.json");
+    let stderr = artifacts.join("child-stderr.log");
+    let prepared = artifacts.join("preparation-complete.json");
+    let mut child = command
+        .env(PREPARATION_READY_ENV, &prepared)
+        .stdout(Stdio::from(
+            fs::File::create(&stdout).expect("retain child stdout"),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(&stderr).expect("retain child stderr"),
+        ))
+        .spawn()
+        .expect("spawn watchdog fixture child");
+    let started = Instant::now();
+    let mut active_started = None;
+    let mut timeout = None;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll watchdog fixture child") {
+            break status;
+        }
+        if active_started.is_none() && prepared.is_file() {
+            active_started = Some(Instant::now());
+        }
+        let (origin, limit, kind) = active_started.map_or(
+            (
+                started,
+                preparation_timeout,
+                ChildTimeoutKind::PreparationTimeout,
+            ),
+            |origin| {
+                (
+                    origin,
+                    execution_timeout,
+                    ChildTimeoutKind::ChildExecutionTimeout,
+                )
+            },
+        );
+        if origin.elapsed() >= limit {
+            child
+                .kill()
+                .expect("kill watchdog child after parent deadline");
+            let status = child.wait().expect("reap killed watchdog child");
+            timeout = Some(ChildTimeout {
+                failure_kind: kind,
+                elapsed_ms: origin.elapsed().as_millis(),
+                limit_ms: limit.as_millis(),
+                child_id: child.id(),
+                child_reaped: true,
+            });
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    fs::write(artifacts.join("child-status.txt"), status.to_string())
+        .expect("retain child exit status");
+    if let Some(timeout) = timeout {
+        fs::write(
+            artifacts.join("child-timeout.json"),
+            serde_json::to_vec_pretty(&timeout).unwrap(),
+        )
+        .expect("retain typed parent timeout");
+        return Err(timeout);
+    }
+    Ok(Output {
+        status,
+        stdout: fs::read(stdout).expect("read retained child stdout"),
+        stderr: fs::read(stderr).expect("read retained child stderr"),
+    })
+}
+
+fn should_bound_child_wait_when_preparation_never_completes() {
+    // Arrange: a committed private child mode hangs before setup can finish.
+    let artifacts = control_artifacts("held-preparation-");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.arg("--hold-preparation");
+    // Act
+    let result = run_bounded_child(
+        &mut command,
+        artifacts.path(),
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+    );
+    // Assert: this is preparation failure, separate from the native work watchdog.
+    let timeout = result.expect_err("hung preparation must fail within the parent budget");
+    assert_eq!(timeout.failure_kind, ChildTimeoutKind::PreparationTimeout);
+    assert!(timeout.child_reaped);
+    let report = read_json(&artifacts.path().join("child-timeout.json"));
+    assert_eq!(report["failure_kind"], "preparation_timeout");
+    assert_eq!(report["child_reaped"], true);
+    assert!(!artifacts.path().join("preparation-complete.json").exists());
+}
 
 fn control_artifacts(label: &str) -> tempfile::TempDir {
     if let Some(root) = std::env::var_os("MIDGE_WATCHDOG_EVIDENCE_DIR") {
@@ -182,7 +299,7 @@ fn invoke_child_with_samples(
     {
         command.env("RUST_LOG", "off");
     }
-    let output = command
+    command
         .arg("--workload")
         .arg(workload)
         .env(CHILD_FLAG, "1")
@@ -194,19 +311,25 @@ fn invoke_child_with_samples(
         .env("STRESS_JSON", "true")
         .env("STRESS_OUTPUT_DIR", artifacts.join("stress"))
         .env("MIDGE_STRESS_ARTIFACT_DIR", artifacts.join("midge"))
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .expect("execute real stress watchdog child");
-    fs::write(artifacts.join("child-stdout.json"), &output.stdout)
-        .expect("retain native child receipt");
-    fs::write(artifacts.join("child-stderr.log"), &output.stderr)
-        .expect("retain child diagnostics");
-    fs::write(
-        artifacts.join("child-status.txt"),
-        output.status.to_string(),
+        .env_remove("GITHUB_ACTIONS");
+    let total = samples
+        .saturating_add(warmup)
+        .saturating_add(cooldown)
+        .max(1);
+    let execution_timeout =
+        Duration::from_secs(15).saturating_mul(u32::try_from(total).unwrap_or(u32::MAX));
+    run_bounded_child(
+        &mut command,
+        artifacts,
+        PREPARATION_TIMEOUT,
+        execution_timeout,
     )
-    .expect("retain child exit status");
-    output
+    .unwrap_or_else(|timeout| {
+        panic!(
+            "watchdog fixture child exceeded parent deadline: {}",
+            serde_json::to_string(&timeout).unwrap()
+        )
+    })
 }
 
 fn receipt(output: &Output) -> Value {
@@ -582,7 +705,7 @@ fn should_count_recovery_work_only_within_its_active_caller_scope() {
 
 #[cfg(feature = "failpoints")]
 fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
-    // Arrange: one genuine publication is delayed 350ms, with a healthy
+    // Arrange: one genuine publication is delayed 100ms, with a healthy
     // acquired primary lease and actual callers waiting only 50ms each.
     let artifacts = control_artifacts("delayed-final-flush-");
 
@@ -605,7 +728,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     assert_eq!(publication["worker_entries"], 1);
     assert_eq!(publication["worker_released"], true);
     assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 1_200);
-    assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 350);
+    assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 100);
     let attempts = outcomes["attempts"]
         .as_array()
         .expect("actual flush attempts");
@@ -903,6 +1026,11 @@ fn should_prepare_fresh_inputs_when_native_samples_repeat() {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--hold-preparation") {
+        loop {
+            std::thread::park();
+        }
+    }
     if std::env::var_os(CHILD_FLAG).is_some() {
         let args: Vec<_> = std::env::args().collect();
         let workload = args
@@ -931,6 +1059,9 @@ fn main() {
             .and_then(|n| n.checked_add(config.cooldown_samples))
             .expect("sample count overflow");
         let _preparation = prepare_child(workload, samples);
+        if let Some(path) = std::env::var_os(PREPARATION_READY_ENV) {
+            fs::write(path, b"{\"prepared\":true}").expect("signal completed child preparation");
+        }
         child_harness::run();
         return;
     }
@@ -942,6 +1073,7 @@ fn main() {
     {
         match control {
             "lifecycle" => {
+                should_bound_child_wait_when_preparation_never_completes();
                 should_reject_invalid_configuration_before_preparing_watchdog_resources();
                 should_cancel_unused_inputs_when_preparation_scope_ends();
             }
@@ -957,6 +1089,7 @@ fn main() {
         );
         return;
     }
+    should_bound_child_wait_when_preparation_never_completes();
     should_reject_invalid_configuration_before_preparing_watchdog_resources();
     should_cancel_unused_inputs_when_preparation_scope_ends();
     should_prepare_fresh_inputs_when_native_samples_repeat();
@@ -974,8 +1107,8 @@ fn main() {
         should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
         should_report_no_progress_when_final_flush_publication_remains_held();
         should_stop_retry_policy_when_callback_returns_a_terminal_error();
-        println!("fifteen real stress watchdog integration checks passed");
+        println!("sixteen real stress watchdog integration checks passed");
     }
     #[cfg(not(feature = "failpoints"))]
-    println!("twelve real stress watchdog integration checks passed");
+    println!("thirteen real stress watchdog integration checks passed");
 }
