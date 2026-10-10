@@ -141,6 +141,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: cargo test --lib io::real::tests --all-features
 
+      - name: Test portable crash adapters on Windows
+        if: runner.os == 'Windows'
+        run: cargo test --lib --all-features -- io::crash_fs:: io::conformance_tests:: io::subdirectory:: simulation:: storage::backend_contract_tests:: --test-threads=1
+
       - name: Test cloud WAL salvage on Windows
         if: matrix.os == 'windows-latest'
         run: cargo test --lib streaming_wal_plan::tests --all-features

@@ -44,7 +44,17 @@ impl Subdirectory {
         {
             return Err(FsError::Io("path escapes filesystem view".into()));
         }
-        Ok(FsPath::new(self.prefix.join(relative).to_string_lossy()))
+        // FsPath is a portable key space. PathBuf's display separator changes
+        // on Windows, but in-memory adapters use '/' on every host.
+        let joined = self.prefix.join(relative);
+        let parts: Vec<_> = joined
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_string_lossy()),
+                _ => None,
+            })
+            .collect();
+        Ok(FsPath::new(parts.join("/")))
     }
 }
 
@@ -170,5 +180,34 @@ mod tests {
         assert!(view
             .exists(&FsPath::new(root.path().join("outside").to_string_lossy()))
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod portable_key_tests {
+    use super::*;
+    use crate::io::{MockFs, OpenMode};
+    use bytes::Bytes;
+
+    #[test]
+    fn should_address_portable_keys_when_subdirectory_wraps_memory_storage() {
+        // Arrange
+        let fs = Arc::new(MockFs::new());
+        let view = subdirectory(fs.clone(), "wal");
+        // Act
+        let mut file = view
+            .open(
+                &FsPath::new("segment"),
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        file.append(Bytes::from_static(b"history")).unwrap();
+        // Assert
+        assert_eq!(fs.get_file("wal/segment"), Some(b"history".to_vec()));
     }
 }

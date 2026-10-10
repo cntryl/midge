@@ -82,7 +82,7 @@ Use a clean immutable source revision for acceptance evidence.
 ## Current local evidence
 
 - Formatting and strict all-target, all-feature Clippy pass.
-- The 44 focused adapter, oracle, scheduler, and shipping-writer checks pass.
+- The 45 focused adapter, oracle, scheduler, and shipping-writer checks pass.
 - The pure object-storage scheduler campaign passes 512 seeds × 256 operations.
   This exercises provider effects and responses; it is not an engine WAL campaign.
 - `cargo machete` reports no unused dependencies.
@@ -90,6 +90,8 @@ Use a clean immutable source revision for acceptance evidence.
   baseline (242 errors on the baseline). The docs validator emits the same 463
   broken-anchor errors on both. These failures are recorded, not waived.
 - Default all-target checking and test-convention validation pass.
+- Windows CI explicitly runs the portable adapter contracts and pure scheduler
+  campaign. Subdirectory views preserve portable key separators on every host.
 - The initial full serial unit run passed 2,948 tests, with one failure and 12
   ignored. Its prune fixture enabled a directory-sync fault before writer
   initialization; after the new shared adapter exposed that earlier failure,

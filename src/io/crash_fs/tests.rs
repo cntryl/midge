@@ -155,14 +155,21 @@ fn should_reclaim_unlinked_bytes_when_directory_barrier_is_complete_at_last_hand
 #[test]
 fn should_retain_unbarriered_bytes_when_only_process_fails() {
     // Arrange
-    let fs = CrashFs::for_root("/model/database");
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("unmaterialized/model-database");
+    let fs = CrashFs::for_root(root.clone());
     let mut file = fs
-        .open(&FsPath::new("/model/database/wal"), CREATE)
+        .open(&FsPath::new(root.join("wal").to_string_lossy()), CREATE)
         .unwrap();
     file.append(Bytes::from_static(b"buffered")).unwrap();
     // Act
     fs.crash(CrashMode::PreserveVolatile);
     // Assert
     assert_eq!(bytes(&fs, "wal"), b"buffered");
-    assert!(fs.exists(&FsPath::new("/outside/wal")).is_err());
+    assert!(fs
+        .exists(&FsPath::new(
+            root.parent().unwrap().join("outside/wal").to_string_lossy()
+        ))
+        .is_err());
 }
