@@ -258,3 +258,24 @@ fn should_preserve_valid_prefix_given_truncated_wal_tail_when_recovering() {
 
 The [#808 regression inventory](wal-redesign-808.md) documents the named WAL
 audit baseline runner, its CI partitions, and its acceptance boundary.
+
+## Watchdog contention qualification
+
+The Cargo-native watchdog executable can repeat its complete suite while CPU
+contenders run in the parent process. Use a clean, committed checkout and retain
+the evidence outside it:
+
+```sh
+MIDGE_WATCHDOG_CPU_WORKERS=4 MIDGE_WATCHDOG_REPEATS=3 \
+MIDGE_WATCHDOG_EVIDENCE_DIR=/tmp/midge-watchdog-contention \
+cargo test --locked --all-features --test stress_workload_watchdog
+```
+
+Each repeat runs all 20 checks, including fresh warmup/measured/cooldown inputs,
+four deliberate no-progress failures with zero completed units, and independently
+bounded preparation and execution children. Receipts and child logs are grouped
+under `run-01`, `run-02`, and `run-03`. CPU contenders stop and join on exit.
+Healthy recovery runs must exceed the actual three-second native idle budget;
+held and progressing controls use that same budget. These fixtures qualify
+watchdog signaling and supervision under CPU contention, not disk latency or
+engine capacity. Production watchdog settings remain unchanged.

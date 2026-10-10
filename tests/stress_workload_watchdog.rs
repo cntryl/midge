@@ -2,13 +2,169 @@
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 #[allow(dead_code)]
 #[path = "../benches/bench_support/stress_scenarios.rs"]
 mod stress_scenarios;
 
 const CHILD_FLAG: &str = "MIDGE_WATCHDOG_TEST_CHILD";
+const PREPARATION_READY_ENV: &str = "MIDGE_WATCHDOG_PREPARATION_READY";
+const PREPARATION_TIMEOUT: Duration = Duration::from_secs(30);
+const NO_PROGRESS_TIMEOUT_SECS: u64 = 3;
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ChildTimeoutKind {
+    PreparationTimeout,
+    ChildExecutionTimeout,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ChildTimeout {
+    failure_kind: ChildTimeoutKind,
+    elapsed_ms: u128,
+    limit_ms: u128,
+    child_id: u32,
+    child_reaped: bool,
+}
+
+fn run_bounded_child(
+    command: &mut Command,
+    artifacts: &Path,
+    preparation_timeout: Duration,
+    execution_timeout: Duration,
+) -> Result<Output, ChildTimeout> {
+    let stdout = artifacts.join("child-stdout.json");
+    let stderr = artifacts.join("child-stderr.log");
+    let prepared = artifacts.join("preparation-complete.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .env(PREPARATION_READY_ENV, &prepared)
+        .stdout(Stdio::from(
+            fs::File::create(&stdout).expect("retain child stdout"),
+        ))
+        .stderr(Stdio::from(
+            fs::File::create(&stderr).expect("retain child stderr"),
+        ))
+        .spawn()
+        .expect("spawn watchdog fixture child");
+    let started = Instant::now();
+    let mut active_started = None;
+    let mut timeout = None;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll watchdog fixture child") {
+            break status;
+        }
+        if active_started.is_none() && prepared.is_file() {
+            active_started = Some(Instant::now());
+        }
+        let (origin, limit, kind) = active_started.map_or(
+            (
+                started,
+                preparation_timeout,
+                ChildTimeoutKind::PreparationTimeout,
+            ),
+            |origin| {
+                (
+                    origin,
+                    execution_timeout,
+                    ChildTimeoutKind::ChildExecutionTimeout,
+                )
+            },
+        );
+        if origin.elapsed() >= limit {
+            #[cfg(unix)]
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", child.id())])
+                .status();
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                .status();
+            let _ = child.kill();
+            let status = child.wait().expect("reap killed watchdog child");
+            timeout = Some(ChildTimeout {
+                failure_kind: kind,
+                elapsed_ms: origin.elapsed().as_millis(),
+                limit_ms: limit.as_millis(),
+                child_id: child.id(),
+                child_reaped: true,
+            });
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    fs::write(artifacts.join("child-status.txt"), status.to_string())
+        .expect("retain child exit status");
+    if let Some(timeout) = timeout {
+        fs::write(
+            artifacts.join("child-timeout.json"),
+            serde_json::to_vec_pretty(&timeout).unwrap(),
+        )
+        .expect("retain typed parent timeout");
+        return Err(timeout);
+    }
+    Ok(Output {
+        status,
+        stdout: fs::read(stdout).expect("read retained child stdout"),
+        stderr: fs::read(stderr).expect("read retained child stderr"),
+    })
+}
+
+fn should_bound_child_wait_when_preparation_never_completes() {
+    // Arrange: a committed private child mode hangs before setup can finish.
+    let artifacts = control_artifacts("held-preparation-");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.arg("--hold-preparation");
+    // Act
+    let result = run_bounded_child(
+        &mut command,
+        artifacts.path(),
+        Duration::from_millis(100),
+        Duration::from_secs(1),
+    );
+    // Assert: this is preparation failure, separate from the native work watchdog.
+    let timeout = result.expect_err("hung preparation must fail within the parent budget");
+    assert_eq!(timeout.failure_kind, ChildTimeoutKind::PreparationTimeout);
+    assert!(timeout.child_reaped);
+    assert!((100..5_000).contains(&timeout.elapsed_ms));
+    let report = read_json(&artifacts.path().join("child-timeout.json"));
+    assert_eq!(report["failure_kind"], "preparation_timeout");
+    assert_eq!(report["child_reaped"], true);
+    assert!(!artifacts.path().join("preparation-complete.json").exists());
+}
+
+fn should_bound_child_wait_when_execution_never_completes() {
+    // Arrange: this private child signals preparation and then parks forever.
+    let artifacts = control_artifacts("held-execution-");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.arg("--hold-execution");
+    // Act
+    let result = run_bounded_child(
+        &mut command,
+        artifacts.path(),
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    );
+    // Assert: active execution is independently bounded and the child reaped.
+    let timeout = result.expect_err("hung execution must fail within the parent budget");
+    assert_eq!(
+        timeout.failure_kind,
+        ChildTimeoutKind::ChildExecutionTimeout
+    );
+    assert!(timeout.child_reaped);
+    assert!((100..5_000).contains(&timeout.elapsed_ms));
+    let report = read_json(&artifacts.path().join("child-timeout.json"));
+    assert_eq!(report["failure_kind"], "child_execution_timeout");
+    assert_eq!(report["child_reaped"], true);
+    assert!(artifacts.path().join("preparation-complete.json").is_file());
+}
 
 fn control_artifacts(label: &str) -> tempfile::TempDir {
     if let Some(root) = std::env::var_os("MIDGE_WATCHDOG_EVIDENCE_DIR") {
@@ -42,7 +198,7 @@ fn prepare_child(
     };
     if let Some(mode) = mode {
         let delay = if mode == Mode::MetadataInventory {
-            Duration::from_millis(1_200)
+            Duration::from_millis(3_200)
         } else {
             Duration::ZERO
         };
@@ -63,7 +219,7 @@ fn prepare_child(
             let delay = if kind == Kind::Held {
                 Duration::ZERO
             } else {
-                Duration::from_millis(1_200)
+                Duration::from_millis(3_200)
             };
             scopes.push(Box::new(
                 stress_scenarios::prepare_final_flush_watchdog_fixture(kind, samples, delay),
@@ -182,7 +338,10 @@ fn invoke_child_with_samples(
     {
         command.env("RUST_LOG", "off");
     }
-    let output = command
+    // Pair progressing and deliberately held controls at the same budget.
+    // Healthy recovery and client work must outlast it; end-only progress must
+    // not pass. These test settings do not change production configuration.
+    command
         .arg("--workload")
         .arg(workload)
         .env(CHILD_FLAG, "1")
@@ -190,22 +349,40 @@ fn invoke_child_with_samples(
         .env("STRESS_SAMPLES", samples.to_string())
         .env("STRESS_WARMUP_SAMPLES", warmup.to_string())
         .env("STRESS_COOLDOWN_SAMPLES", cooldown.to_string())
-        .env("STRESS_NO_PROGRESS_TIMEOUT_SECS", "1")
+        .env(
+            "STRESS_NO_PROGRESS_TIMEOUT_SECS",
+            NO_PROGRESS_TIMEOUT_SECS.to_string(),
+        )
         .env("STRESS_JSON", "true")
         .env("STRESS_OUTPUT_DIR", artifacts.join("stress"))
         .env("MIDGE_STRESS_ARTIFACT_DIR", artifacts.join("midge"))
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .expect("execute real stress watchdog child");
-    fs::write(artifacts.join("child-stdout.json"), &output.stdout)
-        .expect("retain native child receipt");
-    fs::write(artifacts.join("child-stderr.log"), &output.stderr)
-        .expect("retain child diagnostics");
-    fs::write(
-        artifacts.join("child-status.txt"),
-        output.status.to_string(),
+        .env_remove("GITHUB_ACTIONS");
+    let total = samples
+        .saturating_add(warmup)
+        .saturating_add(cooldown)
+        .max(1);
+    let execution_timeout =
+        Duration::from_secs(60).saturating_mul(u32::try_from(total).unwrap_or(u32::MAX));
+    let output = run_bounded_child(
+        &mut command,
+        artifacts,
+        PREPARATION_TIMEOUT,
+        execution_timeout,
     )
-    .expect("retain child exit status");
+    .unwrap_or_else(|timeout| {
+        panic!(
+            "watchdog fixture child exceeded parent deadline: {}",
+            serde_json::to_string(&timeout).unwrap()
+        )
+    });
+    let prepared = artifacts.join("preparation-complete.json");
+    if prepared.is_file() {
+        assert_eq!(
+            read_json(&prepared)["no_progress_timeout_ms"],
+            NO_PROGRESS_TIMEOUT_SECS * 1_000,
+            "the child must use the paired native watchdog budget"
+        );
+    }
     output
 }
 
@@ -234,12 +411,74 @@ fn read_json(path: &Path) -> Value {
 }
 
 #[cfg(feature = "failpoints")]
+fn decode_final_flush_attempts(bytes: &[u8], allow_torn_tail: bool) -> Result<Vec<Value>, String> {
+    let mut attempts = Vec::new();
+    for record in bytes.split_inclusive(|byte| *byte == b'\n') {
+        // A newline commits one JSONL record. Native process termination can
+        // interrupt the formatter before its final newline; only that last
+        // uncommitted record may be ignored, and only for aborted children.
+        if !record.ends_with(b"\n") {
+            if allow_torn_tail {
+                break;
+            }
+            return Err("successful child left an uncommitted final attempt".into());
+        }
+        attempts.push(serde_json::from_slice(record).map_err(|error| error.to_string())?);
+    }
+    Ok(attempts)
+}
+
+#[cfg(feature = "failpoints")]
+fn read_final_flush_attempts(workload: &Path, allow_torn_tail: bool) -> Vec<Value> {
+    let bytes = fs::read(workload.join("final-flush-attempts.jsonl"))
+        .expect("retained actual final-flush results");
+    decode_final_flush_attempts(&bytes, allow_torn_tail)
+        .expect("valid committed final-flush receipts")
+}
+
+#[cfg(feature = "failpoints")]
 fn final_flush_attempts(workload: &Path) -> Vec<Value> {
-    fs::read_to_string(workload.join("final-flush-attempts.jsonl"))
-        .expect("retained actual final-flush results")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("complete final-flush result JSON"))
-        .collect()
+    read_final_flush_attempts(workload, false)
+}
+
+#[cfg(feature = "failpoints")]
+fn aborted_final_flush_attempts(workload: &Path) -> Vec<Value> {
+    read_final_flush_attempts(workload, true)
+}
+
+#[cfg(feature = "failpoints")]
+fn should_read_committed_attempts_when_watchdog_aborts_mid_record() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("final-flush-attempts.jsonl"),
+        b"{\"success\":false}\n{\"success\":",
+    )
+    .unwrap();
+    // Act
+    let attempts = aborted_final_flush_attempts(dir.path());
+    // Assert
+    assert_eq!(attempts, vec![serde_json::json!({"success": false})]);
+}
+
+#[cfg(feature = "failpoints")]
+fn should_reject_malformed_committed_attempts_when_watchdog_aborts() {
+    // Arrange
+    let bytes = b"{malformed}\n";
+    // Act
+    let result = decode_final_flush_attempts(bytes, true);
+    // Assert
+    assert!(result.is_err());
+}
+
+#[cfg(feature = "failpoints")]
+fn should_reject_uncommitted_attempt_when_child_reports_success() {
+    // Arrange: the final JSON value is valid but has no commit newline.
+    let bytes = b"{\"success\":false}\n{\"success\":true}";
+    // Act
+    let result = decode_final_flush_attempts(bytes, false);
+    // Assert: only an aborted child may discard an incomplete tail.
+    assert!(result.is_err());
 }
 
 fn client_snapshot(workload: &Path) -> Value {
@@ -268,7 +507,7 @@ fn should_report_no_progress_when_rejected_clients_keep_database_bytes_changing(
             )
         });
     assert!(!output.status.success());
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     assert_eq!(failure["metadata"]["progress_completed_units"], "0");
     let workload = workload_directory(artifacts.path());
     let status = read_json(&workload.join("workload-status.json"));
@@ -367,7 +606,7 @@ fn assert_successful_recovery_work(output: &Output, workload: &Path) -> Value {
     let observations = recovery_observations(workload);
     assert!(
         output.status.success(),
-        "actual progressing recovery must survive the one-second watchdog; status={}, observations={observations}; receipt={receipt}; stderr={}",
+        "actual progressing recovery must survive its fixture watchdog; status={}, observations={observations}; receipt={receipt}; stderr={}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -375,7 +614,15 @@ fn assert_successful_recovery_work(output: &Output, workload: &Path) -> Value {
     assert_eq!(result["mismatches"], 0);
     assert_eq!(result["local_wal_bytes"], 0);
     assert_eq!(result["staged_wal_count"], 0);
-    assert!(result["elapsed_ms"].as_u64().unwrap() > 1_000);
+    let control = workload.parent().unwrap().parent().unwrap();
+    let budget_ms = read_json(&control.join("preparation-complete.json"))["no_progress_timeout_ms"]
+        .as_u64()
+        .expect("actual configured native idle budget");
+    assert_eq!(budget_ms, NO_PROGRESS_TIMEOUT_SECS * 1_000);
+    assert!(
+        result["elapsed_ms"].as_u64().unwrap() > budget_ms,
+        "healthy recovery must outlast its actual idle budget to detect missing or end-only progress"
+    );
     let specs = receipt["benchmark_specs"]
         .as_array()
         .expect("canonical recovery specs");
@@ -433,7 +680,7 @@ fn should_report_no_progress_when_actual_cloud_recovery_holds_first_range() {
         .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
         .unwrap_or_else(|| panic!("held range must emit typed no-progress: {receipt}"));
     assert!(!output.status.success());
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     let status = read_json(&workload.join("workload-status.json"));
     assert_eq!(status["phase"], "recovery");
     let observations = recovery_observations(&workload);
@@ -462,7 +709,7 @@ fn should_report_no_progress_when_actual_inventory_holds_first_head() {
         .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
         .unwrap_or_else(|| panic!("held HEAD must emit typed no-progress: {receipt}"));
     assert!(!output.status.success());
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     assert_eq!(failure["metadata"]["progress_completed_units"], "0");
     let status = read_json(&workload.join("workload-status.json"));
     assert_eq!(status["phase"], "recovery");
@@ -476,8 +723,8 @@ fn should_report_no_progress_when_actual_inventory_holds_first_head() {
 }
 
 fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
-    // Arrange: sixteen real SST HEADs complete on a 100ms response script,
-    // beyond the one-second idle budget, with RUST_LOG=off and an empty cache.
+    // Arrange: sixteen real SST HEADs complete on a 250ms response script,
+    // beyond the three-second idle budget, with RUST_LOG=off and an empty cache.
     let artifacts = control_artifacts("delayed-inventory-");
 
     // Act
@@ -494,7 +741,7 @@ fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {
         read_json(&workload.join("fixture-preparation.json"))["setup_elapsed_ms"]
             .as_u64()
             .unwrap()
-            >= 1_200
+            >= 3_200
     );
     assert_eq!(result["expected_inventory_entries"], 16);
     assert_eq!(
@@ -604,7 +851,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     );
     assert_eq!(publication["worker_entries"], 1);
     assert_eq!(publication["worker_released"], true);
-    assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 1_200);
+    assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 3_200);
     assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 350);
     let attempts = outcomes["attempts"]
         .as_array()
@@ -678,7 +925,7 @@ fn should_report_no_progress_when_final_flush_publication_remains_held() {
         .iter()
         .find(|spec| spec["metadata"]["failure_kind"] == "no_progress_timeout")
         .unwrap_or_else(|| panic!("held publication must native-timeout: {receipt}"));
-    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "1");
+    assert_eq!(failure["metadata"]["no_progress_timeout_secs"], "3");
     assert_eq!(failure["metadata"]["progress_completed_units"], "0");
     let status = read_json(&workload.join("workload-status.json"));
     assert_eq!(status["phase"], "flush");
@@ -702,7 +949,7 @@ fn should_report_no_progress_when_final_flush_publication_remains_held() {
             && attempt["observed_lease_healthy"] == true
             && attempt["progress_units"] == 0
     }));
-    let recorded_attempts = final_flush_attempts(&workload);
+    let recorded_attempts = aborted_final_flush_attempts(&workload);
     assert!(recorded_attempts.len() > 1);
     assert!(recorded_attempts.iter().all(|attempt| {
         attempt["success"] == false
@@ -737,7 +984,7 @@ fn should_stop_retry_policy_when_callback_returns_a_terminal_error() {
         read_json(&workload.join("fixture-preparation.json"))["setup_elapsed_ms"]
             .as_u64()
             .unwrap()
-            >= 1_200
+            >= 3_200
     );
     let results = read_json(&workload.join("retry-policy-results.json"));
     assert_eq!(results["fixture_scope"], "benchmark_retry_policy");
@@ -903,6 +1150,21 @@ fn should_prepare_fresh_inputs_when_native_samples_repeat() {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--hold-execution") {
+        fs::write(
+            std::env::var_os(PREPARATION_READY_ENV).expect("parent preparation signal"),
+            b"{\"prepared\":true}",
+        )
+        .unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+    if std::env::args().any(|arg| arg == "--hold-preparation") {
+        loop {
+            std::thread::park();
+        }
+    }
     if std::env::var_os(CHILD_FLAG).is_some() {
         let args: Vec<_> = std::env::args().collect();
         let workload = args
@@ -931,6 +1193,18 @@ fn main() {
             .and_then(|n| n.checked_add(config.cooldown_samples))
             .expect("sample count overflow");
         let _preparation = prepare_child(workload, samples);
+        if let Some(path) = std::env::var_os(PREPARATION_READY_ENV) {
+            fs::write(
+                path,
+                serde_json::to_vec(&serde_json::json!({
+                    "prepared": true,
+                    "no_progress_timeout_ms": config.no_progress_timeout
+                        .expect("native idle budget configured").as_millis(),
+                }))
+                .unwrap(),
+            )
+            .expect("signal completed child preparation");
+        }
         child_harness::run();
         return;
     }
@@ -942,10 +1216,20 @@ fn main() {
     {
         match control {
             "lifecycle" => {
+                should_bound_child_wait_when_preparation_never_completes();
+                should_bound_child_wait_when_execution_never_completes();
                 should_reject_invalid_configuration_before_preparing_watchdog_resources();
                 should_cancel_unused_inputs_when_preparation_scope_ends();
             }
             "inventory" => should_remain_healthy_when_actual_inventory_validates_delayed_heads(),
+            #[cfg(feature = "failpoints")]
+            "receipts" => {
+                should_read_committed_attempts_when_watchdog_aborts_mid_record();
+                should_reject_malformed_committed_attempts_when_watchdog_aborts();
+                should_reject_uncommitted_attempt_when_child_reports_success();
+            }
+            #[cfg(feature = "failpoints")]
+            "policy" => should_stop_retry_policy_when_callback_returns_a_terminal_error(),
             #[cfg(feature = "failpoints")]
             "final-flush" => {
                 should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
@@ -957,6 +1241,12 @@ fn main() {
         );
         return;
     }
+    qualification::run(run_suite);
+}
+
+fn run_suite() {
+    should_bound_child_wait_when_preparation_never_completes();
+    should_bound_child_wait_when_execution_never_completes();
     should_reject_invalid_configuration_before_preparing_watchdog_resources();
     should_cancel_unused_inputs_when_preparation_scope_ends();
     should_prepare_fresh_inputs_when_native_samples_repeat();
@@ -971,11 +1261,83 @@ fn main() {
     should_remain_healthy_when_cached_recovery_finishes_verified_coverage_work();
     #[cfg(feature = "failpoints")]
     {
+        should_read_committed_attempts_when_watchdog_aborts_mid_record();
+        should_reject_malformed_committed_attempts_when_watchdog_aborts();
+        should_reject_uncommitted_attempt_when_child_reports_success();
         should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
         should_report_no_progress_when_final_flush_publication_remains_held();
         should_stop_retry_policy_when_callback_returns_a_terminal_error();
-        println!("fifteen real stress watchdog integration checks passed");
+        println!("twenty real stress watchdog integration checks passed");
     }
     #[cfg(not(feature = "failpoints"))]
-    println!("twelve real stress watchdog integration checks passed");
+    println!("fourteen real stress watchdog integration checks passed");
+}
+
+mod qualification {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct CpuLoad {
+        stop: Arc<AtomicBool>,
+        workers: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    impl CpuLoad {
+        fn start(count: usize) -> Self {
+            let mut load = Self {
+                stop: Arc::new(AtomicBool::new(false)),
+                workers: Vec::new(),
+            };
+            for _ in 0..count {
+                let stop = Arc::clone(&load.stop);
+                load.workers.push(std::thread::spawn(move || {
+                    let mut value = std::hint::black_box(1_u64);
+                    while !stop.load(Ordering::Acquire) {
+                        for _ in 0..10_000 {
+                            value = value.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        }
+                        std::hint::black_box(value);
+                    }
+                }));
+            }
+            load
+        }
+    }
+
+    impl Drop for CpuLoad {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            for worker in self.workers.drain(..) {
+                worker.join().expect("CPU contender must stop and join");
+            }
+        }
+    }
+
+    fn number(name: &str, default: usize, maximum: usize) -> usize {
+        let value = std::env::var(name).map_or(default, |raw| {
+            raw.parse().expect("integer qualification setting")
+        });
+        assert!(value <= maximum, "{name} must be at most {maximum}");
+        value
+    }
+
+    pub(super) fn run(suite: fn()) {
+        let workers = number("MIDGE_WATCHDOG_CPU_WORKERS", 0, 64);
+        let repeats = number("MIDGE_WATCHDOG_REPEATS", 1, 100);
+        assert!(repeats > 0, "MIDGE_WATCHDOG_REPEATS must be positive");
+        let root = std::env::var_os("MIDGE_WATCHDOG_EVIDENCE_DIR");
+        let _load = CpuLoad::start(workers);
+        for repeat in 1..=repeats {
+            if let Some(root) = &root {
+                let path = std::path::PathBuf::from(root).join(format!("run-{repeat:02}"));
+                std::env::set_var("MIDGE_WATCHDOG_EVIDENCE_DIR", path);
+            }
+            let started = std::time::Instant::now();
+            suite();
+            eprintln!("full watchdog suite {repeat}/{repeats} passed in {:.3}s with {workers} CPU contenders", started.elapsed().as_secs_f64());
+        }
+        if let Some(root) = root {
+            std::env::set_var("MIDGE_WATCHDOG_EVIDENCE_DIR", root);
+        }
+    }
 }

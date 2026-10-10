@@ -245,7 +245,7 @@ impl InventoryCloudBackend {
                 .is_some_and(|size| *size == metadata.size)
         });
         if expected_size.is_some() {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(250));
         }
         let delivered = callback
             .send(CloudEvent::Head {

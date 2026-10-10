@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const EDIT_COUNT: u32 = 16;
-const READ_DELAY: Duration = Duration::from_millis(20);
+// The real parser's 128 reads must outlast the paired 3s idle budget.
+const READ_DELAY: Duration = Duration::from_millis(30);
 
 /// Independent scalar evidence from the actual manifest journal load.
 #[doc(hidden)]
