@@ -363,6 +363,10 @@ mod sst_regressions {
         // Act: 32 separate flushes exceed the default hard L0 ceiling. Only the
         // production pressure-recovery path can restore admission in this process.
         for index in 0_u32..32 {
+            // Valid scheduling: pressure recovery finishes before admission.
+            assert!(engine
+                .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
+                .unwrap());
             let before = engine.metrics().get_runtime_metrics().unwrap();
             let commit = || {
                 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
