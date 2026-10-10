@@ -1088,6 +1088,8 @@ fn main() {
             }
             "inventory" => should_remain_healthy_when_actual_inventory_validates_delayed_heads(),
             #[cfg(feature = "failpoints")]
+            "policy" => should_stop_retry_policy_when_callback_returns_a_terminal_error(),
+            #[cfg(feature = "failpoints")]
             "final-flush" => {
                 should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
             }
