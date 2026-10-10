@@ -23,9 +23,7 @@ use std::time::{Duration, Instant};
 
 const PUBLICATION_FAILPOINT: &str = "midge::flush_worker::before_publication";
 const CALLER_SLICE: Duration = Duration::from_millis(50);
-// Keep real publication beyond the 50ms caller slice with enough headroom for
-// healthy completion under the unchanged one-second native watchdog.
-const PUBLICATION_DELAY: Duration = Duration::from_millis(100);
+const PUBLICATION_DELAY: Duration = Duration::from_millis(350);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FlushFixtureKind {

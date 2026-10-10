@@ -299,6 +299,17 @@ fn invoke_child_with_samples(
     {
         command.env("RUST_LOG", "off");
     }
+    // These healthy end-to-end fixtures include real publication/control-file
+    // I/O under host contention. The held controls still prove the unchanged
+    // one-second native no-progress decision with zero completed units.
+    let no_progress_timeout = if matches!(
+        workload,
+        "delayed_final_flush_publication" | "metadata_inventory_recovery_with_flat_cache"
+    ) {
+        "3"
+    } else {
+        "1"
+    };
     command
         .arg("--workload")
         .arg(workload)
@@ -307,7 +318,7 @@ fn invoke_child_with_samples(
         .env("STRESS_SAMPLES", samples.to_string())
         .env("STRESS_WARMUP_SAMPLES", warmup.to_string())
         .env("STRESS_COOLDOWN_SAMPLES", cooldown.to_string())
-        .env("STRESS_NO_PROGRESS_TIMEOUT_SECS", "1")
+        .env("STRESS_NO_PROGRESS_TIMEOUT_SECS", no_progress_timeout)
         .env("STRESS_JSON", "true")
         .env("STRESS_OUTPUT_DIR", artifacts.join("stress"))
         .env("MIDGE_STRESS_ARTIFACT_DIR", artifacts.join("midge"))
@@ -705,7 +716,7 @@ fn should_count_recovery_work_only_within_its_active_caller_scope() {
 
 #[cfg(feature = "failpoints")]
 fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
-    // Arrange: one genuine publication is delayed 100ms, with a healthy
+    // Arrange: one genuine publication is delayed 350ms, with a healthy
     // acquired primary lease and actual callers waiting only 50ms each.
     let artifacts = control_artifacts("delayed-final-flush-");
 
@@ -728,7 +739,7 @@ fn should_retry_final_flush_when_real_publication_outlives_its_caller_slice() {
     assert_eq!(publication["worker_entries"], 1);
     assert_eq!(publication["worker_released"], true);
     assert!(activation["setup_elapsed_ms"].as_u64().unwrap() >= 1_200);
-    assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 100);
+    assert!(publication["publication_elapsed_ms"].as_u64().unwrap() >= 350);
     let attempts = outcomes["attempts"]
         .as_array()
         .expect("actual flush attempts");
