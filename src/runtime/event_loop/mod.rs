@@ -359,6 +359,15 @@ impl EventLoop {
             storage.configure_maintenance_memory(compaction_memory_limit);
             self.set_hybrid_storage(storage);
         }
+        if self.wal_actor.is_cloud_async() {
+            let boundary = if recovered_cloud_wal.active_wal.is_some() {
+                0
+            } else {
+                self.state.sequence
+            };
+            self.wal_transition
+                .initialize_gc_pins(self.state.wal.current_segment_id, boundary);
+        }
         self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)
     }
 

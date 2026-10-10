@@ -757,3 +757,36 @@ fn assert_fenced_publication_response(result: &RuntimeResponse, before_gc: bool)
         );
     }
 }
+
+#[test]
+fn should_capture_most_restrictive_gc_cutoff_when_compaction_launches() -> MidgeResult<()> {
+    // Arrange
+    let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let generation = el.state.wal.current_segment_id;
+    el.wal_transition.initialize_gc_pins(generation, 20);
+    let plan =
+        crate::compaction::CompactionPlan::new(0, 0, 1).with_tombstone_gc_eligibility(true, true);
+    el.state.register_snapshot(1, 10, Vec::new());
+
+    // Act
+    let snapshot_limited = el.prepare_compaction_plan_for_launch(plan.clone())?;
+    el.state.unregister_snapshot(1);
+    el.state.register_snapshot(2, 30, Vec::new());
+    let wal_limited = el.prepare_compaction_plan_for_launch(plan.clone())?;
+    el.wal_transition
+        .register_recovered(generation - 1, 5, true);
+    let unknown = el.prepare_compaction_plan_for_launch(plan)?;
+
+    // Assert: unknown WAL tracking disables only GC, not compaction admission.
+    assert_eq!(snapshot_limited.snapshot_horizon, Some(10));
+    assert_eq!(wal_limited.snapshot_horizon, Some(20));
+    assert_eq!(unknown.snapshot_horizon, Some(0));
+    assert!(wal_limited.point_tombstone_gc_eligible);
+    assert!(wal_limited.range_tombstone_gc_eligible);
+    assert!(!unknown.point_tombstone_gc_eligible);
+    assert!(!unknown.range_tombstone_gc_eligible);
+    assert_ne!(unknown.output_seq, 0);
+    Ok(())
+}

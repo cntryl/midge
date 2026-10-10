@@ -1,0 +1,38 @@
+{
+  "format_version": 1,
+  "fencing_epoch": 1,
+  "segments": {
+    "2": {
+      "segment_id": 2,
+      "writer_epoch": 1,
+      "max_sequence": 6,
+      "size_bytes": 143,
+      "content_crc32c": 3403084078,
+      "object_key": "wal/epochs/00000000000000000001/00000000000000000002.wal"
+    },
+    "3": {
+      "segment_id": 3,
+      "writer_epoch": 1,
+      "max_sequence": 9,
+      "size_bytes": 143,
+      "content_crc32c": 4117189051,
+      "object_key": "wal/epochs/00000000000000000001/00000000000000000003.wal"
+    },
+    "4": {
+      "segment_id": 4,
+      "writer_epoch": 1,
+      "max_sequence": 12,
+      "size_bytes": 145,
+      "content_crc32c": 2836828722,
+      "object_key": "wal/epochs/00000000000000000001/00000000000000000004.wal"
+    },
+    "5": {
+      "segment_id": 5,
+      "writer_epoch": 1,
+      "max_sequence": 15,
+      "size_bytes": 136,
+      "content_crc32c": 1586561086,
+      "object_key": "wal/epochs/00000000000000000001/00000000000000000005.wal"
+    }
+  }
+}
