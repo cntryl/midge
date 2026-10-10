@@ -64,6 +64,9 @@ jobs:
       - name: Test checkpoint readback contracts
         run: cargo test --example checkpoint_campaign_readback --all-features -- --test-threads=1
 
+      - name: Test WAL baseline evidence classification
+        run: cargo test --locked --example wal_redesign_baselines --all-features
+
       - name: Integration tests
         shell: bash
         run: |
@@ -103,7 +106,7 @@ jobs:
       - name: Check named WAL audit baseline (includes ignored regressions)
         env:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: python3 tools/run-wal-redesign-regressions.py --baseline --with-sqrzl --output "${{ runner.temp }}/wal-audit-baseline"
+        run: cargo run --locked --all-features --example wal_redesign_baselines -- --baseline --with-sqrzl --output "${{ runner.temp }}/wal-audit-baseline"
 
       - name: Retain named WAL audit baseline
         if: always()
@@ -173,7 +176,7 @@ jobs:
 
       - name: Check native WAL audit baseline on macOS
         if: runner.os == 'macOS'
-        run: python3 tools/run-wal-redesign-regressions.py --baseline --output "${{ runner.temp }}/wal-audit-baseline"
+        run: cargo run --locked --all-features --example wal_redesign_baselines -- --baseline --output "${{ runner.temp }}/wal-audit-baseline"
 
       - name: Retain native WAL audit baseline
         if: always() && runner.os == 'macOS'
