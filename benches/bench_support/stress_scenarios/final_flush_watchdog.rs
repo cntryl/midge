@@ -9,7 +9,10 @@ use cntryl_midge::{
     ColumnFamilyHandle, Engine, MemoryBudget, MidgeError, OpenOptions, TransactionMode,
     WriteOptions,
 };
-use cntryl_stress::{LogicalUnit, OperationOutcome, ProgressHandle, StressContext};
+use cntryl_stress::{
+    LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome, ProgressHandle,
+    StressContext,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
@@ -22,6 +25,48 @@ const PUBLICATION_FAILPOINT: &str = "midge::flush_worker::before_publication";
 const CALLER_SLICE: Duration = Duration::from_millis(50);
 const PUBLICATION_DELAY: Duration = Duration::from_millis(350);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FlushFixtureKind {
+    Delayed,
+    Held,
+    TerminalPolicy,
+}
+
+impl FlushFixtureKind {
+    fn case(self) -> WorkloadCase {
+        WorkloadCase {
+            benchmark: match self {
+                Self::Delayed => "delayed_final_flush_publication",
+                Self::Held => "held_final_flush_publication",
+                Self::TerminalPolicy => "terminal_final_flush_retry_policy",
+            },
+            scenario: if self == Self::TerminalPolicy {
+                "watchdog-final-flush-policy"
+            } else {
+                "watchdog-final-flush"
+            },
+            backend: "cloud-simulated",
+            tier: 5,
+            workload: if self == Self::TerminalPolicy {
+                "retry-policy-control"
+            } else {
+                "write-heavy"
+            },
+            stages: &[],
+        }
+    }
+}
+
+type PreparedFlush = (
+    WorkloadArtifacts,
+    Engine,
+    ColumnFamilyHandle,
+    Duration,
+    FlushFixtureKind,
+);
+static PREPARED_FLUSH: super::watchdog_preparation::PreparedSlot<PreparedFlush> =
+    super::watchdog_preparation::PreparedSlot::new();
+
 struct PublicationPause {
     release: Arc<AtomicBool>,
 }
@@ -33,7 +78,13 @@ impl Drop for PublicationPause {
     }
 }
 
-fn open_fixture_engine(artifacts: &mut WorkloadArtifacts) -> (Engine, ColumnFamilyHandle) {
+fn open_fixture_engine(
+    artifacts: &mut WorkloadArtifacts,
+    setup_delay: Duration,
+) -> (Engine, ColumnFamilyHandle, Duration) {
+    let started = Instant::now();
+    // Moving real engine setup under the watchdog must carry this delay too.
+    thread::sleep(setup_delay);
     let database = artifacts.path.join("fixture-database");
     let options = OpenOptions::cloud_simulated(&database, "flush-fixture", "actual-publication/")
         .memory_budget(MemoryBudget::Bytes(128 * 1024 * 1024))
@@ -61,7 +112,49 @@ fn open_fixture_engine(artifacts: &mut WorkloadArtifacts) -> (Engine, ColumnFami
     artifacts.acknowledged_rows =
         u64::try_from(WRITE_BATCH_ROWS).expect("fixture row count fits u64");
     assert!(engine.is_primary_lease_healthy());
-    (engine, family)
+    (engine, family, started.elapsed())
+}
+
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(crate) fn prepare_final_flush_watchdog_fixture(
+    kind: FlushFixtureKind,
+    samples: usize,
+    setup_delay: Duration,
+) -> impl super::PreparationGuard {
+    enable_phase_tracing();
+    let scope = PREPARED_FLUSH.install(Vec::new(), |(mut artifacts, mut engine, _, _, _)| {
+        let shutdown = engine.shutdown(Duration::from_secs(5));
+        artifacts.terminal_error = Some(format!(
+            "prepared fixture was not invoked; shutdown={shutdown:?}"
+        ));
+        // Seal the cancellation receipt before the fallback Drop marks unfinished work failed.
+        artifacts.complete = true;
+        artifacts.persist("canceled");
+    });
+    for _ in 0..samples {
+        let mut artifacts = WorkloadArtifacts::begin(kind.case(), Duration::from_secs(5));
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            open_fixture_engine(&mut artifacts, setup_delay)
+        }));
+        let (engine, family, setup_elapsed) = prepared.unwrap_or_else(|panic| {
+            artifacts.terminal_error = Some("engine fixture preparation panicked".into());
+            artifacts.persist("failed");
+            std::panic::resume_unwind(panic);
+        });
+        write_atomic_json(
+            &artifacts.path.join("fixture-preparation.json"),
+            &json!({
+                "setup_elapsed_ms": setup_elapsed.as_millis(),
+                "kind": format!("{kind:?}"),
+            }),
+        )
+        .expect("retain actual engine preparation time");
+        scope.push((artifacts, engine, family, setup_elapsed, kind));
+    }
+    scope
 }
 
 #[allow(
@@ -69,25 +162,24 @@ fn open_fixture_engine(artifacts: &mut WorkloadArtifacts) -> (Engine, ColumnFami
     reason = "Only the watchdog integration target calls this fixture"
 )]
 pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_publication: bool) {
-    enable_phase_tracing();
-    let case = WorkloadCase {
-        benchmark: if hold_publication {
-            "held_final_flush_publication"
+    let (mut artifacts, mut engine, family, setup_elapsed, kind) = PREPARED_FLUSH.take();
+    assert_eq!(
+        kind,
+        if hold_publication {
+            FlushFixtureKind::Held
         } else {
-            "delayed_final_flush_publication"
-        },
-        scenario: "watchdog-final-flush",
-        backend: "cloud-simulated",
-        tier: 5,
-        workload: "write-heavy",
-        stages: &[],
-    };
+            FlushFixtureKind::Delayed
+        }
+    );
     let progress = ctx.progress_handle();
-    let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(5));
-    let (mut engine, family) = open_fixture_engine(&mut artifacts);
     let scenario = fail::FailScenario::setup();
     let (pause, worker_entries) = pause_actual_publication(&artifacts, hold_publication);
     let started = Instant::now();
+    write_atomic_json(
+        &artifacts.path.join("active-work-start.json"),
+        &json!({ "setup_elapsed_ms": setup_elapsed.as_millis(), "completed_units_before": progress.completed_units() }),
+    )
+    .expect("retain start of active flush work");
     let (attempts, flush_progress_units) =
         flush_fixture_data(&engine, &family, &progress, &mut artifacts);
     let metrics = engine
@@ -133,10 +225,10 @@ pub(crate) fn run_final_flush_watchdog_fixture(ctx: &mut StressContext, hold_pub
             "authoritative_sst_count": metrics.sst_count,
             "verified_rows": verified_rows,
             "mismatches": mismatches,
+            "active_elapsed_ms": started.elapsed().as_millis(),
         }),
     )
     .expect("retain actual flush and verification result");
-    ctx.metadata("fixture_flush_attempts", attempts);
     ctx.metadata("fixture_flush_progress_units", flush_progress_units);
     ctx.record_external_outcome(
         "actual final flush publication",
@@ -175,6 +267,7 @@ fn pause_actual_publication(
     // Engine. No test gate can block the worker's read-side failpoint guard.
     // Its only effect is to hold real accepted publication before execution.
     fail::cfg_callback(PUBLICATION_FAILPOINT, move || {
+        let publication_started = Instant::now();
         let entries = observed_entries.fetch_add(1, Ordering::AcqRel) + 1;
         write_atomic_json(
             &publication_observations,
@@ -198,6 +291,7 @@ fn pause_actual_publication(
                 "worker_entries": entries,
                 "worker_released": true,
                 "released_elapsed_ms": origin.elapsed().as_millis(),
+                "publication_elapsed_ms": publication_started.elapsed().as_millis(),
             }),
         )
         .expect("retain actual publication release");
@@ -257,18 +351,15 @@ fn flush_fixture_data(
     reason = "Only the watchdog integration target calls this policy fixture"
 )]
 pub(crate) fn run_final_flush_terminal_policy_fixture(ctx: &mut StressContext) {
-    enable_phase_tracing();
-    let case = WorkloadCase {
-        benchmark: "terminal_final_flush_retry_policy",
-        scenario: "watchdog-final-flush-policy",
-        backend: "cloud-simulated",
-        tier: 5,
-        workload: "retry-policy-control",
-        stages: &[],
-    };
+    let (mut artifacts, mut engine, family, setup_elapsed, kind) = PREPARED_FLUSH.take();
+    assert_eq!(kind, FlushFixtureKind::TerminalPolicy);
     let progress = ctx.progress_handle();
-    let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(5));
-    let (mut engine, family) = open_fixture_engine(&mut artifacts);
+    ctx.record_observation(
+        "fixture_setup_elapsed_ns",
+        setup_elapsed.as_secs_f64() * 1e9,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
     let started = Instant::now();
     let mut cases = Vec::new();
     for (kind, error) in terminal_policy_errors() {

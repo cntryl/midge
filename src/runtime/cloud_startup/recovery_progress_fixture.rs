@@ -18,7 +18,7 @@ use crate::wal::{WalOpKind, WalRecord};
 use bytes::Bytes;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -71,17 +71,42 @@ struct FixtureWal {
     catalog: WalPublicationCatalog,
 }
 
-/// Run actual startup inventory or catalog planner/replay without local WAL staging.
+enum PreparedInput {
+    Wal {
+        wal: Box<FixtureWal>,
+        coverage: Option<Box<ReplayCoverage>>,
+        replay_fs: Option<Arc<dyn Fs>>,
+    },
+    #[cfg(any(test, feature = "cloud-common"))]
+    Inventory(Vec<crate::metadata::FileMeta>),
+}
+
+/// Seed fixture input before the external watchdog begins observing recovery.
+#[doc(hidden)]
+pub struct PreparedRecoveryProgressFixture {
+    root: PathBuf,
+    mode: RecoveryProgressFixtureMode,
+    observations: Arc<FixtureObservations>,
+    remote: Arc<dyn StorageBackend>,
+    input: PreparedInput,
+    setup_elapsed: Duration,
+}
+
+/// Prepare actual startup inventory or catalog planner/replay input.
 ///
 /// # Errors
 ///
-/// Returns any setup, proof, replay, or independent-evidence persistence error.
+/// Returns any setup, proof, or independent-evidence persistence error.
 #[doc(hidden)]
-pub fn run_recovery_progress_fixture(
+pub fn prepare_recovery_progress_fixture(
     root: &Path,
     mode: RecoveryProgressFixtureMode,
-) -> MidgeResult<RecoveryProgressFixtureResult> {
+    setup_delay: Duration,
+) -> MidgeResult<PreparedRecoveryProgressFixture> {
     let started = Instant::now();
+    // Keep the regression delay in the component that actually seeds input.
+    // Moving this component back under the watchdog must time out.
+    std::thread::sleep(setup_delay);
     let local = root.join("local");
     std::fs::create_dir_all(local.join("wal"))?;
     if local_wal_state(&local)? != (0, 0) {
@@ -90,38 +115,115 @@ pub fn run_recovery_progress_fixture(
         ));
     }
     let observations = Arc::new(FixtureObservations::new(root, mode, 0)?);
-    if matches!(
-        mode,
-        RecoveryProgressFixtureMode::MetadataInventory | RecoveryProgressFixtureMode::HeldInventory
-    ) {
-        #[cfg(any(test, feature = "cloud-common"))]
-        return inventory_fixture(root, mode, &local, &observations, started);
-        #[cfg(not(any(test, feature = "cloud-common")))]
-        return Err(MidgeError::InvalidArgument(
-            "metadata inventory fixture requires cloud-common".into(),
-        ));
-    }
-    wal_fixture(root, mode, &local, &observations, started)
-}
-
-fn wal_fixture(
-    root: &Path,
-    mode: RecoveryProgressFixtureMode,
-    local: &Path,
-    observations: &Arc<FixtureObservations>,
-    started: Instant,
-) -> MidgeResult<RecoveryProgressFixtureResult> {
-    let wal = seed_wal(root, mode)?;
-    observations.set_expected_records(wal.records.len())?;
     let remote: Arc<dyn StorageBackend> = Arc::new(ObservedBackend::new(
         root.join("cloud"),
         mode,
-        Arc::clone(observations),
+        Arc::clone(&observations),
     )?);
+    let input = match mode {
+        RecoveryProgressFixtureMode::MetadataInventory
+        | RecoveryProgressFixtureMode::HeldInventory => {
+            #[cfg(any(test, feature = "cloud-common"))]
+            {
+                let inventory = seed_inventory(root)?;
+                observations.set_expected_inventory(inventory.len())?;
+                PreparedInput::Inventory(inventory)
+            }
+            #[cfg(not(any(test, feature = "cloud-common")))]
+            return Err(MidgeError::InvalidArgument(
+                "metadata inventory fixture requires cloud-common".into(),
+            ));
+        }
+        _ => {
+            let wal = seed_wal(root, mode)?;
+            observations.set_expected_records(wal.records.len())?;
+            let coverage = if mode == RecoveryProgressFixtureMode::CachedCoverage {
+                Some(Box::new(cached_coverage(root, &wal.records, &remote)?))
+            } else {
+                None
+            };
+            let replay_fs = coverage
+                .as_ref()
+                .map(|_| buffered_wal(&wal.bytes))
+                .transpose()?;
+            PreparedInput::Wal {
+                wal: Box::new(wal),
+                coverage,
+                replay_fs,
+            }
+        }
+    };
+    Ok(PreparedRecoveryProgressFixture {
+        root: root.to_path_buf(),
+        mode,
+        observations,
+        remote,
+        input,
+        setup_elapsed: started.elapsed(),
+    })
+}
+
+impl PreparedRecoveryProgressFixture {
+    /// Return the mode whose input this fixture owns.
+    #[must_use]
+    pub const fn mode(&self) -> RecoveryProgressFixtureMode {
+        self.mode
+    }
+
+    /// Return time spent inside actual fixture preparation.
+    #[must_use]
+    pub const fn setup_elapsed(&self) -> Duration {
+        self.setup_elapsed
+    }
+
+    /// Execute recovery of the prepared input, with no fixture seeding.
+    ///
+    /// # Errors
+    ///
+    /// Returns any proof, replay, or independent-evidence persistence error.
+    pub fn run(self) -> MidgeResult<RecoveryProgressFixtureResult> {
+        let started = Instant::now();
+        let local = self.root.join("local");
+        match self.input {
+            PreparedInput::Wal {
+                wal,
+                coverage,
+                replay_fs,
+            } => wal_fixture(
+                &local,
+                &self.observations,
+                &wal,
+                &self.remote,
+                coverage.as_deref(),
+                replay_fs.as_ref(),
+                started,
+            ),
+            #[cfg(any(test, feature = "cloud-common"))]
+            PreparedInput::Inventory(inventory) => inventory_fixture(
+                &self.root,
+                self.mode,
+                &local,
+                &self.observations,
+                inventory,
+                started,
+            ),
+        }
+    }
+}
+
+fn wal_fixture(
+    local: &Path,
+    observations: &Arc<FixtureObservations>,
+    wal: &FixtureWal,
+    remote: &Arc<dyn StorageBackend>,
+    coverage: Option<&ReplayCoverage>,
+    replay_fs: Option<&Arc<dyn Fs>>,
+    started: Instant,
+) -> MidgeResult<RecoveryProgressFixtureResult> {
     observations.set_phase("planner")?;
     let recovered = StreamingCloudWalRecovery::build(
         local,
-        &remote,
+        remote,
         &wal.catalog,
         RecoveryPolicy::Strict,
         PROVIDER_TIMEOUT,
@@ -137,25 +239,11 @@ fn wal_fixture(
             "fixture planner did not select exactly its cataloged remote WAL".into(),
         ));
     }
-    let coverage = if mode == RecoveryProgressFixtureMode::CachedCoverage {
-        Some(cached_coverage(root, &wal.records, &remote)?)
-    } else {
-        None
-    };
-    let replay_fs = if coverage.is_some() {
-        buffered_wal(&wal.bytes)?
-    } else {
-        recovered.fs
-    };
+    let replay_fs = replay_fs.cloned().unwrap_or(recovered.fs);
     let before_replay = observations.snapshot().completed_range_reads;
     observations.set_phase("replay")?;
     let mut memtables = HashMap::new();
-    let stats = replay_fixture(
-        replay_fs.as_ref(),
-        &mut memtables,
-        coverage.as_ref(),
-        observations,
-    )?;
+    let stats = replay_fixture(replay_fs.as_ref(), &mut memtables, coverage, observations)?;
     observations.check_failure()?;
     let (verified_records, row_mismatches) =
         verify_rows(&wal.records, &memtables, coverage.is_some());
@@ -200,12 +288,11 @@ fn inventory_fixture(
     mode: RecoveryProgressFixtureMode,
     local: &Path,
     observations: &Arc<FixtureObservations>,
+    files: Vec<crate::metadata::FileMeta>,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
-    let files = seed_inventory(root)?;
     let expected_inventory = serde_json::to_vec(&files)
         .map_err(|error| MidgeError::Internal(format!("inventory fixture metadata: {error}")))?;
-    observations.set_expected_inventory(files.len())?;
     let backend = backend::InventoryCloudBackend::new(
         root.join("cloud"),
         mode,
