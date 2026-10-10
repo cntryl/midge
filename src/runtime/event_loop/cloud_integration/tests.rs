@@ -24,7 +24,16 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod gc_pin_tests;
 mod maintenance_tests;
+
+fn install_prune_gc_pins_for_test(el: &mut EventLoop, segment: u64, max_sequence: u64) {
+    el.wal_transition = crate::runtime::wal_transition::WalTransitionProtocol::new();
+    el.wal_transition
+        .initialize_gc_pins(el.state.wal.current_segment_id, max_sequence);
+    el.wal_transition
+        .register_recovered(segment, max_sequence, true);
+}
 
 #[cfg(feature = "failpoints")]
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3036,6 +3045,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     let segment_id = 63;
     let max_sequence = 63;
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    install_prune_gc_pins_for_test(&mut el, segment_id, max_sequence);
     el.state
         .wal
         .frontiers
@@ -3055,6 +3065,12 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
         Some(&max_sequence),
         "ambiguous completion should remain retryable until readback"
     );
+    assert_eq!(
+        el.wal_transition
+            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+        0,
+        "uncertain commit retains the pin until confirmed readback"
+    );
     let catalog_proof = el
         .cloud_coordinator
         .hybrid_storage
@@ -3072,6 +3088,11 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     drain_prune_completion_for_test(&mut el);
 
     // Assert
+    assert_eq!(
+        el.wal_transition
+            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+        max_sequence
+    );
     assert!(
         !el.cloud_coordinator
             .cloud_wal
@@ -5364,6 +5385,7 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    install_prune_gc_pins_for_test(&mut el, segment_id, max_sequence);
     el.state
         .wal
         .frontiers
@@ -5385,6 +5407,11 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
         .expect("decode catalog after failed physical WAL delete");
 
     // Assert
+    assert_eq!(
+        el.wal_transition
+            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+        max_sequence
+    );
     assert_eq!(failing_cloud.delete_attempts(), 1);
     assert!(
         !catalog.segments.contains_key(&segment_id),

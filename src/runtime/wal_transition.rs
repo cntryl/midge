@@ -157,6 +157,10 @@ enum WalLifecyclePhase {
 pub(crate) struct WalTransitionProtocol {
     phase: WalLifecyclePhase,
     segments: BTreeMap<u64, SegmentObligation>,
+    // Independent of upload/local-file obligations: exact SST deletion proof
+    // must survive until catalog retirement, including pending publication.
+    gc_pins: BTreeMap<u64, u64>,
+    gc_active_generation: Option<u64>,
 }
 
 impl WalTransitionProtocol {
@@ -164,6 +168,36 @@ impl WalTransitionProtocol {
         Self {
             phase: WalLifecyclePhase::Ready,
             segments: BTreeMap::new(),
+            gc_pins: BTreeMap::new(),
+            gc_active_generation: None,
+        }
+    }
+
+    /// Install before the fresh writer accepts any writes. A recovered active
+    /// writer uses zero because its lower sequence boundary is unknown.
+    pub(crate) fn initialize_gc_pins(&mut self, generation: u64, boundary: u64) {
+        self.gc_pins.insert(generation, boundary);
+        self.gc_active_generation = Some(generation);
+    }
+
+    /// Greatest deletion sequence safe to collect. Unknown or fenced tracking
+    /// disables GC while still permitting ordinary compaction.
+    pub(crate) fn tombstone_gc_cutoff(&self, active_generation: u64) -> u64 {
+        if self.gc_active_generation != Some(active_generation)
+            || !self.gc_pins.contains_key(&active_generation)
+            || self.ensure_ready().is_err()
+        {
+            return 0;
+        }
+        self.gc_pins.values().copied().min().unwrap_or(0)
+    }
+
+    /// Called only for a matching admitted prune completion. The storage
+    /// worker has confirmed lease-fenced oldest-prefix catalog retirement;
+    /// physical deletion may subsequently fail without retaining the proof.
+    pub(crate) fn retire_gc_pin(&mut self, generation: u64) {
+        if self.gc_active_generation != Some(generation) {
+            self.gc_pins.remove(&generation);
         }
     }
 
@@ -363,6 +397,19 @@ impl WalTransitionProtocol {
                 self.phase
             )));
         }
+        if self.gc_active_generation.is_some() {
+            if self.gc_active_generation == Some(receipt.sealed_segment())
+                && self.gc_pins.contains_key(&receipt.sealed_segment())
+                && !self.gc_pins.contains_key(&receipt.next_segment())
+            {
+                self.gc_pins
+                    .insert(receipt.next_segment(), receipt.max_sequence());
+                self.gc_active_generation = Some(receipt.next_segment());
+            } else {
+                // Never infer a lower boundary after tracking drift.
+                self.gc_active_generation = None;
+            }
+        }
         self.phase = WalLifecyclePhase::Ready;
         Ok(())
     }
@@ -431,6 +478,7 @@ impl WalTransitionProtocol {
         max_sequence: u64,
         acknowledged: bool,
     ) {
+        self.gc_pins.insert(segment_id, 0);
         self.segments.insert(
             segment_id,
             SegmentObligation {
@@ -514,6 +562,84 @@ mod tests {
 
     fn receipt(sealed: u64, next: u64, max_sequence: u64) -> WalRotationReceipt {
         WalRotationReceipt::for_test(sealed, next, max_sequence)
+    }
+
+    #[test]
+    fn should_preserve_gc_pin_when_upload_durability_retires_local_wal_after_seal_retry(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let mut protocol = WalTransitionProtocol::new();
+        protocol.initialize_gc_pins(1, 7);
+        let failed = protocol.begin_seal(1, 2, 20)?;
+
+        // Act: a reversible failed seal leaves the original active boundary.
+        protocol.abandon_prepared_seal(failed);
+        assert_eq!(protocol.tombstone_gc_cutoff(1), 7);
+        let ticket = protocol.begin_seal(1, 2, 20)?;
+        protocol.note_sealed(&ticket, receipt(1, 2, 20))?;
+        protocol.note_queued(1)?;
+        protocol.finish_seal(ticket, receipt(1, 2, 20))?;
+        protocol.note_acknowledged(1)?;
+        protocol.note_requeued(1)?;
+        protocol.note_acknowledged(1)?;
+        protocol.begin_ack(1)?;
+        protocol.note_cloud_durable(1)?;
+        protocol.finish_ack(1)?;
+        protocol.retire_cloud_durable(1)?;
+
+        // Assert: upload durability and local deletion cannot release GC proof.
+        assert_eq!(protocol.tombstone_gc_cutoff(2), 7);
+        protocol.retire_gc_pin(1);
+        assert_eq!(protocol.tombstone_gc_cutoff(2), 20);
+        protocol.retire_gc_pin(2);
+        assert_eq!(
+            protocol.tombstone_gc_cutoff(2),
+            20,
+            "active pins cannot retire"
+        );
+        assert_eq!(protocol.gc_pins.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn should_disable_tombstone_gc_when_recovered_generation_boundary_is_unknown() {
+        // Arrange
+        let mut protocol = WalTransitionProtocol::new();
+        protocol.initialize_gc_pins(9, 80);
+        protocol.register_recovered(7, 60, true);
+        protocol.register_recovered(8, 70, false);
+
+        // Act: out-of-order physical completions still leave the oldest pin.
+        protocol.retire_gc_pin(8);
+
+        // Assert
+        assert_eq!(protocol.tombstone_gc_cutoff(9), 0);
+        protocol.retire_gc_pin(7);
+        assert_eq!(protocol.tombstone_gc_cutoff(9), 80);
+        assert_eq!(
+            protocol.tombstone_gc_cutoff(10),
+            0,
+            "unknown active generation"
+        );
+    }
+
+    #[test]
+    fn should_disable_tombstone_gc_when_seal_is_fenced_after_rename() -> MidgeResult<()> {
+        // Arrange
+        let mut protocol = WalTransitionProtocol::new();
+        protocol.initialize_gc_pins(1, 7);
+        let ticket = protocol.begin_seal(1, 2, 20)?;
+        protocol.note_sealed(&ticket, receipt(1, 2, 20))?;
+
+        // Act
+        protocol.fence("lost epoch after rotation", Some(1), true);
+        protocol.abandon_prepared_seal(ticket);
+
+        // Assert
+        assert_eq!(protocol.tombstone_gc_cutoff(1), 0);
+        assert_eq!(protocol.tombstone_gc_cutoff(2), 0);
+        assert_eq!(protocol.gc_pins.get(&1), Some(&7));
+        Ok(())
     }
 
     #[test]

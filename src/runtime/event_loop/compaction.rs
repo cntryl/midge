@@ -61,6 +61,18 @@ impl EventLoop {
         let memory_limit = self.available_compaction_memory()?;
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
+        if self.wal_actor.is_cloud_async() {
+            // Capture before launch: later writes/rotations cannot make this
+            // plan collect proof needed by an older authoritative generation.
+            let cutoff = self
+                .wal_transition
+                .tombstone_gc_cutoff(self.state.wal.current_segment_id);
+            plan.snapshot_horizon = Some(plan.snapshot_horizon.map_or(cutoff, |h| h.min(cutoff)));
+            if cutoff == 0 {
+                plan.point_tombstone_gc_eligible = false;
+                plan.range_tombstone_gc_eligible = false;
+            }
+        }
         plan.target_sst_size = self.compaction_actor.target_sst_size();
         plan.compaction_memory_limit = memory_limit;
 

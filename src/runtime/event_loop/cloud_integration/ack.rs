@@ -392,17 +392,23 @@ impl EventLoop {
         segment_id: u64,
         result: crate::storage::StorageOutcome<()>,
     ) {
-        self.cloud_coordinator
+        let admitted = self
+            .cloud_coordinator
             .cloud_wal
             .prune_inflight
             .remove(&segment_id);
+        if !admitted {
+            tracing::debug!(segment_id, "ignored stale cloud WAL prune completion");
+            return;
+        }
+        self.wal_transition.retire_gc_pin(segment_id);
+        self.background_compaction_schedule.mark_due();
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
                 self.cloud_coordinator
                     .cloud_wal
                     .acked_segments
                     .remove(&segment_id);
-                self.background_compaction_schedule.mark_due();
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {
