@@ -192,7 +192,7 @@ fn should_charge_size_totals_when_index_and_range_metadata_are_retained() -> Mid
     writer.add_sorted_with_meta(b"a", Some(&[b'v'; 3000]), 1, EntryType::Put, None)?;
     writer.add_sorted_with_meta(b"b", Some(&[b'v'; 3000]), 2, EntryType::Put, None)?;
 
-    // Assert: charge the three cached totals alongside the retained metadata.
+    // Assert: charge both cached totals alongside the retained metadata.
     let range_bytes = std::mem::size_of::<RangeTombstone>() + 2;
     let current_entry_bytes = std::mem::size_of::<PendingEntry>() + 4 + 3000 + 64;
     let index_and_bloom_bytes =

@@ -406,7 +406,7 @@ fn should_release_final_block_reservations_before_reserving_finalization_workspa
     let persistent_metadata_bytes = index_entry_bytes + ENTRY_COUNT * 16;
     let finalization_bytes = index_entry_bytes * 4 + 16 * 1024;
     let budget = crate::common::resource_budget::ResourceBudget::new(
-        finalization_bytes + persistent_metadata_bytes + 2 * std::mem::size_of::<usize>(),
+        finalization_bytes + persistent_metadata_bytes + std::mem::size_of::<usize>(),
     );
     assert!(
         16 * 1024 + entry_reservations > budget.limit(),
