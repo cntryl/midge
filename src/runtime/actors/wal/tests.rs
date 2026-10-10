@@ -2744,3 +2744,42 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
         .exists());
     Ok(())
 }
+
+#[test]
+fn should_replay_strict_commit_when_shipping_writer_uses_crash_filesystem() -> MidgeResult<()> {
+    // Arrange: the actor receives the same subdirectory view as EventLoop::new.
+    let fs = crate::io::crash_fs::CrashFs::new();
+    fs.create_dir_all(&FsPath::new("wal"))
+        .map_err(FsError::into_midge)?;
+    fs.sync_dir(&FsPath::new(""), FsDurability::Durable)
+        .map_err(FsError::into_midge)?;
+    let root: Arc<dyn Fs> = Arc::new(fs.clone());
+    let wal_fs = crate::io::subdirectory(root, "wal");
+    let mut state = RuntimeState::new(PathBuf::from("unmaterialized-database"), true);
+    let mut actor = WalActor::with_filesystem(
+        Some(Arc::clone(&wal_fs)),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let prepared = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        1,
+        b"key",
+        b"value",
+        DurabilityPolicy::Strict,
+    )?;
+    // Act
+    actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    fs.crash(crate::io::crash_fs::CrashMode::DiscardVolatile);
+    let mut recovered = std::collections::HashMap::new();
+    crate::wal::recovery::replay_wal(wal_fs.as_ref(), &FsPath::new(""), &mut recovered)?;
+    // Assert
+    let entries = recovered.get(&0).expect("recovered family").iter_all();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_slice(), b"key");
+    assert_eq!(entries[0].1.as_deref(), Some(b"value".as_slice()));
+    Ok(())
+}

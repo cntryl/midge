@@ -1384,3 +1384,32 @@ fn should_preserve_recovery_inputs_when_strict_planner_exhausts_aggregate_head_b
 fn should_preserve_recovery_inputs_when_salvage_planner_exhausts_aggregate_head_budget() {
     assert_planner_aggregate_timeout(RecoveryPolicy::Salvage);
 }
+
+#[test]
+#[ignore = "#808 PR 5: interrupted-salvage-floor"]
+fn should_preserve_sequence_floor_when_salvage_is_interrupted_before_authority_commit(
+) -> MidgeResult<()> {
+    // Arrange: a verifiable suffix proves sequence 3 was allocated.
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"one");
+    let mut corrupt = framed_wal(2, 7, b"two");
+    corrupt[8] ^= 1;
+    bytes.extend(corrupt);
+    bytes.extend(framed_wal(3, 7, b"three"));
+    fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act: the planner runs, but the process loses the response/state before
+    // the authority commit. A later open must retain the allocation floor.
+    let first = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+    assert!(first.plan.max_unreplayed_sequence >= 3);
+    drop(first);
+    let reopened = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert
+    assert!(
+        reopened.plan.max_unreplayed_sequence >= 3,
+        "interrupted salvage lost its sequence floor: {}",
+        reopened.plan.max_unreplayed_sequence
+    );
+    Ok(())
+}

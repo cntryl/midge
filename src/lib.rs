@@ -92,6 +92,19 @@ mod engine;
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]
 pub mod __internal {
+    pub mod simulation {
+        pub use crate::io::crash_fs::{CrashFs, CrashMode};
+        pub use crate::io::{
+            Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions,
+        };
+        pub use crate::simulation::counterexample::{shrink, Counterexample, MODEL_VERSION};
+        pub use crate::simulation::filesystem::ScheduledFs;
+        pub use crate::simulation::object_store::ObjectStore;
+        pub use crate::simulation::oracle::{
+            FamilyObservation, Obligation, Operation, Oracle, Transaction,
+        };
+        pub use crate::simulation::scheduler::{Action, Command, Scheduler, TraceEvent};
+    }
     // Each module lists the items its tests, benches and fuzz targets use.
     // Glob re-exports would make every `pub` item reachable from outside the
     // crate and so hide dead code from the compiler.
@@ -206,6 +219,9 @@ pub mod __internal {
         }
     }
 }
+
+#[cfg(any(test, feature = "internal-testing"))]
+mod simulation;
 
 // ---------------------------------------------------------------------------
 // Public Export Surface

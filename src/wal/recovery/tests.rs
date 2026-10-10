@@ -2026,3 +2026,46 @@ fn should_not_rescan_fresh_records_when_a_stale_record_carries_a_higher_sequence
     assert_eq!(stats.record_count, 200);
     assert_eq!(streaming::duplicate_rescans(), 0);
 }
+
+#[test]
+#[ignore = "#808 PR 2: allocation and linked history"]
+fn should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_epoch() {
+    // Arrange: the LR-F3 layout. Segments 5 and 6 hold epoch-1 acknowledged
+    // writes. After the next-segment id regressed to 1 at an epoch-2 open,
+    // rotation sealed the active log (epoch-1 tail, then epoch-2 records)
+    // as segment 1, which now replays first.
+    let dir = TempDir::new().unwrap();
+    let wal_dir = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let seg = |id: u64| wal_dir.join(crate::wal::segment_file_name(id));
+    let mut one = encode_frame(&put_record(b"e1-tail", 3, 1));
+    one.extend(encode_frame(&put_record(b"e2-new", 4, 2)));
+    std::fs::write(seg(1), one).unwrap();
+    std::fs::write(seg(5), encode_frame(&put_record(b"e1-acked-a", 1, 1))).unwrap();
+    std::fs::write(seg(6), encode_frame(&put_record(b"e1-acked-b", 2, 1))).unwrap();
+    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), b"").unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let mut memtables = HashMap::new();
+
+    // Act
+    let result = replay_wal(&storage, &FsPath::new("wal"), &mut memtables);
+
+    // Assert: either replay refuses the inverted layout, or it keeps the
+    // acknowledged epoch-1 writes. It must not drop them silently.
+    match result {
+        Err(_) => {}
+        Ok(stats) => {
+            let table = &memtables[&0];
+            assert_eq!(
+                (
+                    table.get(b"e1-acked-a").unwrap().is_some(),
+                    table.get(b"e1-acked-b").unwrap().is_some(),
+                    stats.stale_records_skipped,
+                    stats.had_corruption,
+                ),
+                (true, true, 0, false),
+                "acknowledged epoch-1 writes were skipped as stale"
+            );
+        }
+    }
+}

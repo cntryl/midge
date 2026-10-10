@@ -4,6 +4,10 @@
 
 mod common;
 
+#[cfg(feature = "sqrzl-tests")]
+#[path = "fault_injection/wal_authority_regressions.rs"]
+mod wal_authority_regressions;
+
 #[path = "fault_injection/compaction_deadline.rs"]
 mod compaction_deadline;
 
@@ -2909,6 +2913,44 @@ mod failure_injection {
         assert_eq!(health, EngineHealth::Healthy);
         assert_visible(&reopened, &cf, b"pre", b"value-pre");
         shutdown_engine(reopened);
+    }
+
+    #[test]
+    #[ignore = "#808 PR 3: retryable-fsync-failure"]
+    fn should_not_replay_commit_reported_as_retryable_when_wal_sync_fails() {
+        // Arrange
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let mut engine = open_local_engine(db_path);
+        let cf = default_cf(&engine);
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("failpoint");
+
+        // Act
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(b"k".to_vec(), b"v".to_vec(), None).expect("put");
+        let commit = tx.commit(WriteOptions::sync());
+        fail::remove("midge::wal::inject_no_space_on_sync");
+        scenario.teardown();
+        let visible_before_restart = read_cf_value(&engine, &cf, b"k");
+        let _ = engine.shutdown(std::time::Duration::from_secs(5));
+        let reopened = open_local_engine(db_path);
+        let visible_after_restart = read_cf_value(&reopened, &default_cf(&reopened), b"k");
+
+        // Assert
+        eprintln!(
+            "commit={commit:?} before={visible_before_restart:?} after={visible_after_restart:?}"
+        );
+        let retryable = matches!(commit, Err(MidgeError::NoSpace(_) | MidgeError::Io(_)));
+        assert!(
+            !(retryable && visible_after_restart.is_some()),
+            "commit reported retryable {commit:?} but the write replayed after restart"
+        );
     }
 }
 

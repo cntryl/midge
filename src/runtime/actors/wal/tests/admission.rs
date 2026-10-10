@@ -468,3 +468,100 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
     assert_eq!(second.severity(), crate::common::Severity::Fatal);
     Ok(())
 }
+
+#[test]
+#[ignore = "#808 PR 3: partial-spilled-admission"]
+fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() -> MidgeResult<()> {
+    // Arrange: ephemeral-cache WAL budget with room for the TxnBegin frame
+    // but not for the 500-byte op frame that follows it.
+    let temp = tempfile::tempdir()?;
+    let setup = crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(1024))?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(1024);
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer("wal.log")?,
+    );
+    actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
+    let mut write_set =
+        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), true, 1);
+    write_set.push(crate::runtime::TransactionOp::Put {
+        cf_id: 0,
+        key: Bytes::from_static(b"big-key"),
+        value: Bytes::from(vec![b'v'; 500]),
+        ttl_seconds: None,
+        insert_only: false,
+    })?;
+    let source = write_set.take_source();
+    let begin = crate::wal::WalRecord::new_cf(
+        0,
+        crate::wal::WalOpKind::TxnBegin,
+        Bytes::from_static(b"txn"),
+        None,
+        u64::MAX,
+        u64::MAX,
+    );
+    let begin_bound = crate::wal::encoding::record_frame_size_bound(&begin)? as u64;
+    // Largest admissible amount right now.
+    let (mut low, mut high) = (0_u64, 4096_u64);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if setup.hybrid_storage.admit_local_wal_bytes(mid).is_ok() {
+            setup.hybrid_storage.release_local_wal_bytes(mid);
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let free = low;
+    assert!(
+        free > begin_bound + 16,
+        "test setup: free {free}, begin bound {begin_bound}"
+    );
+    let pre_admitted = free - begin_bound - 16;
+    setup.hybrid_storage.admit_local_wal_bytes(pre_admitted)?;
+    let params = |request_id| SpilledTransactionAppendParams {
+        request_id,
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::CloudAsync),
+        start_sequence: 0,
+        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+    };
+
+    // Act: the begin frame is admitted and written, the op frame is not.
+    let first_result = actor.append_spilled_transaction(&mut state, &source, params(1));
+    let wal_len_after_first = fs.metadata(&FsPath::new("wal.log")).map_or(0, |m| m.len);
+    let fenced_after_first = actor.is_fenced();
+    // The budget frees up (e.g. uploads retire WAL); the caller retries.
+    setup.hybrid_storage.release_local_wal_bytes(pre_admitted);
+    let retry = actor.append_spilled_transaction(&mut state, &source, params(2));
+
+    // Assert
+    eprintln!(
+        "free {free}, begin bound {begin_bound}, first {first_result:?}, wal.log after first \
+         {wal_len_after_first} B, fenced after first {fenced_after_first}, retry {retry:?}, \
+         anomaly {}",
+        state.persistence_anomaly_detected()
+    );
+    assert!(
+        matches!(first_result, Err(MidgeError::NoSpace(_))),
+        "{first_result:?}"
+    );
+    assert!(!fenced_after_first, "a budget rejection fenced the WAL");
+    assert!(
+        retry.is_ok(),
+        "retry after the budget freed failed: {retry:?}"
+    );
+    assert!(actor.is_open());
+    Ok(())
+}

@@ -807,3 +807,43 @@ fn should_stop_streamed_wal_inspection_when_record_visitor_rejects() {
     assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
     assert_eq!(visited, 1);
 }
+
+#[test]
+#[ignore = "#808 PR 3: abandoned-split-transaction"]
+fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_follow() {
+    // Arrange
+    let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 3, 1);
+    begin.txn_id = Some(10);
+    let mut abandoned = put("abandoned", 4, 1);
+    abandoned.txn_id = Some(10);
+    let epoch_one: Vec<u8> = [put("seed", 2, 1), begin, abandoned]
+        .iter()
+        .flat_map(encode)
+        .collect();
+    let epoch_two: Vec<u8> = (5..=400)
+        .map(|seq| put(format!("next-{seq}"), seq, 2))
+        .flat_map(|record| encode(&record))
+        .collect();
+    let storage = fixture(&[("1.wal", epoch_one), ("2.wal", epoch_two)], 1024);
+    let mut memtables = HashMap::new();
+    let mut checkpoints = 0;
+
+    // Act
+    let result = replay_wal_with_checkpoint(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+        None,
+        limits(),
+        &mut |tables, _| {
+            checkpoints += 1;
+            tables.clear();
+            Ok(())
+        },
+    );
+
+    // Assert
+    assert!(result.is_ok(), "replay failed: {result:?}");
+    assert!(checkpoints > 0);
+}

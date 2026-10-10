@@ -255,3 +255,6 @@ fn should_preserve_valid_prefix_given_truncated_wal_tail_when_recovering() {
 - Legacy tests still exist and are being tightened gradually.
 - Prefer durable local-disk coverage for trust-critical tests unless the behavior is specifically cloud-only.
 - Informational tests that only print status are not sufficient for trust guarantees; each guarantee should have an asserted outcome.
+
+The [#808 simulator-stage record](wal-redesign-808.md) describes the crash
+adapters, transaction oracle, and named regression runner for the WAL redesign.
