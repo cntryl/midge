@@ -45,6 +45,13 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      - name: Check diagnostic command syntax
+        run: |
+          ruby -c tools/diagnostic_support.rb
+          ruby -c tools/finalize_stress_artifacts.rb
+          ruby -c tools/recovery_attribution.rb
+          ruby -c tools/profile_checkpoint_pair.rb
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
