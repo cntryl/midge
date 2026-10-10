@@ -504,12 +504,10 @@ fn should_collect_tombstone_when_live_runtime_receives_cloud_wal_retirement() {
         .flat_map(|level| &level.files)
         .all(|file| file.cf_id != cf.id()));
     let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-    assert!(read
-        .scan(&Query::new())
-        .unwrap()
-        .try_collect()
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        read.scan(&Query::new()).unwrap().try_collect().unwrap(),
+        Vec::<(bytes::Bytes, bytes::Bytes)>::new()
+    );
     drop(read);
     engine.shutdown(Duration::from_secs(10)).unwrap();
     drop(engine);
@@ -519,12 +517,10 @@ fn should_collect_tombstone_when_live_runtime_receives_cloud_wal_retirement() {
     let read = reopened
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .unwrap();
-    assert!(read
-        .scan(&Query::new())
-        .unwrap()
-        .try_collect()
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        read.scan(&Query::new()).unwrap().try_collect().unwrap(),
+        Vec::<(bytes::Bytes, bytes::Bytes)>::new()
+    );
     drop(read);
     reopened.shutdown(Duration::from_secs(10)).unwrap();
 }
