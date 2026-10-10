@@ -2985,6 +2985,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
     scenario.teardown();
 }
 
+#[cfg(feature = "failpoints")]
 fn cheap_flush_file(n: u64) -> crate::runtime::FileMeta {
     crate::runtime::FileMeta {
         name: format!("000000_00_{n:020}.sst"),
