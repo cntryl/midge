@@ -4,18 +4,22 @@ use crate::common::resource_budget::ResourceBudget;
 use std::cell::Cell;
 
 thread_local! {
-    static QUERY_WORK: Cell<usize> = const { Cell::new(0) };
+    static QUERY_WORK: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 pub(super) fn record_work(units: usize) {
-    QUERY_WORK.with(|work| work.set(work.get().saturating_add(units)));
+    QUERY_WORK.with(|work| {
+        if let Some(count) = work.get() {
+            work.set(Some(count.saturating_add(units)));
+        }
+    });
 }
 
 fn query_work(writer: &FsSstWriter) -> usize {
-    QUERY_WORK.with(|work| work.set(0));
+    QUERY_WORK.with(|work| work.set(Some(0)));
     std::hint::black_box(writer.estimated_size_bytes());
     std::hint::black_box(writer.encoded_size_upper_bound());
-    QUERY_WORK.with(Cell::get)
+    QUERY_WORK.with(|work| work.replace(None).unwrap())
 }
 
 fn streaming_writer(
@@ -198,7 +202,7 @@ fn should_charge_size_totals_when_index_and_range_metadata_are_retained() -> Mid
         range_bytes
             + current_entry_bytes
             + index_and_bloom_bytes
-            + 3 * std::mem::size_of::<usize>()
+            + 2 * std::mem::size_of::<usize>()
     );
     assert_estimates_match(&writer);
     drop(writer);
@@ -211,20 +215,13 @@ fn should_saturate_retained_size_totals_when_an_append_exceeds_usize() -> MidgeR
     // Arrange: exercise overflow without allocating an unrepresentable inventory.
     let budget = ResourceBudget::new(1024 * 1024);
     let mut writer = streaming_writer(&budget, CompressionPolicy::None)?;
-    writer.range_tombstone_size_upper_bound = usize::MAX - 1;
-    let pipeline = &mut writer.streaming.as_mut().unwrap().pipeline;
-    pipeline.block_index_key_bytes = usize::MAX - 1;
-    pipeline.block_index_size_upper_bound = usize::MAX - 1;
+    writer.range_tombstones.size_upper_bound = usize::MAX - 1;
 
     // Act
     append_inventory(&mut writer, 4)?;
 
     // Assert
-    let pipeline = &writer.streaming.as_ref().unwrap().pipeline;
-    assert_eq!(pipeline.block_index_key_bytes, usize::MAX);
-    assert_eq!(pipeline.block_index_size_upper_bound, usize::MAX);
-    assert_eq!(writer.range_tombstone_size_upper_bound, usize::MAX);
-    assert_eq!(writer.estimated_size_bytes(), usize::MAX);
+    assert_eq!(writer.range_tombstones.size_upper_bound, usize::MAX);
     assert_eq!(writer.encoded_size_upper_bound(), Some(usize::MAX));
     drop(writer);
     assert_eq!(budget.used(), 0);
@@ -340,10 +337,31 @@ fn should_keep_size_preflight_work_constant_when_streaming_partitions_accumulate
     append_inventory(&mut small, 8)?;
     append_inventory(&mut large, 1024)?;
 
-    // Act: count retained-inventory visits or scalar-total reads, not elapsed time.
+    // Act: count actual retained entries visited, not fixed query call sites.
     let small_work = query_work(&small);
     let large_work = query_work(&large);
-    eprintln!("size-preflight counted work: small={small_work}, large={large_work}");
+    // Positive control: the same collection iterators count each real visit.
+    let walked = |writer: &FsSstWriter| {
+        QUERY_WORK.with(|work| work.set(Some(0)));
+        writer
+            .streaming
+            .as_ref()
+            .unwrap()
+            .pipeline
+            .block_index_entries
+            .iter()
+            .for_each(|entry| {
+                std::hint::black_box(entry);
+            });
+        writer.range_tombstones.iter().for_each(|entry| {
+            std::hint::black_box(entry);
+        });
+        QUERY_WORK.with(|work| work.replace(None).unwrap())
+    };
+    let small_walk = walked(&small);
+    let large_walk = walked(&large);
+    eprintln!("size-preflight actual visits: small={small_work}, large={large_work}; walk controls={small_walk}/{large_walk}");
+    assert!(small_walk > 0 && large_walk > small_walk && large_walk >= 1500);
 
     // Assert
     assert!(
@@ -365,7 +383,7 @@ fn should_keep_size_preflight_work_constant_when_streaming_partitions_accumulate
         large.legacy_encoded_size_upper_bound()
     );
     assert!(
-        small_work <= 3 && large_work <= 3,
+        small_work == 0 && large_work == 0,
         "size query work must stay constant: small={small_work}, large={large_work}"
     );
     drop(small);
@@ -385,12 +403,16 @@ impl FsSstWriter {
         // uses fewer than 64 bytes of integer framing. Key payloads also
         // appear in the block index and the two metadata bounds. The factors
         // below allow their copies plus worst-case fixed-compressor growth.
-        let ranges = self.range_tombstones.iter().fold(0usize, |total, range| {
-            total.saturating_add(
-                self.additional_range_tombstone_size_upper_bound(&range.start, &range.end)
-                    .unwrap_or(usize::MAX),
-            )
-        });
+        let ranges = self
+            .range_tombstones
+            .as_slice()
+            .iter()
+            .fold(0usize, |total, range| {
+                total.saturating_add(
+                    self.additional_range_tombstone_size_upper_bound(&range.start, &range.end)
+                        .unwrap_or(usize::MAX),
+                )
+            });
         let fixed = ranges.saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
@@ -401,14 +423,16 @@ impl FsSstWriter {
             }));
         };
         let pipeline = &streaming.pipeline;
-        let index = pipeline
-            .block_index_entries
-            .iter()
-            .fold(0usize, |total, (key, _)| {
-                total
-                    .saturating_add(256)
-                    .saturating_add(key.len().saturating_mul(8))
-            });
+        let index =
+            pipeline
+                .block_index_entries
+                .as_slice()
+                .iter()
+                .fold(0usize, |total, (key, _)| {
+                    total
+                        .saturating_add(256)
+                        .saturating_add(key.len().saturating_mul(8))
+                });
         let current_index = pipeline.current_first_key.as_ref().map_or(0, |key| {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
@@ -446,7 +470,7 @@ impl FsSstWriter {
             let pipeline = &streaming.pipeline;
             let persisted =
                 usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX)).unwrap_or(usize::MAX);
-            let index = pipeline.block_index_entries.iter().fold(
+            let index = pipeline.block_index_entries.as_slice().iter().fold(
                 pipeline
                     .block_index_entries
                     .len()

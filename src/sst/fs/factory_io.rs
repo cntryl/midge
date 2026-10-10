@@ -45,6 +45,10 @@ impl FsSstFactoryIo {
             Arc::clone(&self.scratch_outstanding),
             self.compaction_scratch_directory.as_deref(),
         )?);
+        #[cfg(test)]
+        {
+            writer.legacy_size_preflights = self.legacy_size_preflights;
+        }
         Ok(Box::new(writer))
     }
     /// Create a new factory with a custom filesystem implementation
@@ -152,6 +156,42 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
     super::finish_writer_to_path(Box::new(legacy), path)
 }
 
+// One formula supplies both prospective admission and the retained range total.
+fn range_size_upper_bound(start: usize, end: usize) -> usize {
+    crate::memtable::size_bound::range_bytes(start, end)
+}
+
+#[derive(Default)]
+struct RetainedRanges {
+    entries: Vec<RangeTombstone>,
+    size_upper_bound: usize,
+}
+
+impl RetainedRanges {
+    fn push(&mut self, range: RangeTombstone) {
+        self.size_upper_bound = self
+            .size_upper_bound
+            .saturating_add(range_size_upper_bound(range.start.len(), range.end.len()));
+        self.entries.push(range);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    fn as_slice(&self) -> &[RangeTombstone] {
+        &self.entries
+    }
+    fn iter(&self) -> impl Iterator<Item = &RangeTombstone> {
+        self.entries.iter().inspect(|_| {
+            #[cfg(test)]
+            size_preflight_tests::record_work(1);
+        })
+    }
+}
+
 /// Simple in-memory SST writer that applies block-level compression.
 struct FsSstWriter {
     /// Filesystem this writer publishes through, injected by the factory so
@@ -159,8 +199,7 @@ struct FsSstWriter {
     /// the same backend the factory reads from.
     fs: Arc<dyn Fs>,
     entries: Vec<PendingEntry>,
-    range_tombstones: Vec<RangeTombstone>,
-    range_tombstone_size_upper_bound: usize,
+    range_tombstones: RetainedRanges,
     block_size: usize,
     compression_policy: CompressionPolicy,
     /// Activated only by `add_sorted_with_meta`, which is the compaction
@@ -229,10 +268,7 @@ impl DynSstWriter for FsSstWriter {
         start: &[u8],
         end: &[u8],
     ) -> Option<usize> {
-        Some(crate::memtable::size_bound::range_bytes(
-            start.len(),
-            end.len(),
-        ))
+        Some(range_size_upper_bound(start.len(), end.len()))
     }
 
     fn encoded_size_upper_bound(&self) -> Option<usize> {
@@ -244,10 +280,9 @@ impl DynSstWriter for FsSstWriter {
         // uses fewer than 64 bytes of integer framing. Key payloads also
         // appear in the block index and the two metadata bounds. The factors
         // below allow their copies plus worst-case fixed-compressor growth.
-        #[cfg(test)]
-        size_preflight_tests::record_work(1);
         let fixed = self
-            .range_tombstone_size_upper_bound
+            .range_tombstones
+            .size_upper_bound
             .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
@@ -258,9 +293,7 @@ impl DynSstWriter for FsSstWriter {
             }));
         };
         let pipeline = &streaming.pipeline;
-        #[cfg(test)]
-        size_preflight_tests::record_work(1);
-        let index = pipeline.block_index_size_upper_bound;
+        let index = pipeline.block_index_entries.encoded_size_upper_bound();
         let current_index = pipeline.current_first_key.as_ref().map_or(0, |key| {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
@@ -301,13 +334,7 @@ impl DynSstWriter for FsSstWriter {
             let pipeline = &streaming.pipeline;
             let persisted =
                 usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX)).unwrap_or(usize::MAX);
-            #[cfg(test)]
-            size_preflight_tests::record_work(1);
-            let index = pipeline
-                .block_index_entries
-                .len()
-                .saturating_mul(std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>())
-                .saturating_add(pipeline.block_index_key_bytes);
+            let index = pipeline.block_index_entries.retained_bytes();
             let current_bloom = if pipeline.current_block_keys.is_empty() {
                 0
             } else {
@@ -441,10 +468,6 @@ impl DynSstWriter for FsSstWriter {
             .transpose()?;
         self.range_tombstones
             .push(RangeTombstone::new(start.to_vec(), end.to_vec(), seq));
-        self.range_tombstone_size_upper_bound =
-            self.range_tombstone_size_upper_bound.saturating_add(
-                crate::memtable::size_bound::range_bytes(start.len(), end.len()),
-            );
         if let Some(reservation) = reservation {
             self.range_tombstone_reservations.push(reservation);
         }
@@ -465,7 +488,11 @@ impl DynSstWriter for FsSstWriter {
             compression_policy,
             streaming,
             range_tombstone_reservations: _range_tombstone_reservations,
-            ..
+            block_size: _,
+            budget: _,
+            preserve_legacy_entries: _,
+            #[cfg(test)]
+                legacy_size_preflights: _,
         } = *self;
         debug_assert!(entries.is_empty());
         let scratch = Self::finish_streaming(
@@ -503,7 +530,12 @@ impl DynSstWriter for FsSstWriter {
             return Ok(bytes);
         }
 
-        Self::finish_buffered(entries, &range_tombstones, block_size, &compression_policy)
+        Self::finish_buffered(
+            entries,
+            range_tombstones.as_slice(),
+            block_size,
+            &compression_policy,
+        )
     }
 }
 
@@ -522,11 +554,13 @@ impl SstFactory for FsSstFactoryIo {
     /// Create a new SST writer
     #[cfg(test)]
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
-        Ok(Box::new(FsSstWriter::new(
+        let mut writer = FsSstWriter::new(
             Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
-        )))
+        );
+        writer.legacy_size_preflights = self.legacy_size_preflights;
+        Ok(Box::new(writer))
     }
 
     fn create_for_compaction(

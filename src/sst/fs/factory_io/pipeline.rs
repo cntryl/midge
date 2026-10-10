@@ -19,11 +19,50 @@ use crate::sst::types::{
 use crate::types::{EntryType, RangeTombstone};
 use std::sync::Arc;
 
+/// Owns index insertion and its single retained size total.
+#[derive(Default)]
+pub(super) struct BlockIndexEntries {
+    entries: Vec<(Vec<u8>, BlockHandle)>,
+    key_bytes: usize,
+}
+
+impl BlockIndexEntries {
+    fn push(&mut self, key: Vec<u8>, handle: BlockHandle) {
+        self.key_bytes = self.key_bytes.saturating_add(key.len());
+        self.entries.push((key, handle));
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.len()
+            .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>())
+            .saturating_add(self.key_bytes)
+    }
+
+    pub(super) fn encoded_size_upper_bound(&self) -> usize {
+        self.len()
+            .saturating_mul(256)
+            .saturating_add(self.key_bytes.saturating_mul(8))
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = &(Vec<u8>, BlockHandle)> {
+        self.entries.iter().inspect(|_| {
+            #[cfg(test)]
+            super::size_preflight_tests::record_work(1);
+        })
+    }
+
+    pub(super) fn as_slice(&self) -> &[(Vec<u8>, BlockHandle)] {
+        &self.entries
+    }
+}
+
 /// Mutable state shared by both writer entry paths before blocks are emitted.
 pub(super) struct BlockPipeline {
-    pub(super) block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
-    pub(super) block_index_key_bytes: usize,
-    pub(super) block_index_size_upper_bound: usize,
+    pub(super) block_index_entries: BlockIndexEntries,
     key_profiler: KeyStructureProfiler,
     pub(super) current_block: Vec<u8>,
     pub(super) current_block_keys: Vec<Vec<u8>>,
@@ -39,9 +78,7 @@ pub(super) struct BlockPipeline {
 impl BlockPipeline {
     pub(super) fn new() -> Self {
         Self {
-            block_index_entries: Vec::new(),
-            block_index_key_bytes: 0,
-            block_index_size_upper_bound: 0,
+            block_index_entries: BlockIndexEntries::default(),
             key_profiler: KeyStructureProfiler::new(),
             current_block: Vec::new(),
             current_block_keys: Vec::new(),
@@ -102,7 +139,7 @@ impl BlockPipeline {
         let block_bloom_handle =
             Self::append_block(sink, &self.block_bloom.serialize(), compression_policy)?;
         let meta_handle = Self::append_block(sink, &metadata.encode(), compression_policy)?;
-        let index_bytes = FsSstWriter::serialize_index(&self.block_index_entries)?;
+        let index_bytes = FsSstWriter::serialize_index(self.block_index_entries.as_slice())?;
         let index_handle = Self::append_block(sink, &index_bytes, compression_policy)?;
         let footer = trie_handle
             .map_or_else(
@@ -129,19 +166,24 @@ impl BlockPipeline {
             return Ok(());
         }
 
-        let reservation = sink.prepare_block(
-            self.current_block.len(),
-            self.current_first_key.as_deref(),
-            self.current_block_keys.len(),
-        )?;
+        // The pipeline owns the metadata policy; the sink only reserves its bytes.
+        let metadata_bytes = self
+            .current_first_key
+            .as_ref()
+            .map_or(0, |key| {
+                key.len()
+                    .saturating_add(std::mem::size_of::<(Vec<u8>, BlockHandle)>())
+            })
+            .saturating_add(self.current_block_keys.len().saturating_mul(16))
+            .saturating_add(if self.block_index_entries.len() == 0 {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            });
+        let reservation = sink.prepare_block(self.current_block.len(), metadata_bytes)?;
         let handle = Self::append_block(sink, &self.current_block, compression_policy)?;
         if let Some(first_key) = self.current_first_key.take() {
-            self.block_index_key_bytes = self.block_index_key_bytes.saturating_add(first_key.len());
-            self.block_index_size_upper_bound = self
-                .block_index_size_upper_bound
-                .saturating_add(256)
-                .saturating_add(first_key.len().saturating_mul(8));
-            self.block_index_entries.push((first_key, handle));
+            self.block_index_entries.push(first_key, handle);
         }
         let mut bloom = BloomWriter::with_defaults(self.current_block_keys.len().max(1));
         for key in self.current_block_keys.drain(..) {
@@ -263,8 +305,7 @@ impl FsSstWriter {
         Self {
             fs,
             entries: Vec::new(),
-            range_tombstones: Vec::new(),
-            range_tombstone_size_upper_bound: 0,
+            range_tombstones: super::RetainedRanges::default(),
             block_size,
             compression_policy,
             streaming: None,
@@ -398,7 +439,7 @@ impl FsSstWriter {
 
     pub(super) fn build_trie_index(
         index_kind: IndexKind,
-        block_index_entries: &[(Vec<u8>, BlockHandle)],
+        block_index_entries: &BlockIndexEntries,
     ) -> Option<Vec<u8>> {
         if !matches!(index_kind, IndexKind::Trie) {
             return None;
@@ -443,7 +484,7 @@ impl FsSstWriter {
 
     pub(super) fn finish_streaming(
         mut state: StreamingState,
-        range_tombstones: &[RangeTombstone],
+        range_tombstones: &super::RetainedRanges,
         compression_policy: &CompressionPolicy,
     ) -> MidgeResult<super::super::scratch::TrackedScratch> {
         // Release the final block's transient entry reservations before asking
@@ -455,14 +496,7 @@ impl FsSstWriter {
             .pipeline
             .flush_current_block(&mut state.sink, compression_policy)?;
 
-        let index_bytes = state.pipeline.block_index_entries.iter().fold(
-            state
-                .pipeline
-                .block_index_entries
-                .len()
-                .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
-            |total, (key, _)| total.saturating_add(key.len()),
-        );
+        let index_bytes = state.pipeline.block_index_entries.retained_bytes();
         let tombstone_bytes = range_tombstones.iter().fold(
             range_tombstones
                 .len()
@@ -479,13 +513,183 @@ impl FsSstWriter {
             .saturating_add(16 * 1024);
         let _finalization_reservation = state.sink.reserve_finalization(finalization_bytes)?;
 
-        state
-            .pipeline
-            .finish(&mut state.sink, range_tombstones, compression_policy)?;
+        state.pipeline.finish(
+            &mut state.sink,
+            range_tombstones.as_slice(),
+            compression_policy,
+        )?;
         // The scratch file carries no durability: `finish_to_path` copies it
         // into the staging file, and that copy is what is fsynced and renamed
         // into place. Syncing here would write every output byte to the device
         // twice. A crash simply orphans the scratch, which cleanup handles.
         state.sink.finish()
+    }
+}
+
+#[cfg(test)]
+mod size_accounting_tests {
+    use super::*;
+    use crate::common::resource_budget::ResourceBudget;
+    use crate::common::MidgeError;
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Failure {
+        Preparation,
+        Header,
+        Payload,
+        Advance,
+    }
+
+    struct FailingSink<'a> {
+        inner: &'a mut super::super::sink::ScratchBlockSink,
+        failure: Failure,
+        appends: usize,
+    }
+
+    fn injected_error() -> MidgeError {
+        MidgeError::Io(std::io::Error::other("injected block flush failure"))
+    }
+
+    impl BlockSink for FailingSink<'_> {
+        type Finish = ();
+        type EntryReservation =
+            <super::super::sink::ScratchBlockSink as BlockSink>::EntryReservation;
+        type FlushReservation =
+            <super::super::sink::ScratchBlockSink as BlockSink>::FlushReservation;
+        fn offset(&self) -> MidgeResult<u64> {
+            self.inner.offset()
+        }
+        fn append(&mut self, bytes: &[u8]) -> MidgeResult<()> {
+            self.appends += 1;
+            if matches!(
+                (self.failure, self.appends),
+                (Failure::Header, 1) | (Failure::Payload, 2)
+            ) {
+                return Err(injected_error());
+            }
+            self.inner.append(bytes)
+        }
+        fn advance_after_append(&mut self, bytes: u64) -> MidgeResult<()> {
+            if self.failure == Failure::Advance {
+                return Err(injected_error());
+            }
+            self.inner.advance_after_append(bytes)
+        }
+        fn reserve_entry(&self, bytes: usize) -> MidgeResult<Self::EntryReservation> {
+            self.inner.reserve_entry(bytes)
+        }
+        fn retain_entry(&mut self, reservation: Self::EntryReservation) {
+            self.inner.retain_entry(reservation);
+        }
+        fn prepare_block(
+            &self,
+            block_bytes: usize,
+            metadata_bytes: usize,
+        ) -> MidgeResult<Self::FlushReservation> {
+            let reservation = self.inner.prepare_block(block_bytes, metadata_bytes)?;
+            if self.failure == Failure::Preparation {
+                return Err(injected_error());
+            }
+            Ok(reservation)
+        }
+        fn finish_block(&mut self, reservation: Self::FlushReservation) {
+            self.inner.finish_block(reservation);
+        }
+        fn finish(self) -> MidgeResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_preserve_size_accounting_when_block_flush_fails() -> MidgeResult<()> {
+        for failure in [
+            Failure::Preparation,
+            Failure::Header,
+            Failure::Payload,
+            Failure::Advance,
+        ] {
+            // Arrange: use real scratch storage and real budget guards.
+            let budget = ResourceBudget::new(1024 * 1024);
+            let mut sink = super::super::sink::ScratchBlockSink::new(
+                Some(budget.clone()),
+                Arc::default(),
+                None,
+            )?;
+            let mut pipeline = BlockPipeline::new();
+            let reservation = sink.reserve_entry(4096)?;
+            pipeline.append_sorted_entry(
+                &mut sink,
+                PendingEntry {
+                    key: b"a".to_vec(),
+                    value: Some(vec![b'v'; 3000]),
+                    sequence: 1,
+                    op_type: EntryType::Put,
+                    expiration: None,
+                },
+                4096,
+                &CompressionPolicy::None,
+                reservation,
+            )?;
+            let before_index = (
+                pipeline.block_index_entries.len(),
+                pipeline.block_index_entries.retained_bytes(),
+                pipeline.block_index_entries.encoded_size_upper_bound(),
+            );
+            let before_block = pipeline.current_block.clone();
+            let before_keys = pipeline.current_block_keys.clone();
+            let retained = budget.used();
+
+            // Act: fail inside flush_current_block, after actual reservations are acquired.
+            let result = pipeline.flush_current_block(
+                &mut FailingSink {
+                    inner: &mut sink,
+                    failure,
+                    appends: 0,
+                },
+                &CompressionPolicy::None,
+            );
+
+            // Assert: an unsuccessful append cannot advance any retained index total.
+            assert!(result.is_err(), "{failure:?}");
+            assert_eq!(
+                (
+                    pipeline.block_index_entries.len(),
+                    pipeline.block_index_entries.retained_bytes(),
+                    pipeline.block_index_entries.encoded_size_upper_bound()
+                ),
+                before_index,
+                "{failure:?}"
+            );
+            assert_eq!(pipeline.current_first_key.as_deref(), Some(b"a".as_slice()));
+            assert_eq!(pipeline.current_block, before_block);
+            assert_eq!(pipeline.current_block_keys, before_keys);
+            assert_eq!(sink.offset()?, 0);
+            assert_eq!(
+                budget.used(),
+                retained,
+                "temporary guards must release: {failure:?}"
+            );
+            assert!(budget.peak() > retained && budget.peak() <= budget.limit());
+            // A partially written failed scratch is discarded, never retried or published.
+            drop(sink);
+            assert_eq!(budget.used(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_saturate_cached_key_bytes_when_index_insertion_overflows() {
+        // Arrange: simulate the arithmetic boundary without allocating usize::MAX bytes.
+        let mut index = BlockIndexEntries {
+            entries: Vec::new(),
+            key_bytes: usize::MAX - 1,
+        };
+        // Act
+        index.push(vec![1, 2], BlockHandle::new(0, 10));
+        // Assert
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.key_bytes, usize::MAX);
+        assert_eq!(index.retained_bytes(), usize::MAX);
+        assert_eq!(index.encoded_size_upper_bound(), usize::MAX);
     }
 }
