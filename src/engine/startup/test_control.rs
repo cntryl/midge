@@ -29,6 +29,7 @@ pub(super) struct OneShotBarrier {
 
 #[derive(Default)]
 struct CallerSlot {
+    #[cfg(feature = "failpoints")]
     installed: bool,
     control: Option<OpenTestControl>,
 }
@@ -38,8 +39,10 @@ thread_local! {
     static WORKER: RefCell<Option<CheckpointTestBoundaries>> = const { RefCell::new(None) };
 }
 
+#[cfg(feature = "failpoints")]
 pub(super) struct Installation(std::marker::PhantomData<*mut ()>);
 
+#[cfg(feature = "failpoints")]
 pub(super) fn install(control: OpenTestControl) -> Installation {
     CALLER.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -50,6 +53,7 @@ pub(super) fn install(control: OpenTestControl) -> Installation {
     Installation(std::marker::PhantomData)
 }
 
+#[cfg(feature = "failpoints")]
 impl Drop for Installation {
     fn drop(&mut self) {
         CALLER.with(|slot| *slot.borrow_mut() = CallerSlot::default());
