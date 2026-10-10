@@ -124,6 +124,7 @@ test_db_*/
 
 tools/*
 !tools/recovery_attribution.py
+!tools/qualify_watchdog_contention.py
 !tools/finalize_stress_artifacts.py
 !tools/readback-investigation.rb
 !tools/run-stress-with-receipts.sh
