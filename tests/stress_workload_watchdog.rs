@@ -366,12 +366,64 @@ fn read_json(path: &Path) -> Value {
 }
 
 #[cfg(feature = "failpoints")]
+fn decode_final_flush_attempts(bytes: &[u8], allow_torn_tail: bool) -> Result<Vec<Value>, String> {
+    let mut attempts = Vec::new();
+    for record in bytes.split_inclusive(|byte| *byte == b'\n') {
+        // A newline commits one JSONL record. Native process termination can
+        // interrupt the formatter before its final newline; only that last
+        // uncommitted record may be ignored, and only for aborted children.
+        if !record.ends_with(b"\n") {
+            if allow_torn_tail {
+                break;
+            }
+            return Err("successful child left an uncommitted final attempt".into());
+        }
+        attempts.push(serde_json::from_slice(record).map_err(|error| error.to_string())?);
+    }
+    Ok(attempts)
+}
+
+#[cfg(feature = "failpoints")]
+fn read_final_flush_attempts(workload: &Path, allow_torn_tail: bool) -> Vec<Value> {
+    let bytes = fs::read(workload.join("final-flush-attempts.jsonl"))
+        .expect("retained actual final-flush results");
+    decode_final_flush_attempts(&bytes, allow_torn_tail)
+        .expect("valid committed final-flush receipts")
+}
+
+#[cfg(feature = "failpoints")]
 fn final_flush_attempts(workload: &Path) -> Vec<Value> {
-    fs::read_to_string(workload.join("final-flush-attempts.jsonl"))
-        .expect("retained actual final-flush results")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("complete final-flush result JSON"))
-        .collect()
+    read_final_flush_attempts(workload, false)
+}
+
+#[cfg(feature = "failpoints")]
+fn aborted_final_flush_attempts(workload: &Path) -> Vec<Value> {
+    read_final_flush_attempts(workload, true)
+}
+
+#[cfg(feature = "failpoints")]
+fn should_read_committed_attempts_when_watchdog_aborts_mid_record() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("final-flush-attempts.jsonl"),
+        b"{\"success\":false}\n{\"success\":",
+    )
+    .unwrap();
+    // Act
+    let attempts = aborted_final_flush_attempts(dir.path());
+    // Assert
+    assert_eq!(attempts, vec![serde_json::json!({"success": false})]);
+}
+
+#[cfg(feature = "failpoints")]
+fn should_reject_malformed_committed_attempts_when_watchdog_aborts() {
+    // Arrange
+    let bytes = b"{malformed}\n";
+    // Act
+    let result = decode_final_flush_attempts(bytes, true);
+    // Assert
+    assert!(result.is_err());
 }
 
 fn client_snapshot(workload: &Path) -> Value {
@@ -834,7 +886,7 @@ fn should_report_no_progress_when_final_flush_publication_remains_held() {
             && attempt["observed_lease_healthy"] == true
             && attempt["progress_units"] == 0
     }));
-    let recorded_attempts = final_flush_attempts(&workload);
+    let recorded_attempts = aborted_final_flush_attempts(&workload);
     assert!(recorded_attempts.len() > 1);
     assert!(recorded_attempts.iter().all(|attempt| {
         attempt["success"] == false
@@ -1088,6 +1140,11 @@ fn main() {
             }
             "inventory" => should_remain_healthy_when_actual_inventory_validates_delayed_heads(),
             #[cfg(feature = "failpoints")]
+            "receipts" => {
+                should_read_committed_attempts_when_watchdog_aborts_mid_record();
+                should_reject_malformed_committed_attempts_when_watchdog_aborts();
+            }
+            #[cfg(feature = "failpoints")]
             "policy" => should_stop_retry_policy_when_callback_returns_a_terminal_error(),
             #[cfg(feature = "failpoints")]
             "final-flush" => {
@@ -1115,10 +1172,12 @@ fn main() {
     should_remain_healthy_when_cached_recovery_finishes_verified_coverage_work();
     #[cfg(feature = "failpoints")]
     {
+        should_read_committed_attempts_when_watchdog_aborts_mid_record();
+        should_reject_malformed_committed_attempts_when_watchdog_aborts();
         should_retry_final_flush_when_real_publication_outlives_its_caller_slice();
         should_report_no_progress_when_final_flush_publication_remains_held();
         should_stop_retry_policy_when_callback_returns_a_terminal_error();
-        println!("sixteen real stress watchdog integration checks passed");
+        println!("eighteen real stress watchdog integration checks passed");
     }
     #[cfg(not(feature = "failpoints"))]
     println!("thirteen real stress watchdog integration checks passed");
