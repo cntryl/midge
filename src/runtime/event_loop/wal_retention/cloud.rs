@@ -339,40 +339,38 @@ impl EventLoop {
         let local_bytes = std::fs::metadata(&local_path)
             .ok()
             .map(|metadata| metadata.len());
-        match std::fs::remove_file(&local_path) {
-            Ok(()) => {
-                if let Err(error) = self.state.fs.sync_dir(
-                    &crate::io::FsPath::new("wal"),
-                    crate::io::Durability::Durable,
-                ) {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(segment_id, %error, "local WAL deletion directory sync failed; retained ownership for restart reconciliation");
-                    return false;
-                }
-                if let (Some(storage), Some(bytes)) =
-                    (&self.cloud_coordinator.hybrid_storage, local_bytes)
-                {
-                    storage.release_local_wal_bytes(bytes);
-                }
-                tracing::debug!(
-                segment_id,
-                path = %local_path.display(),
-                "Removed cloud-durable local WAL segment"
-                );
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
+        let removed = match self.state.fs.remove_file(&crate::io::FsPath::new(format!(
+            "wal/{}",
+            crate::wal::segment_file_name(segment_id)
+        ))) {
+            Ok(()) => true,
+            Err(crate::io::FsError::NotFound(_)) => false,
             Err(error) => {
                 self.state.mark_persistence_anomaly();
-                tracing::warn!(
-                    segment_id,
-                    path = %local_path.display(),
-                    error = %error,
-                    "Failed to remove cloud-durable local WAL segment; recovery remains safe but storage may leak"
-                );
-                false
+                tracing::warn!(segment_id, %error, "local WAL removal failed; retaining deletion proof");
+                return false;
+            }
+        };
+        // NotFound may follow an earlier unlink whose directory sync failed.
+        // Absence alone cannot prove the old file will stay absent after power loss.
+        if let Err(error) = self.state.fs.sync_dir(
+            &crate::io::FsPath::new("wal"),
+            crate::io::Durability::Durable,
+        ) {
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(segment_id, %error, "local WAL deletion directory sync failed; retaining deletion proof");
+            return false;
+        }
+        if removed {
+            if let (Some(storage), Some(bytes)) =
+                (&self.cloud_coordinator.hybrid_storage, local_bytes)
+            {
+                storage.release_local_wal_bytes(bytes);
             }
         }
+        tracing::debug!(segment_id, path = %local_path.display(), "Durably removed cloud-durable local WAL segment");
+        true
     }
 }
 
