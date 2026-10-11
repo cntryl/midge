@@ -673,6 +673,10 @@ impl CloudPersistence {
         Ok(())
     }
 
+    /// Verify one segment's upload and publish it: [`Self::verify_uploaded_wal_segment`],
+    /// then [`Self::publish_wal_segments`] for it alone. Runtime publication
+    /// selects a contiguous run first; tests publish one segment directly.
+    #[cfg(test)]
     pub(crate) fn publish_remote_wal_segment(
         &self,
         segment_id: u64,
@@ -681,6 +685,30 @@ impl CloudPersistence {
         fencing_epoch: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
+        let upload =
+            self.verify_uploaded_wal_segment(segment_id, expected_max_sequence, source, deadline)?;
+        self.publish_wal_segments(&[upload], fencing_epoch, deadline)
+    }
+
+    /// Prove that the remote object for the sealed segment at `source` holds
+    /// exactly its local bytes, and describe it for publication.
+    ///
+    /// This only records an upload; publishing it is
+    /// [`Self::publish_wal_segments`]'s job, once every earlier segment is
+    /// uploaded too. An existing object with the same bytes counts as this
+    /// upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MidgeError::Corruption`] when the object holds other bytes:
+    /// objects are immutable, so it is never overwritten.
+    pub(crate) fn verify_uploaded_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        source: &crate::io::FsLocation,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<PublishedWalSegment> {
         let local_bytes = source.read_all().map_err(|error| {
             let error = error.into_io();
             MidgeError::Io(std::io::Error::new(
@@ -704,11 +732,35 @@ impl CloudPersistence {
         );
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
-            return Err(MidgeError::Internal(format!(
+            return Err(MidgeError::Corruption(format!(
                 "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
                 local_readback.writer_epoch
             )));
         }
+        Ok(entry)
+    }
+
+    /// Publish `run`, verified uploads oldest first, in one catalog
+    /// compare-and-swap.
+    ///
+    /// The caller selects `run` as the contiguous uploads its writer owes the
+    /// catalog ([`crate::wal::publish::uploaded_run`]); here each segment the
+    /// catalog lacks must land past its head
+    /// ([`crate::wal::publish::additions`]). Segments it already publishes
+    /// identically add nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MidgeError::Fenced`] when another writer epoch owns the
+    /// catalog, [`MidgeError::Corruption`] when the catalog publishes another
+    /// object for one of these segments, and an internal error for a run
+    /// that would not extend the catalog in order.
+    pub(crate) fn publish_wal_segments(
+        &self,
+        run: &[PublishedWalSegment],
+        fencing_epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         let _catalog_mutation =
             self.lock_wal_catalog_mutation_within(deadline, "cloud WAL publication")?;
         let authority = load_and_repair_catalog_within(self, deadline)?.ok_or_else(|| {
@@ -721,11 +773,21 @@ impl CloudPersistence {
                 catalog.fencing_epoch
             )));
         }
-        if !catalog
-            .publish(fencing_epoch, entry)
-            .map_err(MidgeError::Internal)?
-        {
+        let additions = crate::wal::publish::additions(&catalog.segments, run).map_err(
+            |refusal| match refusal {
+                crate::wal::publish::Refusal::Conflict { .. } => {
+                    MidgeError::Corruption(refusal.to_string())
+                }
+                _ => MidgeError::Internal(refusal.to_string()),
+            },
+        )?;
+        if additions.is_empty() {
             return Ok(());
+        }
+        for segment in additions {
+            catalog
+                .publish(fencing_epoch, segment)
+                .map_err(MidgeError::Internal)?;
         }
         let publication = commit_catalog_within(self, Some(&authority.primary), &catalog, deadline);
         match publication {
@@ -910,11 +972,10 @@ fn validate_remote_wal(
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<ValidatedWalObject> {
     let proof = storage.remote_object_proof_within(&entry.object_key, deadline)?;
+    // The object exists but holds other bytes than the segment it names.
     entry
         .validate_bytes(proof.bytes())
-        .map_err(MidgeError::Internal)?;
-    crate::wal::cloud_segment::validate_bytes(&entry.object_key, proof.bytes(), entry.max_sequence)
-        .map_err(MidgeError::Internal)?;
+        .map_err(MidgeError::Corruption)?;
     Ok(ValidatedWalObject { proof })
 }
 

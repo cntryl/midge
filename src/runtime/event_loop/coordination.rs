@@ -9,7 +9,14 @@ const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Owns cloud WAL admission, acknowledgement, pruning, and cleanup proof state.
 pub(crate) struct CloudWalUploadTracker {
+    /// Acknowledged segments, each with the last sequence it holds: verified
+    /// uploads, and segments recovery found published.
     pub(super) acked_segments: BTreeMap<u64, u64>,
+    /// The verified uploads among `acked_segments` the catalog does not
+    /// publish yet, each as publication adds it. An upload waits here until
+    /// every earlier segment is uploaded too, so they publish as one
+    /// contiguous run (#841).
+    uploaded: BTreeMap<u64, crate::wal::cloud_catalog::PublishedWalSegment>,
     pub(super) upload_backlog: BTreeMap<u64, u64>,
     /// Earliest time at which runtime-owned WAL upload obligations may be
     /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
@@ -21,11 +28,45 @@ impl CloudWalUploadTracker {
     pub(super) fn new(acked_segments: BTreeMap<u64, u64>) -> Self {
         Self {
             acked_segments,
+            uploaded: BTreeMap::new(),
             upload_backlog: BTreeMap::new(),
             upload_retry: crate::runtime::retry_schedule::RetrySchedule::new(
                 CLOUD_WAL_RUNTIME_RETRY_DELAY,
             ),
             prune_inflight: HashSet::new(),
+        }
+    }
+
+    /// Acknowledge a verified upload. It is not published yet.
+    pub(super) fn record_upload(&mut self, upload: crate::wal::cloud_catalog::PublishedWalSegment) {
+        self.acked_segments
+            .insert(upload.segment_id, upload.max_sequence);
+        self.uploaded.insert(upload.segment_id, upload);
+    }
+
+    /// Withdraw a segment's acknowledgement, so no run publishes past it
+    /// until it is verified again.
+    pub(super) fn forget_upload(&mut self, segment_id: u64) {
+        self.acked_segments.remove(&segment_id);
+        self.uploaded.remove(&segment_id);
+    }
+
+    /// What publishing `run`, a contiguous run of acknowledged segments,
+    /// adds: its verified uploads, oldest first. Segments recovery found
+    /// published add nothing.
+    pub(super) fn unpublished_uploads(
+        &self,
+        run: &[(u64, u64)],
+    ) -> Vec<crate::wal::cloud_catalog::PublishedWalSegment> {
+        run.iter()
+            .filter_map(|(segment_id, _)| self.uploaded.get(segment_id).cloned())
+            .collect()
+    }
+
+    /// The catalog now publishes `run`.
+    pub(super) fn mark_published(&mut self, run: &[(u64, u64)]) {
+        for (segment_id, _) in run {
+            self.uploaded.remove(segment_id);
         }
     }
 

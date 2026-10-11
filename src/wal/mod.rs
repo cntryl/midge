@@ -18,7 +18,9 @@
 //! Cloud WAL durability uses epoch-scoped immutable segment objects plus a
 //! lease-fenced publication catalog with a conditionally updated recovery
 //! mirror. Recovery replays only validated catalog entries, so an uploader that
-//! finishes after losing its lease can create only an ignored orphan. Both
+//! finishes after losing its lease can create only an ignored orphan. A
+//! verified upload only marks its segment uploaded; `publish` selects the
+//! contiguous run of uploads the catalog may publish next. Both
 //! catalog copies advance to every newly acquired lease epoch before recovery
 //! and converge before a cloud durability acknowledgement can advance the
 //! runtime frontier.
@@ -33,6 +35,7 @@ pub mod encoding;
 pub mod frame;
 pub(crate) mod fs;
 pub mod policy;
+pub(crate) mod publish;
 pub(crate) mod recovery;
 pub(crate) mod traits;
 pub mod types;

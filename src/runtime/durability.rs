@@ -299,27 +299,22 @@ impl DurabilityCoordinator {
         &self,
         acked_segments: &BTreeMap<u64, u64>,
     ) -> Result<Vec<(u64, u64)>, String> {
-        let mut inflight: Vec<(u64, u64)> = self
+        let mut owed: Vec<crate::wal::publish::OwedSegment> = self
             .inflight
             .iter()
-            .map(|(segment_id, info)| (*segment_id, info.max_sequence))
+            .map(|(segment_id, info)| crate::wal::publish::OwedSegment {
+                segment_id: *segment_id,
+                max_sequence: info.max_sequence,
+            })
             .collect();
-        inflight.sort_unstable_by_key(|(segment_id, _)| *segment_id);
-
-        let mut ready = Vec::new();
-        for (segment_id, expected_max_sequence) in inflight {
-            let Some(acked_max_sequence) = acked_segments.get(&segment_id) else {
-                break;
-            };
-            if *acked_max_sequence != expected_max_sequence {
-                return Err(format!(
-                    "cloud WAL segment {segment_id} ack max sequence {acked_max_sequence} does not match inflight max sequence {expected_max_sequence}"
-                ));
-            }
-            ready.push((segment_id, expected_max_sequence));
-        }
-
-        Ok(ready)
+        owed.sort_unstable_by_key(|segment| segment.segment_id);
+        crate::wal::publish::uploaded_run(&owed, acked_segments)
+            .map(|run| {
+                run.into_iter()
+                    .map(|segment| (segment.segment_id, segment.max_sequence))
+                    .collect()
+            })
+            .map_err(|refusal| refusal.to_string())
     }
 
     /// Retire a cloud segment only after its frontier and waiter commit has

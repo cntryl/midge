@@ -9301,7 +9301,6 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
 }
 
 #[test]
-#[ignore = "#808 stage 2: out-of-order-publication"]
 fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: upload both immutable bodies without publishing either one.
@@ -9333,6 +9332,96 @@ fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
         catalog.segments.is_empty(),
         "catalog published across an unacknowledged predecessor: {:?}",
         catalog.segments.keys().collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+fn published_wal_segments_for_test(el: &EventLoop) -> crate::common::MidgeResult<Vec<u64>> {
+    let catalog_path = el
+        .state
+        .db_path
+        .join("cloud_store")
+        .join(crate::wal::cloud_catalog::OBJECT_KEY);
+    let catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&std::fs::read(catalog_path)?)
+            .map_err(crate::common::MidgeError::Corruption)?;
+    Ok(catalog.segments.keys().copied().collect())
+}
+
+#[test]
+fn should_publish_buffered_upload_in_order_when_preceding_segment_is_acknowledged(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the later upload is acknowledged first, so it waits.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    assert_eq!(published_wal_segments_for_test(&el)?, Vec::<u64>::new());
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+
+    // Assert
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), second_max_sequence);
+    Ok(())
+}
+
+#[test]
+fn should_fence_writer_when_uploaded_wal_object_holds_other_bytes() -> crate::common::MidgeResult<()>
+{
+    // Arrange: the object under the segment's key holds other bytes.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let request_id = 46_101;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+    let remote_path = remote_wal_path_for_test(&el, segment_id);
+    let mut other_bytes = std::fs::read(&remote_path)?;
+    let last = other_bytes.len() - 1;
+    other_bytes[last] ^= 0xff;
+    write_test_file(remote_path.clone(), &other_bytes);
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    let response = response
+        .recv_timeout(Duration::from_secs(1))
+        .expect("waiter outcome");
+    assert!(
+        matches!(
+            response,
+            RuntimeResponse::Error {
+                error: crate::common::MidgeError::Corruption(_),
+                ..
+            }
+        ),
+        "{response:?}"
+    );
+    assert!(el.wal_transition.is_fenced());
+    assert_eq!(published_wal_segments_for_test(&el)?, Vec::<u64>::new());
+    assert_eq!(
+        std::fs::read(&remote_path)?,
+        other_bytes,
+        "the object is never overwritten"
     );
     Ok(())
 }
