@@ -25,7 +25,11 @@ impl SimulatedClock {
     /// Move this clock, and every clone of it, forward by `by`.
     pub fn advance(&self, by: Duration) {
         let by = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
-        self.offset_millis.fetch_add(by, Ordering::SeqCst);
+        let _ = self
+            .offset_millis
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |offset| {
+                Some(offset.saturating_add(by))
+            });
     }
 
     /// Move the clock forward until it reads at least `millis`; a reading

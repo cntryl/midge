@@ -19,8 +19,9 @@ use std::time::{Duration, Instant};
 const LEASE_TTL: Duration = Duration::from_secs(30);
 /// Past the TTL and the default skew allowance, half the TTL.
 const PAST_EXPIRY: Duration = Duration::from_secs(46);
-/// Within the TTL and the default skew allowance.
-const SHORT_OF_EXPIRY: Duration = Duration::from_secs(44);
+/// Past the TTL but within the default skew allowance, with seconds to spare
+/// for the real time a test takes.
+const SHORT_OF_EXPIRY: Duration = Duration::from_secs(40);
 
 #[derive(Debug, Clone, Copy)]
 enum Mode {
@@ -216,7 +217,7 @@ fn should_take_over_crashed_provider_holder_without_waiting_when_lease_clock_adv
 
 #[test]
 fn should_refuse_crashed_holder_lease_when_lease_clock_stops_short_of_expiry() {
-    // Arrange: inside the TTL plus the skew allowance, the dead holder's
+    // Arrange: past the TTL but inside the skew allowance, the dead holder's
     // lease still stands.
     let modes = [Mode::Local, Mode::SimulatedCloud, Mode::ProviderCloud];
 

@@ -32,14 +32,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Long enough that a live process keeps renewing its lease, short enough
-/// that a crashed process's engine, whose threads outlive the simulated
-/// crash, stops retrying its lease release within a second.
-const LEASE_TTL: Duration = Duration::from_secs(1);
-/// How far a restarted process's lease clock moves past a crash: beyond the
-/// TTL and the default skew allowance, half the TTL, so it takes the dead
-/// process's lease over at once (#835).
-const TAKEOVER: Duration = Duration::from_secs(2);
+/// The lease TTL in milliseconds: long enough that a live process keeps
+/// renewing its lease, short enough that a crashed process's engine, whose
+/// threads outlive the simulated crash, stops retrying its lease release
+/// within a second.
+const LEASE_TTL_MILLIS: u64 = 1_000;
+/// A TTL short enough that lease renewals interleave with crashes.
+const RENEWING_LEASE_TTL_MILLIS: u64 = 60;
 /// The local lease's mutation lock. #811: a completed release's unlink is not
 /// made durable, so a power loss can bring the lock back and block every
 /// later open.
@@ -298,7 +297,9 @@ struct Image {
     /// the start of the workload.
     crashed: bool,
     /// The lease clock's reading, so a replay never sees a lease record
-    /// stamped in its future.
+    /// stamped in its future. Images without one were stamped by the system
+    /// clock.
+    #[serde(default)]
     lease_clock_millis: u64,
     /// What the campaign reported, so a replay judges the same way.
     checks: Checks,
@@ -323,6 +324,13 @@ struct Checks {
     /// After a power loss, remove a resurrected lease lock as an operator
     /// would (#811) instead of reporting the refused open.
     clear_stale_lease_lock: bool,
+    /// The lease TTL, which sets how often renewals interleave with crashes.
+    #[serde(default = "default_lease_ttl_millis")]
+    lease_ttl_millis: u64,
+}
+
+fn default_lease_ttl_millis() -> u64 {
+    LEASE_TTL_MILLIS
 }
 
 impl Default for Checks {
@@ -330,7 +338,14 @@ impl Default for Checks {
         Self {
             segment_reuse: true,
             clear_stale_lease_lock: true,
+            lease_ttl_millis: LEASE_TTL_MILLIS,
         }
+    }
+}
+
+impl Checks {
+    fn lease_ttl(self) -> Duration {
+        Duration::from_millis(self.lease_ttl_millis)
     }
 }
 
@@ -403,7 +418,7 @@ impl Campaign {
         let root: Arc<dyn Fs> = Arc::new(self.device.fs());
         OpenOptions::local(self.named.path())
             .background_compaction(false)
-            .lease_ttl(LEASE_TTL)
+            .lease_ttl(self.checks.lease_ttl())
             .lease_clock_for_testing(Arc::new(self.clock.clone()))
             .filesystem_for_testing(root)
             .build()
@@ -476,8 +491,10 @@ impl Campaign {
     fn recover(&mut self, stop: Stop) -> Result<(), FindingKind> {
         self.device.disarm_faults();
         if stop != Stop::Clean {
-            // The restarted process's clock runs past the dead one's lease.
-            self.clock.advance(TAKEOVER);
+            // The restarted process's clock runs past the dead one's lease,
+            // beyond the TTL and the default skew allowance of half the TTL,
+            // so it takes the lease over at once (#835).
+            self.clock.advance(self.checks.lease_ttl() * 2);
         }
         let engine = match Engine::open(self.options()) {
             Err(error)
@@ -813,11 +830,15 @@ fn assert_reproduced(case: &str, finding: Option<Finding>, signature: impl Fn(&F
 
 #[test]
 fn should_find_no_violation_when_synced_writes_survive_crashes() {
-    // Arrange
+    // Arrange: lease renewals interleave with the crashes.
     let workloads = control_seeds(32);
+    let checks = Checks {
+        lease_ttl_millis: RENEWING_LEASE_TTL_MILLIS,
+        ..Checks::default()
+    };
 
     // Act
-    let finding = campaign(Profile::CrashControl, workloads, 24, Checks::default());
+    let finding = campaign(Profile::CrashControl, workloads, 24, checks);
 
     // Assert
     assert_clean("crash-control", finding);

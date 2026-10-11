@@ -488,26 +488,29 @@ fn should_report_conflict_only_before_a_conditional_effect() {
 
 #[test]
 fn should_cut_crashed_process_off_without_effect_when_processes_restart() {
-    // Arrange
+    // Arrange: two processes share the store.
     let store = SimulatedObjectStore::eager();
     let crashed = store.process();
-    let restarted_before = store.process();
+    let other = store.process();
 
     // Act
-    store.process_crash();
+    crashed.process_crash();
     let restarted = store.process();
-    let from_crashed = put(&crashed, "k", b"zombie", &[]).recv_timeout(ANSWER_WAIT);
+    let from_crashed = put(&crashed.clone(), "k", b"zombie", &[]).recv_timeout(ANSWER_WAIT);
     let from_restarted = put(&restarted, "k", b"live", &[]).recv_timeout(ANSWER_WAIT);
-    let from_stale_view = head(&restarted_before, "k");
+    let from_other = head(&other, "k");
 
     // Assert
     assert_eq!(class(&from_crashed.expect("crashed answer")), "transport");
     assert_eq!(class(&from_restarted.expect("restarted answer")), "ok");
-    assert!(matches!(from_stale_view, Err(CloudError::Transport(_))));
+    assert!(from_other.is_ok(), "{from_other:?}");
     assert_eq!(store.object("k").as_deref(), Some(b"live".as_slice()));
     assert_eq!(
         store.trace(),
-        vec![(id(Operation::Put, "k", 0), Fate::Normal)]
+        vec![
+            (id(Operation::Put, "k", 0), Fate::Normal),
+            (id(Operation::Head, "k", 0), Fate::Normal),
+        ]
     );
 }
 
@@ -519,7 +522,7 @@ fn should_land_crashed_process_late_effect_when_landed_after_the_crash() {
     let _ = put(&crashed, "k", b"zombie", &[]).recv_timeout(ANSWER_WAIT);
 
     // Act
-    store.process_crash();
+    crashed.process_crash();
     let landed = store.land_late_effects();
 
     // Assert

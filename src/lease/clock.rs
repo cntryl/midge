@@ -5,7 +5,9 @@
 //! inject a clock to take a lease over without waiting out its TTL: advancing
 //! the clock a new process reads makes the old holder's record stale to it,
 //! and it acquires the next epoch through the normal path. The old holder's
-//! own validity is monotonic and does not follow the injected clock.
+//! local validity is monotonic and does not follow the injected clock, but a
+//! provider lease judges its own document's expiry by this clock when it
+//! renews or publishes.
 
 use crate::common::time::Clock;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ impl LeaseClock {
             Some(clock) => i64::try_from(clock.now_millis())
                 .ok()
                 .and_then(chrono::DateTime::from_timestamp_millis)
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+                .expect("an injected lease clock reads a representable time"),
         }
     }
 }

@@ -850,9 +850,11 @@ impl OpenOptionsBuilder {
     }
 
     /// Read the wall time the lease stamps its records with, and judges
-    /// another holder's expiry by, from `clock` instead of the system clock.
-    /// A test advances it to take a lease over without waiting out the TTL;
-    /// the holder's own validity stays monotonic and does not follow it.
+    /// expiry by, from `clock` instead of the system clock. A test advances
+    /// the clock a new process reads to take a lease over without waiting out
+    /// the TTL. The holder's local validity stays monotonic, but a provider
+    /// lease also checks its own document's expiry by this clock when it
+    /// renews or publishes, so advancing a live holder's clock fences it.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]
