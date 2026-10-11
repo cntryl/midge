@@ -9378,7 +9378,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
 }
 
 #[test]
-#[ignore = "#808 PR 2: out-of-order-publication"]
+#[ignore = "#808 stage 2: out-of-order-publication"]
 fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: upload both immutable bodies without publishing either one.

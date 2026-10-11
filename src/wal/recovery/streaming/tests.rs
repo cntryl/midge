@@ -809,7 +809,7 @@ fn should_stop_streamed_wal_inspection_when_record_visitor_rejects() {
 }
 
 #[test]
-#[ignore = "#808 PR 3: abandoned-split-transaction"]
+#[ignore = "#808 stage 6: abandoned-split-transaction"]
 fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_follow() {
     // Arrange
     let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 3, 1);

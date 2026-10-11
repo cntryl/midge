@@ -693,13 +693,82 @@ mod source_scan {
             .replace(std::path::MAIN_SEPARATOR, "/")
     }
 
+    /// Split a `cfg` predicate list at its top-level commas.
+    fn predicate_list(list: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let (mut depth, mut start) = (0usize, 0);
+        for (index, character) in list.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(list[start..index].trim());
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(list[start..].trim());
+        parts.retain(|part| !part.is_empty());
+        parts
+    }
+
+    /// Whether a `cfg` predicate holds only in test builds: `test`, or the
+    /// `internal-testing`/`failpoints` features.
+    fn test_only(predicate: &str) -> bool {
+        let predicate = predicate.trim();
+        let inner = |prefix: &str| {
+            predicate
+                .strip_prefix(prefix)
+                .and_then(|tail| tail.strip_suffix(')'))
+                .map(predicate_list)
+        };
+        if predicate == "test" {
+            true
+        } else if let Some(feature) = predicate
+            .strip_prefix("feature = \"")
+            .and_then(|tail| tail.strip_suffix('"'))
+        {
+            matches!(feature, "internal-testing" | "failpoints")
+        } else if let Some(parts) = inner("all(") {
+            parts.into_iter().any(test_only)
+        } else if let Some(parts) = inner("any(") {
+            !parts.is_empty() && parts.into_iter().all(test_only)
+        } else {
+            false
+        }
+    }
+
+    /// Whether `line` opens a `cfg` attribute whose item compiles only in
+    /// test builds.
     fn is_gate(line: &str) -> bool {
         let trimmed = line.trim_start();
-        trimmed.starts_with("#[cfg(")
-            && !trimmed.contains("not(")
-            && (trimmed.contains("test")
-                || trimmed.contains("internal-testing")
-                || trimmed.contains("failpoints"))
+        if !trimmed.starts_with("#[cfg(") {
+            return false;
+        }
+        let end = attribute_end(trimmed);
+        trimmed[..end]
+            .strip_prefix("#[cfg(")
+            .and_then(|tail| tail.strip_suffix(")]"))
+            .is_some_and(test_only)
+    }
+
+    /// Byte offset just past the `cfg` attribute that starts `line`.
+    fn attribute_end(line: &str) -> usize {
+        let mut depth = 0usize;
+        for (index, character) in line.char_indices() {
+            match character {
+                '[' | '(' => depth += 1,
+                ']' | ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        line.len()
     }
 
     /// Byte length of the item starting at `text`: through its matching `}`,
@@ -713,6 +782,41 @@ mod source_scan {
                 b'/' if bytes.get(index + 1) == Some(&b'/') => {
                     while index < bytes.len() && bytes[index] != b'\n' {
                         index += 1;
+                    }
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    let mut nesting = 0usize;
+                    while index < bytes.len() {
+                        if bytes[index..].starts_with(b"/*") {
+                            nesting += 1;
+                            index += 2;
+                        } else if bytes[index..].starts_with(b"*/") {
+                            nesting -= 1;
+                            index += 2;
+                            if nesting == 0 {
+                                break;
+                            }
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    continue;
+                }
+                b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
+                    && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric()) =>
+                {
+                    let hashes = bytes[index + 1..]
+                        .iter()
+                        .take_while(|byte| **byte == b'#')
+                        .count();
+                    let open = index + 1 + hashes;
+                    if bytes.get(open) == Some(&b'"') {
+                        let mut closing = b"\"".to_vec();
+                        closing.extend(std::iter::repeat_n(b'#', hashes));
+                        index = text[open + 1..]
+                            .find(std::str::from_utf8(&closing).expect("ASCII delimiter"))
+                            .map_or(bytes.len(), |end| open + 1 + end + closing.len());
+                        continue;
                     }
                 }
                 b'"' => {
@@ -759,8 +863,14 @@ mod source_scan {
                 rest = &rest[line_end..];
                 continue;
             }
-            rest = &rest[line_end..];
+            let after_attribute = attribute_end(line);
             let mut path_attribute = None;
+            if line[after_attribute..].trim().is_empty() {
+                rest = &rest[line_end..];
+            } else {
+                // The gated item starts on the attribute's own line.
+                rest = &rest[after_attribute..];
+            }
             // Further attributes belong to the same gated item.
             while rest.trim_start().starts_with("#[") {
                 let end = rest.find('\n').map_or(rest.len(), |end| end + 1);
@@ -859,13 +969,31 @@ mod source_scan {
 /// Calls that reach host storage without the injected database root.
 const HOST_IO: &[&str] = &[
     "std::fs",
+    "tokio::fs",
     "RealFs::new(",
     "RealFs::open_existing(",
     "tempfile::",
     ".exists()",
     ".try_exists(",
+    ".is_file()",
+    ".is_dir()",
+    ".read_dir()",
+    ".metadata()",
+    ".symlink_metadata()",
+    ".canonicalize()",
     "filesystem::FileSystem::new(",
 ];
+
+/// Whether `source` imports `std::fs` through a grouped `use std::{..}`.
+fn imports_std_fs_in_group(source: &str) -> bool {
+    source.match_indices("use std::{").any(|(start, _)| {
+        let group = &source[start..];
+        let group = &group[..group.find('}').map_or(group.len(), |end| end + 1)];
+        group
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .any(|word| word == "fs")
+    })
+}
 
 /// Code that is the host boundary itself, or reads host state that is not
 /// database storage. Each entry says why it may touch the host directly.
@@ -957,6 +1085,10 @@ fn should_route_storage_io_through_injected_fs() {
             .map(str::trim)
             .map(str::to_string)
             .collect();
+        let mut hits = hits;
+        if imports_std_fs_in_group(&file.production) {
+            hits.push("use std::{.., fs, ..}".to_string());
+        }
         if !hits.is_empty() {
             violations.insert(file.relative, hits);
         }

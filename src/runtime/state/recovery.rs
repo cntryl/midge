@@ -73,7 +73,7 @@ impl RuntimeState {
     }
 
     /// Recover runtime state from a host directory, or from memory.
-    #[cfg(any(test, feature = "internal-testing"))]
+    #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
     pub fn try_new(
         db_path: PathBuf,
         memory_mode: bool,
@@ -93,7 +93,7 @@ impl RuntimeState {
         Self::recover(db_path, false, root, recovery_policy, false, None)
     }
 
-    #[cfg(any(test, feature = "internal-testing"))]
+    #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
     fn test_root(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {
         if memory_mode {
             return Ok(Arc::new(crate::io::MockFs::new()));

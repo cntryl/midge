@@ -44,7 +44,7 @@ fn assert_acknowledged_writes(engine: &Engine) {
 }
 
 #[test]
-#[ignore = "#808 PR 5: noncorruption-salvage"]
+#[ignore = "#808 stage 5: noncorruption-salvage"]
 fn should_keep_acknowledged_writes_when_salvage_replay_hits_a_transient_io_error() {
     // Arrange: sync-acknowledged writes include a split transaction requiring
     // the shipping replay spool. The healthy control proves all members exist.

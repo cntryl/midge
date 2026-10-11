@@ -255,9 +255,8 @@ impl CloudStartupRecovery {
                 .map_err(FsError::into_midge)?;
         }
 
-        crate::metadata::validate_format_marker(staging_fs.as_ref()).map_err(|error| {
-            MidgeError::RecoveryFailed(format!("committed cloud FORMAT is invalid: {error}"))
-        })?;
+        crate::metadata::validate_format_marker(staging_fs.as_ref())
+            .map_err(|error| preserve_timeout(error, "committed cloud FORMAT is invalid"))?;
         crate::metadata::ManifestPersistence::load_with_fs_and_policy_within(
             &staging_fs,
             RecoveryPolicy::Strict,

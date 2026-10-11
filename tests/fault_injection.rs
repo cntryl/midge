@@ -2919,7 +2919,7 @@ mod failure_injection {
     }
 
     #[test]
-    #[ignore = "#808 PR 3: retryable-fsync-failure"]
+    #[ignore = "#808 stage 6: retryable-fsync-failure"]
     fn should_not_replay_commit_reported_as_retryable_when_wal_sync_fails() {
         // Arrange
         let _guard = failpoint_test_lock()

@@ -252,8 +252,16 @@ fn verify_storage_path_with_sst_fs(
     sst_fs: Option<&Arc<dyn Fs>>,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<StorageVerificationReport> {
-    let fs: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?);
+    let fs: Arc<dyn Fs> = match crate::io::RealFs::open_existing(db_path) {
+        Ok(fs) => Arc::new(fs),
+        // A missing database has no FORMAT marker to validate.
+        Err(error) if !db_path.exists() => {
+            return Err(MidgeError::CompatibilityError(format!(
+                "failed to read FORMAT marker: database path is missing: {error}"
+            )));
+        }
+        Err(error) => return Err(error.into_midge()),
+    };
     crate::metadata::validate_format_marker(fs.as_ref())?;
     let manifest =
         crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)

@@ -46,7 +46,10 @@ impl StartupStoragePath {
         } else if memory_mode {
             Arc::new(crate::io::MockFs::new())
         } else {
-            Arc::new(crate::io::RealFs::new(&db_path).map_err(FsError::into_midge)?)
+            // Create durably first so a failure keeps its operating-system
+            // error kind; the root then already exists.
+            crate::io::durable_dir::create_path_durably(&db_path)?;
+            Arc::new(crate::io::RealFs::open_existing(&db_path).map_err(FsError::into_midge)?)
         };
         Ok(Self {
             db_path,
