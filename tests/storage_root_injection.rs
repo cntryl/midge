@@ -5,7 +5,9 @@
 use cntryl_midge::__internal::io::{
     Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, RealFs,
 };
-use cntryl_midge::__internal::simulation::{CrashDevice, Operation, SimulatedObjectStore};
+use cntryl_midge::__internal::simulation::{
+    CrashDevice, Operation, SimulatedClock, SimulatedObjectStore,
+};
 use cntryl_midge::__internal::storage::cloud::MockCloudBackend;
 use cntryl_midge::{Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions};
 use std::sync::Arc;
@@ -680,9 +682,9 @@ fn should_remove_orphaned_spill_runs_when_opening_from_injected_root() {
     drop(engine);
 }
 
-/// Short enough that a restart after a simulated crash takes the dead
-/// process's lease over quickly.
-const LEASE_TTL: std::time::Duration = std::time::Duration::from_millis(100);
+/// The lease a crashed process leaves behind; a restart advances its lease
+/// clock past it.
+const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Every state a power loss can leave after a local engine on a simulated
 /// device makes a synced commit, then a buffered commit of `tail`, and its
@@ -694,12 +696,14 @@ fn recover_every_power_loss(
 ) -> Vec<Result<(Option<Vec<u8>>, Option<Vec<u8>>), String>> {
     let named = tempfile::tempdir().expect("named directory");
     let device = CrashDevice::new();
+    let clock = SimulatedClock::new();
     let options = |device: &CrashDevice| {
         let root: Arc<dyn Fs> = Arc::new(device.fs());
         OpenOptions::local(named.path())
             .background_compaction(false)
             .lease_ttl(LEASE_TTL)
             .lease_clock_skew_tolerance(std::time::Duration::ZERO)
+            .lease_clock_for_testing(Arc::new(clock.clone()))
             .filesystem_for_testing(root)
             .build()
             .expect("open options")
@@ -718,8 +722,8 @@ fn recover_every_power_loss(
     }
     device.process_crash();
     drop(engine);
-    // A restarted process takes the dead one's lease over once it is stale.
-    std::thread::sleep(LEASE_TTL * 3);
+    // A restarted process's clock runs past the dead one's lease.
+    clock.advance(LEASE_TTL * 2);
     let decisions = device.decisions();
     let outcomes: usize = decisions.iter().map(|decision| decision.options).product();
     assert!((2..=256).contains(&outcomes), "{decisions:?}");

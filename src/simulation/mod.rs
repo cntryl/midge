@@ -2,6 +2,7 @@
 //! 1b). Test support only: compiled for unit tests and the `internal-testing`
 //! feature, never into production builds.
 
+pub(crate) mod clock;
 pub(crate) mod crash_fs;
 #[cfg(any(test, feature = "cloud-common"))]
 pub(crate) mod object_store;

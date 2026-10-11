@@ -28,12 +28,14 @@ pub(super) const RELEASED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
 /// Filesystem-based `LeaderStore` using temp-write + fsync + atomic rename.
 pub struct FsLeaderStore {
     fs: Arc<dyn Fs>,
+    clock: crate::lease::clock::LeaseClock,
 }
 
 impl FsLeaderStore {
-    /// Create a new filesystem leader store backed by the given `Fs`.
-    pub fn new(fs: Arc<dyn Fs>) -> Self {
-        Self { fs }
+    /// Create a new filesystem leader store backed by the given `Fs`, which
+    /// stamps its records from `clock`.
+    pub(crate) fn new(fs: Arc<dyn Fs>, clock: crate::lease::clock::LeaseClock) -> Self {
+        Self { fs, clock }
     }
 
     /// Build the temp file name for CAS.
@@ -116,7 +118,7 @@ impl FsLeaderStore {
 
     fn acquire_lock(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
         let lock_path = FsPath::new(LEADER_LOCK_FILE);
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let owner_token = uuid::Uuid::new_v4().to_string();
         let payload = Self::lock_contents(holder_id, &owner_token, &now.to_rfc3339());
 
@@ -330,7 +332,7 @@ impl FsLeaderStore {
         }
 
         // Write updated record with fresh timestamp (same epoch)
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = self.clock.now().to_rfc3339();
         let refreshed = LeaderRecord {
             epoch: expected_epoch,
             holder_id: holder_id.to_string(),
@@ -422,7 +424,7 @@ impl FsLeaderStore {
             .max(minimum_epoch)
             .checked_add(1)
             .ok_or(LeaseError::EpochExhausted)?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = self.clock.now().to_rfc3339();
 
         let new_record = LeaderRecord {
             epoch: new_epoch,
@@ -474,7 +476,10 @@ mod tests {
     use std::thread;
 
     fn make_store() -> FsLeaderStore {
-        FsLeaderStore::new(Arc::new(MockFs::new()))
+        FsLeaderStore::new(
+            Arc::new(MockFs::new()),
+            crate::lease::clock::LeaseClock::default(),
+        )
     }
 
     #[test]
@@ -807,7 +812,10 @@ mod tests {
     fn should_fail_closed_when_an_acquisition_lock_is_not_initialized_yet() {
         // Arrange
         let fs = Arc::new(MockFs::new());
-        let store = FsLeaderStore::new(Arc::clone(&fs) as Arc<dyn Fs>);
+        let store = FsLeaderStore::new(
+            Arc::clone(&fs) as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        );
         let lock_path = FsPath::new(LEADER_LOCK_FILE);
         fs.open(
             &lock_path,
@@ -832,7 +840,10 @@ mod tests {
     fn should_reject_takeover_given_renewal_write_still_owns_mutation_lock() {
         // Arrange
         let fs = Arc::new(MockFs::new());
-        let store = FsLeaderStore::new(Arc::clone(&fs) as Arc<dyn Fs>);
+        let store = FsLeaderStore::new(
+            Arc::clone(&fs) as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        );
         let old_guard = store.acquire_lock("node-a").expect("acquire old lock");
         let stale_timestamp = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
         let lock_path = FsPath::new(LEADER_LOCK_FILE);
@@ -881,7 +892,10 @@ mod tests {
         // Arrange
         const CONTENDERS: usize = 8;
         let fs = Arc::new(MockFs::new());
-        let store = Arc::new(FsLeaderStore::new(Arc::clone(&fs) as Arc<dyn Fs>));
+        let store = Arc::new(FsLeaderStore::new(
+            Arc::clone(&fs) as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        ));
         let start = Arc::new(Barrier::new(CONTENDERS));
         let attempts_complete = Arc::new(Barrier::new(CONTENDERS));
         let mut handles = Vec::with_capacity(CONTENDERS);
@@ -1000,7 +1014,10 @@ mod lock_init_failure_tests {
             fail_lock_writes: AtomicBool::new(true),
             fail_record_open: AtomicBool::new(false),
         });
-        let store = FsLeaderStore::new(fs.clone() as Arc<dyn Fs>);
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        );
 
         // Act
         let failed = store.acquire_leadership("writer-a");
@@ -1025,7 +1042,10 @@ mod lock_init_failure_tests {
             fail_lock_writes: AtomicBool::new(false),
             fail_record_open: AtomicBool::new(false),
         });
-        let store = FsLeaderStore::new(fs.clone() as Arc<dyn Fs>);
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        );
         store.acquire_leadership("writer-a").expect("acquire");
         fs.fail_record_open.store(true, Ordering::SeqCst);
 

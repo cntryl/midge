@@ -25,11 +25,19 @@
 //!   as timer-driven lease reads, are still numbered by arrival, so a seeded
 //!   schedule can be scoped to key prefixes and leave them eager.
 //!
+//! - **A crashed process is cut off.** Each process uses its own view of the
+//!   store ([`SimulatedObjectStore::process`]). Once a view's process
+//!   crashes ([`SimulatedObjectStore::process_crash`]), requests through it
+//!   fail at once without effect and without a request id, as a dead process
+//!   sends nothing; other processes keep their views, and the dead one's
+//!   late effects can still land (#835).
+//!
 //! Listing returns every key in one page; real providers page at about a
 //! thousand keys.
 
 use crate::storage::cloud::{CloudBackend, CloudCallback, CloudError, CloudEvent, ObjectMetadata};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The kind of request a [`RequestId`] names.
@@ -434,10 +442,12 @@ struct StoreState {
     trace: Vec<(RequestId, Fate)>,
 }
 
-/// A simulated object store; clones share one store.
+/// A simulated object store; clones share one store and one process view.
 #[derive(Clone)]
 pub struct SimulatedObjectStore {
     state: Arc<Mutex<StoreState>>,
+    /// Whether the process using this view is still running.
+    alive: Arc<AtomicBool>,
 }
 
 impl SimulatedObjectStore {
@@ -451,7 +461,24 @@ impl SimulatedObjectStore {
                 late: Vec::new(),
                 trace: Vec::new(),
             })),
+            alive: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// A view of the store for a new process.
+    #[must_use]
+    pub fn process(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            alive: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// The process using this view crashes: later requests through this view
+    /// and its clones fail with a transport error, without effect. Other
+    /// views are unaffected.
+    pub fn process_crash(&self) {
+        self.alive.store(false, Ordering::SeqCst);
     }
 
     /// A store that applies and answers every request at once.
@@ -517,6 +544,10 @@ impl SimulatedObjectStore {
     }
 
     fn submit(&self, operation: Operation, key: &str, effect: Effect, callback: &CloudCallback) {
+        if !self.alive.load(Ordering::SeqCst) {
+            let _ = callback.send(failed(effect.land(&mut Objects::new()), Failure::Transport));
+            return;
+        }
         let mut state = self.lock();
         let stable = stable_key(key);
         let occurrence = state

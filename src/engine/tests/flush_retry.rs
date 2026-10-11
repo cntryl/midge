@@ -155,6 +155,7 @@ impl RetryFixture {
             options.lease_clock_skew_tolerance(),
             options.storage_io_timeout(),
             options.lease_ttl(),
+            &options.lease_clock(),
         )?;
         let guard = Arc::clone(&created.lease).try_acquire()?;
         let healthy = Arc::new(AtomicBool::new(true));

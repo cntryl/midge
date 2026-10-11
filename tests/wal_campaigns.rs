@@ -23,18 +23,22 @@
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
     Commit, CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp, History, Logging,
-    Verdict, Violation,
+    SimulatedClock, Verdict, Violation,
 };
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Clock, Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Short, so a restart after a simulated crash takes the dead process's
-/// lease over quickly.
-const LEASE_TTL: Duration = Duration::from_millis(40);
+/// The lease TTL in milliseconds: long enough that a live process keeps
+/// renewing its lease, short enough that a crashed process's engine, whose
+/// threads outlive the simulated crash, stops retrying its lease release
+/// within a second.
+const LEASE_TTL_MILLIS: u64 = 1_000;
+/// A TTL short enough that lease renewals interleave with crashes.
+const RENEWING_LEASE_TTL_MILLIS: u64 = 60;
 /// The local lease's mutation lock. #811: a completed release's unlink is not
 /// made durable, so a power loss can bring the lock back and block every
 /// later open.
@@ -43,7 +47,7 @@ const LEASE_LOCK: &str = ".midge_leader.lock";
 const KEYS: u8 = 6;
 const DEFAULT: &str = "default";
 /// How many times more seeds the nightly profile explores per control.
-const NIGHTLY_SCALE: u64 = 50;
+const NIGHTLY_SCALE: u64 = 100;
 /// The seeds a detection campaign searches. Whether a seed reaches a bug can
 /// depend on background timing, so the search is wide; it stops at the first
 /// finding, which usually comes within the first few seeds.
@@ -148,7 +152,8 @@ enum Profile {
     CrashControl,
     /// Synced and buffered writes, flushes, compaction, clean restarts and
     /// power losses, without the triggers of known #808 bugs: no best-effort
-    /// writes, no faults, and no process crash before a power loss.
+    /// writes, no buffered deletes (`lost-buffered-delete`), no faults, and
+    /// no process crash before a power loss.
     RetentionControl,
     /// Buffered writes, a process crash, then a power loss.
     BufferedCrashes,
@@ -188,7 +193,7 @@ impl Profile {
             },
             Self::RetentionControl => match rng.below(14) {
                 0..=4 => put(0, logged),
-                5..=6 => delete(0, logged),
+                5..=6 => delete(0, Durability::Sync),
                 7..=8 => Op::Flush { family: 0 },
                 9 => Op::Compact,
                 10 => Op::CleanRestart,
@@ -291,6 +296,11 @@ struct Image {
     /// Whether this point follows a crash, rather than a clean shutdown or
     /// the start of the workload.
     crashed: bool,
+    /// The lease clock's reading, so a replay never sees a lease record
+    /// stamped in its future. Images without one were stamped by the system
+    /// clock.
+    #[serde(default)]
+    lease_clock_millis: u64,
     /// What the campaign reported, so a replay judges the same way.
     checks: Checks,
 }
@@ -314,6 +324,13 @@ struct Checks {
     /// After a power loss, remove a resurrected lease lock as an operator
     /// would (#811) instead of reporting the refused open.
     clear_stale_lease_lock: bool,
+    /// The lease TTL, which sets how often renewals interleave with crashes.
+    #[serde(default = "default_lease_ttl_millis")]
+    lease_ttl_millis: u64,
+}
+
+fn default_lease_ttl_millis() -> u64 {
+    LEASE_TTL_MILLIS
 }
 
 impl Default for Checks {
@@ -321,7 +338,14 @@ impl Default for Checks {
         Self {
             segment_reuse: true,
             clear_stale_lease_lock: true,
+            lease_ttl_millis: LEASE_TTL_MILLIS,
         }
+    }
+}
+
+impl Checks {
+    fn lease_ttl(self) -> Duration {
+        Duration::from_millis(self.lease_ttl_millis)
     }
 }
 
@@ -335,6 +359,8 @@ enum Stop {
 
 struct Campaign {
     device: CrashDevice,
+    /// The lease clock every process of this campaign reads.
+    clock: SimulatedClock,
     named: tempfile::TempDir,
     engine: Option<Engine>,
     history: History,
@@ -361,6 +387,7 @@ impl Campaign {
             values: 0,
             remaining: Vec::new(),
             crashed: false,
+            lease_clock_millis: 0,
             checks,
         })
     }
@@ -368,8 +395,11 @@ impl Campaign {
     fn from_image(image: &Image) -> Self {
         let device = CrashDevice::with_files(&image.files);
         let restored_names = device.names_ever();
+        let clock = SimulatedClock::new();
+        clock.advance_to(image.lease_clock_millis);
         Self {
             device,
+            clock,
             named: tempfile::tempdir().expect("named directory"),
             engine: None,
             history: image.history.clone(),
@@ -388,8 +418,8 @@ impl Campaign {
         let root: Arc<dyn Fs> = Arc::new(self.device.fs());
         OpenOptions::local(self.named.path())
             .background_compaction(false)
-            .lease_ttl(LEASE_TTL)
-            .lease_clock_skew_tolerance(Duration::ZERO)
+            .lease_ttl(self.checks.lease_ttl())
+            .lease_clock_for_testing(Arc::new(self.clock.clone()))
             .filesystem_for_testing(root)
             .build()
             .expect("open options")
@@ -436,6 +466,7 @@ impl Campaign {
             values: self.values,
             remaining: remaining.to_vec(),
             crashed,
+            lease_clock_millis: self.clock.now_millis(),
             checks: self.checks,
         };
         self.images.push(image);
@@ -460,9 +491,10 @@ impl Campaign {
     fn recover(&mut self, stop: Stop) -> Result<(), FindingKind> {
         self.device.disarm_faults();
         if stop != Stop::Clean {
-            // A restarted process takes the dead one's lease over once it
-            // is stale.
-            std::thread::sleep(LEASE_TTL * 3);
+            // The restarted process's clock runs past the dead one's lease,
+            // beyond the TTL and the default skew allowance of half the TTL,
+            // so it takes the lease over at once (#835).
+            self.clock.advance(self.checks.lease_ttl() * 2);
         }
         let engine = match Engine::open(self.options()) {
             Err(error)
@@ -798,11 +830,15 @@ fn assert_reproduced(case: &str, finding: Option<Finding>, signature: impl Fn(&F
 
 #[test]
 fn should_find_no_violation_when_synced_writes_survive_crashes() {
-    // Arrange
-    let workloads = control_seeds(8);
+    // Arrange: lease renewals interleave with the crashes.
+    let workloads = control_seeds(32);
+    let checks = Checks {
+        lease_ttl_millis: RENEWING_LEASE_TTL_MILLIS,
+        ..Checks::default()
+    };
 
     // Act
-    let finding = campaign(Profile::CrashControl, workloads, 24, Checks::default());
+    let finding = campaign(Profile::CrashControl, workloads, 24, checks);
 
     // Assert
     assert_clean("crash-control", finding);
@@ -812,7 +848,7 @@ fn should_find_no_violation_when_synced_writes_survive_crashes() {
 fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
     // Arrange: segment-name reuse after restarts is the known
     // `restarted-segment-id`, reported by its own campaign.
-    let workloads = control_seeds(8);
+    let workloads = control_seeds(32);
     let checks = Checks {
         segment_reuse: false,
         ..Checks::default()
@@ -830,7 +866,7 @@ fn should_keep_created_families_when_process_crash_precedes_power_loss() {
     // Arrange: the review's lead is that a manifest journal created but not
     // dir-synced before a process crash loses its name at the next power
     // loss.
-    let workloads = control_seeds(8);
+    let workloads = control_seeds(32);
 
     // Act
     let finding = campaign(Profile::FamilyCrashes, workloads, 24, Checks::default());
@@ -989,5 +1025,41 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
     assert!(
         recovered.is_ok(),
         "recovered WAL tail was served, then lost after power loss: {recovered:?}"
+    );
+}
+
+/// Registered RED case `lost-buffered-delete`, found by the retention
+/// control's nightly budget: a buffered delete is flushed into an SST, a power
+/// loss drops its unsynced WAL record, and compaction then drops the flushed
+/// tombstone together with the put it shadowed, so recovery replays the put.
+#[test]
+#[ignore = "#808 stage 3: lost-buffered-delete"]
+fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
+    // Arrange: a synced put, a buffered delete of it and a completed flush,
+    // then power is lost with the WAL page from before the delete.
+    let mut campaign = Campaign::new(Checks::default());
+    campaign.recover(Stop::Clean).expect("first open");
+    campaign.write(0, 1, false, Durability::Sync);
+    campaign.write(0, 1, true, Durability::Buffered);
+    campaign
+        .apply(&Op::Flush { family: 0 }, &[])
+        .expect("flush");
+    campaign.device.process_crash();
+    campaign.device.power_loss_with(|_| 0);
+    drop(campaign.engine.take());
+    let recovered = campaign.recover(Stop::PowerLoss);
+
+    // Act
+    campaign.apply(&Op::Compact, &[]).expect("compact");
+    let after_compaction = campaign.apply(&Op::ProcessCrash, &[]);
+
+    // Assert
+    assert!(
+        recovered.is_ok(),
+        "recovery after the power loss: {recovered:?}"
+    );
+    assert!(
+        after_compaction.is_ok(),
+        "flushed delete resurrected after compaction: {after_compaction:?}"
     );
 }

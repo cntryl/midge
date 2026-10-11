@@ -485,3 +485,47 @@ fn should_report_conflict_only_before_a_conditional_effect() {
     assert_eq!(after_effect, "server-error");
     assert_eq!(store.object("catalog"), Some(b"two".to_vec()));
 }
+
+#[test]
+fn should_cut_crashed_process_off_without_effect_when_processes_restart() {
+    // Arrange: two processes share the store.
+    let store = SimulatedObjectStore::eager();
+    let crashed = store.process();
+    let other = store.process();
+
+    // Act
+    crashed.process_crash();
+    let restarted = store.process();
+    let from_crashed = put(&crashed.clone(), "k", b"zombie", &[]).recv_timeout(ANSWER_WAIT);
+    let from_restarted = put(&restarted, "k", b"live", &[]).recv_timeout(ANSWER_WAIT);
+    let from_other = head(&other, "k");
+
+    // Assert
+    assert_eq!(class(&from_crashed.expect("crashed answer")), "transport");
+    assert_eq!(class(&from_restarted.expect("restarted answer")), "ok");
+    assert!(from_other.is_ok(), "{from_other:?}");
+    assert_eq!(store.object("k").as_deref(), Some(b"live".as_slice()));
+    assert_eq!(
+        store.trace(),
+        vec![
+            (id(Operation::Put, "k", 0), Fate::Normal),
+            (id(Operation::Head, "k", 0), Fate::Normal),
+        ]
+    );
+}
+
+#[test]
+fn should_land_crashed_process_late_effect_when_landed_after_the_crash() {
+    // Arrange: a put that reached the provider before its process died.
+    let store = scripted(&[(id(Operation::Put, "k", 0), Fate::Late)]);
+    let crashed = store.process();
+    let _ = put(&crashed, "k", b"zombie", &[]).recv_timeout(ANSWER_WAIT);
+
+    // Act
+    crashed.process_crash();
+    let landed = store.land_late_effects();
+
+    // Assert
+    assert_eq!(landed, 1);
+    assert_eq!(store.object("k").as_deref(), Some(b"zombie".as_slice()));
+}

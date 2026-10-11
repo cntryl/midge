@@ -8,6 +8,7 @@
 //! Filesystem-simulated cloud mode can still construct this type without a
 //! provider backend; that path remains local-only for deterministic tests.
 
+use super::clock::LeaseClock;
 use super::fs_leader_store::FsLeaderStore;
 use super::traits::{
     CloudMetadataGeneration, CloudMetadataHead, LeaderRecord, LeaderStore, LeaseError, LeaseGuard,
@@ -52,6 +53,7 @@ struct ProviderLeaderStore {
     owner_token: String,
     validity: Arc<LeaseValidity>,
     clock_skew_tolerance: Mutex<Duration>,
+    clock: LeaseClock,
 }
 
 enum MetadataPointerCasOutcome {
@@ -73,6 +75,7 @@ impl ProviderLeaderStore {
         owner_token: String,
         validity: Arc<LeaseValidity>,
         clock_skew_tolerance: Duration,
+        clock: LeaseClock,
     ) -> Self {
         Self {
             cloud,
@@ -80,6 +83,7 @@ impl ProviderLeaderStore {
             owner_token,
             validity,
             clock_skew_tolerance: Mutex::new(clock_skew_tolerance),
+            clock,
         }
     }
 
@@ -89,7 +93,7 @@ impl ProviderLeaderStore {
         expected_epoch: u64,
     ) -> Result<(), LeaseError> {
         self.validity.remaining(expected_epoch)?;
-        if document.is_expired_with_tolerance(self.clock_skew_tolerance())? {
+        if document.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
             return Err(LeaseError::RenewalFailed(
                 "cloud lease expired during metadata publication".to_string(),
             ));
@@ -206,7 +210,7 @@ impl ProviderLeaderStore {
             }
         }
         if let Some(existing) = existing.as_ref() {
-            if !existing.is_expired_with_tolerance(self.clock_skew_tolerance())? {
+            if !existing.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
                 return Err(LeaseError::AcquisitionFailed(format!(
                     "another instance holds the lease (holder: {}, expires: {})",
                     existing.holder_id, existing.expires_at
@@ -233,7 +237,7 @@ impl ProviderLeaderStore {
             .checked_add(1)
             .ok_or(LeaseError::EpochExhausted)?;
         let monotonic_now = Instant::now();
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let valid_until = monotonic_now + self.ttl;
         let document = LeaseDocument {
             version: LeaseDocumentVersion::V2,
@@ -521,7 +525,7 @@ impl LeaderStore for ProviderLeaderStore {
                         expected_epoch,
                     ) =>
             {
-                if document.is_expired_with_tolerance(self.clock_skew_tolerance())? {
+                if document.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
                     return Err(LeaseError::RenewalFailed(
                         "cloud lease expired before epoch validation".to_string(),
                     ));
@@ -592,7 +596,8 @@ impl LeaderStore for ProviderLeaderStore {
             // A malformed expiry cannot be taken over by another conforming
             // writer; the current locally valid owner may repair it. A valid
             // expiry that has passed is an actual loss of authority.
-            match existing.is_expired_with_tolerance(self.clock_skew_tolerance()) {
+            match existing.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())
+            {
                 Ok(true) => {
                     return Err(LeaseError::RenewalFailed(
                         "cloud lease expired before renewal".to_string(),
@@ -609,7 +614,7 @@ impl LeaderStore for ProviderLeaderStore {
             let monotonic_now = Instant::now();
             let valid_until = monotonic_now + self.ttl;
             let document = LeaseDocument {
-                expires_at: (chrono::Utc::now()
+                expires_at: (self.clock.now()
                     + CloudStorageLease::persisted_lease_duration(self.ttl))
                 .to_rfc3339(),
                 ..existing
@@ -648,6 +653,7 @@ impl LeaderStore for ProviderLeaderStore {
                             Arc::clone(&self.cloud),
                             document,
                             self.clock_skew_tolerance(),
+                            self.clock.clone(),
                         );
                     }
                     return Err(error);
@@ -691,7 +697,7 @@ impl LeaderStore for ProviderLeaderStore {
                 LeaseError::IoError("cloud lease release lacks a conditional token".to_string())
             })?;
             let released = LeaseDocument {
-                expires_at: (chrono::Utc::now() - release_offset).to_rfc3339(),
+                expires_at: (self.clock.now() - release_offset).to_rfc3339(),
                 ..current
             };
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -786,6 +792,7 @@ struct SimulatedLeaderStore {
     ttl: Duration,
     validity: Arc<LeaseValidity>,
     clock_skew_tolerance: Mutex<Duration>,
+    clock: LeaseClock,
 }
 
 impl SimulatedLeaderStore {
@@ -795,14 +802,16 @@ impl SimulatedLeaderStore {
         ttl: Duration,
         validity: Arc<LeaseValidity>,
         clock_skew_tolerance: Duration,
+        clock: LeaseClock,
     ) -> Self {
         Self {
-            inner: FsLeaderStore::new(Arc::clone(&fs)),
+            inner: FsLeaderStore::new(Arc::clone(&fs), clock.clone()),
             fs,
             owner_token,
             ttl,
             validity,
             clock_skew_tolerance: Mutex::new(clock_skew_tolerance),
+            clock,
         }
     }
 
@@ -896,13 +905,15 @@ impl LeaderStore for SimulatedLeaderStore {
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
         let monotonic_now = Instant::now();
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let valid_until = monotonic_now + self.ttl;
         let record = self.inner.acquire_leadership_after_validation_and_publish(
             holder_id,
             |_| {
                 if let Some(existing) = self.read_document()? {
-                    if !existing.is_expired_with_tolerance(self.clock_skew_tolerance())? {
+                    if !existing
+                        .is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())?
+                    {
                         return Err(LeaseError::AcquisitionFailed(format!(
                             "another instance holds the lease (holder: {}, expires: {})",
                             existing.holder_id, existing.expires_at
@@ -960,7 +971,7 @@ impl LeaderStore for SimulatedLeaderStore {
                 }
             }
             let monotonic_now = Instant::now();
-            let now = chrono::Utc::now();
+            let now = self.clock.now();
             let valid_until = monotonic_now + self.ttl;
             self.validity.remaining(expected_epoch)?;
             self.write_document(&LeaseDocument {
@@ -1092,6 +1103,7 @@ impl CloudStorageLease {
             config,
             cache,
             Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
+            LeaseClock::default(),
         )
     }
 
@@ -1099,6 +1111,7 @@ impl CloudStorageLease {
         config: CloudLeaseConfig,
         cache: Result<Arc<dyn Fs>, FsError>,
         ttl: Duration,
+        clock: LeaseClock,
     ) -> Self {
         let holder_id = format!(
             "{}@{}",
@@ -1118,6 +1131,7 @@ impl CloudStorageLease {
                 ttl,
                 Arc::clone(&validity),
                 clock_skew_tolerance,
+                clock,
             )),
             Err(error) => Arc::new(UnavailableLeaderStore::new(error.to_string())),
         };
@@ -1151,14 +1165,15 @@ impl CloudStorageLease {
     }
 
     /// A simulated-cloud lease whose leader record lives in the local cache
-    /// `root`.
+    /// `root`, timed by `clock`.
     pub(crate) fn new_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
         root: Arc<dyn Fs>,
         clock_skew_tolerance: Duration,
         ttl: Duration,
+        clock: LeaseClock,
     ) -> Self {
-        Self::new_with_ttl(config, Ok(root), ttl)
+        Self::new_with_ttl(config, Ok(root), ttl, clock)
             .with_clock_skew_tolerance(clock_skew_tolerance)
             .expect("engine validates lease clock-skew tolerance")
     }
@@ -1173,6 +1188,7 @@ impl CloudStorageLease {
             config,
             cloud,
             Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
+            LeaseClock::default(),
         )
     }
 
@@ -1180,6 +1196,7 @@ impl CloudStorageLease {
         config: CloudLeaseConfig,
         cloud: Arc<CloudStorage>,
         ttl: Duration,
+        clock: LeaseClock,
     ) -> Self {
         let holder_id = format!(
             "{}@{}",
@@ -1197,6 +1214,7 @@ impl CloudStorageLease {
             owner_token.clone(),
             Arc::clone(&validity),
             clock_skew_tolerance,
+            clock,
         ));
         Self {
             config,
@@ -1213,13 +1231,15 @@ impl CloudStorageLease {
         }
     }
 
+    /// A provider lease whose document lives in `cloud`, timed by `clock`.
     pub(crate) fn new_provider_backed_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
         cloud: Arc<CloudStorage>,
         clock_skew_tolerance: Duration,
         ttl: Duration,
+        clock: LeaseClock,
     ) -> Self {
-        Self::new_provider_backed_with_ttl(config, cloud, ttl)
+        Self::new_provider_backed_with_ttl(config, cloud, ttl, clock)
             .with_clock_skew_tolerance(clock_skew_tolerance)
             .expect("engine validates lease clock-skew tolerance")
     }
@@ -1455,10 +1475,15 @@ impl LeaseDocument {
     /// Check if the lease has expired based on `expires_at`.
     #[cfg(test)]
     fn is_expired(&self) -> Result<bool, LeaseError> {
-        self.is_expired_with_tolerance(Duration::ZERO)
+        self.is_expired_with_tolerance(Duration::ZERO, chrono::Utc::now())
     }
 
-    fn is_expired_with_tolerance(&self, tolerance: Duration) -> Result<bool, LeaseError> {
+    /// Whether the lease had expired, beyond `tolerance`, at `now`.
+    fn is_expired_with_tolerance(
+        &self,
+        tolerance: Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, LeaseError> {
         let expires = chrono::DateTime::parse_from_rfc3339(&self.expires_at).map_err(|_| {
             LeaseError::Indeterminate(format!(
                 "cloud lease expiry is invalid; ownership is ambiguous (holder: {}, epoch: {:?})",
@@ -1468,7 +1493,7 @@ impl LeaseDocument {
         let tolerance = chrono::Duration::from_std(tolerance).map_err(|_| {
             LeaseError::Internal("lease clock-skew tolerance is out of range".to_string())
         })?;
-        Ok(chrono::Utc::now() > expires + tolerance)
+        Ok(now > expires + tolerance)
     }
 }
 
@@ -2083,11 +2108,10 @@ fn spawn_ambiguous_renewal_reconciler(
     cloud: Arc<CloudStorage>,
     expected: LeaseDocument,
     clock_skew_tolerance: Duration,
+    clock: LeaseClock,
 ) {
-    let expected_expiry = chrono::DateTime::parse_from_rfc3339(&expected.expires_at).map_or_else(
-        |_| chrono::Utc::now(),
-        |value| value.with_timezone(&chrono::Utc),
-    );
+    let expected_expiry = chrono::DateTime::parse_from_rfc3339(&expected.expires_at)
+        .map_or_else(|_| clock.now(), |value| value.with_timezone(&chrono::Utc));
     let tolerance =
         chrono::Duration::from_std(clock_skew_tolerance).unwrap_or(chrono::Duration::MAX);
     let reconcile_until = expected_expiry
@@ -2103,7 +2127,7 @@ fn spawn_ambiguous_renewal_reconciler(
             } else {
                 Duration::from_millis(100)
             };
-            while chrono::Utc::now() <= reconcile_until {
+            while clock.now() <= reconcile_until {
                 if let Ok(Some((current, metadata))) =
                     provider_read_doc_with_metadata(&cloud, Duration::from_millis(500))
                 {
@@ -2116,7 +2140,7 @@ fn spawn_ambiguous_renewal_reconciler(
                         return;
                     }
                     if !current
-                        .is_expired_with_tolerance(clock_skew_tolerance)
+                        .is_expired_with_tolerance(clock_skew_tolerance, clock.now())
                         .unwrap_or(false)
                     {
                         if let Some(headers) = mutation_precondition_headers(&metadata) {
@@ -2125,7 +2149,7 @@ fn spawn_ambiguous_renewal_reconciler(
                             let chrono_offset = chrono::Duration::from_std(release_offset)
                                 .unwrap_or(chrono::Duration::MAX);
                             let expired = LeaseDocument {
-                                expires_at: (chrono::Utc::now() - chrono_offset).to_rfc3339(),
+                                expires_at: (clock.now() - chrono_offset).to_rfc3339(),
                                 ..current
                             };
                             let _ = provider_write_doc_with_timeout(

@@ -1140,6 +1140,7 @@ mod tests {
                     Arc::clone(&cloud),
                     Duration::ZERO,
                     Duration::from_secs(30),
+                    crate::lease::LeaseClock::default(),
                 ),
             )
         };

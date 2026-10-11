@@ -1,10 +1,10 @@
 # WAL redesign regression inventory (#808)
 
 This change inventories the 14 original audit classes as 17 executable tests,
-plus two supplemental allocation/history cases and two cases the crash
+plus two supplemental allocation/history cases and three cases the crash
 simulator found (`torn-unsynced-tail`, #817; `recovered-tail-not-durable`,
-#831). It supplies a baseline runner
-and CI coverage. It does not implement the redesign or complete its simulator
+#831; `lost-buffered-delete`, #835). It supplies a baseline runner and CI
+coverage. It does not implement the redesign or complete its simulator
 stage. Refs #808.
 
 The earlier simulator and shipping adapter changes were removed after review
@@ -103,9 +103,15 @@ complete cross-platform redesign campaign.
 `tests/wal_campaigns.rs` drives the engine through seeded workloads on the
 crash device and judges every recovery with the prefix oracle (#831).
 Control campaigns must find nothing. CI runs their per-PR seed budget with the
-integration tests. The nightly `WAL campaigns` workflow runs 50 times as many
+integration tests. The nightly `WAL campaigns` workflow runs 100 times as many
 seeds, from a base that moves each run. Detection campaigns keep fixed seeds,
 so every run proves the same findings (#837).
+
+A restarted process takes a crashed one's lease over at once: the test
+advances the lease clock it reads past the old lease's expiry, and it acquires
+the next epoch through the normal path (#835). A crashed process reaches
+neither its device nor the object store again, so it cannot release its lease
+or write after its crash; requests it had in flight can still land late.
 
 A finding is saved as a crash image below `MIDGE_CAMPAIGN_IMAGES`, and both
 workflows upload those images as artifacts. To run the nightly budget, then

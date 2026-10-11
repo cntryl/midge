@@ -203,6 +203,7 @@ pub mod __internal {
     }
     /// Simulated storage for crash and fault campaigns.
     pub mod simulation {
+        pub use crate::simulation::clock::SimulatedClock;
         pub use crate::simulation::crash_fs::{
             CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp,
         };
