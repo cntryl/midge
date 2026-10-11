@@ -685,7 +685,9 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
     let Some(staging_dir) = task.build.staging_path.parent() else {
         return;
     };
-    if staging_dir.file_name().and_then(|name| name.to_str()) != Some(".flush-staging") {
+    if staging_dir.file_name().and_then(|name| name.to_str())
+        != Some(crate::sst::fs::STAGING_DIR_NAME)
+    {
         return;
     }
     let Ok(staging_path) = db_relative_fs_path(task, &task.build.staging_path) else {

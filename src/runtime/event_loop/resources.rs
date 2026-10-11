@@ -10,39 +10,28 @@ pub(super) struct SstRuntimeResources {
 }
 
 /// SSTs are read through the database root, or through the cloud read view
-/// layered over it. The compaction factory is rooted at its `sst/` directory,
-/// so compaction names inputs, outputs and scratch relative to it.
+/// layered over it.
 pub(super) fn assemble_sst_resources(
     state: &RuntimeState,
     memory_mode: bool,
     config: &RuntimeConfig,
 ) -> SstRuntimeResources {
-    let fs = crate::io::subdirectory(
-        config
-            .sst_read_fs
-            .clone()
-            .unwrap_or_else(|| Arc::clone(&state.fs)),
-        crate::sst::fs::SST_DIR,
-    );
-    let factory: Arc<dyn crate::sst::SstFactory> = if memory_mode {
-        Arc::new(
-            crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_compression_policy(config.compression_policy.clone()),
-        )
+    let fs = config
+        .sst_read_fs
+        .clone()
+        .unwrap_or_else(|| Arc::clone(&state.fs));
+    let fs = if memory_mode {
+        fs
     } else {
-        let fs = fs
-            .with_read_observer(
-                Arc::clone(&state.diagnostics) as Arc<dyn crate::io::traits::ReadObserver>
-            )
-            .unwrap_or(fs);
-        Arc::new(
-            crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_compaction_scratch_directory(std::path::PathBuf::from(
-                    crate::sst::fs::STAGING_DIR_NAME,
-                ))
-                .with_compression_policy(config.compression_policy.clone()),
+        fs.with_read_observer(
+            Arc::clone(&state.diagnostics) as Arc<dyn crate::io::traits::ReadObserver>
         )
+        .unwrap_or(fs)
     };
+    let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(compaction_sst_factory(
+        fs,
+        config.compression_policy.clone(),
+    ));
     let reads = if memory_mode {
         None
     } else {
@@ -59,4 +48,19 @@ pub(super) fn assemble_sst_resources(
         )))
     };
     SstRuntimeResources { factory, reads }
+}
+
+/// The compaction SST factory over `fs`, the database root or the cloud read
+/// view layered over it. The factory is rooted at its `sst/` directory, so
+/// compaction names inputs, outputs and build scratch relative to it.
+pub(super) fn compaction_sst_factory(
+    fs: Arc<dyn crate::io::Fs>,
+    compression_policy: crate::codec::CompressionPolicy,
+) -> crate::sst::FsSstFactoryIo {
+    crate::sst::FsSstFactoryIo::new(
+        crate::io::subdirectory(fs, crate::sst::fs::SST_DIR),
+        64 * 1024,
+    )
+    .with_compaction_scratch_directory(std::path::PathBuf::from(crate::sst::fs::STAGING_DIR_NAME))
+    .with_compression_policy(compression_policy)
 }

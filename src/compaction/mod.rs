@@ -26,8 +26,9 @@ use std::path::PathBuf;
 /// This is intentionally thin — the heavy lifting is inside `executor::*`
 /// which performs the actual merge and write pipeline.
 ///
-/// **Important**: `output_dir` must be the CF-specific directory (e.g., `cf_00/`),
-/// not the DB root. Output filenames use canonical SST names:
+/// Outputs are written to `output_dir`, a location in the factory's output
+/// filesystem; the runtime's factory is rooted at the SST directory, so it
+/// passes an empty path. Output filenames use canonical SST names:
 /// `{cf_id:06}_{level:02}_{generation:020}_{partition:010}.sst`.
 #[cfg(test)]
 pub fn execute_compaction(

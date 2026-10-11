@@ -1147,7 +1147,7 @@ impl RuntimeState {
     /// acknowledged write, whatever else syncs the database root (#519).
     fn ensure_directories(root: &dyn Fs, memory_mode: bool) -> MidgeResult<()> {
         if !memory_mode {
-            for directory in ["wal", "sst"] {
+            for directory in ["wal", crate::sst::fs::SST_DIR] {
                 root.create_dir_all(&FsPath::new(directory))
                     .map_err(FsError::into_midge)?;
             }

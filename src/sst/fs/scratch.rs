@@ -190,6 +190,77 @@ mod tests {
         Ok(())
     }
 
+    /// Forwards everything to an in-memory root except long-lived handles.
+    struct HandlelessFs(crate::io::MockFs);
+
+    impl Fs for HandlelessFs {
+        fn coordination_key(&self) -> u64 {
+            self.0.coordination_key()
+        }
+
+        fn open(
+            &self,
+            path: &FsPath,
+            opts: OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn File + '_>> {
+            self.0.open(path, opts)
+        }
+
+        fn remove_file(&self, path: &FsPath) -> crate::io::FsResult<()> {
+            self.0.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
+            self.0.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            self.0.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
+            self.0.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.0.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
+            self.0.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, dur: crate::io::Durability) -> crate::io::FsResult<()> {
+            self.0.sync_dir(path, dur)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> crate::io::FsResult<()> {
+            self.0.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_release_scratch_count_when_creation_leaves_no_file() {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(HandlelessFs(crate::io::MockFs::new()));
+        let outstanding = Arc::new(AtomicUsize::new(0));
+
+        // Act
+        let result = TrackedScratch::new(
+            fs,
+            Arc::clone(&outstanding),
+            Some(Path::new("sst/.flush-staging")),
+        );
+
+        // Assert
+        assert!(result.is_err(), "scratch needs a long-lived handle");
+        assert_eq!(
+            outstanding.load(Ordering::Acquire),
+            0,
+            "a creation that left no file holds no admission"
+        );
+    }
+
     #[test]
     fn should_keep_scratch_inside_filesystem_when_root_is_in_memory() -> MidgeResult<()> {
         // Arrange

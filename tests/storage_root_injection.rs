@@ -118,7 +118,7 @@ fn should_recover_synced_write_when_injected_root_is_in_memory() {
 }
 
 /// Write three flushed generations, then compact them into one level.
-fn flush_three_generations(engine: &mut Engine) {
+fn flush_three_generations(engine: &mut Engine, write: WriteOptions) {
     let default = engine.get_column_family("default").expect("default family");
     for generation in 0..3_u8 {
         let mut tx = engine
@@ -128,7 +128,7 @@ fn flush_three_generations(engine: &mut Engine) {
             tx.put(vec![b'k', index], vec![generation, index], None)
                 .expect("put");
         }
-        tx.commit(WriteOptions::sync()).expect("commit");
+        tx.commit(write).expect("commit");
         engine.flush_cf(&default).expect("flush");
     }
     engine.compact_all().expect("compact");
@@ -169,7 +169,7 @@ fn should_keep_named_path_empty_when_flushing_through_injected_root() {
     // Act
     let health = {
         let mut engine = Engine::open(options.clone()).expect("open");
-        flush_three_generations(&mut engine);
+        flush_three_generations(&mut engine, WriteOptions::sync());
         let health = engine
             .metrics()
             .get_runtime_metrics()
@@ -213,7 +213,7 @@ fn should_recover_compacted_data_when_injected_root_is_in_memory() {
         .expect("open options");
     {
         let mut engine = Engine::open(options.clone()).expect("open");
-        flush_three_generations(&mut engine);
+        flush_three_generations(&mut engine, WriteOptions::sync());
         engine
             .shutdown(std::time::Duration::from_secs(5))
             .expect("shutdown");
@@ -233,7 +233,7 @@ fn should_report_orphan_residue_when_injected_root_holds_unpublished_sst() {
     let named = tempfile::tempdir().expect("named directory");
     let served = tempfile::tempdir().expect("served directory");
     let mut engine = Engine::open(served_options(named.path(), served.path())).expect("open");
-    flush_three_generations(&mut engine);
+    flush_three_generations(&mut engine, WriteOptions::sync());
     std::fs::write(served.path().join("sst").join("orphan.sst"), b"unpublished")
         .expect("plant orphan");
 
@@ -253,4 +253,62 @@ fn should_report_orphan_residue_when_injected_root_holds_unpublished_sst() {
     engine
         .shutdown(std::time::Duration::from_secs(5))
         .expect("shutdown");
+}
+
+#[test]
+fn should_reject_injected_filesystem_when_storage_is_cloud_simulated() {
+    // Arrange: cloud working storage is not yet served by the root, so a
+    // partly injected cloud database would split its files across two roots.
+    let named = tempfile::tempdir().expect("named directory");
+    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+
+    // Act
+    let result = OpenOptions::cloud_simulated(named.path(), "bucket", "prefix")
+        .filesystem_for_testing(root)
+        .build();
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn should_keep_sst_effects_under_sst_dir_when_compacting_cloud_simulated_database() {
+    // Arrange: the cloud SST view layers over the same root, so flush and
+    // compaction outputs, scratch and repair runs all belong under `sst/`.
+    let directory = tempfile::tempdir().expect("cache directory");
+    let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "sst-layout")
+        .background_compaction(false)
+        .build()
+        .expect("open options");
+    {
+        let mut engine = Engine::open(options.clone()).expect("open");
+        flush_three_generations(&mut engine, WriteOptions::cloud_strict());
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+    }
+
+    // Act
+    let reopened = Engine::open(options).expect("reopen");
+
+    // Assert
+    assert_eq!(read_compacted(&reopened), expected_compacted());
+    let stray: Vec<_> = host_entries(directory.path())
+        .into_iter()
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+                || name.ends_with(".sst.tmp")
+                || name.starts_with(".compaction")
+                || name == ".flush-staging"
+        })
+        .collect();
+    assert_eq!(stray, Vec::<std::path::PathBuf>::new());
 }

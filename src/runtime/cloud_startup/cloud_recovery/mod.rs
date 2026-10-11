@@ -97,7 +97,7 @@ impl CloudStartupRecovery {
                     Ok(()) => state
                         .fs
                         .sync_dir(
-                            &crate::io::FsPath::new("sst"),
+                            &crate::io::FsPath::new(crate::sst::fs::SST_DIR),
                             crate::io::Durability::Durable,
                         )
                         .map_err(FsError::into_midge)?,

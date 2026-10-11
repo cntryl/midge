@@ -26,7 +26,7 @@ fn cloud_debt_with_wal_records(
         .unwrap()
         .enable_ephemeral_sst_cache(64 * 1024 * 1024);
     let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-        Arc::new(crate::io::RealFs::new(&el.state.db_path).map_err(FsError::into_midge)?),
+        Arc::clone(&el.state.fs),
         el.cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -35,8 +35,10 @@ fn cloud_debt_with_wal_records(
         Duration::from_secs(3),
     ));
     el.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(
-        crate::sst::FsSstFactoryIo::new(reads, 64 * 1024)
-            .with_compaction_scratch_directory(el.state.host_sst_dir().join(".flush-staging")),
+        crate::runtime::event_loop::resources::compaction_sst_factory(
+            reads,
+            crate::codec::CompressionPolicy::default(),
+        ),
     ));
     let other = el.state.create_cf("remaining-debt".into())?;
     let record = crate::wal::WalRecord::new(

@@ -43,13 +43,22 @@ pub(crate) fn sst_key(name: &str) -> FsPath {
     FsPath::new(format!("{SST_DIR}/{name}"))
 }
 
+/// Classify a failure to reach an SST the engine itself wrote. A missing
+/// file is an engine fault, never a caller asking for something absent.
+pub(crate) fn engine_sst_error(error: FsError) -> MidgeError {
+    match error {
+        FsError::NotFound(path) => MidgeError::Internal(format!("engine SST is missing: {path}")),
+        error => error.into_midge(),
+    }
+}
+
 /// Compute an SST identity through the same filesystem that published it.
 pub(crate) fn identity_with_fs(
     fs: &Arc<dyn Fs>,
     path: &Path,
 ) -> MidgeResult<crate::sst::identity::SstIdentity> {
     let path = fs_relative_sst_path(fs, path)?;
-    let size = fs.metadata(&path).map_err(FsError::into_midge)?.len;
+    let size = fs.metadata(&path).map_err(engine_sst_error)?.len;
     let file = fs
         .open(
             &path,
@@ -60,7 +69,7 @@ pub(crate) fn identity_with_fs(
                 truncate: false,
             },
         )
-        .map_err(FsError::into_midge)?;
+        .map_err(engine_sst_error)?;
     crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
 }
 

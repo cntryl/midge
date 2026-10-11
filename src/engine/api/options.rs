@@ -685,15 +685,52 @@ impl OpenOptionsBuilder {
     /// Serve the database from `filesystem` instead of the host directory, so
     /// tests can fault or crash its storage effects. The filesystem is the
     /// database root; the configured path names it only. Metadata, WAL,
-    /// lease and SST files are served from it; transaction spill runs and
-    /// cloud working storage still use the configured path until #808
-    /// stage 1 routes them.
+    /// lease and SST files are served from it; transaction spill runs still
+    /// use the configured path until #808 stage 1 routes them. Only local
+    /// databases accept an injected filesystem until cloud working storage
+    /// is routed too. The filesystem must support
+    /// [`crate::io::Fs::open_persistent_handle`], which SST builds use for
+    /// scratch.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]
     pub fn filesystem_for_testing(mut self, filesystem: Arc<dyn crate::io::Fs>) -> Self {
         self.filesystem = Some(InjectedFilesystem(filesystem));
         self
+    }
+
+    fn validate_storage(&self) -> MidgeResult<()> {
+        // Cloud working storage is not yet served by an injected root, so a
+        // partly injected cloud database would split its files across two roots.
+        #[cfg(feature = "internal-testing")]
+        if self.filesystem.is_some() && !matches!(self.storage, Storage::Local { .. }) {
+            return Err(MidgeError::InvalidArgument(
+                "an injected filesystem serves local databases only until #808 stage 1 \
+                 routes cloud working storage"
+                    .to_string(),
+            ));
+        }
+        if self.cloud.local_storage_budget_bytes == Some(0) {
+            return Err(MidgeError::InvalidArgument(
+                "local storage budget must be greater than zero".to_string(),
+            ));
+        }
+        if let Storage::Cloud { topology, .. } = &self.storage {
+            let report = topology.validate();
+            if !report.is_valid {
+                let summaries = report
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.outcome == crate::config::CloudCheckOutcome::Failed)
+                    .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
+                    .collect::<Vec<_>>();
+                return Err(MidgeError::InvalidArgument(format!(
+                    "invalid cloud storage topology: {}",
+                    summaries.join("; ")
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Override the CloudAsync drain budget used by deterministic shutdown
@@ -783,26 +820,7 @@ impl OpenOptionsBuilder {
     /// providers' millisecond-granularity deadlines, and the enclosing runtime
     /// response timeout must be greater than the storage I/O timeout.
     pub fn build(self) -> MidgeResult<OpenOptions> {
-        if self.cloud.local_storage_budget_bytes == Some(0) {
-            return Err(MidgeError::InvalidArgument(
-                "local storage budget must be greater than zero".to_string(),
-            ));
-        }
-        if let Storage::Cloud { topology, .. } = &self.storage {
-            let report = topology.validate();
-            if !report.is_valid {
-                let summaries = report
-                    .findings
-                    .iter()
-                    .filter(|finding| finding.outcome == crate::config::CloudCheckOutcome::Failed)
-                    .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
-                    .collect::<Vec<_>>();
-                return Err(MidgeError::InvalidArgument(format!(
-                    "invalid cloud storage topology: {}",
-                    summaries.join("; ")
-                )));
-            }
-        }
+        self.validate_storage()?;
         if self.io_timeouts.storage < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be at least 1 millisecond".to_string(),

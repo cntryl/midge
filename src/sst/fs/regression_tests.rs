@@ -457,3 +457,19 @@ fn should_reject_sst_publish_when_an_ancestor_symlink_is_dangling() {
     assert!(result.is_err());
     assert!(!root.path().join("missing").exists());
 }
+
+#[test]
+fn should_report_internal_fault_when_engine_sst_is_missing() {
+    // Arrange: flush and compaction ask for the identity of a file they
+    // wrote; its absence is an engine fault, not a caller's lookup miss.
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+
+    // Act
+    let result = crate::sst::fs::identity_with_fs(&fs, Path::new("sst/missing.sst"));
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Internal(_))),
+        "{result:?}"
+    );
+}

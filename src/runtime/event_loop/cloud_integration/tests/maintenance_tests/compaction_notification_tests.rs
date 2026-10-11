@@ -120,12 +120,8 @@ impl NotificationFixture {
         assert_eq!(outputs.len(), 1, "one genuine row produces one output");
         let name = &outputs[0];
         assert!(self.el.state.manifest_has_file(name));
-        let path = if self.cloud {
-            Path::new("sst").join(name)
-        } else {
-            PathBuf::from(name)
-        };
-        let reader = self.el.compaction_actor.open_sst_reader(&path)?;
+        // Both factories are rooted at `sst/`, so the SST name is its path.
+        let reader = self.el.compaction_actor.open_sst_reader(Path::new(name))?;
         let rows = reader.scan_range_raw_state(None, None)?;
         assert_eq!(rows.len(), 1);
         let expected_key: &[u8] = if self.cloud {

@@ -229,7 +229,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = el.state.manifest.last_persisted_sequence;
     let mut metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el)?;
+    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
     let plan = el
         .compaction_actor
         .check_manual_compaction(&el.state)?
@@ -309,7 +309,7 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = el.state.manifest.last_persisted_sequence;
     let metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el)?;
+    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
     let plan = el
         .compaction_actor
         .check_manual_compaction(&el.state)?

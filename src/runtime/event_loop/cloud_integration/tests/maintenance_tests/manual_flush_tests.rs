@@ -247,7 +247,7 @@ fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeR
     // Arrange: align seeded durable metadata with the next real write's allocator.
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = el.state.manifest.last_persisted_sequence;
-    let (mut release, reached) = paused_compactor::install(&mut el)?;
+    let (mut release, reached) = paused_compactor::install(&mut el);
     let plan = el
         .compaction_actor
         .check_manual_compaction(&el.state)?
@@ -317,7 +317,7 @@ fn should_keep_optional_maintenance_blocked_while_compaction_computes() -> Midge
     // Arrange
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = el.state.manifest.last_persisted_sequence;
-    let (mut release, reached) = paused_compactor::install(&mut el)?;
+    let (mut release, reached) = paused_compactor::install(&mut el);
     let plan = el
         .compaction_actor
         .check_manual_compaction(&el.state)?

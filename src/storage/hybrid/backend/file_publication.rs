@@ -107,7 +107,7 @@ impl HybridStorage {
                     truncate: false,
                 },
             )
-            .map_err(FsError::into_midge)?;
+            .map_err(crate::sst::fs::engine_sst_error)?;
         if source.len().map_err(FsError::into_midge)? != size {
             return Err(MidgeError::Corruption(
                 "immutable upload file size changed".into(),
