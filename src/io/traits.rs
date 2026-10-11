@@ -157,6 +157,15 @@ pub trait File: Send {
     /// Returns an error when the file length cannot be queried.
     fn len(&self) -> FsResult<u64>;
 
+    /// Whether the file contains no bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::len`].
+    fn is_empty(&self) -> FsResult<bool> {
+        self.len().map(|len| len == 0)
+    }
+
     /// Sync to storage device according to durability level
     ///
     /// # Errors

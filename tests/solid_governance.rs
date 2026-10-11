@@ -856,99 +856,104 @@ mod source_scan {
     }
 }
 
+/// Calls that reach host storage without the injected database root.
+const HOST_IO: &[&str] = &[
+    "std::fs",
+    "RealFs::new(",
+    "RealFs::open_existing(",
+    "tempfile::",
+    ".exists()",
+    ".try_exists(",
+    "filesystem::FileSystem::new(",
+];
+
+/// Code that is the host boundary itself, or reads host state that is not
+/// database storage. Each entry says why it may touch the host directly.
+const HOST_BOUNDARY: &[(&str, &str)] = &[
+    ("src/io/real.rs", "the production Fs adapter"),
+    (
+        "src/io/durable_dir.rs",
+        "host directory creation behind RealFs roots",
+    ),
+    (
+        "src/engine/startup/storage_root.rs",
+        "the single constructor of the engine's host-backed root",
+    ),
+    (
+        "src/engine/api/options/memory.rs",
+        "reads cgroup memory limits",
+    ),
+    (
+        "src/compaction/repair.rs",
+        "resolves the host mount for free-space checks",
+    ),
+    (
+        "src/storage/providers/azure.rs",
+        "reads workload-identity token files",
+    ),
+    (
+        "src/storage/providers/gcs.rs",
+        "reads service-account credential files",
+    ),
+    (
+        "src/storage/providers/s3.rs",
+        "reads web-identity and profile files",
+    ),
+];
+
+/// Not yet routed through the injected root. #808 stage 1 removes every
+/// entry; an entry whose file no longer touches the host must be deleted.
+const UNROUTED: &[&str] = &[
+    "src/engine/backup.rs",
+    "src/engine/backup/paths.rs",
+    "src/engine/startup/epoch_floor.rs",
+    "src/engine/startup/storage.rs",
+    "src/engine/verification.rs",
+    "src/runtime/actors/flush.rs",
+    "src/runtime/actors/gc.rs",
+    "src/runtime/cloud_startup/cloud_recovery/metadata.rs",
+    "src/runtime/cloud_startup/cloud_recovery/mod.rs",
+    "src/runtime/cloud_startup/cloud_recovery/sst_proof.rs",
+    "src/runtime/cloud_startup/mod.rs",
+    "src/runtime/cloud_startup/streaming_wal_plan.rs",
+    "src/runtime/event_loop/cloud_integration/ack.rs",
+    "src/runtime/event_loop/cloud_integration/sealing.rs",
+    "src/runtime/event_loop/compaction.rs",
+    "src/runtime/event_loop/resources.rs",
+    "src/runtime/event_loop/wal_retention/cloud.rs",
+    "src/runtime/hybrid_persistence.rs",
+    "src/runtime/hybrid_persistence/metadata_snapshot.rs",
+    "src/runtime/storage_residue.rs",
+    "src/runtime/transaction_spill/format.rs",
+    "src/runtime/transaction_spill/mod.rs",
+    "src/runtime/transaction_spill/range.rs",
+    "src/sst/fs/mod.rs",
+    "src/sst/fs/reader_io/mod.rs",
+    "src/sst/fs/scratch.rs",
+    "src/sst/identity.rs",
+    "src/storage/filesystem.rs",
+    "src/storage/filesystem/windows.rs",
+    "src/storage/hybrid/backend/file_publication.rs",
+    "src/storage/hybrid/backend/uploads.rs",
+    "src/storage/simulated.rs",
+    "src/wal/recovery/streaming.rs",
+];
+
 /// Production code reaches durable storage only through the injected `Fs`
-/// root, so a crash-simulating filesystem sees every effect (#808 PR 1a).
+/// root, so a crash-simulating filesystem sees every effect (#808 stage 1).
 #[test]
 fn should_route_storage_io_through_injected_fs() {
     // Arrange
-    let host_io = [
-        "std::fs",
-        "RealFs::new(",
-        "RealFs::open_existing(",
-        "tempfile::",
-        ".exists()",
-        ".try_exists(",
-        "filesystem::FileSystem::new(",
-    ];
-    // Code that is the host boundary itself, or reads host state that is not
-    // database storage. Each entry says why it may touch the host directly.
-    let boundary = [
-        ("src/io/real.rs", "the production Fs adapter"),
-        (
-            "src/io/durable_dir.rs",
-            "host directory creation behind RealFs roots",
-        ),
-        (
-            "src/engine/startup/storage_root.rs",
-            "the single constructor of the engine's host-backed root",
-        ),
-        (
-            "src/engine/api/options/memory.rs",
-            "reads cgroup memory limits",
-        ),
-        (
-            "src/compaction/repair.rs",
-            "resolves the host mount for free-space checks",
-        ),
-        (
-            "src/storage/providers/azure.rs",
-            "reads workload-identity token files",
-        ),
-        (
-            "src/storage/providers/gcs.rs",
-            "reads service-account credential files",
-        ),
-        (
-            "src/storage/providers/s3.rs",
-            "reads web-identity and profile files",
-        ),
-    ];
-    // Not yet routed through the injected root. #808 PR 1a removes every
-    // entry; an entry whose file no longer touches the host must be deleted.
-    let pending = [
-        "src/engine/backup.rs",
-        "src/engine/backup/paths.rs",
-        "src/engine/startup/epoch_floor.rs",
-        "src/engine/startup/storage.rs",
-        "src/engine/verification.rs",
-        "src/runtime/actors/flush.rs",
-        "src/runtime/actors/gc.rs",
-        "src/runtime/cloud_startup/cloud_recovery/metadata.rs",
-        "src/runtime/cloud_startup/cloud_recovery/mod.rs",
-        "src/runtime/cloud_startup/cloud_recovery/sst_proof.rs",
-        "src/runtime/cloud_startup/mod.rs",
-        "src/runtime/cloud_startup/streaming_wal_plan.rs",
-        "src/runtime/event_loop/cloud_integration/ack.rs",
-        "src/runtime/event_loop/cloud_integration/sealing.rs",
-        "src/runtime/event_loop/compaction.rs",
-        "src/runtime/event_loop/resources.rs",
-        "src/runtime/event_loop/wal_retention/cloud.rs",
-        "src/runtime/hybrid_persistence.rs",
-        "src/runtime/hybrid_persistence/metadata_snapshot.rs",
-        "src/runtime/storage_residue.rs",
-        "src/runtime/transaction_spill/format.rs",
-        "src/runtime/transaction_spill/mod.rs",
-        "src/runtime/transaction_spill/range.rs",
-        "src/sst/fs/mod.rs",
-        "src/sst/fs/reader_io/mod.rs",
-        "src/sst/fs/scratch.rs",
-        "src/sst/identity.rs",
-        "src/storage/filesystem.rs",
-        "src/storage/filesystem/windows.rs",
-        "src/storage/hybrid/backend/file_publication.rs",
-        "src/storage/hybrid/backend/uploads.rs",
-        "src/storage/simulated.rs",
-        "src/wal/recovery/streaming.rs",
-    ];
+    let files = source_scan::production_files();
 
     // Act
     let mut violations = std::collections::BTreeMap::new();
-    for file in source_scan::production_files() {
+    for file in files {
         let hits: Vec<_> = file
             .production
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .filter(|line| host_io.iter().any(|token| line.contains(token)))
+            .filter(|line| HOST_IO.iter().any(|token| line.contains(token)))
             .map(str::trim)
             .map(str::to_string)
             .collect();
@@ -961,20 +966,20 @@ fn should_route_storage_io_through_injected_fs() {
     let unexpected: Vec<_> = violations
         .iter()
         .filter(|(file, _)| {
-            !boundary.iter().any(|(allowed, _)| allowed == file)
-                && !pending.contains(&file.as_str())
+            !HOST_BOUNDARY.iter().any(|(allowed, _)| allowed == file)
+                && !UNROUTED.contains(&file.as_str())
         })
         .collect();
     assert!(
         unexpected.is_empty(),
         "production code bypasses the injected filesystem root: {unexpected:#?}"
     );
-    let stale: Vec<_> = pending
+    let stale: Vec<_> = UNROUTED
         .iter()
         .filter(|file| !violations.contains_key(**file))
         .collect();
     assert!(
         stale.is_empty(),
-        "remove routed files from pending: {stale:?}"
+        "remove routed files from UNROUTED: {stale:?}"
     );
 }
