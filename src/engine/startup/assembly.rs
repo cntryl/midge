@@ -95,6 +95,7 @@ impl FacadeAssembly {
             runtime: Some(started.runtime),
             runtime_handle: started.runtime_handle,
             db_path: storage_path.db_path,
+            root: storage_path.root,
             memory_mode: storage_path.memory_mode,
             cloud_mode: matches!(
                 opts.storage(),
@@ -182,7 +183,7 @@ impl EngineStartup {
         }
         check_scope(scope, "lease acquisition")?;
         if !storage_path.memory_mode {
-            crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
+            crate::runtime::transaction_spill::cleanup_orphaned_runs(storage_path.root.as_ref())?;
         }
         check_scope(scope, "orphaned spill cleanup")?;
         let materialized = super::timing::measure("storage_materialization", || {

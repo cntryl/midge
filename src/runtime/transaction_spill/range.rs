@@ -1,16 +1,16 @@
 use super::format::{
-    field_len_bytes, read_crc_exact, read_crc_vec, read_frame_header, read_u32_at, read_u64_at,
-    u64_to_usize, usize_to_u64, write_frame_parts, RunFile,
+    create_spill_file, field_len_bytes, read_crc_exact, read_crc_vec, read_frame_header,
+    read_u32_at, read_u64_at, u64_to_usize, usize_to_u64, write_frame_parts, RunFile,
 };
 use super::{
     IntentLookup, OrdinalOp, TransactionOp, NO_RANGE_CHILD, RANGE_HEADER_LEN, RANGE_MAGIC,
     RANGE_TABLE_ENTRY_LEN, RANGE_VERSION,
 };
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::stream::FileWriter;
+use crate::io::{Fs, FsPath};
 use bytes::Bytes;
-use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
 
 #[derive(Debug)]
 struct RangeNodeMeta {
@@ -118,7 +118,7 @@ fn range_order(nodes: &[RangeNodeMeta], ops: &[OrdinalOp], order: RangeOrder) ->
     indices.into_iter().map(|index| index as u64).collect()
 }
 
-fn write_order_table(file: &mut File, order: &[u64]) -> MidgeResult<()> {
+fn write_order_table(file: &mut FileWriter, order: &[u64]) -> MidgeResult<()> {
     for node_index in order {
         let bytes = node_index.to_le_bytes();
         file.write_all(&bytes)?;
@@ -135,9 +135,13 @@ fn range_tables_len(node_count: usize) -> Option<usize> {
         .checked_mul(3)
 }
 
-pub(super) fn write_range_index_file(path: &Path, ops: &[OrdinalOp]) -> MidgeResult<()> {
+pub(super) fn write_range_index_file(
+    root: &dyn Fs,
+    path: &FsPath,
+    ops: &[OrdinalOp],
+) -> MidgeResult<()> {
     let nodes = build_range_nodes(ops)?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut file = create_spill_file(root, path)?;
     file.write_all(&[0; RANGE_HEADER_LEN])?;
     let table_bytes = range_tables_len(nodes.len()).ok_or_else(|| {
         MidgeError::ResourceLimit("transaction range index table overflow".to_string())
@@ -158,12 +162,13 @@ pub(super) fn write_range_index_file(path: &Path, ops: &[OrdinalOp]) -> MidgeRes
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header)?;
     file.seek(SeekFrom::Start(end))?;
+    file.flush()?;
     // Range indexes are pre-commit scratch alongside their run, so the WAL
     // commit -- not an fsync here -- is their durability boundary.
     Ok(())
 }
 
-fn write_zeroes(file: &mut File, mut bytes: usize) -> MidgeResult<()> {
+fn write_zeroes(file: &mut FileWriter, mut bytes: usize) -> MidgeResult<()> {
     const ZEROES: [u8; 4096] = [0; 4096];
     while bytes != 0 {
         let chunk = bytes.min(ZEROES.len());
@@ -188,7 +193,7 @@ fn encode_range_header(
 }
 
 fn write_range_node_frame(
-    file: &mut File,
+    file: &mut FileWriter,
     node: &RangeNodeMeta,
     ops: &[OrdinalOp],
 ) -> MidgeResult<()> {
@@ -494,8 +499,8 @@ pub(super) fn read_ordered_range(
     })
 }
 
-pub(super) fn validate_range_index(path: &Path) -> MidgeResult<()> {
-    let mut file = RunFile::open(path)?;
+pub(super) fn validate_range_index(root: &dyn Fs, path: &FsPath) -> MidgeResult<()> {
+    let mut file = RunFile::open(root, path)?;
     let header = read_range_header(&mut file)?;
     for position in 0..header.node_count {
         for order in [RangeOrder::Start, RangeOrder::End] {

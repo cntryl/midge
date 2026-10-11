@@ -5,6 +5,7 @@
 //! write. Scratch carries no durability and is never synced.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::stream::FileReader;
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use bytes::Bytes;
 use std::path::Path;
@@ -79,15 +80,13 @@ impl TrackedScratch {
     }
 
     /// Read the scratch back from its first byte.
-    pub(super) fn reader(&self) -> ScratchReader<'_> {
-        ScratchReader {
-            file: self
-                .file
+    pub(super) fn reader(&self) -> FileReader<&dyn File> {
+        FileReader::with_len(
+            self.file
                 .as_deref()
                 .expect("scratch stays open until closed"),
-            len: self.len,
-            position: 0,
-        }
+            self.len,
+        )
     }
 
     pub(super) fn close(mut self) -> MidgeResult<()> {
@@ -116,36 +115,6 @@ impl Drop for TrackedScratch {
         if let Err(error) = self.cleanup() {
             tracing::warn!(%error, "retaining compaction disk admission because scratch cleanup failed");
         }
-    }
-}
-
-/// Sequential reader over finished scratch.
-pub(super) struct ScratchReader<'a> {
-    file: &'a dyn File,
-    len: u64,
-    position: u64,
-}
-
-impl std::io::Read for ScratchReader<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let count = (self.len - self.position).min(buffer.len() as u64);
-        if count == 0 {
-            return Ok(0);
-        }
-        let bytes = self
-            .file
-            .read_at(self.position, count)
-            .map_err(|error| std::io::Error::other(error.into_midge()))?;
-        let read = bytes.len();
-        if read as u64 != count {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "SST scratch shrank while it was read back",
-            ));
-        }
-        buffer[..read].copy_from_slice(&bytes);
-        self.position += count;
-        Ok(read)
     }
 }
 

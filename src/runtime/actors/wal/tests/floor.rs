@@ -24,7 +24,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     actor.set_storage_budget(setup.hybrid_storage.clone());
     let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
         Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0)),
-        directory.path(),
+        &crate::io::real::test_root(directory.path()),
         false,
         1,
     )

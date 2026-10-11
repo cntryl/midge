@@ -88,6 +88,8 @@ pub struct Engine {
     runtime_handle: RuntimeHandle,
     /// Database path
     db_path: PathBuf,
+    /// The database root; transaction spill runs are written below it.
+    root: Arc<dyn crate::io::Fs>,
     /// Pure in-memory mode flag.
     memory_mode: bool,
     /// True when opened in cloud-backed mode.
@@ -403,7 +405,7 @@ impl Engine {
             start_sequence,
             read_snapshot: Some(read_snapshot),
             cloud_mode: self.cloud_mode,
-            db_path: self.db_path.clone(),
+            root: Arc::clone(&self.root),
             memory_mode: self.memory_mode,
             transaction_memory_pool: Arc::clone(&self.transaction_memory_pool),
             runtime_transaction_guard,
