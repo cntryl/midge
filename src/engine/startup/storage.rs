@@ -77,11 +77,14 @@ fn initialize_startup_state(
 #[allow(clippy::too_many_arguments)]
 /// Open the WAL ledger of a cloud cache, after sweeping files it does not
 /// name. A cache without one starts its history past every cataloged
-/// segment.
+/// segment. The FORMAT marker comes first, as in local recovery: a WAL file
+/// without it reads as state of an unknown format.
 fn open_cloud_wal_history(
-    root: &Arc<dyn crate::io::Fs>,
+    path: &StartupStoragePath,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
 ) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
+    let root = &path.root;
+    crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
     let first_open = match catalog.segments.keys().next_back() {
         Some(last) => last.checked_add(1).ok_or_else(|| {
             MidgeError::ResourceLimit("WAL segment identity space exhausted".into())
@@ -836,7 +839,7 @@ impl RuntimeStorageMaterialization {
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&cloud.hybrid_storage, scope)?;
 
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let mut history = open_cloud_wal_history(&storage_path.root, &wal_catalog)?;
+        let mut history = open_cloud_wal_history(storage_path, &wal_catalog)?;
         let streaming = super::timing::measure("wal_plan", || {
             build_wal_plan(
                 &storage_path.root,
@@ -982,7 +985,7 @@ impl RuntimeStorageMaterialization {
             scope,
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let mut history = open_cloud_wal_history(&storage_path.root, &wal_catalog)?;
+        let mut history = open_cloud_wal_history(storage_path, &wal_catalog)?;
         let streaming = super::timing::measure("wal_plan", || {
             build_wal_plan(
                 &storage_path.root,
