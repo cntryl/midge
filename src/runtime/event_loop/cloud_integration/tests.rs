@@ -9677,3 +9677,150 @@ fn should_refuse_writes_when_unpublished_uploads_fill_the_upload_queue(
     assert_eq!(admitted, 2);
     Ok(())
 }
+
+/// Drive the runtime's upload backlog and storage events until the cloud
+/// durability frontier reaches `max_sequence`.
+fn drive_cloud_frontier_to_for_test(el: &mut EventLoop, max_sequence: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while el.state.wal.frontiers.cloud_durable() < max_sequence && Instant::now() < deadline {
+        el.drain_cloud_wal_upload_backlog();
+        el.tick_hybrid_storage();
+        el.drain_hybrid_storage_events();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn should_advance_frontier_through_run_when_its_lost_catalog_answer_had_committed(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: two uploads wait as one run, and the catalog commits their
+    // publication but its answer never arrives.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(500);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open cloud store"),
+    );
+    let lost_answer = Arc::new(CommitThenBlockCatalogCasCallbackBackend::new(cloud_fs));
+    let backend: Arc<dyn crate::storage::StorageBackend> = lost_answer.clone();
+    let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
+    el.set_hybrid_storage(Arc::new(
+        crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            Arc::clone(&backend),
+            Arc::clone(&backend),
+            backend,
+            storage_event_tx,
+            Duration::from_millis(500),
+        ),
+    ));
+    el.cloud_coordinator.hybrid_storage_events = Some(storage_event_rx);
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    lost_answer.arm();
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    assert_eq!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.get(&first),
+        Some(&first_max_sequence),
+        "the lost answer withdraws the run's first upload"
+    );
+    assert_eq!(
+        published_wal_segments_for_test(&el)?,
+        vec![first, second],
+        "the catalog committed the run before its answer was lost"
+    );
+
+    // Act: the withdrawn segment uploads again; its republication finds
+    // the run already published.
+    drive_cloud_frontier_to_for_test(&mut el, second_max_sequence);
+
+    // Assert
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), second_max_sequence);
+    assert!(!el.wal_transition.is_fenced());
+    Ok(())
+}
+
+#[test]
+fn should_publish_whole_run_after_memory_deferral_when_shared_memory_returns(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: two uploads wait as one run while shared maintenance memory
+    // is too short for the catalog publication.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let request_id = 46_301;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(second, DurabilityWaiter::CloudDurability { request_id });
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    let budget = el
+        .cloud_coordinator
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .maintenance_memory()
+        .expect("maintenance memory")
+        .with_contention_errors();
+    let reserve_deadline = Instant::now() + Duration::from_secs(10);
+    let held = loop {
+        match budget.reserve(budget.limit() - 64, "competing maintenance") {
+            Ok(held) => break held,
+            Err(error) => {
+                assert!(
+                    Instant::now() < reserve_deadline,
+                    "shared maintenance budget never drained: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    };
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    assert!(
+        matches!(
+            response.try_recv(),
+            Err(crossbeam::channel::TryRecvError::Empty)
+        ),
+        "memory pressure is backpressure, not a failed write"
+    );
+    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&first));
+    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&second));
+    assert_eq!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.get(&first),
+        Some(&first_max_sequence)
+    );
+
+    // Act: memory returns and the deferred segment uploads again.
+    drop(held);
+    drive_cloud_frontier_to_for_test(&mut el, second_max_sequence);
+
+    // Assert: the whole run publishes and its waiter completes.
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Ok { request_id: actual }) if actual == request_id
+    ));
+    Ok(())
+}
