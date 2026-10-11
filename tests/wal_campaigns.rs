@@ -36,6 +36,7 @@ mod search;
 #[path = "wal_campaigns/workload.rs"]
 mod workload;
 
+use cntryl_midge::__internal::simulation::{Fault, FaultEffect, FaultError, FaultOp};
 use config::{Config, Mode, StoreFaults, RENEWING_LEASE_TTL_MILLIS};
 use harness::{Campaign, FindingKind, Stop, LEASE_LOCK};
 use images::{assert_clean, assert_reproduced, load_image};
@@ -243,6 +244,12 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
 /// control's nightly budget: a buffered delete is flushed into an SST, a power
 /// loss drops its unsynced WAL record, and compaction then drops the flushed
 /// tombstone together with the put it shadowed, so recovery replays the put.
+///
+/// A completed flush wakes its caller before the event loop syncs the WAL to
+/// seal the active segment for pruning, so whether the delete's record is
+/// still unsynced when power is lost is a race the event loop often wins. The
+/// WAL's next sync fails and drops its writeback, so either way the device
+/// keeps the WAL from before the delete.
 #[test]
 #[ignore = "#808 stage 3: lost-buffered-delete"]
 fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
@@ -252,9 +259,14 @@ fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
     campaign.recover(Stop::Clean).expect("first open");
     campaign.write(0, 1, false, Durability::Sync);
     campaign.write(0, 1, true, Durability::Buffered);
-    campaign
-        .apply(&Op::Flush { family: 0 }, &[])
-        .expect("flush");
+    campaign.inject(Fault {
+        op: FaultOp::Sync,
+        path: "wal".into(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+    campaign.flush(0).expect("flush the buffered delete");
     campaign.lose_power_with(|_| 0);
     let recovered = campaign.recover(Stop::PowerLoss);
 

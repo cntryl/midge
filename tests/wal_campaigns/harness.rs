@@ -386,6 +386,22 @@ impl Campaign {
         }
     }
 
+    /// Flush `family`; the history counts it flushed only if the flush
+    /// succeeded.
+    pub(crate) fn flush(&mut self, family: usize) -> cntryl_midge::MidgeResult<()> {
+        let name = self.family(family);
+        let engine = self.engine();
+        let handle = engine.get_column_family(&name).expect("family exists");
+        engine.flush_cf(&handle)?;
+        self.history.flushed(&name);
+        Ok(())
+    }
+
+    /// Fail a later device call; see [`Fault`].
+    pub(crate) fn inject(&self, fault: Fault) {
+        let _ = self.device.inject(fault);
+    }
+
     /// The process dies: it reaches neither its device nor the store again.
     pub(crate) fn crash_process(&mut self) {
         self.device.process_crash();
@@ -451,12 +467,7 @@ impl Campaign {
                 durability,
             } => self.write(*family, *key, true, *durability),
             Op::Flush { family } => {
-                let name = self.family(*family);
-                let engine = self.engine();
-                let handle = engine.get_column_family(&name).expect("family exists");
-                if engine.flush_cf(&handle).is_ok() {
-                    self.history.flushed(&name);
-                }
+                let _ = self.flush(*family);
             }
             Op::Compact => {
                 let _ = self.engine().compact_all();
