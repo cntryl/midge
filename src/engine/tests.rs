@@ -921,28 +921,6 @@ fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) ->
 }
 
 #[test]
-fn should_reject_legacy_segment_only_cloud_wal_without_catalog() {
-    // Arrange
-    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
-    Engine::blocking_cloud_put(&cloud, "wal/1.wal", cloud_wal_test_bytes(1, 1, b"legacy"))
-        .expect("upload legacy WAL alias");
-
-    // Act
-    let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
-            &cloud, None,
-        );
-
-    // Assert
-    assert!(matches!(
-        result,
-        Err(crate::common::MidgeError::RecoveryFailed(message))
-            if message.contains("publication catalog format v1")
-    ));
-}
-
-#[test]
 fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");

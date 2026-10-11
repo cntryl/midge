@@ -331,7 +331,7 @@ impl CloudStartupRecovery {
         let untracked = store
             .keys_under(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX, scope)?
             .into_iter()
-            .find(|key| crate::wal::parse_segment_id(key).is_some());
+            .find(|key| crate::wal::parse_segment_object_key(key).is_some());
         if let Some(key) = untracked {
             return Err(Self::cloud_wal_without_catalog_error(&key));
         }
@@ -339,16 +339,8 @@ impl CloudStartupRecovery {
     }
 
     fn cloud_wal_without_catalog_error(key: &str) -> MidgeError {
-        let relative = key
-            .strip_prefix(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)
-            .unwrap_or(key);
-        if relative.contains('/') {
-            return MidgeError::RecoveryFailed(format!(
-                "epoch-scoped cloud WAL object '{key}' exists without publication catalog format v1; refusing ambiguous recovery because object presence is not authority"
-            ));
-        }
         MidgeError::RecoveryFailed(format!(
-            "legacy segment-only cloud WAL object '{key}' is unsupported by publication catalog format v1; migrate or restore with a compatible Midge release"
+            "epoch-scoped cloud WAL object '{key}' exists without publication catalog format v1; refusing ambiguous recovery because object presence is not authority"
         ))
     }
 

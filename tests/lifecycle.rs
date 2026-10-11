@@ -2452,7 +2452,7 @@ mod local_wal_retention {
             .expect("read wal dir")
             .filter_map(Result::ok)
             .filter(|entry| {
-                cntryl_midge::__internal::wal::parse_segment_id(
+                cntryl_midge::__internal::wal::parse_segment_file_name(
                     &entry.file_name().to_string_lossy(),
                 )
                 .is_some()

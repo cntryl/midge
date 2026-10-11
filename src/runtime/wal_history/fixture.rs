@@ -111,7 +111,7 @@ fn stash_segments(wal: &dyn Fs) -> MidgeResult<Vec<(String, Vec<u8>)>> {
     };
     let mut stashed = Vec::new();
     for entry in entries {
-        if entry.is_dir || crate::wal::parse_segment_id(&entry.name).is_none() {
+        if entry.is_dir || crate::wal::parse_segment_file_name(&entry.name).is_none() {
             continue;
         }
         let path = FsPath::new(&entry.name);

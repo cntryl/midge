@@ -190,7 +190,8 @@ impl CloudState {
     /// Stop tracking `segment_id`'s WAL object as queued for upload.
     pub fn forget_pending_upload(&mut self, segment_id: u64) {
         self.pending_uploads.retain(|item| {
-            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+            crate::wal::parse_segment_object_key(item)
+                .is_none_or(|(_, pending)| pending != segment_id)
         });
     }
 }

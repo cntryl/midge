@@ -41,7 +41,7 @@ mod durability_wal {
             .expect("read wal dir")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| cntryl_midge::__internal::wal::parse_segment_id(name).is_some())
+            .filter(|name| cntryl_midge::__internal::wal::parse_segment_file_name(name).is_some())
             .collect();
         names.sort();
         names.pop();

@@ -647,7 +647,8 @@ impl RuntimeState {
         }
         let mut recovered_sequence = stats.max_sequence.unwrap_or(0);
         if let Some(stop) = &stats.salvage_stop {
-            let segment = crate::wal::parse_segment_id(&stop.path.0).ok_or_else(|| {
+            let file_name = stop.path.0.rsplit('/').next().unwrap_or_default();
+            let segment = crate::wal::parse_segment_file_name(file_name).ok_or_else(|| {
                 MidgeError::Corruption(format!("salvage stopped in non-segment file {}", stop.path))
             })?;
             // A segment replay took nothing from leaves history whole.

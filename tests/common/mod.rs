@@ -364,7 +364,7 @@ pub fn wal_segment_files(db_path: &std::path::Path) -> Vec<(u64, PathBuf)> {
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             Some((
-                cntryl_midge::__internal::wal::parse_segment_id(&name)?,
+                cntryl_midge::__internal::wal::parse_segment_file_name(&name)?,
                 entry.path(),
             ))
         })

@@ -71,24 +71,33 @@ pub fn segment_object_key(segment_id: u64, writer_epoch: u64) -> String {
     )
 }
 
-/// Parse a WAL segment id from a cloud key or a segment filename.
+/// The id of the local WAL segment file `name`, which must be exactly
+/// [`segment_file_name`]'s form: twenty digits, then `.wal`. Anything else,
+/// an unpadded id or a path included, is not a segment file.
 #[must_use]
-pub fn parse_segment_id(name: &str) -> Option<u64> {
-    let file_name = name.strip_prefix("wal/").unwrap_or(name);
+pub fn parse_segment_file_name(name: &str) -> Option<u64> {
+    parse_padded_id(name.strip_suffix(".wal")?)
+}
 
-    if let Some((epoch, segment)) = file_name
-        .strip_prefix("epochs/")
-        .and_then(|rest| rest.split_once('/'))
-    {
-        epoch.parse::<u64>().ok()?;
-        return segment
-            .strip_suffix(".wal")
-            .and_then(|segment_id| segment_id.parse::<u64>().ok());
+/// The writer epoch and segment id of the cloud WAL object `key`, which must
+/// be exactly [`segment_object_key`]'s form,
+/// `wal/epochs/{epoch:020}/{id:020}.wal`. A local file name or any other
+/// key is not a segment object.
+#[must_use]
+pub fn parse_segment_object_key(key: &str) -> Option<(u64, u64)> {
+    let rest = key
+        .strip_prefix(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)?
+        .strip_prefix("epochs/")?;
+    let (epoch, file_name) = rest.split_once('/')?;
+    Some((parse_padded_id(epoch)?, parse_segment_file_name(file_name)?))
+}
+
+/// A `u64` written with exactly [`WAL_SEGMENT_ID_WIDTH`] decimal digits.
+fn parse_padded_id(digits: &str) -> Option<u64> {
+    if digits.len() != WAL_SEGMENT_ID_WIDTH || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
     }
-
-    file_name
-        .strip_suffix(".wal")
-        .and_then(|segment_str| segment_str.parse::<u64>().ok())
+    digits.parse().ok()
 }
 
 // Re-export main WAL types
@@ -147,17 +156,31 @@ mod tests {
     }
 
     #[test]
-    fn should_parse_segment_ids_from_supported_wal_names() {
+    fn should_reject_alias_and_foreign_form_in_each_segment_parser() {
         // Arrange
+        let file = segment_file_name(42);
+        let object = segment_object_key(42, 7);
+
         // Act
+        let files = [
+            parse_segment_file_name(&file),
+            parse_segment_file_name("42.wal"),
+            parse_segment_file_name(&format!("wal/{file}")),
+            parse_segment_file_name(&object),
+            parse_segment_file_name("99999999999999999999.wal"),
+            parse_segment_file_name("0000000000000000004a.wal"),
+        ];
+        let objects = [
+            parse_segment_object_key(&object),
+            parse_segment_object_key(&file),
+            parse_segment_object_key(&format!("wal/{file}")),
+            parse_segment_object_key("wal/epochs/7/00000000000000000042.wal"),
+            parse_segment_object_key(&format!("wal/epochs/00000000000000000007/42.wal")),
+            parse_segment_object_key(&format!("wal/epochs/00000000000000000007/x/{file}")),
+        ];
+
         // Assert
-        assert_eq!(parse_segment_id("1.wal"), Some(1));
-        assert_eq!(parse_segment_id("00000000000000000042.wal"), Some(42));
-        assert_eq!(parse_segment_id("wal/00000000000000000099.wal"), Some(99));
-        assert_eq!(
-            parse_segment_id("wal/epochs/00000000000000000007/00000000000000000099.wal"),
-            Some(99)
-        );
-        assert_eq!(parse_segment_id("wal_000123.log"), None);
+        assert_eq!(files, [Some(42), None, None, None, None, None]);
+        assert_eq!(objects, [Some((7, 42)), None, None, None, None, None]);
     }
 }
