@@ -1193,11 +1193,6 @@ const WAL_PATH_WORDS: &[&str] = &[
 const TEST_ONLY_WAL_PATHS: &[(&str, &str, &str)] = &[
     (
         "src/runtime/state/recovery.rs",
-        "replay_wal",
-        "the production replay without a deadline; stage 2 replays the planned segment list",
-    ),
-    (
-        "src/runtime/state/recovery.rs",
         "try_new_before_cloud_replay",
         "loads metadata from a host directory for cloud replay tests; stage 2 plans cloud replay",
     ),
@@ -1282,6 +1277,160 @@ fn should_not_shadow_production_wal_paths_in_tests() {
     );
 }
 
+/// Production files in the WAL authority scope, and the WAL history adapter.
+fn wal_authority_files() -> Vec<source_scan::SourceFile> {
+    source_scan::production_files()
+        .into_iter()
+        .filter(|file| {
+            file.relative == "src/runtime/wal_history.rs"
+                || file.relative == "src/engine/verification.rs"
+                || WAL_AUTHORITY_SCOPE
+                    .iter()
+                    .any(|scope| file.relative.starts_with(scope))
+        })
+        .collect()
+}
+
+/// Production lines of `files` that hold any of `tokens`, by file.
+fn lines_calling(
+    files: &[source_scan::SourceFile],
+    tokens: &[&str],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    files
+        .iter()
+        .filter_map(|file| {
+            let hits: Vec<String> = file
+                .production
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with("//"))
+                .filter(|line| tokens.iter().any(|token| line.contains(token)))
+                .map(str::to_string)
+                .collect();
+            (!hits.is_empty()).then(|| (file.relative.clone(), hits))
+        })
+        .collect()
+}
+
+/// Files in the WAL authority scope that list a directory, each with what it
+/// lists. None of them lists `wal/` to name history (#842).
+const WAL_SCOPE_LISTINGS: &[(&str, &str)] = &[
+    (
+        "src/runtime/wal_history.rs",
+        "the only listing of wal/: the orphan sweep and the genesis check",
+    ),
+    (
+        "src/engine/startup/recovery.rs",
+        "byte totals of local directories for storage accounting",
+    ),
+    (
+        "src/engine/startup/storage.rs",
+        "the empty-cache check before a cloud bootstrap",
+    ),
+];
+
+/// WAL ids are allocated and replay is planned from the segment ledger, never
+/// from a directory listing (#842).
+#[test]
+fn should_not_list_directories_to_allocate_wal_ids_or_plan_replay() {
+    // Arrange
+    let files = wal_authority_files();
+
+    // Act
+    let listings = lines_calling(&files, &[".list_dir("]);
+
+    // Assert
+    let unexpected: Vec<_> = listings
+        .iter()
+        .filter(|(file, _)| {
+            !WAL_SCOPE_LISTINGS
+                .iter()
+                .any(|(allowed, _)| allowed == file)
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "WAL authority code lists directories; name WAL files from the ledger: {unexpected:#?}"
+    );
+    let stale: Vec<_> = WAL_SCOPE_LISTINGS
+        .iter()
+        .filter(|(file, _)| !listings.contains_key(*file))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "remove stale WAL_SCOPE_LISTINGS: {stale:?}"
+    );
+}
+
+/// Files in the WAL authority scope that remove or rename files, each with
+/// what it removes. Only the WAL history adapter removes WAL segments, after
+/// the ledger stops naming them (#842).
+const WAL_SCOPE_REMOVALS: &[(&str, &str)] = &[
+    (
+        "src/runtime/wal_history.rs",
+        "segments the ledger retired or set aside, and orphans",
+    ),
+    (
+        "src/runtime/state/recovery.rs",
+        "SSTs recovery found unpublished",
+    ),
+    (
+        "src/runtime/cloud_startup/cloud_recovery/mod.rs",
+        "local SST copies and SST staging residue",
+    ),
+    (
+        "src/engine/startup/recovery.rs",
+        "resident SSTs evicted after cloud migration",
+    ),
+    (
+        "src/engine/startup/streaming_recovery.rs",
+        "SST objects recovery staged",
+    ),
+];
+
+/// The segment ledger changes only through the WAL history adapter: nothing
+/// else opens its journal, and nothing else removes or renames files in the
+/// WAL authority scope beyond the SST work listed above (#842).
+#[test]
+fn should_mutate_wal_authority_only_through_ledger_transitions() {
+    // Arrange
+    let files = wal_authority_files();
+    let everywhere = source_scan::production_files();
+
+    // Act
+    let removals = lines_calling(&files, &[".remove_file(", ".rename_atomic("]);
+    let journal_writers: Vec<String> = lines_calling(&everywhere, &["LedgerStore::"])
+        .into_keys()
+        .filter(|file| file != "src/runtime/wal_history.rs" && file != "src/wal/ledger_store.rs")
+        .collect();
+
+    // Assert
+    let unexpected: Vec<_> = removals
+        .iter()
+        .filter(|(file, _)| {
+            !WAL_SCOPE_REMOVALS
+                .iter()
+                .any(|(allowed, _)| allowed == file)
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "WAL authority code removes or renames files outside the ledger: {unexpected:#?}"
+    );
+    let stale: Vec<_> = WAL_SCOPE_REMOVALS
+        .iter()
+        .filter(|(file, _)| !removals.contains_key(*file))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "remove stale WAL_SCOPE_REMOVALS: {stale:?}"
+    );
+    assert!(
+        journal_writers.is_empty(),
+        "only WalHistory opens the ledger journal: {journal_writers:?}"
+    );
+}
+
 /// Code the #808 redesign deleted. Each entry names the issue that removed
 /// it; nothing in the crate, its tests, benches, examples or fuzz targets may
 /// bring it back. Entries are whole identifiers or path segments.
@@ -1321,6 +1470,42 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("allowed_out_of_order", "#841"),
     ("campaign_beyond", "#841"),
     ("assert_replays", "#841"),
+    ("ACTIVE_FILE_NAME", "#842"),
+    ("recover_next_segment_id", "#842"),
+    ("replayable_wal_files", "#842"),
+    ("quarantine_wal_files", "#842"),
+    ("listed_segments", "#842"),
+    ("collect_local_wal_paths", "#842"),
+    ("LocalWalPaths", "#842"),
+    ("canonicalize_aliases", "#842"),
+    ("quarantine_active", "#842"),
+    ("quarantine_local_wal_alias", "#842"),
+    ("quarantine_local_wal_alias_with_authority", "#842"),
+    ("set_aside_local_paths", "#842"),
+    ("set_aside_local_wal", "#842"),
+    ("set_aside_local_wal_with_authority", "#842"),
+    ("set_aside_local_wal_with_authority_within", "#842"),
+    ("commit_set_aside_with_authority", "#842"),
+    ("commit_set_aside_with_authority_within", "#842"),
+    ("after_salvage_quarantine_rename", "#842"),
+    ("remove_cloud_durable_local_wal_segment", "#842"),
+    ("retire_sealed_local_wal", "#842"),
+    ("remove_local_wal_segment", "#842"),
+    ("local_prune_cursor", "#842"),
+    ("restore_active_writer_after_failed_rotate", "#842"),
+    ("can_ignore_missing_active_segment", "#842"),
+    ("create_replacement_writer", "#842"),
+    ("before_rename_boundary", "#842"),
+    ("after_rename_boundary", "#842"),
+    ("inject_fail_before_rename", "#842"),
+    ("inject_fail_after_rename_before_writer_create", "#842"),
+    ("BeforeRename", "#842"),
+    ("AfterRename", "#842"),
+    ("BeforeWriterCreate", "#842"),
+    ("AfterWriterCreate", "#842"),
+    ("AfterReplacementDirectorySync", "#842"),
+    ("cloud_segment_object_key", "#842"),
+    ("cloud_segment_file_name", "#842"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
