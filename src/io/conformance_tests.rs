@@ -1,4 +1,5 @@
-//! Contract tests that hold `MockFs` to the observable behavior of `RealFs`.
+//! Contract tests that hold `MockFs` and `CrashFs` to the observable behavior
+//! of `RealFs`.
 
 use super::traits::{DirEntry, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use super::{MockFs, RealFs};
@@ -25,6 +26,10 @@ fn for_each_backend(check: impl Fn(&str, &dyn Fs)) {
     let real = RealFs::new(temp_dir.path()).expect("create RealFs");
     check("RealFs", &real);
     check("MockFs", &MockFs::new());
+    check(
+        "CrashFs",
+        &crate::simulation::crash_fs::CrashDevice::new().fs(),
+    );
 }
 
 fn write_file(fs: &dyn Fs, path: &str, data: &'static [u8]) {

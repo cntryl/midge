@@ -5,6 +5,7 @@
 use cntryl_midge::__internal::io::{
     Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, RealFs,
 };
+use cntryl_midge::__internal::simulation::CrashDevice;
 use cntryl_midge::__internal::storage::cloud::MockCloudBackend;
 use cntryl_midge::{Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions};
 use std::sync::Arc;
@@ -636,4 +637,76 @@ fn should_remove_orphaned_spill_runs_when_opening_from_injected_root() {
         .exists(&FsPath::new("txn/0000000000000001-00000000.run"))
         .expect("probe orphaned run"));
     drop(engine);
+}
+
+/// Short enough that a restart after a simulated crash takes the dead
+/// process's lease over quickly.
+const LEASE_TTL: std::time::Duration = std::time::Duration::from_millis(100);
+
+#[test]
+fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
+    for seed in 0..8_u64 {
+        // Arrange: a local engine whose every file lives on a simulated device.
+        let named = tempfile::tempdir().expect("named directory");
+        let device = CrashDevice::new();
+        let options = |device: &CrashDevice| {
+            let root: Arc<dyn Fs> = Arc::new(device.fs());
+            OpenOptions::local(named.path())
+                .background_compaction(false)
+                .lease_ttl(LEASE_TTL)
+                .lease_clock_skew_tolerance(std::time::Duration::ZERO)
+                .filesystem_for_testing(root)
+                .build()
+                .expect("open options")
+        };
+        let engine = Engine::open(options(&device)).expect("open");
+        let default = engine.get_column_family("default").expect("default family");
+        let mut tx = engine
+            .begin_tx(default.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(b"key".to_vec(), seed.to_be_bytes().to_vec(), None)
+            .expect("put");
+        tx.commit(WriteOptions::sync()).expect("commit");
+        let mut tx = engine
+            .begin_tx(default.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(b"buffered".to_vec(), b"tail".to_vec(), None)
+            .expect("put");
+        tx.commit(WriteOptions::buffered())
+            .expect("buffered commit");
+        let undecided = device.decisions();
+
+        // Act: power is lost while the engine runs; the dead process can no
+        // longer reach the device, so its shutdown changes nothing. A
+        // restarted process takes the lease over once it is stale.
+        device.power_loss(seed);
+        drop(engine);
+        std::thread::sleep(LEASE_TTL * 3);
+        let reopened = Engine::open(options(&device)).expect("reopen");
+        let default = reopened
+            .get_column_family("default")
+            .expect("default family");
+        let tx = reopened
+            .begin_tx(default.id(), TransactionMode::ReadOnly)
+            .expect("read");
+        let synced = tx.get(b"key").expect("get synced");
+        let buffered = tx.get(b"buffered").expect("get buffered");
+
+        // Assert: the buffered tail was undecided, and whatever part of it
+        // survived, recovery keeps the synced commit and never invents bytes.
+        assert!(
+            !undecided.is_empty(),
+            "seed {seed}: nothing was left unsynced"
+        );
+        assert_eq!(
+            synced.as_deref(),
+            Some(&seed.to_be_bytes()[..]),
+            "seed {seed}"
+        );
+        assert!(
+            buffered.is_none() || buffered.as_deref() == Some(&b"tail"[..]),
+            "seed {seed}: {buffered:?}"
+        );
+        assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+    }
 }
