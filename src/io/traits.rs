@@ -157,11 +157,13 @@ pub trait File: Send {
     /// Returns an error when the file length cannot be queried.
     fn len(&self) -> FsResult<u64>;
 
-    /// Whether the file contains no bytes.
+    /// Whether the file contains no bytes. Present where the trait is
+    /// reachable outside the crate, alongside [`Self::len`].
     ///
     /// # Errors
     ///
     /// Returns the same errors as [`Self::len`].
+    #[cfg(feature = "internal-testing")]
     fn is_empty(&self) -> FsResult<bool> {
         self.len().map(|len| len == 0)
     }
