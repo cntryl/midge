@@ -153,7 +153,8 @@ enum Profile {
     CrashControl,
     /// Synced and buffered writes, flushes, compaction, clean restarts and
     /// power losses, without the triggers of known #808 bugs: no best-effort
-    /// writes, no faults, and no process crash before a power loss.
+    /// writes, no buffered deletes (`lost-buffered-delete`), no faults, and
+    /// no process crash before a power loss.
     RetentionControl,
     /// Buffered writes, a process crash, then a power loss.
     BufferedCrashes,
@@ -193,7 +194,7 @@ impl Profile {
             },
             Self::RetentionControl => match rng.below(14) {
                 0..=4 => put(0, logged),
-                5..=6 => delete(0, logged),
+                5..=6 => delete(0, Durability::Sync),
                 7..=8 => Op::Flush { family: 0 },
                 9 => Op::Compact,
                 10 => Op::CleanRestart,
@@ -1003,5 +1004,41 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
     assert!(
         recovered.is_ok(),
         "recovered WAL tail was served, then lost after power loss: {recovered:?}"
+    );
+}
+
+/// Registered RED case `lost-buffered-delete`, found by the retention
+/// control's nightly budget: a buffered delete is flushed into an SST, a power
+/// loss drops its unsynced WAL record, and compaction then drops the flushed
+/// tombstone together with the put it shadowed, so recovery replays the put.
+#[test]
+#[ignore = "#808 stage 3: lost-buffered-delete"]
+fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
+    // Arrange: a synced put, a buffered delete of it and a completed flush,
+    // then power is lost with the WAL page from before the delete.
+    let mut campaign = Campaign::new(Checks::default());
+    campaign.recover(Stop::Clean).expect("first open");
+    campaign.write(0, 1, false, Durability::Sync);
+    campaign.write(0, 1, true, Durability::Buffered);
+    campaign
+        .apply(&Op::Flush { family: 0 }, &[])
+        .expect("flush");
+    campaign.device.process_crash();
+    campaign.device.power_loss_with(|_| 0);
+    drop(campaign.engine.take());
+    let recovered = campaign.recover(Stop::PowerLoss);
+
+    // Act
+    campaign.apply(&Op::Compact, &[]).expect("compact");
+    let after_compaction = campaign.apply(&Op::ProcessCrash, &[]);
+
+    // Assert
+    assert!(
+        recovered.is_ok(),
+        "recovery after the power loss: {recovered:?}"
+    );
+    assert!(
+        after_compaction.is_ok(),
+        "flushed delete resurrected after compaction: {after_compaction:?}"
     );
 }

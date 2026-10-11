@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 /// Long enough that no lease expires by itself while a test runs; cloud
 /// leases need two thirds of it to exceed the provider write margin.
 const LEASE_TTL: Duration = Duration::from_secs(30);
-/// The default skew allowance: half the TTL.
-const SKEW: Duration = Duration::from_secs(15);
-/// Past the TTL and the skew allowance.
+/// Past the TTL and the default skew allowance, half the TTL.
 const PAST_EXPIRY: Duration = Duration::from_secs(46);
+/// Within the TTL and the default skew allowance.
+const SHORT_OF_EXPIRY: Duration = Duration::from_secs(44);
 
 #[derive(Debug, Clone, Copy)]
 enum Mode {
@@ -219,12 +219,11 @@ fn should_refuse_crashed_holder_lease_when_lease_clock_stops_short_of_expiry() {
     // Arrange: inside the TTL plus the skew allowance, the dead holder's
     // lease still stands.
     let modes = [Mode::Local, Mode::SimulatedCloud, Mode::ProviderCloud];
-    let short = LEASE_TTL + SKEW - Duration::from_secs(1);
 
     // Act
     let takeovers: Vec<_> = modes
         .iter()
-        .map(|mode| (mode, restart_after_crash(*mode, short)))
+        .map(|mode| (mode, restart_after_crash(*mode, SHORT_OF_EXPIRY)))
         .collect();
 
     // Assert
