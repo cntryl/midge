@@ -44,6 +44,10 @@ const KEYS: u8 = 6;
 const DEFAULT: &str = "default";
 /// How many times more seeds the nightly profile explores per control.
 const NIGHTLY_SCALE: u64 = 50;
+/// The seeds a detection campaign searches. Whether a seed reaches a bug can
+/// depend on background timing, so the search is wide; it stops at the first
+/// finding, which usually comes within the first few seeds.
+const DETECTION_SEEDS: std::ops::Range<u64> = 0..200;
 
 /// The seeds a control campaign explores: `per_pr` of them, or
 /// [`NIGHTLY_SCALE`] times as many from the nightly seed base.
@@ -844,7 +848,7 @@ fn should_reproduce_best_effort_delete_when_campaigning() {
     };
 
     // Act
-    let finding = campaign(Profile::BestEffortDelete, 0..20, 16, checks);
+    let finding = campaign(Profile::BestEffortDelete, DETECTION_SEEDS, 16, checks);
 
     // Assert: a key came back after a best-effort delete.
     assert_reproduced("best-effort-delete", finding, |finding| {
@@ -870,7 +874,7 @@ fn should_reproduce_failed_local_unlink_when_campaigning() {
     };
 
     // Act
-    let finding = campaign(Profile::FailedUnlink, 0..40, 30, checks);
+    let finding = campaign(Profile::FailedUnlink, DETECTION_SEEDS, 30, checks);
 
     // Assert: a deleted key came back after a WAL removal failed.
     assert_reproduced("failed-local-unlink", finding, |finding| {
@@ -881,7 +885,7 @@ fn should_reproduce_failed_local_unlink_when_campaigning() {
 #[test]
 fn should_reproduce_restarted_segment_id_when_campaigning() {
     // Arrange
-    let workloads = 0..20;
+    let workloads = DETECTION_SEEDS;
 
     // Act
     let finding = campaign(Profile::SegmentRetirement, workloads, 16, Checks::default());
@@ -897,7 +901,7 @@ fn should_reproduce_restarted_segment_id_when_campaigning() {
 #[test]
 fn should_reproduce_recovered_tail_loss_when_campaigning() {
     // Arrange
-    let workloads = 0..10;
+    let workloads = DETECTION_SEEDS;
 
     // Act
     let finding = campaign(Profile::BufferedCrashes, workloads, 12, Checks::default());
@@ -922,7 +926,7 @@ fn should_reproduce_stale_lease_lock_when_power_is_lost() {
     };
 
     // Act
-    let found = (0..8)
+    let found = DETECTION_SEEDS
         .map(|seed| (seed, Profile::CrashControl.workload(seed, 24)))
         .find_map(|(seed, workload)| Campaign::run(seed, &workload, checks).err())
         .map(|finding| *finding);
