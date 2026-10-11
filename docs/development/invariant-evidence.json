@@ -3587,17 +3587,24 @@
       "production": [
         {
           "path": "src/storage/hybrid/backend/uploads.rs",
-          "line": 399,
+          "line": 400,
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 671,
-          "symbol": "publish_remote_wal_segment",
+          "line": 730,
+          "symbol": "verify_uploaded_wal_segment",
           "kind": "function",
-          "marker": "pub(crate) fn publish_remote_wal_segment("
+          "marker": "pub(crate) fn verify_uploaded_wal_segment("
+        },
+        {
+          "path": "src/runtime/hybrid_persistence.rs",
+          "line": 785,
+          "symbol": "publish_wal_segments",
+          "kind": "function",
+          "marker": "pub(crate) fn publish_wal_segments("
         },
         {
           "path": "src/runtime/frontiers.rs",
@@ -3610,87 +3617,87 @@
       "tests": [
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2949,
+          "line": 2912,
           "symbol": "should_readback_remote_wal_before_upload_worker_emits_ack",
           "claim": "Actual upload worker emits ACK for segment 9/sequence 13 only with recorded GET download of exact epoch/segment key.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2979,
+              "line": 2946,
               "marker": "assert!("
             },
             {
-              "line": 2989,
+              "line": 2956,
               "marker": "assert!("
             }
           ]
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5726,
+          "line": 5669,
           "symbol": "should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued",
           "claim": "Real sealed local WAL plus controlled fenced ACK leaves cloud frontier 0 and WAL present, marks anomaly.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5746,
+              "line": 5689,
               "marker": "assert_eq!(sequence, max_sequence);"
             },
             {
-              "line": 5760,
+              "line": 5703,
               "marker": "assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 0);"
             },
             {
-              "line": 5761,
+              "line": 5704,
               "marker": "assert!(local_path.exists(), \"fenced ACK must retain the local WAL\");"
             },
             {
-              "line": 5762,
+              "line": 5705,
               "marker": "assert!(event_loop.state.persistence_anomaly_detected());"
             }
           ]
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5767,
+          "line": 5710,
           "symbol": "should_not_advance_cloud_durability_across_unacked_segment_gap",
           "claim": "Out-of-order ACK stays buffered and WAL retained; earlier ACK permits exact contiguous cloud frontier and drains covered tracking.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5788,
+              "line": 5731,
               "marker": "assert!(first_deferred, \"CloudAsync first append should defer\");"
             },
             {
-              "line": 5808,
+              "line": 5751,
               "marker": "assert!(second_deferred, \"CloudAsync second append should defer\");"
             },
             {
-              "line": 5815,
+              "line": 5758,
               "marker": "assert!(second_segment > first_segment);"
             },
             {
-              "line": 5826,
+              "line": 5769,
               "marker": "assert_eq!("
             },
             {
-              "line": 5831,
+              "line": 5774,
               "marker": "assert!("
             },
             {
-              "line": 5838,
+              "line": 5781,
               "marker": "assert!("
             },
             {
-              "line": 5848,
+              "line": 5791,
               "marker": "assert_eq!("
             },
             {
-              "line": 5853,
+              "line": 5796,
               "marker": "assert!("
             },
             {
-              "line": 5859,
+              "line": 5802,
               "marker": "assert!("
             }
           ]
@@ -5151,7 +5158,7 @@
         },
         {
           "path": "src/storage/hybrid/backend/uploads.rs",
-          "line": 399,
+          "line": 400,
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
@@ -5533,7 +5540,7 @@
         },
         {
           "path": "src/storage/hybrid/backend/uploads.rs",
-          "line": 399,
+          "line": 400,
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
@@ -5567,26 +5574,18 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2951,
-          "symbol": "should_keep_retrying_failed_wal_upload_with_backoff_when_every_attempt_fails",
-          "claim": "Actual queued valid local WAL with always-failing storage keeps retrying past three attempts with backoff, two retryable failures then every later one failing waiters, and the upload stays queued with its next turn backed off.",
+          "line": 3002,
+          "symbol": "should_keep_retrying_failed_wal_upload_when_every_attempt_fails",
+          "claim": "Actual queued valid local WAL with always-failing storage and an injected zero-delay retry policy reports failures 1 through 6 in order and stays queued.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2977,
-              "marker": "assert!("
-            },
-            {
-              "line": 2984,
+              "line": 3024,
               "marker": "assert_eq!("
             },
             {
-              "line": 2994,
+              "line": 3035,
               "marker": "assert_eq!("
-            },
-            {
-              "line": 2999,
-              "marker": "assert!("
             }
           ]
         }

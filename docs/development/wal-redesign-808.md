@@ -44,11 +44,15 @@ Decisions that refine the #808 target design:
 - Contiguous catalog publication lands first in stage 2 (#841). A verified
   readback only marks a segment uploaded; the pure `wal::publish` selects the
   longest contiguous run of uploads past the catalog head, and one catalog CAS
-  publishes it in order. A remote object or catalog entry with other bytes is
-  typed corruption that fences the writer, never an overwrite. A failed WAL
-  upload stays queued and retries with capped exponential backoff until it
-  succeeds or the writer is fenced; after three failures each further failure
-  fails the waiting callers while the retries go on. The queue is WAL-only.
+  publishes it in order. A refusal no retry can fix fences the writer, never
+  an overwrite: a remote object with other bytes, a catalog entry that
+  conflicts, or a run the catalog cannot append in order. A failed WAL upload
+  stays queued and retries with exponential backoff capped at one second until
+  it succeeds or the writer is fenced; after three failures each further
+  failure fails the waiting callers with an unknown outcome (`Timeout`) while
+  the retries go on. Uploads verified but not yet published count against the
+  upload queue's limits, so writes stall behind a segment that keeps failing.
+  The queue is WAL-only.
 - Rotation does not pre-open the next segment, because the next header links
   the previous segment's final digest.
 
