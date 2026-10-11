@@ -4,7 +4,7 @@
 
 use crate::common::MidgeResult;
 use crate::io::{Fs, FsError, FsPath};
-use crate::wal::recovery::ReplayFile;
+use crate::wal::recovery::ReplaySegments;
 
 /// The WAL files under `wal_dir` to replay, in order: rotated segments by
 /// ascending id, preferring each id's canonical name, then the active file.
@@ -12,13 +12,13 @@ use crate::wal::recovery::ReplayFile;
 /// # Errors
 ///
 /// Returns an error if `wal_dir` cannot be listed.
-pub(crate) fn listed_segments(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<ReplayFile>> {
+pub(crate) fn listed_segments(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<ReplaySegments> {
     if !storage.exists(wal_dir).map_err(FsError::into_midge)? {
-        return Ok(Vec::new());
+        return Ok(ReplaySegments::default());
     }
     let entries = match storage.list_dir(wal_dir) {
         Ok(entries) => entries,
-        Err(FsError::NotFound(_)) => return Ok(Vec::new()),
+        Err(FsError::NotFound(_)) => return Ok(ReplaySegments::default()),
         Err(error) => return Err(error.into_midge()),
     };
     let mut sealed: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
@@ -42,12 +42,10 @@ pub(crate) fn listed_segments(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult
             }
         }
     }
-    let mut segments: Vec<ReplayFile> = sealed
-        .into_values()
-        .map(|name| ReplayFile::sealed(join(wal_dir, &name)))
-        .collect();
-    segments.extend(active.map(ReplayFile::active));
-    Ok(segments)
+    Ok(ReplaySegments::new(
+        sealed.into_values().map(|name| join(wal_dir, &name)),
+        active,
+    ))
 }
 
 fn join(dir: &FsPath, leaf: &str) -> FsPath {
@@ -56,5 +54,70 @@ fn join(dir: &FsPath, leaf: &str) -> FsPath {
         FsPath::new(leaf)
     } else {
         FsPath::new(format!("{base}/{leaf}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listed_segments;
+    use crate::io::{Fs, FsPath, MockFs, OpenMode, OpenOptions};
+
+    fn write(fs: &MockFs, name: &str, bytes: &[u8]) {
+        let mut file = fs
+            .open(
+                &FsPath::new(format!("wal/{name}")),
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create WAL file");
+        file.append(bytes::Bytes::copy_from_slice(bytes))
+            .expect("write WAL file");
+    }
+
+    #[test]
+    fn should_list_sealed_segments_by_id_then_active_file_when_listing() {
+        // Arrange: segments written out of order, an alias of segment 1, and
+        // the active file.
+        let fs = MockFs::new();
+        fs.create_dir_all(&FsPath::new("wal")).expect("WAL dir");
+        write(&fs, &crate::wal::segment_file_name(2), b"two");
+        write(&fs, crate::wal::ACTIVE_FILE_NAME, b"active");
+        write(&fs, "wal_1.log", b"alias");
+        write(&fs, &crate::wal::segment_file_name(1), b"one");
+
+        // Act
+        let segments = listed_segments(&fs, &FsPath::new("wal")).expect("list");
+
+        // Assert: the canonical name of segment 1 wins, and the active file
+        // is replayed last.
+        assert_eq!(
+            format!("{segments:?}"),
+            format!(
+                "{:?}",
+                crate::wal::recovery::ReplaySegments::new(
+                    [1, 2].map(|id| FsPath::new(format!(
+                        "wal/{}",
+                        crate::wal::segment_file_name(id)
+                    ))),
+                    Some(FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME))),
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn should_list_nothing_when_wal_directory_is_absent() {
+        // Arrange
+        let fs = MockFs::new();
+
+        // Act
+        let segments = listed_segments(&fs, &FsPath::new("wal")).expect("list");
+
+        // Assert
+        assert_eq!(segments.len(), 0);
     }
 }

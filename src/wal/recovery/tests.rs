@@ -857,7 +857,7 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
 
     // Act
     let mut memtables = HashMap::new();
-    let segments = crate::runtime::wal_history::listed_segments(&storage, &wal_dir).unwrap();
+    let segments = crate::wal::recovery::fixture::segments(&storage, &wal_dir);
     let stats = replay_wal_with_manifest_filter_within(
         &storage,
         &segments,
@@ -1803,8 +1803,7 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     .expect("write WAL fixture");
     let storage = RealFs::new(dir.path()).expect("open fs");
 
-    let segments =
-        crate::runtime::wal_history::listed_segments(&storage, &FsPath::new("wal")).unwrap();
+    let segments = crate::wal::recovery::fixture::segments(&storage, &FsPath::new("wal"));
     let replay = match validate_wal_with_policy(&storage, &segments, ReplayPolicy::Strict, None) {
         Ok(stats) => WalkerVerdict::Accepted {
             newest_epoch: stats.max_epoch_seen,
@@ -2098,7 +2097,7 @@ fn replay_listed_with_policy(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
-    let segments = crate::runtime::wal_history::listed_segments(storage, wal_dir)?;
+    let segments = crate::wal::recovery::fixture::segments(storage, wal_dir);
     replay_wal_with_manifest_filter_within(
         storage,
         &segments,

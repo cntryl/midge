@@ -2,8 +2,8 @@
 
 use super::{
     apply_record, open_wal_replay_file, replay_error_action, EpochPolicy, NextWalFrame,
-    RecoveryStats, ReplayErrorAction, ReplayFailure, ReplayFile, ReplayPolicy, ToleratedActiveTail,
-    WalSalvageStop, WriterEpochFrontiers,
+    RecoveryStats, ReplayErrorAction, ReplayFailure, ReplayFile, ReplayPolicy, ReplaySegments,
+    ToleratedActiveTail, WalSalvageStop, WriterEpochFrontiers,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
@@ -259,7 +259,7 @@ struct ReplayState<'a> {
 #[cfg(test)]
 pub(crate) fn replay_wal_with_checkpoint(
     storage: &dyn Fs,
-    segments: &[ReplayFile],
+    segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
     should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
@@ -282,7 +282,7 @@ pub(crate) fn replay_wal_with_checkpoint(
 #[allow(clippy::too_many_arguments)] // Each input is a distinct replay contract.
 pub(crate) fn replay_wal_with_options(
     storage: &dyn Fs,
-    segments: &[ReplayFile],
+    segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
     should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
@@ -299,7 +299,7 @@ pub(crate) fn replay_wal_with_options(
     }
     let started = std::time::Instant::now();
     let (frontiers, had_corruption) =
-        discover_frontiers(storage, segments, replay_policy, limits, options)?;
+        discover_frontiers(storage, segments.files(), replay_policy, limits, options)?;
     let mut state = ReplayState {
         stats: RecoveryStats {
             max_epoch_seen: frontiers.max_epoch_seen(),
@@ -318,7 +318,13 @@ pub(crate) fn replay_wal_with_options(
             "replay_decision",
         ),
     };
-    replay_paths(storage, segments, replay_policy, &frontiers, &mut state)?;
+    replay_paths(
+        storage,
+        segments.files(),
+        replay_policy,
+        &frontiers,
+        &mut state,
+    )?;
     options.check()?;
     state.operation_progress.finish();
     state.stats.total_replay_ns = started.elapsed().as_nanos();

@@ -1,8 +1,8 @@
 //! WAL recovery - replay WAL files to restore state after crash
 //!
 //! On startup, persistent WAL files are replayed to reconstruct the
-//! memtables for each column family. Callers say which files to replay, in
-//! order, as [`ReplayFile`]s: sealed segments, then the active file.
+//! memtables for each column family. Callers say which files to replay as
+//! [`ReplaySegments`]: sealed segments in order, then the active file.
 
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
@@ -25,29 +25,43 @@ enum ReplayFileKind {
     FinalActive,
 }
 
-/// One WAL file to replay, in the order a caller gives them.
 #[derive(Debug)]
-pub(crate) struct ReplayFile {
+struct ReplayFile {
     path: FsPath,
     kind: ReplayFileKind,
 }
 
-impl ReplayFile {
-    /// A sealed segment: every frame in it must be whole.
-    pub(crate) fn sealed(path: FsPath) -> Self {
-        Self {
-            path,
-            kind: ReplayFileKind::Sealed,
-        }
-    }
+/// The WAL files one replay reads: sealed segments, oldest first, every
+/// frame of which must be whole, then at most one active file, replayed
+/// last, whose incomplete tail is a write the crash interrupted.
+#[derive(Debug, Default)]
+pub(crate) struct ReplaySegments {
+    files: Vec<ReplayFile>,
+}
 
-    /// The active file, replayed last: an incomplete tail is a write the
-    /// crash interrupted.
-    pub(crate) fn active(path: FsPath) -> Self {
-        Self {
+impl ReplaySegments {
+    pub(crate) fn new(sealed: impl IntoIterator<Item = FsPath>, active: Option<FsPath>) -> Self {
+        let mut files: Vec<ReplayFile> = sealed
+            .into_iter()
+            .map(|path| ReplayFile {
+                path,
+                kind: ReplayFileKind::Sealed,
+            })
+            .collect();
+        files.extend(active.map(|path| ReplayFile {
             path,
             kind: ReplayFileKind::FinalActive,
-        }
+        }));
+        Self { files }
+    }
+
+    fn files(&self) -> &[ReplayFile] {
+        &self.files
+    }
+
+    /// How many files the replay reads.
+    pub(crate) fn len(&self) -> usize {
+        self.files.len()
     }
 }
 
@@ -290,7 +304,8 @@ impl RecoveryStats {
     }
 }
 
-/// Replay local WAL `segments` through the one streaming engine (#524).
+/// Replay `segments` through the one streaming engine (#524) as storage
+/// verification does.
 ///
 /// Local recovery keeps two behaviours the cloud path does not need: a
 /// split-marker transaction spills to disk, since local writers spill
@@ -299,7 +314,7 @@ impl RecoveryStats {
 /// unbounded, so no checkpoint is needed.
 fn replay_local(
     storage: &dyn Fs,
-    segments: &[ReplayFile],
+    segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
     should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
@@ -333,7 +348,7 @@ fn replay_local(
 /// expires between frames.
 pub(crate) fn validate_wal_with_policy(
     storage: &dyn Fs,
-    segments: &[ReplayFile],
+    segments: &ReplaySegments,
     replay_policy: ReplayPolicy,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<RecoveryStats> {
@@ -350,7 +365,7 @@ pub(crate) fn validate_wal_with_policy(
 
 pub(crate) fn replay_wal_with_manifest_filter_within(
     storage: &dyn Fs,
-    segments: &[ReplayFile],
+    segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
     should_apply: &dyn Fn(&WalRecord) -> MidgeResult<bool>,
@@ -436,12 +451,12 @@ impl WriterEpochFrontiers {
 /// corrupt and `replay_policy` does not tolerate it.
 pub(crate) fn max_writer_epoch(
     storage: &dyn Fs,
-    segments: &[ReplayFile],
+    segments: &ReplaySegments,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<u64> {
     let (frontiers, _had_corruption) = streaming::discover_frontiers(
         storage,
-        segments,
+        segments.files(),
         replay_policy,
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions::default(),
@@ -545,5 +560,7 @@ fn apply_record<S: BuildHasher>(
 
 pub(crate) mod streaming;
 
+#[cfg(test)]
+mod fixture;
 #[cfg(test)]
 mod tests;

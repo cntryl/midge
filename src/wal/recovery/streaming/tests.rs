@@ -861,7 +861,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     assert_eq!(recovered.len(), 397);
 }
 
-/// The WAL files `storage` holds under `wal/`, as recovery lists them.
-fn segments(storage: &dyn crate::io::Fs) -> Vec<ReplayFile> {
-    crate::runtime::wal_history::listed_segments(storage, &FsPath::new("wal")).expect("list WAL")
+/// The WAL files `storage` holds under `wal/`.
+fn segments(storage: &dyn crate::io::Fs) -> ReplaySegments {
+    crate::wal::recovery::fixture::segments(storage, &FsPath::new("wal"))
 }

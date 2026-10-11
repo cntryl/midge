@@ -857,6 +857,7 @@ impl RuntimeStorageMaterialization {
                 #[cfg(feature = "internal-testing")]
                 probe: opts.recovery_probe(),
                 fs: streaming.fs,
+                segments: streaming.segments,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
                 scope: scope.cloned(),
@@ -1000,6 +1001,7 @@ impl RuntimeStorageMaterialization {
                 #[cfg(feature = "internal-testing")]
                 probe: opts.recovery_probe(),
                 fs: streaming.fs,
+                segments: streaming.segments,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
                 scope: scope.cloned(),

@@ -246,7 +246,13 @@ fn wal_fixture(
     let before_replay = observations.snapshot().completed_range_reads;
     observations.set_phase("replay")?;
     let mut memtables = HashMap::new();
-    let stats = replay_fixture(replay_fs.as_ref(), &mut memtables, coverage, observations)?;
+    let stats = replay_fixture(
+        replay_fs.as_ref(),
+        &recovered.segments,
+        &mut memtables,
+        coverage,
+        observations,
+    )?;
     observations.check_failure()?;
     let (verified_records, row_mismatches) =
         verify_rows(&wal.records, &memtables, coverage.is_some());
@@ -542,6 +548,7 @@ fn cached_coverage(
 
 fn replay_fixture(
     fs: &dyn Fs,
+    segments: &crate::wal::recovery::ReplaySegments,
     memtables: &mut HashMap<u32, Arc<SkipListMemtable>>,
     coverage: Option<&ReplayCoverage>,
     observations: &FixtureObservations,
@@ -554,10 +561,9 @@ fn replay_fixture(
         }
         !covered
     };
-    let segments = crate::runtime::wal_history::listed_segments(fs, &FsPath::new("wal"))?;
     replay_wal_with_options(
         fs,
-        &segments,
+        segments,
         memtables,
         ReplayPolicy::Strict,
         Some(&should_apply),
