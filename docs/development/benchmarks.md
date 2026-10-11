@@ -70,9 +70,10 @@ be compared with Engine throughput or block counts.
 Tier benchmarks run in separate manually dispatched workflows. Tier 4 uses
 `Benchmark Tier 4` (`bench-tier4.yml`) for 25 system scenarios and the checkpoint
 modes, and `Benchmark Tier 4 YCSB` (`bench-tier4-ycsb.yml`) for 48 YCSB A–F
-scenarios. The other tiers use `Benchmark Tier 1` through `Benchmark Tier 6`.
-Tier 3 runs all registered Tier 3 targets on Ubuntu, Windows, and macOS; the
-repeated flush-cycle row enables compaction so L0 slots can be recycled.
+scenarios. Tiers 1 to 3 share `Benchmark Tiers 1-3` (`bench-tiers.yml`), which
+runs the registered targets of the chosen tier on ARM Ubuntu; Tiers 5 and 6 use
+`Benchmark Tier 5` and `Benchmark Tier 6`. The repeated Tier 3 flush-cycle row
+enables compaction so L0 slots can be recycled.
 
 Tier 4, 5 and 6 workflows share a `profile` dropdown, defaulting to `standard`:
 
