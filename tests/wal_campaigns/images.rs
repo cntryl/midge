@@ -1,7 +1,7 @@
 //! Saving findings as crash images, loading them back, and the assertions
 //! that prove a saved image replays its finding.
 
-use crate::harness::{Campaign, Finding, FindingKind, Image};
+use crate::harness::{Campaign, Finding, Image};
 use std::path::{Path, PathBuf};
 
 /// Write `image` below `directory`: its files under `files/`, the rest as
@@ -102,17 +102,6 @@ pub(crate) fn assert_reproduced(
     finding: Option<Finding>,
     signature: impl Fn(&Finding) -> bool,
 ) {
-    assert_replays(case, finding, signature, FindingKind::same_class);
-}
-
-/// Assert `finding` matches `signature`, save its image, and prove the saved
-/// image replays a finding `same` accepts.
-pub(crate) fn assert_replays(
-    case: &str,
-    finding: Option<Finding>,
-    signature: impl Fn(&Finding) -> bool,
-    same: impl Fn(&FindingKind, &FindingKind) -> bool,
-) {
     let finding = finding.unwrap_or_else(|| panic!("{case}: the campaign found nothing"));
     assert!(signature(&finding), "{case}: found {finding:#?}");
     let image = saved_and_loaded(case, &finding);
@@ -120,7 +109,7 @@ pub(crate) fn assert_replays(
     assert!(
         replayed
             .as_ref()
-            .is_err_and(|kind| same(kind, &finding.kind)),
+            .is_err_and(|kind| kind.same_class(&finding.kind)),
         "{case}: the saved image did not reproduce {:?}: {replayed:?}",
         finding.kind
     );

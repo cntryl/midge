@@ -1314,6 +1314,12 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("replay_wal_with_policy", "#848"),
     ("wal_replay_file_open_count", "#848"),
     ("reset_wal_replay_file_open_count", "#848"),
+    ("verify_remote_wal_segment_before_ack", "#841"),
+    ("publishes_out_of_order", "#841"),
+    ("explains_out_of_order", "#841"),
+    ("allowed_out_of_order", "#841"),
+    ("campaign_beyond", "#841"),
+    ("assert_replays", "#841"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

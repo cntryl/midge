@@ -20,30 +20,6 @@ pub(crate) fn campaign(
     }))
 }
 
-/// Run `profile` over `seeds`; return the first finding `known` does not
-/// explain, shrunk, and how many known findings came before it.
-pub(crate) fn campaign_beyond(
-    profile: Profile,
-    seeds: std::ops::Range<u64>,
-    len: usize,
-    config: Config,
-    known: impl Fn(&Finding) -> bool,
-) -> (Option<Finding>, usize) {
-    let mut known_findings = 0;
-    for seed in seeds {
-        let workload = profile.workload(seed, len, config.mode);
-        match Campaign::run(seed, &workload, config) {
-            Err(finding) if known(&finding) => known_findings += 1,
-            Err(finding) => {
-                let shrunk = shrink(*finding, config, |smaller| !known(smaller));
-                return (Some(shrunk), known_findings);
-            }
-            Ok(()) => {}
-        }
-    }
-    (None, known_findings)
-}
-
 /// Drop operations one at a time while `keep` holds for the smaller finding.
 fn shrink(mut finding: Finding, config: Config, keep: impl Fn(&Finding) -> bool) -> Finding {
     let mut index = 0;
