@@ -185,10 +185,14 @@ pub mod __internal {
             pub use crate::sst::types::{decode_range_tombstones, Footer};
         }
     }
-    /// Cloud-boundary types exposed only to this crate's compile-contract
-    /// tests. They remain outside Midge's supported public API.
+    /// Cloud-boundary types exposed only to this crate's compile-contract and
+    /// storage-injection tests. They remain outside Midge's supported public
+    /// API.
     pub mod storage {
         pub mod cloud {
+            /// In-memory object store for injection tests.
+            #[cfg(feature = "cloud-common")]
+            pub use crate::storage::cloud::MockCloudBackend;
             #[doc(inline)]
             pub use crate::storage::cloud::{CloudBackend, CloudCallback};
         }

@@ -142,8 +142,6 @@ pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 pub(crate) use list_budget::CloudListBudget;
 
 mod error;
-#[cfg(test)]
-use error::cloud_outcome_from_result;
 pub(crate) use error::contextualize_operation_error;
 pub use error::{CloudError, CloudOutcome};
 
@@ -154,9 +152,9 @@ pub use event::{CloudCallback, CloudEvent, ObjectMetadata};
 mod backend;
 pub use backend::CloudBackend;
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 mod mock;
-#[cfg(test)]
+#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 pub use mock::MockCloudBackend;
 
 mod dispatcher;

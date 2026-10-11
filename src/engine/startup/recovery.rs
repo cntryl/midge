@@ -195,13 +195,10 @@ impl RuntimeRecoveryMaterialization {
         reconcile_cloud_ddl_within(&mut materialized, scope)?;
 
         materialized.state.replay_intent_log()?;
-        if let Some(root) = materialized.cloud_root.as_deref() {
-            CloudStartupRecovery::ensure_local_sst_cache_from_cloud(&mut materialized.state, root)?;
-        }
-        if let Some(cloud_storage) = materialized.cloud_storage_for_restore.as_deref() {
-            CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(
+        if let Some(store) = materialized.sst_inventory.clone() {
+            CloudStartupRecovery::validate_manifest_ssts_in_store(
                 &mut materialized.state,
-                cloud_storage,
+                store.as_ref(),
             )?;
         }
         if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {

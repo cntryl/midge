@@ -477,7 +477,7 @@ Uncovered boundary: Native fixture checks one protocol and controlled sequences.
 
 ## CLOUD-4
 
-Production: [src/runtime/cloud_startup/cloud_recovery/mod.rs:673](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L673) `ensure_local_sst_cache_from_cloud_storage`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:705](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L705) `reconcile_manifest_ssts`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:747](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L747) `validate_manifest_sst_size`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:1086](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L1086) `cloud_recovery_sst_proofs_for_intent_replay`.
+Production: [src/runtime/cloud_startup/cloud_recovery/mod.rs:505](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L505) `validate_manifest_ssts_in_store`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:705](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L705) `reconcile_manifest_ssts`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:747](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L747) `validate_manifest_sst_size`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:1086](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L1086) `cloud_recovery_sst_proofs_for_intent_replay`.
 
 Exact evidence and assertion markers:
 

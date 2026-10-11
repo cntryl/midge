@@ -51,10 +51,11 @@ impl StartupEpochFloor {
         let local_wal = Self::local_wal_epoch(&storage_path.root, opts.recovery_policy(), scope)?;
         let catalog = match opts.storage() {
             Storage::Cloud { topology, .. } => {
-                let wal = crate::storage::providers::build_cloud_storage_with_timeout(
+                let wal = crate::storage::providers::build_class_store(
                     topology.wal().provider(),
                     topology.wal().prefix(),
                     opts.storage_io_timeout(),
+                    opts.injected_object_store(),
                 )?;
                 let wal = scope.map_or_else(
                     || wal.clone(),
@@ -67,14 +68,15 @@ impl StartupEpochFloor {
                 )?
             }
             Storage::CloudSimulated { .. } => {
-                let cloud_root =
-                    crate::storage::simulated::simulated_cloud_root(&storage_path.db_path);
-                if cloud_root.exists() {
-                    let backend: Arc<dyn crate::storage::StorageBackend> =
-                        Arc::new(crate::storage::filesystem::FileSystem::new(cloud_root)?);
-                    Self::catalog_epoch(&backend, opts, scope)?
-                } else {
-                    0
+                let existing = crate::storage::simulated::SimulatedCloud::locate(
+                    storage_path.root.as_ref(),
+                    opts.injected_object_store(),
+                    opts.storage_io_timeout(),
+                )?
+                .open_existing()?;
+                match existing {
+                    Some(store) => Self::catalog_epoch(&(store as _), opts, scope)?,
+                    None => 0,
                 }
             }
             Storage::InMemory | Storage::Local { .. } => 0,

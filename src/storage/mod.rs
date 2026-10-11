@@ -67,6 +67,7 @@
 pub(crate) mod cloud;
 pub(crate) mod filesystem;
 pub(crate) mod hybrid;
+pub(crate) mod inventory;
 pub(crate) mod providers;
 pub(crate) mod remote_sst;
 pub(crate) mod retained_callback;

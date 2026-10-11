@@ -14,6 +14,7 @@ mod epoch_floor;
 mod recovery;
 mod storage;
 mod storage_root;
+pub(super) use storage_root::existing_host_root;
 mod streaming_recovery;
 #[cfg(test)]
 mod test_control;
@@ -40,7 +41,8 @@ struct StartupLease {
 struct RuntimeStorageMaterialization {
     state: RuntimeState,
     runtime_config: crate::runtime::RuntimeConfig,
-    cloud_root: Option<PathBuf>,
+    /// The object store whose SSTs back the manifest, checked at startup.
+    sst_inventory: Option<Arc<dyn crate::storage::inventory::ObjectInventory>>,
     cloud_storage_for_restore: Option<Arc<crate::storage::cloud::CloudStorage>>,
     cloud_metadata_storage_for_mirror: Option<Arc<crate::storage::cloud::CloudStorage>>,
     streaming_wal: Option<streaming_recovery::CloudReplay>,

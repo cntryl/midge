@@ -1,10 +1,13 @@
 //! Deterministic, synchronous in-memory `CloudBackend` for tests.
 
+use super::error::cloud_outcome_from_result;
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::common::MidgeError;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
+#[cfg(test)]
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -22,6 +25,7 @@ pub struct MockCloudBackend {
     range_downloads: Arc<Mutex<Vec<String>>>,
 }
 impl MockCloudBackend {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             storage: Arc::new(Mutex::new(HashMap::new())),
@@ -33,14 +37,17 @@ impl MockCloudBackend {
         }
     }
 
+    #[must_use]
     pub fn get_uploads(&self) -> Vec<(String, u64)> {
         self.uploads.lock().clone()
     }
 
+    #[must_use]
     pub fn get_downloads(&self) -> Vec<String> {
         self.downloads.lock().clone()
     }
 
+    #[must_use]
     pub fn get_range_downloads(&self) -> Vec<String> {
         self.range_downloads.lock().clone()
     }
@@ -228,7 +235,7 @@ impl CloudBackend for MockCloudBackend {
         });
     }
 
-    #[cfg(any(test, feature = "cloud-common"))]
+    #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let result = self

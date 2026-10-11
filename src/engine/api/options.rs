@@ -144,6 +144,18 @@ impl std::fmt::Debug for InjectedFilesystem {
     }
 }
 
+/// A test-supplied object store standing in for every cloud object store.
+#[cfg(feature = "internal-testing")]
+#[derive(Clone)]
+struct InjectedObjectStore(Arc<dyn crate::storage::cloud::CloudBackend>);
+
+#[cfg(feature = "internal-testing")]
+impl std::fmt::Debug for InjectedObjectStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InjectedObjectStore")
+    }
+}
+
 /// Immutable, validated database open options.
 ///
 /// Values of this type can only be produced by [`OpenOptionsBuilder::build`].
@@ -174,6 +186,8 @@ pub struct OpenOptions {
     recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
     #[cfg(feature = "internal-testing")]
     filesystem: Option<InjectedFilesystem>,
+    #[cfg(feature = "internal-testing")]
+    object_store: Option<InjectedObjectStore>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -201,6 +215,8 @@ pub struct OpenOptionsBuilder {
     recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
     #[cfg(feature = "internal-testing")]
     filesystem: Option<InjectedFilesystem>,
+    #[cfg(feature = "internal-testing")]
+    object_store: Option<InjectedObjectStore>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -501,6 +517,23 @@ impl OpenOptions {
         }
     }
 
+    /// The object store a test injected in place of every cloud object store,
+    /// if any.
+    pub(crate) fn injected_object_store(
+        &self,
+    ) -> Option<Arc<dyn crate::storage::cloud::CloudBackend>> {
+        #[cfg(feature = "internal-testing")]
+        {
+            self.object_store
+                .as_ref()
+                .map(|injected| Arc::clone(&injected.0))
+        }
+        #[cfg(not(feature = "internal-testing"))]
+        {
+            None
+        }
+    }
+
     pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
         Arc::clone(&self.ttl_clock.0)
     }
@@ -536,6 +569,8 @@ impl OpenOptionsBuilder {
                 ),
             #[cfg(feature = "internal-testing")]
             filesystem: None,
+            #[cfg(feature = "internal-testing")]
+            object_store: None,
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease: LeaseConfig::new(Duration::from_secs(30), None, None),
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
@@ -685,11 +720,11 @@ impl OpenOptionsBuilder {
     /// Serve the database from `filesystem` instead of the host directory, so
     /// tests can fault or crash its storage effects. The filesystem is the
     /// database root; the configured path names it only. Metadata, WAL,
-    /// lease, SST and transaction spill files are served from it. Only local
-    /// databases accept an injected filesystem until #808 stage 1 routes
-    /// cloud working storage too. The filesystem must support
-    /// [`crate::io::Fs::open_persistent_handle`], which SST builds use for
-    /// scratch.
+    /// lease, SST, transaction spill and cloud working files are served from
+    /// it. A simulated cloud lives under the root's host directory, so a root
+    /// without one needs [`Self::object_store_for_testing`]. The filesystem
+    /// must support [`crate::io::Fs::open_persistent_handle`], which SST
+    /// builds use for scratch.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]
@@ -698,17 +733,24 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Serve every cloud object store, and in provider mode the lease
+    /// document, from `store` instead of the configured provider or the
+    /// simulated cloud directory. The configured provider and prefixes only
+    /// name the objects. Cloud and simulated-cloud storage only.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn object_store_for_testing(
+        mut self,
+        store: Arc<dyn crate::storage::cloud::CloudBackend>,
+    ) -> Self {
+        self.object_store = Some(InjectedObjectStore(store));
+        self
+    }
+
     fn validate_storage(&self) -> MidgeResult<()> {
-        // Cloud working storage is not yet served by an injected root, so a
-        // partly injected cloud database would split its files across two roots.
         #[cfg(feature = "internal-testing")]
-        if self.filesystem.is_some() && !matches!(self.storage, Storage::Local { .. }) {
-            return Err(MidgeError::InvalidArgument(
-                "an injected filesystem serves local databases only until #808 stage 1 \
-                 routes cloud working storage"
-                    .to_string(),
-            ));
-        }
+        self.validate_injected_storage()?;
         if self.cloud.local_storage_budget_bytes == Some(0) {
             return Err(MidgeError::InvalidArgument(
                 "local storage budget must be greater than zero".to_string(),
@@ -728,6 +770,35 @@ impl OpenOptionsBuilder {
                     summaries.join("; ")
                 )));
             }
+        }
+        Ok(())
+    }
+
+    /// Injected stores must leave nothing on the configured host path.
+    #[cfg(feature = "internal-testing")]
+    fn validate_injected_storage(&self) -> MidgeResult<()> {
+        let cloud = matches!(
+            self.storage,
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. }
+        );
+        if self.object_store.is_some() && !cloud {
+            return Err(MidgeError::InvalidArgument(
+                "an injected object store serves cloud databases only".to_string(),
+            ));
+        }
+        let hostless_root = self
+            .filesystem
+            .as_ref()
+            .is_some_and(|root| root.0.host_addressing().is_none());
+        if matches!(self.storage, Storage::CloudSimulated { .. })
+            && hostless_root
+            && self.object_store.is_none()
+        {
+            return Err(MidgeError::InvalidArgument(
+                "a simulated cloud lives under the root's host directory; a root without \
+                 one needs an injected object store"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
@@ -898,6 +969,8 @@ impl OpenOptionsBuilder {
             recovery_probe: self.recovery_probe,
             #[cfg(feature = "internal-testing")]
             filesystem: self.filesystem,
+            #[cfg(feature = "internal-testing")]
+            object_store: self.object_store,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease: self.lease,
             ttl_clock: self.ttl_clock,

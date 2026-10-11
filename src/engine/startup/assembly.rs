@@ -89,6 +89,10 @@ impl FacadeAssembly {
 
         let hybrid_storage = started.runtime_handle.storage_budget.clone();
 
+        let root_host_directory = storage_path
+            .root
+            .host_addressing()
+            .map(|addressing| addressing.root.to_path_buf());
         Ok(Engine {
             #[cfg(feature = "internal-testing")]
             metadata_accounting: started.metadata_accounting,
@@ -102,6 +106,11 @@ impl FacadeAssembly {
                 Storage::Cloud { .. } | Storage::CloudSimulated { .. }
             ),
             simulated_cloud_mode: matches!(opts.storage(), Storage::CloudSimulated { .. }),
+            backup_source: if opts.injected_object_store().is_some() {
+                None
+            } else {
+                root_host_directory
+            },
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(
                 started.recovered_sequence,
             )),

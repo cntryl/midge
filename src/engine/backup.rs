@@ -100,7 +100,11 @@ impl Engine {
             ));
         }
 
-        let source = fs::canonicalize(&self.db_path)?;
+        let source = self.backup_source.clone().ok_or_else(|| {
+            MidgeError::NotSupported(
+                "backup captures a database served from a host directory".to_string(),
+            )
+        })?;
         let destination = paths::prepare_target(&source, destination.as_ref())?;
         let parent = destination.parent().ok_or_else(|| {
             MidgeError::InvalidArgument("backup destination requires a parent".into())
@@ -113,10 +117,8 @@ impl Engine {
                 "backup capture barrier reports an unhealthy engine".to_string(),
             ));
         }
-        let database_format_version = crate::metadata::format::validate_format_marker(
-            &crate::io::RealFs::open_existing(&source).map_err(crate::io::FsError::into_midge)?,
-            &source,
-        )?;
+        let database_format_version =
+            crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
         let pinned = pin_durable_files(&source, self.simulated_cloud_mode, parent)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
@@ -231,8 +233,7 @@ impl Engine {
             }?;
             let _ = verification;
             let restored_format = crate::metadata::format::validate_format_marker(
-                &crate::io::RealFs::open_existing(staging)
-                    .map_err(crate::io::FsError::into_midge)?,
+                super::startup::existing_host_root(staging)?.as_ref(),
                 staging,
             )?;
             if restored_format != manifest.database_format_version {

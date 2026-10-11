@@ -3815,10 +3815,10 @@
       "production": [
         {
           "path": "src/runtime/cloud_startup/cloud_recovery/mod.rs",
-          "line": 673,
-          "symbol": "ensure_local_sst_cache_from_cloud_storage",
+          "line": 505,
+          "symbol": "validate_manifest_ssts_in_store",
           "kind": "function",
-          "marker": "pub(crate) fn ensure_local_sst_cache_from_cloud_storage("
+          "marker": "pub(crate) fn validate_manifest_ssts_in_store("
         },
         {
           "path": "src/runtime/cloud_startup/cloud_recovery/mod.rs",

@@ -931,7 +931,7 @@ fn should_reject_legacy_segment_only_cloud_wal_without_catalog() {
     // Act
     let result =
         crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
-            &cloud,
+            &cloud, None,
         );
 
     // Assert
@@ -950,10 +950,14 @@ fn should_reject_legacy_segment_only_simulated_cloud_wal_without_catalog() {
     std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
     std::fs::write(cloud_wal_dir.join("wal_000001.log"), b"legacy")
         .expect("write legacy WAL alias");
+    let store = crate::storage::filesystem::FileSystem::new(temp_dir.path().join("cloud_store"))
+        .expect("simulated cloud store");
 
     // Act
     let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
+            &store, None,
+        );
 
     // Assert
     assert!(matches!(
@@ -976,10 +980,14 @@ fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
         .expect("create epoch WAL directory");
     std::fs::write(orphan_path, cloud_wal_test_bytes(1, 7, b"untracked"))
         .expect("write untracked epoch WAL object");
+    let store = crate::storage::filesystem::FileSystem::new(temp_dir.path().join("cloud_store"))
+        .expect("simulated cloud store");
 
     // Act
     let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
+            &store, None,
+        );
 
     // Assert
     assert!(matches!(
@@ -1676,7 +1684,7 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
     .expect("upload test sst");
 
     // Act
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("validate cloud SST inventory");
     let intent_proofs = Engine::cloud_recovery_sst_proofs_for_intent_replay(&state);
 
@@ -1773,7 +1781,7 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
     )
     .expect("upload test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("stale list should not make readable manifest SST unrecoverable");
 
     // Act
@@ -1825,7 +1833,7 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
     )
     .expect("upload wrong-sized but structurally valid test sst");
 
-    let error = Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    let error = Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect_err("strict recovery must reject wrong-sized authoritative cloud SST");
 
     assert!(
@@ -1873,7 +1881,7 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
     )
     .expect("upload same-sized but wrong-content test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("startup validates object metadata without scanning the SST body");
 
     // Act
@@ -1927,7 +1935,7 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
     )
     .expect("upload authoritative manifest-sized test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("valid cloud metadata should permit opening without local cache restoration");
 
     assert_eq!(
@@ -1974,7 +1982,7 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
     )
     .expect("upload authoritative manifest-crc test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("cloud metadata permits opening without scanning stale local cache bytes");
 
     // Act
@@ -2015,7 +2023,7 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
     std::fs::write(state.host_sst_dir().join(&sst_name), &committed_sst_bytes)
         .expect("write valid local SST cache");
     let cloud = cloud_with_stale_sst_listing();
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("salvage should keep a manifest SST when the local cache is valid");
 
     // Act
@@ -2064,7 +2072,7 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
     let cloud = cloud_with_stale_sst_listing();
 
     // Act
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("salvage missing cloud object");
 
     // Assert
@@ -2273,7 +2281,7 @@ mod salvage_removes_definitively_lost_ssts {
         let cloud = cloud_with_stale_sst_listing();
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("salvage tolerates a missing authoritative SST");
 
         // Assert
@@ -2299,7 +2307,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("upload wrongly sized SST");
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("salvage tolerates a wrongly sized authoritative SST");
 
         // Assert
@@ -2322,9 +2330,9 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create a file where the SST directory should be");
 
         // Act
-        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
             &mut state,
-            cloud_root.path(),
+            &crate::storage::filesystem::FileSystem::new(cloud_root.path()).expect("host store"),
         )
         .expect("salvage tolerates an unverifiable authoritative SST");
 
@@ -2374,9 +2382,9 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create indeterminate SST metadata path");
 
         // Act
-        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
             &mut state,
-            cloud_root.path(),
+            &crate::storage::filesystem::FileSystem::new(cloud_root.path()).expect("host store"),
         )
         .expect("salvage tolerates mixed definitive and indeterminate losses");
         crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
@@ -2423,7 +2431,7 @@ mod salvage_removes_definitively_lost_ssts {
         );
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("salvage tolerates an unverifiable authoritative SST");
 
         // Assert
@@ -2448,7 +2456,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("upload SST");
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("a valid SST is retained");
 
         // Assert
