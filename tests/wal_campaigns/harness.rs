@@ -5,8 +5,8 @@ use crate::config::Config;
 use crate::workload::{Durability, Op, DEFAULT, KEYS};
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
-    Commit, CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultId, FaultOp, Histories,
-    Key, Recovery, SimulatedClock, SimulatedObjectStore, StoreImage, Violation, FAILURE_MESSAGE,
+    Commit, CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultOp, Histories, Key,
+    Recovery, SimulatedClock, SimulatedObjectStore, StoreImage, Violation, FAILURE_MESSAGE,
 };
 use cntryl_midge::{Clock, Engine, OpenOptions, TransactionMode};
 use serde::{Deserialize, Serialize};
@@ -76,8 +76,6 @@ pub(crate) struct Finding {
     pub(crate) seed: u64,
     pub(crate) workload: Vec<Op>,
     pub(crate) image: Image,
-    /// Injected faults that fired before the finding.
-    pub(crate) faults_fired: usize,
 }
 
 /// How the engine stopped before a recovery.
@@ -133,7 +131,6 @@ pub(crate) struct Campaign {
     restored_names: BTreeMap<String, u64>,
     values: u64,
     images: Vec<Image>,
-    faults: Vec<FaultId>,
     /// Resurrected lease locks removed after power losses (#811).
     stale_lease_locks: usize,
     config: Config,
@@ -178,7 +175,6 @@ impl Campaign {
             restored_names,
             values: image.values,
             images: Vec::new(),
-            faults: Vec::new(),
             stale_lease_locks: 0,
             config: image.config,
         }
@@ -218,13 +214,6 @@ impl Campaign {
             let id = name.strip_prefix("wal/")?.strip_suffix(".wal")?;
             (count > 1 && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(name)
         })
-    }
-
-    fn faults_fired(&self) -> usize {
-        self.faults
-            .iter()
-            .filter(|fault| self.device.fired(**fault))
-            .count()
     }
 
     /// Record a recovery point for replay.
@@ -497,16 +486,13 @@ impl Campaign {
                 let _ = self.store.land_late_effects();
             }
             Op::Settle => self.settle(),
-            Op::FailWalRemoval { nth } => {
-                let fault = self.device.inject(Fault {
-                    op: FaultOp::RemoveFile,
-                    path: "wal".into(),
-                    nth: *nth,
-                    effect: FaultEffect::Before,
-                    error: FaultError::Io,
-                });
-                self.faults.push(fault);
-            }
+            Op::FailWalRemoval { nth } => self.inject(Fault {
+                op: FaultOp::RemoveFile,
+                path: "wal".into(),
+                nth: *nth,
+                effect: FaultEffect::Before,
+                error: FaultError::Io,
+            }),
         }
         self.reused_segment()
             .map_or(Ok(()), |reuse| Err(FindingKind::SegmentReuse(reuse)))
@@ -538,7 +524,6 @@ impl Campaign {
         campaign.drive(workload, Stop::Clean).map_err(|kind| {
             Box::new(Finding {
                 image: campaign.image_for(&kind),
-                faults_fired: campaign.faults_fired(),
                 kind,
                 seed,
                 workload: workload.to_vec(),

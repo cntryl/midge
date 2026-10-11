@@ -118,37 +118,38 @@ fn should_reproduce_best_effort_delete_when_campaigning() {
     });
 }
 
+/// Formerly the detection of `failed-local-unlink`: a failed removal of a
+/// flushed WAL segment left its file in `wal/`, and the next open listed the
+/// directory and replayed it, bringing a deleted key back. Retirement now
+/// makes the ledger's new log start durable before it unlinks, so a file
+/// whose removal fails is an orphan recovery never replays and the next open
+/// sweeps (#842).
 #[test]
-fn should_reproduce_failed_local_unlink_when_campaigning() {
+fn should_keep_deleted_keys_absent_when_wal_removals_fail() {
     // Arrange
-    let config = Config {
-        segment_reuse: false,
-        ..Config::default()
-    };
+    let workloads = control_seeds(32);
 
     // Act
-    let finding = campaign(Profile::FailedUnlink, DETECTION_SEEDS, 30, config);
+    let finding = campaign(Profile::FailedUnlink, workloads, 30, Config::default());
 
-    // Assert: a deleted key came back after a WAL removal failed.
-    assert_reproduced("failed-local-unlink", finding, |finding| {
-        resurrects(&finding.kind) && finding.faults_fired > 0
-    });
+    // Assert
+    assert_clean("failed-unlink-control", finding);
 }
 
+/// Formerly the detection of `restarted-segment-id`: once flushes retired
+/// every sealed segment, a restart allocated its segment id from what the
+/// WAL directory still listed and durably gave a retired name again. The
+/// segment ledger now allocates every id past each one it ever named (#842).
 #[test]
-fn should_reproduce_restarted_segment_id_when_campaigning() {
+fn should_not_reuse_segment_names_when_flushes_retire_every_sealed_segment() {
     // Arrange
-    let workloads = DETECTION_SEEDS;
+    let workloads = control_seeds(32);
 
     // Act
     let finding = campaign(Profile::SegmentRetirement, workloads, 16, Config::default());
 
     // Assert
-    assert_reproduced(
-        "restarted-segment-id",
-        finding,
-        |finding| matches!(&finding.kind, FindingKind::SegmentReuse(name) if name.starts_with("wal/")),
-    );
+    assert_clean("segment-retirement-control", finding);
 }
 
 #[test]

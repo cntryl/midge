@@ -1506,6 +1506,7 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("AfterReplacementDirectorySync", "#842"),
     ("cloud_segment_object_key", "#842"),
     ("cloud_segment_file_name", "#842"),
+    ("faults_fired", "#842"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
