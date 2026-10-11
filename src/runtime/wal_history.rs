@@ -135,6 +135,7 @@ impl WalHistory {
     ///
     /// The ledger write error; the rotation may or may not have become
     /// durable.
+    #[allow(clippy::needless_pass_by_value)] // Consuming it records each prepared rotation once.
     pub(crate) fn record_rotation(&mut self, prepared: PreparedRotation) -> MidgeResult<()> {
         self.commit(&LedgerEdit::Rotate {
             seal: prepared.seal,
