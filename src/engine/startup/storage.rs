@@ -1,5 +1,4 @@
 use super::super::OpenOptions;
-use super::super::IN_MEMORY_OPEN_COUNTER;
 use super::{
     CloudStartupRecovery, RuntimeState, RuntimeStorageMaterialization, StartupLease,
     StartupStoragePath,
@@ -9,8 +8,7 @@ use crate::config::{RecoveryPolicy, Storage};
 use crate::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::path::Path;
 use std::sync::Arc;
 
 struct CloudClassStores {
@@ -56,32 +54,15 @@ fn initialize_startup_state(
     replay_wal: bool,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<RuntimeState> {
-    if let Some(scope) = scope {
-        scope.check("local recovery initialization")?;
-        if replay_wal {
-            RuntimeState::try_new_with_recovery_dir_within(
-                path.db_path.clone(),
-                path.memory_mode,
-                None,
-                opts.recovery_policy(),
-                scope,
-            )
-        } else {
-            RuntimeState::try_new_before_cloud_replay_within(
-                path.db_path.clone(),
-                opts.recovery_policy(),
-                scope,
-            )
-        }
-    } else if replay_wal {
-        RuntimeState::try_new(
-            path.db_path.clone(),
-            path.memory_mode,
-            opts.recovery_policy(),
-        )
-    } else {
-        RuntimeState::try_new_before_cloud_replay(path.db_path.clone(), opts.recovery_policy())
-    }
+    check_startup_scope(scope, "local recovery initialization")?;
+    RuntimeState::recover(
+        path.db_path.clone(),
+        path.memory_mode,
+        Arc::clone(&path.root),
+        opts.recovery_policy(),
+        replay_wal,
+        scope,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,48 +178,6 @@ fn require_empty_local_cache_for_cloud_bootstrap(
         }
     }
     Ok(())
-}
-
-impl StartupStoragePath {
-    pub(super) fn resolve(storage: &Storage) -> Self {
-        match storage {
-            Storage::InMemory => Self {
-                db_path: {
-                    let counter = IN_MEMORY_OPEN_COUNTER.fetch_add(1, Ordering::SeqCst);
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |duration| duration.as_nanos());
-                    PathBuf::from(format!(
-                        "target/tmp/midge_test_memory_{}_{}_{}",
-                        std::process::id(),
-                        counter,
-                        timestamp
-                    ))
-                },
-                memory_mode: true,
-            },
-            Storage::Local { path } => Self {
-                db_path: path.clone(),
-                memory_mode: false,
-            },
-            Storage::Cloud {
-                local_cache_path, ..
-            }
-            | Storage::CloudSimulated {
-                local_cache_path, ..
-            } => Self {
-                db_path: local_cache_path.clone(),
-                memory_mode: false,
-            },
-        }
-    }
-
-    pub(super) fn prepare(&self) -> MidgeResult<()> {
-        if !self.memory_mode {
-            crate::io::durable_dir::create_path_durably(&self.db_path)?;
-        }
-        Ok(())
-    }
 }
 
 impl StartupLease {

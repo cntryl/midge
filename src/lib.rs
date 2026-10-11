@@ -128,6 +128,13 @@ pub mod __internal {
             enable_transaction_commit_timing_for_benchmarks, TransactionCommitTimingSample,
         };
     }
+    pub mod io {
+        pub use crate::io::traits::{DirEntry, Metadata};
+        pub use crate::io::{
+            Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, MockFs, OpenMode,
+            OpenOptions, RealFs,
+        };
+    }
     pub mod memtable {
         pub use crate::memtable::{bench, SkipListMemtable};
     }

@@ -1082,7 +1082,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
         last_persisted_sequence: 20,
         ..Default::default()
     };
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+    crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(temp_dir.path()))
         .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &local_manifest)
         .expect("save local manifest");
@@ -1127,7 +1127,7 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend.clone());
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+    crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(temp_dir.path()))
         .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(
         temp_dir.path(),
@@ -1153,7 +1153,7 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
 fn should_not_commit_manifest_when_format_marker_upload_fails_under_salvage() {
     // Arrange: a local FORMAT 4 upgrade must reach cloud before its manifest.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+    crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(temp_dir.path()))
         .expect("create FORMAT 4 marker");
     crate::metadata::ManifestPersistence::save(
         temp_dir.path(),
@@ -1521,7 +1521,7 @@ fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
 fn should_reject_reused_local_metadata_cache_without_committed_cloud_generation() {
     // Arrange: an uncommitted pointer is only valid for an empty database.
     let temp_dir = tempfile::tempdir().expect("create cache directory");
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+    crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(temp_dir.path()))
         .expect("write stale local format marker");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());

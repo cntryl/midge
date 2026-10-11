@@ -1161,22 +1161,17 @@ impl RuntimeState {
         Ok(bytes)
     }
 
-    fn ensure_directories(
-        db_path: &std::path::Path,
-        memory_mode: bool,
-    ) -> MidgeResult<(std::path::PathBuf, std::path::PathBuf)> {
-        let wal_dir = db_path.join("wal");
-        let sst_dir = db_path.join("sst");
-
+    /// Create the WAL and SST directories below `root`. `Fs::create_dir_all`
+    /// is durable: each new entry survives a crash before the first
+    /// acknowledged write, whatever else syncs the database root (#519).
+    fn ensure_directories(root: &dyn Fs, memory_mode: bool) -> MidgeResult<()> {
         if !memory_mode {
-            crate::io::durable_dir::create_path_durably(db_path)?;
-            // Durable: the entries must survive a crash before the first
-            // acknowledged write, whatever else syncs the database root (#519).
-            crate::io::durable_dir::create_dir_all_durably(db_path, &wal_dir)?;
-            crate::io::durable_dir::create_dir_all_durably(db_path, &sst_dir)?;
+            for directory in ["wal", "sst"] {
+                root.create_dir_all(&FsPath::new(directory))
+                    .map_err(FsError::into_midge)?;
+            }
         }
-
-        Ok((wal_dir, sst_dir))
+        Ok(())
     }
 
     /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;

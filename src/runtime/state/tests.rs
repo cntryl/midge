@@ -1182,7 +1182,8 @@ fn should_load_intent_log_on_startup() {
     let test_dir = std::env::temp_dir().join("midge_state_intent_test");
     let _ = std::fs::remove_dir_all(&test_dir);
     std::fs::create_dir_all(&test_dir).expect("create test dir");
-    crate::metadata::ensure_or_create_format_marker(&test_dir).expect("create format marker");
+    crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(&test_dir))
+        .expect("create format marker");
 
     let intents = vec![crate::runtime::IntentLogEntry::WalSynced {
         segment_id: 2,

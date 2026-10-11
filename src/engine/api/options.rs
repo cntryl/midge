@@ -131,6 +131,19 @@ struct IoTimeouts<T> {
     runtime_response: T,
 }
 
+/// A test-supplied database root. `OpenOptions` stays `Debug` without
+/// requiring every filesystem adapter to be.
+#[cfg(feature = "internal-testing")]
+#[derive(Clone)]
+struct InjectedFilesystem(Arc<dyn crate::io::Fs>);
+
+#[cfg(feature = "internal-testing")]
+impl std::fmt::Debug for InjectedFilesystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InjectedFilesystem")
+    }
+}
+
 /// Immutable, validated database open options.
 ///
 /// Values of this type can only be produced by [`OpenOptionsBuilder::build`].
@@ -159,6 +172,8 @@ pub struct OpenOptions {
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
     #[cfg(feature = "internal-testing")]
     recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
+    #[cfg(feature = "internal-testing")]
+    filesystem: Option<InjectedFilesystem>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -184,6 +199,8 @@ pub struct OpenOptionsBuilder {
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
     #[cfg(feature = "internal-testing")]
     recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
+    #[cfg(feature = "internal-testing")]
+    filesystem: Option<InjectedFilesystem>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -470,6 +487,20 @@ impl OpenOptions {
         self.recovery_probe
     }
 
+    /// The filesystem a test injected in place of the host root, if any.
+    pub(crate) fn injected_filesystem(&self) -> Option<Arc<dyn crate::io::Fs>> {
+        #[cfg(feature = "internal-testing")]
+        {
+            self.filesystem
+                .as_ref()
+                .map(|injected| Arc::clone(&injected.0))
+        }
+        #[cfg(not(feature = "internal-testing"))]
+        {
+            None
+        }
+    }
+
     pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
         Arc::clone(&self.ttl_clock.0)
     }
@@ -503,6 +534,8 @@ impl OpenOptionsBuilder {
             recovery_probe:
                 crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant::default(
                 ),
+            #[cfg(feature = "internal-testing")]
+            filesystem: None,
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease: LeaseConfig::new(Duration::from_secs(30), None, None),
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
@@ -646,6 +679,17 @@ impl OpenOptionsBuilder {
         variant: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
     ) -> Self {
         self.recovery_probe = variant;
+        self
+    }
+
+    /// Serve every database file from `filesystem` instead of the host
+    /// directory, so tests can fault or crash all storage effects. The
+    /// filesystem is the database root; the configured path names it only.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn filesystem_for_testing(mut self, filesystem: Arc<dyn crate::io::Fs>) -> Self {
+        self.filesystem = Some(InjectedFilesystem(filesystem));
         self
     }
 
@@ -832,6 +876,8 @@ impl OpenOptionsBuilder {
             startup_observer: self.startup_observer,
             #[cfg(feature = "internal-testing")]
             recovery_probe: self.recovery_probe,
+            #[cfg(feature = "internal-testing")]
+            filesystem: self.filesystem,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease: self.lease,
             ttl_clock: self.ttl_clock,

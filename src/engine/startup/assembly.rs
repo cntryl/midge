@@ -157,8 +157,7 @@ impl EngineStartup {
     ) -> MidgeResult<(Engine, Option<crate::runtime::StartupAdmission>)> {
         check_scope(scope, "startup entry")?;
         Self::trace_open(opts);
-        let storage_path = StartupStoragePath::resolve(opts.storage());
-        storage_path.prepare()?;
+        let storage_path = StartupStoragePath::resolve(opts)?;
         check_scope(scope, "storage path preparation")?;
 
         let minimum_epoch = super::timing::measure("lease_epoch_floor", || {

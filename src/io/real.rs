@@ -30,6 +30,16 @@ pub struct RealFs {
     relative_anchor: Option<PathBuf>,
 }
 
+/// A host-backed database root for tests, created if missing.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be created or resolved.
+#[cfg(test)]
+pub fn test_root(path: impl AsRef<Path>) -> std::sync::Arc<dyn Fs> {
+    std::sync::Arc::new(RealFs::new(path).expect("test database root"))
+}
+
 impl RealFs {
     /// Create a new real filesystem rooted at `base_path`
     ///

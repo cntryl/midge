@@ -13,6 +13,7 @@ use crate::runtime::cloud_startup::CloudStartupRecovery;
 mod epoch_floor;
 mod recovery;
 mod storage;
+mod storage_root;
 mod streaming_recovery;
 #[cfg(test)]
 mod test_control;
@@ -21,6 +22,8 @@ mod timing;
 struct StartupStoragePath {
     db_path: PathBuf,
     memory_mode: bool,
+    /// Every database file is reached through this root (#808).
+    root: Arc<dyn crate::io::Fs>,
 }
 
 struct StartupLease {
