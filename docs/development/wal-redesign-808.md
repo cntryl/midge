@@ -113,6 +113,28 @@ the next epoch through the normal path (#835). A crashed process reaches
 neither its device nor the object store again, so it cannot release its lease
 or write after its crash; requests it had in flight can still land late.
 
+Cloud campaigns (#838) run the same harness against simulated-cloud and
+provider engines whose objects live in a simulated object store, sealing an
+asynchronous WAL segment every two writes so several upload at once:
+
+- **Promises.** `cloud_strict` writes, clean shutdowns and, in provider mode,
+  completed flushes are cloud-durable. `cloud_async` writes are promised
+  nothing until one of those covers them.
+- **Two histories.** A recovery from a surviving cache is judged as locally:
+  the engine may not lose what it has served. A takeover by a process with a
+  fresh cache, in provider mode only, keeps just what the cloud promised, so
+  it is judged against a cloud history that only such takeovers rebase. A
+  recovery from a surviving cache still removes the unpromised WAL commits it
+  lost from the cloud history.
+- **Faults.** The faulting campaign fails WAL and SST uploads and deletes
+  before or after their effect, loses their answers, delays them and lands
+  them late, and retries opens the faults refuse, as an operator would. It
+  reproduces `out-of-order-publication` end to end: a segment exhausts its
+  upload retries, the next one is published past it, and a fresh-cache
+  takeover recovers the later writes without the earlier ones.
+- **Simulated cloud** keeps its lease and shared metadata in the cache, so a
+  fresh cache would lose its whole cloud; it has no fresh-cache takeovers.
+
 A finding is saved as a crash image below `MIDGE_CAMPAIGN_IMAGES`, and both
 workflows upload those images as artifacts. To run the nightly budget, then
 replay a saved image:

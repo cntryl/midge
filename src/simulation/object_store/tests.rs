@@ -533,7 +533,7 @@ fn should_land_crashed_process_late_effect_when_landed_after_the_crash() {
 }
 
 #[test]
-fn should_continue_objects_and_request_ids_when_restored_from_an_image() {
+fn should_resume_store_state_when_restored_from_an_image() {
     // Arrange: the second put of `k` is the one the schedule fails.
     let fates = [(
         id(Operation::Put, "k", 1),
