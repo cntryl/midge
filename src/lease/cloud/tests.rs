@@ -973,7 +973,7 @@ fn should_not_resurrect_authority_when_provider_put_lands_after_watchdog_fence()
         .expect("lease record retained for epoch history");
     assert!(
         persisted
-            .is_expired_with_tolerance(lease.clock_skew_tolerance)
+            .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
             .expect("parse reconciled expiry"),
         "late provider side effect must be conditionally expired"
     );
@@ -1017,7 +1017,7 @@ fn should_eventually_expire_late_renewal_after_timeout_readback_saw_old_object()
             .expect("read eventual cleanup state")
             .expect("lease record retained");
         if current
-            .is_expired_with_tolerance(stale.clock_skew_tolerance)
+            .is_expired_with_tolerance(stale.clock_skew_tolerance, chrono::Utc::now())
             .expect("parse cleanup expiry")
         {
             break;
@@ -1054,7 +1054,7 @@ fn should_eventually_expire_late_renewal_after_timeout_readback_saw_old_object()
         Some(takeover_owner.as_str())
     );
     assert!(!after_takeover
-        .is_expired_with_tolerance(takeover.clock_skew_tolerance)
+        .is_expired_with_tolerance(takeover.clock_skew_tolerance, chrono::Utc::now())
         .expect("parse takeover expiry"));
 }
 
@@ -1872,9 +1872,11 @@ fn should_delay_takeover_until_clock_skew_tolerance_elapses() {
     };
 
     // Act
-    let without_tolerance = document.is_expired_with_tolerance(Duration::ZERO).unwrap();
+    let without_tolerance = document
+        .is_expired_with_tolerance(Duration::ZERO, chrono::Utc::now())
+        .unwrap();
     let with_tolerance = document
-        .is_expired_with_tolerance(Duration::from_secs(15))
+        .is_expired_with_tolerance(Duration::from_secs(15), chrono::Utc::now())
         .unwrap();
 
     // Assert
@@ -2741,7 +2743,7 @@ fn should_retry_provider_release_when_same_epoch_pointer_cas_wins() {
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
     assert_eq!(persisted.committed_metadata, Some(generation));
     assert!(persisted
-        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .unwrap());
 }
 
@@ -2775,7 +2777,7 @@ fn should_deactivate_local_validity_when_provider_release_fails() {
     lease.release().expect("retry provider lease release");
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
     assert!(persisted
-        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .expect("released lease expiry"));
 }
 
@@ -2789,6 +2791,7 @@ fn should_release_provider_lease_after_terminal_renewal_failure() {
             Arc::clone(&cloud),
             Duration::from_secs(1),
             Duration::from_secs(10),
+            LeaseClock::default(),
         ),
     );
     let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
@@ -2808,7 +2811,7 @@ fn should_release_provider_lease_after_terminal_renewal_failure() {
     released.expect("release must conditionally expire the old lease");
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
     assert!(persisted
-        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .expect("released lease expiry"));
 }
 
@@ -2914,6 +2917,7 @@ fn should_persist_expiry_not_before_local_validity_when_ttl_has_fractional_secon
         crate::io::real::test_root(dir.path()),
         Duration::ZERO,
         ttl,
+        LeaseClock::default(),
     ));
 
     // Act

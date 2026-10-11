@@ -18,6 +18,7 @@
 //! - Requires a writable filesystem (not suitable for read-only media)
 //! - Leader record is a small file; no built-in expiry without heartbeat
 
+use super::clock::LeaseClock;
 use super::fs_leader_store::FsLeaderStore;
 use super::traits::{LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease};
 use crate::io::Fs;
@@ -46,6 +47,8 @@ pub struct FileSystemLease {
     validity: Arc<LeaseValidity>,
     ttl: Duration,
     clock_skew_tolerance: Duration,
+    /// Judges whether another holder's record is stale.
+    clock: LeaseClock,
 }
 
 impl FileSystemLease {
@@ -77,14 +80,21 @@ impl FileSystemLease {
             let realfs = RealFs::new(db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
             Arc::new(realfs)
         };
-        Ok(Self::with_root(fs, ttl, clock_skew_tolerance))
+        Ok(Self::with_root(
+            fs,
+            ttl,
+            clock_skew_tolerance,
+            LeaseClock::default(),
+        ))
     }
 
-    /// A lease whose coordination files live in the database `root`.
+    /// A lease whose coordination files live in the database `root`, timed
+    /// by `clock`.
     pub(crate) fn with_root(
         root: Arc<dyn Fs>,
         ttl: Duration,
         clock_skew_tolerance: Duration,
+        clock: LeaseClock,
     ) -> Self {
         let fs = root;
         let instance = LEASE_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -97,7 +107,7 @@ impl FileSystemLease {
                 .to_string_lossy()
         );
 
-        let leader_store = Arc::new(FsLeaderStore::new(fs));
+        let leader_store = Arc::new(FsLeaderStore::new(fs, clock.clone()));
 
         Self {
             leader_store,
@@ -107,12 +117,13 @@ impl FileSystemLease {
             validity: Arc::new(LeaseValidity::new()),
             ttl,
             clock_skew_tolerance,
+            clock,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new_with_fs_for_test(fs: Arc<dyn Fs>, ttl: Duration) -> Self {
-        Self::with_root(fs, ttl, ttl / 2)
+        Self::with_root(fs, ttl, ttl / 2, LeaseClock::default())
     }
 
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
@@ -166,7 +177,7 @@ impl PrimaryLease for FileSystemLease {
                             existing.holder_id, existing.epoch
                         ))
                     })?;
-                    let signed_age = chrono::Utc::now().signed_duration_since(acquired_at);
+                    let signed_age = self.clock.now().signed_duration_since(acquired_at);
                     if signed_age < chrono::Duration::zero() {
                         return Err(LeaseError::Indeterminate(format!(
                         "leader timestamp is in the future; ownership is ambiguous (holder: {}, \

@@ -496,6 +496,10 @@ impl OpenOptions {
         self.lease.ttl
     }
 
+    pub(crate) fn lease_clock(&self) -> crate::lease::LeaseClock {
+        self.lease.clock.clone()
+    }
+
     #[cfg(feature = "internal-testing")]
     pub(crate) fn recovery_probe(
         &self,
@@ -842,6 +846,18 @@ impl OpenOptionsBuilder {
     #[must_use]
     pub fn lease_ttl(mut self, ttl: Duration) -> Self {
         self.lease.ttl = ttl;
+        self
+    }
+
+    /// Read the wall time the lease stamps its records with, and judges
+    /// another holder's expiry by, from `clock` instead of the system clock.
+    /// A test advances it to take a lease over without waiting out the TTL;
+    /// the holder's own validity stays monotonic and does not follow it.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lease_clock_for_testing(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        self.lease.clock = crate::lease::LeaseClock::injected(clock);
         self
     }
 

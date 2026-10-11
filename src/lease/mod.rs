@@ -24,6 +24,7 @@
 //!
 //! Lease acquisition MUST occur before engine initialization:
 
+mod clock;
 pub(crate) mod cloud;
 mod filesystem;
 pub mod fs_leader_store;
@@ -31,6 +32,7 @@ mod heartbeat;
 mod scoped_leader_store;
 mod traits;
 
+pub(crate) use clock::LeaseClock;
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
@@ -78,6 +80,7 @@ pub(crate) struct LeaseConfig {
     pub(crate) ttl: Duration,
     pub(crate) clock_skew_tolerance: Option<Duration>,
     pub(crate) loss_hook: Option<LeaseLossHook>,
+    pub(crate) clock: LeaseClock,
 }
 
 impl LeaseConfig {
@@ -90,6 +93,7 @@ impl LeaseConfig {
             ttl,
             clock_skew_tolerance,
             loss_hook,
+            clock: LeaseClock::default(),
         }
     }
 
@@ -197,13 +201,14 @@ pub(crate) fn create_lease_with_validity(
         clock_skew_tolerance,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         std::time::Duration::from_secs(30),
+        &LeaseClock::default(),
     )
 }
 
 /// Create the primary lease for `storage`. Local and simulated leases keep
 /// their coordination files in the database `root`; a provider lease keeps
 /// its document in the control store, or in `object_store` when a test
-/// injects one.
+/// injects one. Every lease reads wall time from `clock`.
 pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
     storage: &Storage,
     root: &Arc<dyn crate::io::Fs>,
@@ -211,6 +216,7 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
     clock_skew_tolerance: std::time::Duration,
     storage_io_timeout: std::time::Duration,
     lease_ttl: std::time::Duration,
+    clock: &LeaseClock,
 ) -> Result<CreatedLease, LeaseError> {
     match storage {
         Storage::InMemory => Ok(CreatedLease {
@@ -218,6 +224,7 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 Arc::clone(root),
                 lease_ttl,
                 clock_skew_tolerance,
+                clock.clone(),
             )),
             validity: None,
         }),
@@ -226,6 +233,7 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 Arc::clone(root),
                 lease_ttl,
                 clock_skew_tolerance,
+                clock.clone(),
             ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
@@ -254,6 +262,7 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                     cloud,
                     clock_skew_tolerance,
                     lease_ttl,
+                    clock.clone(),
                 ),
             );
             Ok(CreatedLease {
@@ -271,6 +280,7 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 Arc::clone(root),
                 clock_skew_tolerance,
                 lease_ttl,
+                clock.clone(),
             ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),

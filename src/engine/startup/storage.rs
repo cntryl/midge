@@ -233,6 +233,7 @@ impl StartupLease {
             opts.lease_clock_skew_tolerance(),
             opts.storage_io_timeout(),
             opts.lease_ttl(),
+            &opts.lease_clock(),
         )
         .map_err(|error| match MidgeError::from(error) {
             MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
