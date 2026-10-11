@@ -1388,6 +1388,27 @@ const WAL_SCOPE_REMOVALS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Files in the WAL authority scope that cut a WAL file back or copy one,
+/// each with what it cuts or keeps.
+const WAL_SCOPE_CUTS: &[(&str, &str)] = &[
+    (
+        "src/runtime/wal_history.rs",
+        "salvage: a copy of the cut segment, then the cut once the ledger records it",
+    ),
+    (
+        "src/runtime/state/recovery.rs",
+        "the torn tail of the open segment before the writer appends",
+    ),
+    (
+        "src/runtime/cloud_startup/streaming_wal_plan.rs",
+        "the open member back to its verified prefix",
+    ),
+    (
+        "src/runtime/cloud_startup/cloud_recovery/mod.rs",
+        "a retained copy of the open member before that cut",
+    ),
+];
+
 /// The segment ledger changes only through the WAL history adapter: nothing
 /// else opens its journal, and nothing else removes or renames files in the
 /// WAL authority scope beyond the SST work listed above (#842).
@@ -1399,6 +1420,7 @@ fn should_mutate_wal_authority_only_through_ledger_transitions() {
 
     // Act
     let removals = lines_calling(&files, &[".remove_file(", ".rename_atomic("]);
+    let cuts = lines_calling(&files, &["truncate_durably(", "copy_durably("]);
     let journal_writers: Vec<String> = lines_calling(&everywhere, &["LedgerStore::"])
         .into_keys()
         .filter(|file| file != "src/runtime/wal_history.rs" && file != "src/wal/ledger_store.rs")
@@ -1424,6 +1446,22 @@ fn should_mutate_wal_authority_only_through_ledger_transitions() {
     assert!(
         stale.is_empty(),
         "remove stale WAL_SCOPE_REMOVALS: {stale:?}"
+    );
+    let unexpected_cuts: Vec<_> = cuts
+        .iter()
+        .filter(|(file, _)| !WAL_SCOPE_CUTS.iter().any(|(allowed, _)| allowed == file))
+        .collect();
+    assert!(
+        unexpected_cuts.is_empty(),
+        "WAL authority code cuts or copies WAL files outside the reviewed sites: {unexpected_cuts:#?}"
+    );
+    let stale_cuts: Vec<_> = WAL_SCOPE_CUTS
+        .iter()
+        .filter(|(file, _)| !cuts.contains_key(*file))
+        .collect();
+    assert!(
+        stale_cuts.is_empty(),
+        "remove stale WAL_SCOPE_CUTS: {stale_cuts:?}"
     );
     assert!(
         journal_writers.is_empty(),
