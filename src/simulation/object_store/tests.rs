@@ -1,7 +1,7 @@
 //! The simulated object store against the probes that disqualified the
 //! earlier draft (#810 review) and the provider contract's semantics.
 
-use super::{Fate, Operation, RequestId, Schedule, SimulatedObjectStore};
+use super::{Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore};
 use crate::common::{MidgeError, OperationDeadline};
 use crate::storage::cloud::{
     BlockingCloud, CloudBackend, CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata,
@@ -62,7 +62,8 @@ fn head(store: &SimulatedObjectStore, key: &str) -> CloudOutcome<ObjectMetadata>
     }
 }
 
-/// The outcome class of a mutation's answer.
+/// The outcome class of an answer.
+#[allow(clippy::match_same_arms)] // The arms bind results of different types.
 fn class(answer: &CloudEvent) -> &'static str {
     let outcome = match answer {
         CloudEvent::Put { result, .. } | CloudEvent::Delete { result, .. } => result.as_ref().err(),
@@ -77,6 +78,9 @@ fn class(answer: &CloudEvent) -> &'static str {
         Some(CloudError::NotFound(_)) => "not-found",
         Some(CloudError::PreconditionFailed(_)) => "precondition-failed",
         Some(CloudError::ServerError(_)) => "server-error",
+        Some(CloudError::Timeout(_)) => "timeout",
+        Some(CloudError::Transport(_)) => "transport",
+        Some(CloudError::ConditionalConflict(_)) => "conflict",
         Some(CloudError::Protocol(_)) => "protocol",
         Some(_) => "other",
     }
@@ -121,10 +125,11 @@ fn should_evaluate_late_condition_when_effect_lands() {
     let winner = put(&store, "lease", b"new holder", &[("If-None-Match", "*")]);
 
     // Act
-    store.land_late_effects();
+    let landed = store.land_late_effects();
 
     // Assert: the late create lost its condition when it landed.
-    assert!(late.recv_timeout(ANSWER_WAIT).is_err(), "never answered");
+    assert_eq!(landed, 1);
+    assert_eq!(answered(&late), "timeout");
     assert_eq!(answered(&winner), "ok");
     assert_eq!(store.object("lease"), Some(b"new holder".to_vec()));
 }
@@ -172,12 +177,11 @@ fn should_replay_same_fates_when_submissions_interleave() {
         seed: 11,
         fates: vec![
             Fate::Normal,
-            Fate::FailBefore,
-            Fate::FailAfter,
-            Fate::LoseResponse,
-            Fate::Duplicate,
+            Fate::FailBefore(Failure::Server),
+            Fate::FailAfter(Failure::Timeout),
             Fate::Late,
         ],
+        scope: Vec::new(),
     };
     let first = SimulatedObjectStore::new(schedule());
     let second = SimulatedObjectStore::new(schedule());
@@ -201,35 +205,45 @@ fn should_replay_same_fates_when_submissions_interleave() {
 }
 
 #[test]
-fn should_apply_effect_without_answer_when_response_is_lost() {
-    // Arrange
-    let store = scripted(&[(id(Operation::Put, "wal/2", 0), Fate::LoseResponse)]);
+fn should_apply_effect_when_answer_is_lost() {
+    // Arrange: the provider applied the put, but its answer never arrived, so
+    // the executor reports a timeout.
+    let store = scripted(&[(
+        id(Operation::Put, "wal/2", 0),
+        Fate::FailAfter(Failure::Timeout),
+    )]);
 
     // Act
     let answer = put(&store, "wal/2", b"segment", &[]);
 
     // Assert
-    assert!(answer.recv_timeout(ANSWER_WAIT).is_err(), "never answered");
+    assert_eq!(answered(&answer), "timeout");
     assert_eq!(store.object("wal/2"), Some(b"segment".to_vec()));
 }
 
 #[test]
 fn should_not_apply_effect_when_request_fails_before() {
     // Arrange
-    let store = scripted(&[(id(Operation::Put, "wal/3", 0), Fate::FailBefore)]);
+    let store = scripted(&[(
+        id(Operation::Put, "wal/3", 0),
+        Fate::FailBefore(Failure::Transport),
+    )]);
 
     // Act
     let answer = put(&store, "wal/3", b"segment", &[]);
 
     // Assert
-    assert_eq!(answered(&answer), "server-error");
+    assert_eq!(answered(&answer), "transport");
     assert_eq!(store.object("wal/3"), None);
 }
 
 #[test]
 fn should_apply_effect_when_request_fails_after() {
     // Arrange
-    let store = scripted(&[(id(Operation::Put, "wal/4", 0), Fate::FailAfter)]);
+    let store = scripted(&[(
+        id(Operation::Put, "wal/4", 0),
+        Fate::FailAfter(Failure::Server),
+    )]);
 
     // Act
     let answer = put(&store, "wal/4", b"segment", &[]);
@@ -237,21 +251,6 @@ fn should_apply_effect_when_request_fails_after() {
     // Assert
     assert_eq!(answered(&answer), "server-error");
     assert_eq!(store.object("wal/4"), Some(b"segment".to_vec()));
-}
-
-#[test]
-fn should_apply_once_when_response_is_duplicated() {
-    // Arrange
-    let store = scripted(&[(id(Operation::Put, "lease", 0), Fate::Duplicate)]);
-
-    // Act
-    let answer = put(&store, "lease", b"holder", &[("If-None-Match", "*")]);
-
-    // Assert: both answers report the one effect.
-    assert_eq!(answered(&answer), "ok");
-    assert_eq!(answered(&answer), "ok");
-    assert_eq!(store.trace().len(), 1);
-    assert_eq!(store.object("lease"), Some(b"holder".to_vec()));
 }
 
 #[test]
@@ -350,4 +349,139 @@ fn should_list_every_key_under_prefix_when_listing() {
         }
         other => panic!("unexpected answer: {other:?}"),
     }
+}
+
+#[test]
+fn should_release_reservation_when_answer_is_lost_or_late() {
+    for fate in [Fate::FailAfter(Failure::Timeout), Fate::Late] {
+        // Arrange: an admitted upload holds its reservation until answered.
+        let store = scripted(&[(id(Operation::Put, "sst/1", 0), fate)]);
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(4096, "upload").expect("reserve"));
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        store.submit_put_with_reservation(
+            "sst/1",
+            b"table".to_vec(),
+            Vec::new(),
+            Some(reservation),
+            tx,
+        );
+        let answer = rx.recv_timeout(ANSWER_WAIT).expect("an answer");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while budget.used() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // Assert
+        assert_eq!(class(&answer), "timeout", "{fate:?}");
+        assert_eq!(budget.used(), 0, "{fate:?}");
+    }
+}
+
+#[test]
+fn should_resurrect_object_when_late_put_lands_after_late_delete() {
+    // Arrange: a zombie put and a delete, both late.
+    let store = SimulatedObjectStore::eager();
+    answered(&put(&store, "wal/9", b"segment", &[]));
+    store.set_schedule(Schedule::Scripted(
+        [
+            (id(Operation::Put, "wal/9", 1), Fate::Late),
+            (id(Operation::Delete, "wal/9", 0), Fate::Late),
+        ]
+        .into_iter()
+        .collect(),
+    ));
+    answered(&put(&store, "wal/9", b"zombie", &[]));
+    answered(&delete(&store, "wal/9", &[]));
+
+    // Act: the delete lands first, then the zombie put.
+    let late = store.late_requests();
+    let landed_delete = store.land_late(&id(Operation::Delete, "wal/9", 0));
+    let landed_put = store.land_late(&id(Operation::Put, "wal/9", 1));
+
+    // Assert
+    assert_eq!(
+        late,
+        [
+            id(Operation::Put, "wal/9", 1),
+            id(Operation::Delete, "wal/9", 0)
+        ]
+    );
+    assert!(landed_delete && landed_put);
+    assert_eq!(store.object("wal/9"), Some(b"zombie".to_vec()));
+    assert_eq!(store.late_requests(), Vec::new());
+}
+
+#[test]
+fn should_name_requests_alike_when_generation_names_differ() {
+    // Arrange: two runs publish generations under different random names.
+    let runs = [
+        "metadata/generations/15d115db-8ea6-45ba-bc78-be14dda6c277/manifest.journal",
+        "metadata/generations/9c4de13d-4f53-4e19-8f26-ef2033386653/manifest.journal",
+    ];
+
+    // Act
+    let names: Vec<RequestId> = runs
+        .iter()
+        .map(|key| {
+            let store = SimulatedObjectStore::eager();
+            answered(&put(&store, key, b"journal", &[]));
+            store.trace().remove(0).0
+        })
+        .collect();
+
+    // Assert
+    assert_eq!(names[0], names[1]);
+    assert_eq!(names[0].key, "metadata/generations/*/manifest.journal");
+}
+
+#[test]
+fn should_leave_requests_outside_scope_eager_when_schedule_is_scoped() {
+    // Arrange: only WAL traffic is adversarial.
+    let store = SimulatedObjectStore::new(Schedule::Seeded {
+        seed: 5,
+        fates: vec![Fate::FailBefore(Failure::Server)],
+        scope: vec!["wal/".into()],
+    });
+
+    // Act
+    let lease = put(&store, "midge_primary_lease.json", b"lease", &[]);
+    let segment = put(&store, "wal/1.wal", b"segment", &[]);
+
+    // Assert
+    assert_eq!(answered(&lease), "ok");
+    assert_eq!(answered(&segment), "server-error");
+}
+
+#[test]
+fn should_report_conflict_only_before_a_conditional_effect() {
+    // Arrange
+    let store = scripted(&[
+        (
+            id(Operation::Put, "catalog", 0),
+            Fate::FailBefore(Failure::Conflict),
+        ),
+        (
+            id(Operation::Put, "plain", 0),
+            Fate::FailBefore(Failure::Conflict),
+        ),
+        (
+            id(Operation::Put, "catalog", 1),
+            Fate::FailAfter(Failure::Conflict),
+        ),
+    ]);
+
+    // Act
+    let conditional = answered(&put(&store, "catalog", b"one", &[("If-None-Match", "*")]));
+    let unconditional = answered(&put(&store, "plain", b"one", &[]));
+    let after_effect = answered(&put(&store, "catalog", b"two", &[("If-None-Match", "*")]));
+
+    // Assert: a conflict promises nothing was committed, so it is never
+    // reported for a mutation that applied or had no condition.
+    assert_eq!(conditional, "conflict");
+    assert_eq!(unconditional, "server-error");
+    assert_eq!(after_effect, "server-error");
+    assert_eq!(store.object("catalog"), Some(b"two".to_vec()));
 }

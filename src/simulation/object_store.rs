@@ -1,24 +1,32 @@
 //! A simulated object store with S3 semantics and an adversarial schedule
-//! (#830), qualified against the review of the earlier draft (#810).
+//! (#830), qualified against the reviews of the earlier draft (#810).
 //!
 //! It plugs into the engine as a [`CloudBackend`] through
 //! `object_store_for_testing`, so the production `CloudStorage` adapter, its
-//! deadlines and its conditional headers all run against it.
+//! deadlines, admission reservations and conditional headers all run against
+//! it.
 //!
-//! - **Effects and responses are separate.** A schedule gives every request
-//!   a [`Fate`]: applied and answered, failed before or after its effect,
-//!   answered twice, or never answered. A `Late` request is not applied until
-//!   the test lands it, after its client has given up, as a request that
+//! - **Effects and answers are separate.** A schedule gives every request a
+//!   [`Fate`]: applied and answered, failed before or after its effect with a
+//!   chosen error class, or late. A late request is not applied until the
+//!   test lands it, after its client was told it timed out, as a request that
 //!   reached the provider applies whatever the client's deadline. Conditions
-//!   are evaluated when an effect lands, never when it is submitted.
+//!   are evaluated when an effect lands, never when it is submitted. Every
+//!   request is answered, as the executor answers `Timeout` at a deadline, so
+//!   admission reservations are always released.
 //! - **Identity is S3's.** An `ETag` is a digest of the content, so deleting an
 //!   object and putting identical bytes again repeats its identity, and a
 //!   stale `If-Match` then succeeds against the successor. Conditional
 //!   requests compare identities only, never sizes.
 //! - **Replay is stable.** A request is named by its operation, its key and
-//!   how many earlier requests of that operation named that key, so a seeded
-//!   or scripted schedule gives each request the same fate however engine
-//!   threads interleave.
+//!   how many earlier requests of that operation named that key. Random
+//!   generation names in keys are replaced by `*`, so names repeat across
+//!   runs. Requests the engine issues to one key from several threads, such
+//!   as timer-driven lease reads, are still numbered by arrival, so a seeded
+//!   schedule can be scoped to key prefixes and leave them eager.
+//!
+//! Listing returns every key in one page; real providers page at about a
+//! thousand keys.
 
 use crate::storage::cloud::{CloudBackend, CloudCallback, CloudError, CloudEvent, ObjectMetadata};
 use std::collections::BTreeMap;
@@ -39,10 +47,22 @@ impl Operation {
     fn mutates(self) -> bool {
         matches!(self, Self::Put | Self::Delete)
     }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Put => "put",
+            Self::Get => "get",
+            Self::Head => "head",
+            Self::Delete => "delete",
+            Self::List => "list",
+            Self::RangeRead => "range-read",
+        }
+    }
 }
 
-/// A stable name for one request: its operation, its key and how many
-/// earlier requests of that operation named that key.
+/// A stable name for one request: its operation, its key with random
+/// generation names replaced by `*`, and how many earlier requests of that
+/// operation named that key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId {
     pub operation: Operation,
@@ -50,21 +70,55 @@ pub struct RequestId {
     pub occurrence: u64,
 }
 
+/// Whether `segment` is a random generation name (a hyphenated UUID).
+fn is_generation_name(segment: &str) -> bool {
+    let groups: Vec<&str> = segment.split('-').collect();
+    groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        && groups
+            .iter()
+            .all(|group| group.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// `key` with random generation names replaced by `*`.
+fn stable_key(key: &str) -> String {
+    key.split('/')
+        .map(|segment| {
+            if is_generation_name(segment) {
+                "*"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The error class a failed request reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Failure {
+    /// A retryable server failure (5xx).
+    Server,
+    /// The executor's deadline expired: the answer was lost.
+    Timeout,
+    /// The connection failed.
+    Transport,
+    /// A conditional mutation was definitely rejected by a conflict without
+    /// its precondition being decided. Only a failure before the effect can
+    /// report it; after the effect it is reported as a server failure.
+    Conflict,
+}
+
 /// What happens to one request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Fate {
-    /// Applied, and answered once.
+    /// Applied, and answered.
     Normal,
-    /// Not applied; answered with a server error.
-    FailBefore,
-    /// Applied; answered with a server error anyway.
-    FailAfter,
-    /// Applied; never answered, so the client times out.
-    LoseResponse,
-    /// Applied; answered twice.
-    Duplicate,
-    /// Not applied until [`SimulatedObjectStore::land_late_effects`]; never
-    /// answered. A read has no effect, so a late read only loses its answer.
+    /// Not applied; answered with the failure.
+    FailBefore(Failure),
+    /// Applied; answered with the failure anyway.
+    FailAfter(Failure),
+    /// Not applied until landed; answered with a timeout at once. A read has
+    /// no effect, so a late read only times out.
     Late,
 }
 
@@ -73,8 +127,14 @@ pub enum Fate {
 pub enum Schedule {
     /// Every request is applied and answered at once.
     Eager,
-    /// Each request draws its fate from `fates`, by `seed` and its id.
-    Seeded { seed: u64, fates: Vec<Fate> },
+    /// Requests whose key starts with one of `scope` (every request when
+    /// `scope` is empty) draw their fate from `fates` by `seed` and their id;
+    /// the rest are eager.
+    Seeded {
+        seed: u64,
+        fates: Vec<Fate>,
+        scope: Vec<String>,
+    },
     /// Listed requests get their fate; the rest are eager.
     Scripted(BTreeMap<RequestId, Fate>),
 }
@@ -82,22 +142,27 @@ pub enum Schedule {
 impl Schedule {
     fn fate(&self, id: &RequestId) -> Fate {
         match self {
-            Self::Eager => Fate::Normal,
-            Self::Seeded { seed, fates } if !fates.is_empty() => {
-                let index = digest(seed.to_le_bytes().iter().copied().chain(
-                    format!("{:?}\0{}\0{}", id.operation, id.key, id.occurrence).into_bytes(),
-                )) % fates.len() as u64;
+            Self::Seeded { seed, fates, scope }
+                if !fates.is_empty()
+                    && (scope.is_empty()
+                        || scope
+                            .iter()
+                            .any(|prefix| id.key.starts_with(prefix.as_str()))) =>
+            {
+                let key = format!("{}\0{}\0{}", id.operation.name(), id.key, id.occurrence);
+                let index = digest(0, seed.to_le_bytes().into_iter().chain(key.into_bytes()))
+                    % fates.len() as u64;
                 fates[usize::try_from(index).expect("an index fits usize")]
             }
-            Self::Seeded { .. } => Fate::Normal,
             Self::Scripted(fates) => fates.get(id).copied().unwrap_or(Fate::Normal),
+            Self::Eager | Self::Seeded { .. } => Fate::Normal,
         }
     }
 }
 
-/// FNV-1a over `bytes`, finished with SplitMix64.
-fn digest(bytes: impl IntoIterator<Item = u8>) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a from `basis` over `bytes`, finished with `SplitMix64`.
+fn digest(basis: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ basis;
     for byte in bytes {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
@@ -107,16 +172,11 @@ fn digest(bytes: impl IntoIterator<Item = u8>) -> u64 {
     hash ^ (hash >> 31)
 }
 
-/// The `ETag` of `bytes`: a digest of the content, as S3 reports for a single
-/// upload.
+/// The `ETag` of `bytes`: a 128-bit digest of the content, as S3 reports for a
+/// single upload.
 fn etag(bytes: &[u8]) -> String {
-    let low = digest(bytes.iter().copied());
-    let high = digest(
-        bytes
-            .iter()
-            .copied()
-            .chain((bytes.len() as u64).to_le_bytes()),
-    );
+    let low = digest(0, bytes.iter().copied());
+    let high = digest(0x9e37_79b9_7f4a_7c15, bytes.iter().copied());
     format!("\"{high:016x}{low:016x}\"")
 }
 
@@ -139,6 +199,8 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         .find(|(header, _)| header.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.as_str())
 }
+
+type Objects = BTreeMap<String, Vec<u8>>;
 
 /// One request's effect, evaluated when it lands.
 enum Effect {
@@ -170,77 +232,26 @@ enum Effect {
 }
 
 impl Effect {
+    /// Whether this is a mutation guarded by a precondition.
+    fn conditional(&self) -> bool {
+        match self {
+            Self::Put { headers, .. } | Self::Delete { headers, .. } => {
+                header(headers, "if-match").is_some() || header(headers, "if-none-match").is_some()
+            }
+            _ => false,
+        }
+    }
+
     /// Apply this effect to `objects` and describe its answer.
-    fn land(&self, objects: &mut BTreeMap<String, Vec<u8>>) -> CloudEvent {
+    fn land(&self, objects: &mut Objects) -> CloudEvent {
         match self {
             Self::Put {
                 key,
                 bytes,
                 headers,
-            } => {
-                let existing = objects.get(key);
-                let result = if header(headers, "if-none-match") == Some("*") && existing.is_some()
-                {
-                    Err(CloudError::PreconditionFailed(format!("{key} exists")))
-                } else if let Some(expected) = header(headers, "if-match") {
-                    match existing {
-                        Some(stored) if identity_matches(stored, expected) => Ok(()),
-                        _ => Err(CloudError::PreconditionFailed(format!(
-                            "{key} is not at {expected}"
-                        ))),
-                    }
-                } else if header(headers, "x-goog-if-generation-match").is_some() {
-                    Err(CloudError::PreconditionFailed(
-                        "the simulated store reports no generations".into(),
-                    ))
-                } else {
-                    Ok(())
-                };
-                if result.is_ok() {
-                    objects.insert(key.clone(), bytes.clone());
-                }
-                CloudEvent::Put {
-                    key: key.clone(),
-                    result,
-                }
-            }
-            Self::Delete { key, headers } => {
-                let result = match (objects.get(key), header(headers, "if-match")) {
-                    // Deleting an absent object succeeds, conditional or not.
-                    (None, _) => Ok(()),
-                    (Some(stored), Some(expected)) if !identity_matches(stored, expected) => Err(
-                        CloudError::PreconditionFailed(format!("{key} is not at {expected}")),
-                    ),
-                    (Some(_), _) => {
-                        objects.remove(key);
-                        Ok(())
-                    }
-                };
-                CloudEvent::Delete {
-                    key: key.clone(),
-                    result,
-                }
-            }
-            Self::Get { key, with_metadata } => {
-                let stored = objects
-                    .get(key)
-                    .cloned()
-                    .ok_or_else(|| CloudError::NotFound(key.clone()));
-                if *with_metadata {
-                    CloudEvent::GetWithMetadata {
-                        key: key.clone(),
-                        result: stored.map(|bytes| {
-                            let metadata = metadata(&bytes);
-                            (bytes, metadata)
-                        }),
-                    }
-                } else {
-                    CloudEvent::Get {
-                        key: key.clone(),
-                        result: stored,
-                    }
-                }
-            }
+            } => land_put(objects, key, bytes, headers),
+            Self::Delete { key, headers } => land_delete(objects, key, headers),
+            Self::Get { key, with_metadata } => land_get(objects, key, *with_metadata),
             Self::Head { key } => CloudEvent::Head {
                 key: key.clone(),
                 result: objects
@@ -261,43 +272,123 @@ impl Effect {
                 start,
                 end,
                 expected,
-            } => {
-                let result = (|| {
-                    let stored = objects
-                        .get(key)
-                        .ok_or_else(|| CloudError::NotFound(key.clone()))?;
-                    if let Some(expected) = expected {
-                        if !metadata(stored).same_version(expected) {
-                            return Err(CloudError::PreconditionFailed(format!(
-                                "{key} changed version"
-                            )));
-                        }
-                    }
-                    let start = usize::try_from(*start)
-                        .map_err(|error| CloudError::Protocol(error.to_string()))?;
-                    let end = end.map_or(Ok(stored.len()), |end| {
-                        usize::try_from(end)
-                            .map_err(|error| CloudError::Protocol(error.to_string()))
-                    })?;
-                    stored
-                        .get(start..end)
-                        .map(<[u8]>::to_vec)
-                        .ok_or_else(|| CloudError::Protocol(format!("{key} is shorter than {end}")))
-                })();
-                CloudEvent::GetRange {
-                    key: key.clone(),
-                    start: *start,
-                    end: *end,
-                    result,
-                }
-            }
+            } => CloudEvent::GetRange {
+                key: key.clone(),
+                start: *start,
+                end: *end,
+                result: read_range(objects, key, *start, *end, expected.as_ref()),
+            },
         }
     }
 }
 
-/// A server error answering `event`'s request, keeping its shape.
-fn server_error(event: CloudEvent) -> CloudEvent {
-    let error = || CloudError::ServerError("simulated provider failure".into());
+fn land_put(
+    objects: &mut Objects,
+    key: &str,
+    bytes: &[u8],
+    headers: &[(String, String)],
+) -> CloudEvent {
+    let existing = objects.get(key);
+    let result = if header(headers, "if-none-match") == Some("*") && existing.is_some() {
+        Err(CloudError::PreconditionFailed(format!("{key} exists")))
+    } else if let Some(expected) = header(headers, "if-match") {
+        match existing {
+            Some(stored) if identity_matches(stored, expected) => Ok(()),
+            _ => Err(CloudError::PreconditionFailed(format!(
+                "{key} is not at {expected}"
+            ))),
+        }
+    } else if header(headers, "x-goog-if-generation-match").is_some() {
+        Err(CloudError::PreconditionFailed(
+            "the simulated store reports no generations".into(),
+        ))
+    } else {
+        Ok(())
+    };
+    if result.is_ok() {
+        objects.insert(key.to_string(), bytes.to_vec());
+    }
+    CloudEvent::Put {
+        key: key.to_string(),
+        result,
+    }
+}
+
+fn land_delete(objects: &mut Objects, key: &str, headers: &[(String, String)]) -> CloudEvent {
+    let result = match (objects.get(key), header(headers, "if-match")) {
+        // Deleting an absent object succeeds, conditional or not.
+        (None, _) => Ok(()),
+        (Some(stored), Some(expected)) if !identity_matches(stored, expected) => Err(
+            CloudError::PreconditionFailed(format!("{key} is not at {expected}")),
+        ),
+        (Some(_), _) => {
+            objects.remove(key);
+            Ok(())
+        }
+    };
+    CloudEvent::Delete {
+        key: key.to_string(),
+        result,
+    }
+}
+
+fn land_get(objects: &Objects, key: &str, with_metadata: bool) -> CloudEvent {
+    let stored = objects
+        .get(key)
+        .cloned()
+        .ok_or_else(|| CloudError::NotFound(key.to_string()));
+    if with_metadata {
+        CloudEvent::GetWithMetadata {
+            key: key.to_string(),
+            result: stored.map(|bytes| {
+                let metadata = metadata(&bytes);
+                (bytes, metadata)
+            }),
+        }
+    } else {
+        CloudEvent::Get {
+            key: key.to_string(),
+            result: stored,
+        }
+    }
+}
+
+fn read_range(
+    objects: &Objects,
+    key: &str,
+    start: u64,
+    end: Option<u64>,
+    expected: Option<&ObjectMetadata>,
+) -> Result<Vec<u8>, CloudError> {
+    let stored = objects
+        .get(key)
+        .ok_or_else(|| CloudError::NotFound(key.to_string()))?;
+    if expected.is_some_and(|expected| !metadata(stored).same_version(expected)) {
+        return Err(CloudError::PreconditionFailed(format!(
+            "{key} changed version"
+        )));
+    }
+    let start = usize::try_from(start).map_err(|error| CloudError::Protocol(error.to_string()))?;
+    let end = end.map_or(Ok(stored.len()), |end| {
+        usize::try_from(end).map_err(|error| CloudError::Protocol(error.to_string()))
+    })?;
+    stored
+        .get(start..end)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| CloudError::Protocol(format!("{key} is shorter than {end}")))
+}
+
+/// `failure` reported in the shape of `event`'s answer.
+fn failed(event: CloudEvent, failure: Failure) -> CloudEvent {
+    let error = || {
+        let message = "simulated provider failure".to_string();
+        match failure {
+            Failure::Server => CloudError::ServerError(message),
+            Failure::Timeout => CloudError::Timeout(message),
+            Failure::Transport => CloudError::Transport(message),
+            Failure::Conflict => CloudError::ConditionalConflict(message),
+        }
+    };
     match event {
         CloudEvent::Put { key, .. } => CloudEvent::Put {
             key,
@@ -334,21 +425,12 @@ fn server_error(event: CloudEvent) -> CloudEvent {
     }
 }
 
-struct LateEffect {
-    id: RequestId,
-    effect: Effect,
-    /// Held so the client waits for its own deadline rather than seeing a
-    /// closed channel.
-    callback: CloudCallback,
-}
-
 struct StoreState {
-    objects: BTreeMap<String, Vec<u8>>,
+    objects: Objects,
     schedule: Schedule,
     occurrences: BTreeMap<(Operation, String), u64>,
-    late: Vec<LateEffect>,
-    /// Answers that never arrive, held open for the same reason.
-    unanswered: Vec<CloudCallback>,
+    /// Late effects not yet landed, in arrival order.
+    late: Vec<(RequestId, Effect)>,
     trace: Vec<(RequestId, Fate)>,
 }
 
@@ -367,7 +449,6 @@ impl SimulatedObjectStore {
                 schedule,
                 occurrences: BTreeMap::new(),
                 late: Vec::new(),
-                unanswered: Vec::new(),
                 trace: Vec::new(),
             })),
         }
@@ -390,20 +471,31 @@ impl SimulatedObjectStore {
         self.lock().schedule = schedule;
     }
 
-    /// Apply every late effect, in request order, as requests that reached
-    /// the provider after their clients gave up. Returns how many landed.
-    pub fn land_late_effects(&self) -> usize {
+    /// Late requests not yet landed, in arrival order.
+    #[must_use]
+    pub fn late_requests(&self) -> Vec<RequestId> {
+        self.lock().late.iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// Land one late request's effect, evaluating its condition now. Returns
+    /// whether `id` was late and unlanded.
+    #[must_use = "a test should prove the effect was late"]
+    pub fn land_late(&self, id: &RequestId) -> bool {
         let mut state = self.lock();
-        let mut late = std::mem::take(&mut state.late);
-        late.sort_by(|left, right| left.id.cmp(&right.id));
-        for effect in &late {
-            effect.effect.land(&mut state.objects);
-        }
-        let landed = late.len();
-        state
-            .unanswered
-            .extend(late.into_iter().map(|effect| effect.callback));
-        landed
+        let Some(position) = state.late.iter().position(|(late, _)| late == id) else {
+            return false;
+        };
+        let (_, effect) = state.late.remove(position);
+        effect.land(&mut state.objects);
+        true
+    }
+
+    /// Land every late effect in request order. Returns how many landed.
+    #[must_use = "a test should prove late effects existed"]
+    pub fn land_late_effects(&self) -> usize {
+        let mut ids = self.late_requests();
+        ids.sort();
+        ids.iter().filter(|id| self.land_late(id)).count()
     }
 
     /// Every request so far with its fate, in arrival order.
@@ -424,15 +516,16 @@ impl SimulatedObjectStore {
         self.lock().objects.keys().cloned().collect()
     }
 
-    fn submit(&self, operation: Operation, key: &str, effect: Effect, callback: CloudCallback) {
+    fn submit(&self, operation: Operation, key: &str, effect: Effect, callback: &CloudCallback) {
         let mut state = self.lock();
+        let stable = stable_key(key);
         let occurrence = state
             .occurrences
-            .entry((operation, key.to_string()))
+            .entry((operation, stable.clone()))
             .or_default();
         let id = RequestId {
             operation,
-            key: key.to_string(),
+            key: stable,
             occurrence: *occurrence,
         };
         *occurrence += 1;
@@ -440,41 +533,34 @@ impl SimulatedObjectStore {
         if !operation.mutates() {
             // A read has no effect to apply before or after its answer.
             fate = match fate {
-                Fate::FailAfter => Fate::FailBefore,
-                Fate::Late => Fate::LoseResponse,
+                Fate::FailAfter(failure) => Fate::FailBefore(failure),
+                Fate::Late => Fate::FailBefore(Failure::Timeout),
                 other => other,
             };
         }
-        state.trace.push((id.clone(), fate));
-        match fate {
-            Fate::Late => state.late.push(LateEffect {
-                id,
-                effect,
-                callback,
-            }),
-            Fate::FailBefore => {
-                let answer = server_error(effect.land(&mut BTreeMap::new()));
-                drop(state);
-                let _ = callback.send(answer);
-            }
-            Fate::Normal | Fate::Duplicate => {
-                let answer = effect.land(&mut state.objects);
-                drop(state);
-                if fate == Fate::Duplicate {
-                    let _ = callback.send(answer.clone());
-                }
-                let _ = callback.send(answer);
-            }
-            Fate::FailAfter => {
-                let answer = server_error(effect.land(&mut state.objects));
-                drop(state);
-                let _ = callback.send(answer);
-            }
-            Fate::LoseResponse => {
-                effect.land(&mut state.objects);
-                state.unanswered.push(callback);
-            }
+        if !effect.conditional() {
+            fate = match fate {
+                Fate::FailBefore(Failure::Conflict) => Fate::FailBefore(Failure::Server),
+                other => other,
+            };
         }
+        if let Fate::FailAfter(Failure::Conflict) = fate {
+            // A conflict reports that nothing was committed.
+            fate = Fate::FailAfter(Failure::Server);
+        }
+        state.trace.push((id.clone(), fate));
+        let answer = match fate {
+            Fate::Normal => effect.land(&mut state.objects),
+            Fate::FailBefore(failure) => failed(effect.land(&mut Objects::new()), failure),
+            Fate::FailAfter(failure) => failed(effect.land(&mut state.objects), failure),
+            Fate::Late => {
+                let answer = failed(effect.land(&mut Objects::new()), Failure::Timeout);
+                state.late.push((id, effect));
+                answer
+            }
+        };
+        drop(state);
+        let _ = callback.send(answer);
     }
 }
 
@@ -497,7 +583,7 @@ impl CloudBackend for SimulatedObjectStore {
                 end: Some(end),
                 expected: Some(expected),
             },
-            callback,
+            &callback,
         );
     }
 
@@ -516,7 +602,7 @@ impl CloudBackend for SimulatedObjectStore {
                 bytes: data,
                 headers,
             },
-            callback,
+            &callback,
         );
     }
 
@@ -528,7 +614,7 @@ impl CloudBackend for SimulatedObjectStore {
                 key: key.to_string(),
                 with_metadata: false,
             },
-            callback,
+            &callback,
         );
     }
 
@@ -540,7 +626,7 @@ impl CloudBackend for SimulatedObjectStore {
                 key: key.to_string(),
                 with_metadata: true,
             },
-            callback,
+            &callback,
         );
     }
 
@@ -555,7 +641,7 @@ impl CloudBackend for SimulatedObjectStore {
                 end,
                 expected: None,
             },
-            callback,
+            &callback,
         );
     }
 
@@ -567,7 +653,7 @@ impl CloudBackend for SimulatedObjectStore {
                 key: key.to_string(),
                 headers,
             },
-            callback,
+            &callback,
         );
     }
 
@@ -578,7 +664,7 @@ impl CloudBackend for SimulatedObjectStore {
             Effect::List {
                 prefix: prefix.to_string(),
             },
-            callback,
+            &callback,
         );
     }
 
@@ -589,7 +675,7 @@ impl CloudBackend for SimulatedObjectStore {
             Effect::Head {
                 key: key.to_string(),
             },
-            callback,
+            &callback,
         );
     }
 }

@@ -389,22 +389,6 @@ fn backends(root: &std::path::Path) -> Vec<(&'static str, Box<dyn StorageBackend
                 "midge".to_string(),
             )),
         ),
-        (
-            // Every answer may arrive twice; no contract outcome may change.
-            "cloud-simulated-duplicated",
-            Box::new(CloudStorage::new(
-                std::sync::Arc::new(crate::simulation::object_store::SimulatedObjectStore::new(
-                    crate::simulation::object_store::Schedule::Seeded {
-                        seed: 3,
-                        fates: vec![
-                            crate::simulation::object_store::Fate::Normal,
-                            crate::simulation::object_store::Fate::Duplicate,
-                        ],
-                    },
-                )),
-                "midge".to_string(),
-            )),
-        ),
     ]
 }
 
