@@ -63,8 +63,10 @@ fn should_find_no_violation_when_synced_writes_survive_crashes() {
 
 #[test]
 fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
-    // Arrange: segment-name reuse after restarts is the known
-    // `restarted-segment-id`, reported by its own campaign.
+    // Arrange: a power loss can cut a rotation between creating its segment
+    // and recording it in the ledger; the open sweeps that empty orphan and
+    // the next rotation creates the same name again. The ledger never named
+    // the first file, but the reuse check counts names on the device.
     let workloads = control_seeds(32);
     let config = Config {
         segment_reuse: false,
@@ -301,8 +303,10 @@ fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
 
 #[test]
 fn should_find_no_violation_when_provider_writes_survive_takeovers() {
-    // Arrange: segment-name reuse after restarts is the known
-    // `restarted-segment-id`, reported by its own campaign.
+    // Arrange: a power loss can cut a rotation between creating its segment
+    // and recording it in the ledger; the open sweeps that empty orphan and
+    // the next rotation creates the same name again. The ledger never named
+    // the first file, but the reuse check counts names on the device.
     let workloads = control_seeds(16);
     let config = Config {
         segment_reuse: false,
@@ -318,8 +322,10 @@ fn should_find_no_violation_when_provider_writes_survive_takeovers() {
 
 #[test]
 fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
-    // Arrange: segment-name reuse after restarts is the known
-    // `restarted-segment-id`, reported by its own campaign.
+    // Arrange: a power loss can cut a rotation between creating its segment
+    // and recording it in the ledger; the open sweeps that empty orphan and
+    // the next rotation creates the same name again. The ledger never named
+    // the first file, but the reuse check counts names on the device.
     let workloads = control_seeds(16);
     let config = Config {
         segment_reuse: false,
