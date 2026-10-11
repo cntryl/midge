@@ -306,6 +306,37 @@ impl RuntimeState {
             .fold(0_usize, usize::saturating_add)
     }
 
+    /// Continue WAL history in `history`'s open segment; the event loop
+    /// hands the ledger to the WAL actor.
+    pub(crate) fn adopt_wal_history(&mut self, history: crate::runtime::wal_history::WalHistory) {
+        self.wal.current_segment_id = history.ledger().open_segment();
+        self.wal.history = Some(history);
+    }
+
+    /// What the WAL actor writes through: nothing durable in memory mode,
+    /// otherwise the ledger recovery adopted, handed over once.
+    ///
+    /// # Errors
+    ///
+    /// A file-backed state whose ledger is gone, or was already handed over.
+    pub(crate) fn take_wal_backing(
+        &mut self,
+        memory_mode: bool,
+    ) -> MidgeResult<crate::runtime::actors::wal::WalBacking> {
+        if memory_mode {
+            return Ok(crate::runtime::actors::wal::WalBacking::Memory);
+        }
+        self.wal
+            .history
+            .take()
+            .map(crate::runtime::actors::wal::WalBacking::Files)
+            .ok_or_else(|| {
+                MidgeError::Internal(
+                    "a file-backed WAL started without its segment ledger".to_string(),
+                )
+            })
+    }
+
     fn empty_wal_recovery(
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,

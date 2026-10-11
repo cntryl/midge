@@ -192,11 +192,9 @@ mod tests {
         )
         .expect("start the mock WAL ledger");
         let mut wal_actor = crate::runtime::actors::WalActor::open(
-            fs,
-            Some(history),
+            crate::runtime::actors::wal::WalBacking::Files(history),
             config.wal_durability_policy,
             config.wal_batch_config,
-            false,
             config.writer_epoch,
             config.storage_io_timeout,
         )

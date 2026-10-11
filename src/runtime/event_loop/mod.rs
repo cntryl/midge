@@ -266,11 +266,9 @@ impl EventLoop {
             config.flush_memory_limit,
         )?;
         let mut wal_actor = WalActor::open(
-            crate::io::subdirectory(Arc::clone(&state.fs), "wal"),
-            state.wal.history.take(),
+            state.take_wal_backing(memory_mode)?,
             config.wal_durability_policy,
             config.wal_batch_config,
-            memory_mode,
             config.writer_epoch,
             config.storage_io_timeout,
         )?;

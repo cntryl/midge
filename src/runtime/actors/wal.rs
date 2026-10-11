@@ -266,6 +266,14 @@ pub struct WalActor {
     append_total: Duration,
 }
 
+/// Where a WAL actor's records go.
+pub(crate) enum WalBacking {
+    /// Nowhere durable: memory mode.
+    Memory,
+    /// Segment files, named by their ledger.
+    Files(crate::runtime::wal_history::WalHistory),
+}
+
 mod apply_op;
 mod durability;
 mod rotation;
@@ -608,55 +616,42 @@ impl WalActor {
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
-        let fs: Arc<dyn Fs> = if memory_mode {
-            Arc::new(crate::io::MockFs::new())
+        let backing = if memory_mode {
+            WalBacking::Memory
         } else {
-            Arc::new(crate::io::RealFs::new(wal_dir).map_err(FsError::into_midge)?)
-        };
-        let history = if memory_mode {
-            None
-        } else {
-            Some(crate::runtime::wal_history::WalHistory::open(
-                Arc::clone(&fs),
-                1,
-            )?)
+            let fs: Arc<dyn Fs> =
+                Arc::new(crate::io::RealFs::new(wal_dir).map_err(FsError::into_midge)?);
+            WalBacking::Files(crate::runtime::wal_history::WalHistory::open(fs, 1)?)
         };
         Self::open(
-            fs,
-            history,
+            backing,
             durability_policy,
             batch_config,
-            memory_mode,
             writer_epoch,
             storage_io_timeout,
         )
     }
 
-    /// Open the WAL actor over `wal`, the database's WAL directory view,
-    /// appending to the open segment of `history`, which a file-backed WAL
-    /// needs.
+    /// Open the WAL actor over `backing`; a file-backed WAL appends to its
+    /// ledger's open segment.
     pub(crate) fn open(
-        wal: Arc<dyn Fs>,
-        history: Option<crate::runtime::wal_history::WalHistory>,
+        backing: WalBacking,
         durability_policy: DurabilityPolicy,
         batch_config: BatchConfig,
-        memory_mode: bool,
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
         let counters = crate::telemetry::CounterSink::default();
-        let (io, history) = if memory_mode {
-            (WalIoState::Memory, None)
-        } else {
-            let history = history.ok_or_else(|| {
-                MidgeError::Internal("a file-backed WAL needs its segment ledger".to_string())
-            })?;
-            let fs = wal;
-            let factory = FsWalFactoryIo::new(Arc::clone(&fs))
-                .with_io_timeout(storage_io_timeout)
-                .with_counters(counters.clone());
-            let writer = factory.open_segment(history.ledger().open_segment())?;
-            (WalIoState::Open { fs, writer }, Some(history))
+        let (io, history) = match backing {
+            WalBacking::Memory => (WalIoState::Memory, None),
+            WalBacking::Files(history) => {
+                let fs = history.wal();
+                let factory = FsWalFactoryIo::new(Arc::clone(&fs))
+                    .with_io_timeout(storage_io_timeout)
+                    .with_counters(counters.clone());
+                let writer = factory.open_segment(history.ledger().open_segment())?;
+                (WalIoState::Open { fs, writer }, Some(history))
+            }
         };
 
         let actor = Self {

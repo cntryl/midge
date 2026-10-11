@@ -88,6 +88,11 @@ impl WalHistory {
         self.store.ledger()
     }
 
+    /// The WAL directory this history governs.
+    pub(crate) fn wal(&self) -> Arc<dyn Fs> {
+        Arc::clone(&self.wal)
+    }
+
     /// Make `edit` durable, then apply it. Every edit pairs with its file
     /// effects in the methods below, in the order that survives a crash.
     ///

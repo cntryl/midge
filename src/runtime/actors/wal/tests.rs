@@ -324,13 +324,11 @@ fn prepare_put_transaction(
 /// A file-backed WAL actor over `fs`, appending to segment `open` of the
 /// ledger there, which starts at `open` when `fs` holds none.
 fn actor_over(fs: Arc<dyn Fs>, open: u64, policy: DurabilityPolicy) -> MidgeResult<WalActor> {
-    let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), open)?;
+    let history = crate::runtime::wal_history::WalHistory::open(fs, open)?;
     WalActor::open(
-        fs,
-        Some(history),
+        crate::runtime::actors::wal::WalBacking::Files(history),
         policy,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )
