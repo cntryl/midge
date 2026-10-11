@@ -376,7 +376,7 @@ mod failure_injection {
         write_cf_value(&engine, &cf, b"stream-record", b"original-stream-bytes");
         write_cf_value(&engine, &cf, b"queue-record-a", b"queue-a");
         write_cf_value(&engine, &cf, b"queue-record-b", b"queue-b");
-        let wal_path = db_path.join("wal").join("wal.log");
+        let wal_path = crate::common::open_wal_segment(db_path);
         let wal_len_before_failure = std::fs::metadata(&wal_path)
             .expect("WAL metadata before partial write")
             .len();
@@ -2876,8 +2876,8 @@ mod failure_injection {
         let _guard = failpoint_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Arrange: an unflushed record survives a clean restart in wal.log, so
-        // the next writer epoch appends to the same file. A second column
+        // Arrange: an unflushed record survives a clean restart in the open
+        // segment, so the next writer epoch appends to the same file. A second column
         // family keeps that segment above the flushed floor.
         let temp = TempDir::new().expect("tempdir");
         let options = || {
@@ -2904,11 +2904,9 @@ mod failure_injection {
             .expect("metrics")
             .health;
 
-        let sealed = std::fs::read_dir(temp.path().join("wal"))
-            .expect("list wal")
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name() != "wal.log")
-            .count();
+        let sealed = crate::common::wal_segment_files(temp.path())
+            .len()
+            .saturating_sub(1);
 
         // Assert: the rotated two-epoch segment stayed above the flushed
         // floor, so prune inspected it.
@@ -3302,7 +3300,7 @@ mod chaos_real {
     fn should_preserve_complete_wal_records_when_partial_final_record_is_missing_one_byte() {
         // WHAT THIS TEST DOES:
         // Runs a child process that writes sync commits and then aborts using a real manifest-persist failpoint.
-        // The parent appends a valid WAL record directly to wal.log and truncates one byte from its tail.
+        // The parent appends a valid WAL record directly to the open WAL segment and truncates one byte from its tail.
         // FAILURE INJECTED:
         // Real subprocess abort via midge::manifest::after_temp_sync_before_rename plus direct WAL tail truncation.
         // EXPECTED INVARIANT:
@@ -3334,7 +3332,7 @@ mod chaos_real {
     fn should_preserve_complete_wal_prefix_when_truncated_to_one_byte_past_last_complete_record() {
         // WHAT THIS TEST DOES:
         // Runs a child process that writes sync commits and aborts using a real manifest-persist failpoint.
-        // The parent then appends a synthetic WAL record and truncates wal.log so exactly one byte of that new record remains.
+        // The parent then appends a synthetic WAL record and truncates the open WAL segment so exactly one byte of that new record remains.
         // FAILURE INJECTED:
         // Real subprocess abort via midge::manifest::after_temp_sync_before_rename plus direct WAL truncation.
         // EXPECTED INVARIANT:
@@ -3531,7 +3529,7 @@ mod chaos_real {
         );
         expire_crashed_process_lease(db_path);
 
-        let wal_path = wal_log_path(db_path);
+        let wal_path = open_wal_segment_path(db_path);
         append_complete_wal_record(&wal_path, b"synthetic_tail", b"synthetic_value");
         truncate_file_by(&wal_path, 1);
 
@@ -3546,7 +3544,7 @@ mod chaos_real {
         );
         expire_crashed_process_lease(db_path);
 
-        let wal_path = wal_log_path(db_path);
+        let wal_path = open_wal_segment_path(db_path);
         let original_len = fs::metadata(&wal_path).expect("wal metadata").len();
         append_complete_wal_record(&wal_path, b"synthetic_prefix_tail", b"synthetic_value");
         truncate_file_to(&wal_path, original_len + 1);
@@ -4129,8 +4127,8 @@ mod chaos_real {
         file.sync_all().expect("sync zeroed file");
     }
 
-    fn wal_log_path(db_path: &Path) -> PathBuf {
-        db_path.join("wal").join("wal.log")
+    fn open_wal_segment_path(db_path: &Path) -> PathBuf {
+        crate::common::open_wal_segment(db_path)
     }
 
     fn manifest_path(db_path: &Path) -> PathBuf {
@@ -6507,7 +6505,7 @@ mod transaction_crash_boundaries {
     fn child_abort_after_rotation_writer_reopen_failure(db_path: &Path) {
         child_abort_after_rotation_transition_failure(
             db_path,
-            "midge::wal::inject_fail_after_rename_before_writer_create",
+            "midge::wal::inject_fail_after_ledger_rotate_before_writer_create",
             "after_rotation_writer_reopen_failure",
         );
     }
@@ -7081,7 +7079,7 @@ mod cloud_crash_recovery {
 
         run_child_expect_abort("cloud_async_active_after_ack", db_path);
         expire_crashed_process_lease(db_path);
-        let active_wal = db_path.join("wal").join("wal.log");
+        let active_wal = crate::common::open_wal_segment(db_path);
         assert!(
             std::fs::metadata(&active_wal).is_ok_and(|metadata| metadata.len() > 0),
             "crashed child must leave the acknowledged write in the active WAL"
@@ -7155,9 +7153,9 @@ mod cloud_crash_recovery {
         assert_eq!(metrics.health, EngineHealth::Healthy);
     }
 
-    /// The rename succeeded but the replacement writer never appeared, so the
-    /// sealed segment was never enqueued and the child fenced. Recovery must
-    /// find the orphaned sealed file, upload it, and reach the same frontier.
+    /// The ledger sealed the segment but the next writer never appeared, so
+    /// the sealed segment was never enqueued and the child fenced. Recovery
+    /// must find the sealed member, upload it, and reach the same frontier.
     #[cfg(feature = "failpoints")]
     #[test]
     fn should_recover_orphaned_sealed_cloud_wal_when_child_aborts_after_writer_loss() {
@@ -7307,10 +7305,10 @@ mod cloud_crash_recovery {
     fn child_cloud_async_after_rename_writer_loss(db_path: &Path) {
         let _scenario = fail::FailScenario::setup();
         fail::cfg(
-            "midge::wal::inject_fail_after_rename_before_writer_create",
+            "midge::wal::inject_fail_after_ledger_rotate_before_writer_create",
             "return",
         )
-        .expect("configure replacement writer loss after rename");
+        .expect("configure next writer loss after the ledger rotation");
         let engine = open_cloud_engine(db_path, None);
         commit_value(
             &engine,
@@ -7888,7 +7886,7 @@ mod cloud_persistence_hardening {
             .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics");
-        let local_segments = list_files_with_extension(&db_path.join("wal"), "wal");
+        let local_segments = crate::common::sealed_wal_segment_files(&db_path);
         let remote_segments =
             list_files_with_extension(&db_path.join("cloud_store").join("wal"), "wal");
         engine
@@ -10150,12 +10148,7 @@ mod observability_api {
         assert_eq!(metrics.cache_hits + metrics.cache_misses, 0);
         assert_eq!(metrics.cloud_async_wal_uploads_failed, 0);
         assert_eq!(metrics.hybrid_pending_evictions, 0);
-        let sealed_local_wal = std::fs::read_dir(db_path.join("wal"))
-            .expect("list local WAL directory")
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "wal"))
-            .collect::<Vec<_>>();
+        let sealed_local_wal = crate::common::sealed_wal_segment_files(db_path);
         assert!(
             sealed_local_wal.is_empty(),
             "manifest-covered sealed local WAL segments should be pruned: {sealed_local_wal:?}"
@@ -11650,7 +11643,7 @@ mod storage_verification_hardening {
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn write_empty_storage_fixture(db_path: &Path) {
-        std::fs::write(db_path.join("FORMAT"), "midge-format-version=3\n")
+        std::fs::write(db_path.join("FORMAT"), "midge-format-version=5\n")
             .expect("write format marker");
         std::fs::write(
             db_path.join("manifest.json"),
@@ -12495,7 +12488,7 @@ mod transaction_spill_hardening {
         engine
             .shutdown(spill_shutdown_timeout())
             .expect("shutdown committed engine");
-        let frames = read_wal_frames(&temp.path().join("wal").join("wal.log"));
+        let frames = read_wal_frames(&crate::common::open_wal_segment(temp.path()));
         let records = frames.iter().map(|(record, _)| record).collect::<Vec<_>>();
 
         let mut reopened = open_local(temp.path(), 8 * 1024);
@@ -12554,7 +12547,7 @@ mod transaction_spill_hardening {
             .expect("child spill marker")
             .parse::<usize>()
             .expect("spill count");
-        let frames = read_wal_frames(&temp.path().join("wal").join("wal.log"));
+        let frames = read_wal_frames(&crate::common::open_wal_segment(temp.path()));
         let records = frames.iter().map(|(record, _)| record).collect::<Vec<_>>();
         let mut engine = open_local(temp.path(), 8 * 1024);
         let cf = default_cf(&engine);

@@ -389,3 +389,11 @@ pub fn first_wal_segment(db_path: &std::path::Path) -> PathBuf {
         .join("wal")
         .join(cntryl_midge::__internal::wal::segment_file_name(1))
 }
+
+/// Sealed WAL segment files of the local database at `db_path`: every
+/// segment but the newest, which is the open one.
+pub fn sealed_wal_segment_files(db_path: &std::path::Path) -> Vec<PathBuf> {
+    let mut segments = wal_segment_files(db_path);
+    segments.pop();
+    segments.into_iter().map(|(_, path)| path).collect()
+}
