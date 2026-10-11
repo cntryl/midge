@@ -1543,6 +1543,18 @@ mod compatibility_fixtures {
         temp
     }
 
+    /// Copy the populated release fixture as a database of the current
+    /// format, for tests whose subject is its manifest and SST rather than
+    /// its format. Its empty pre-ledger `wal.log` goes with the old marker.
+    fn copy_populated_fixture_as_current_format() -> tempfile::TempDir {
+        let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+        fs::write(temp.path().join("FORMAT"), "midge-format-version=5\n")
+            .expect("mark fixture copy as the current format");
+        fs::remove_file(temp.path().join("wal").join("wal.log"))
+            .expect("drop the pre-ledger active WAL");
+        temp
+    }
+
     fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
         fs::create_dir_all(destination)?;
 
@@ -1593,59 +1605,38 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_verify_populated_release_v3_v4_fixture_given_supported_format_when_reopening() {
-        // Arrange
+    fn should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening() {
+        // Arrange: format 3 predates the WAL segment ledger (#842).
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+        let before = fs::read(temp.path().join("FORMAT")).expect("read fixture marker");
 
         // Act
-        let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
-            .expect("verify release fixture");
-        assert_eq!(report.health, EngineHealth::Healthy);
-        assert_eq!(report.manifest_files_verified, 1);
-        assert_eq!(report.sst_files_verified, 1);
-        assert_eq!(report.bytes_verified, 437);
-        assert_eq!(report.data_blocks_verified, 1);
-        assert_eq!(report.wal_recovery_records_replayed, 0);
-        assert_eq!(report.wal_recovery_bytes_replayed, 0);
-        assert_eq!(report.intent_entries_loaded, 0);
-
-        let mut engine = Engine::open(
+        let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("format 3 fixture must fail verify");
+        let Err(open_error) = Engine::open(
             OpenOptions::local(temp.path())
                 .recovery_policy(RecoveryPolicy::Strict)
                 .build()
                 .expect("build options"),
-        )
-        .expect("open release fixture");
-        let cf = engine
-            .get_column_family("default")
-            .expect("fixture default column family");
-        let read = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin fixture read");
-        let rows = read
-            .scan(&Query::new())
-            .expect("scan fixture")
-            .try_collect()
-            .expect("collect fixture rows");
-        let runtime = engine
-            .metrics()
-            .get_runtime_metrics()
-            .expect("runtime metrics");
+        ) else {
+            panic!("format 3 fixture must fail open");
+        };
 
         // Assert
-        assert_eq!(runtime.health, EngineHealth::Healthy);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(logical_rows_digest(&rows), 14_948_492_731_235_234_299);
-        drop(read);
-        engine
-            .shutdown(Duration::from_secs(5))
-            .expect("shutdown fixture engine");
+        assert_compatibility_error(verify_error);
+        assert_compatibility_error(open_error);
+        assert_eq!(
+            fs::read(temp.path().join("FORMAT")).expect("reread fixture marker"),
+            before,
+            "a rejected open must not rewrite the marker"
+        );
+        assert!(!temp.path().join("wal").join("LEDGER").exists());
     }
 
     #[test]
     fn should_reject_manifest_bounds_when_valid_sst_summary_disagrees() {
         // Arrange: the release fixture has a valid SST and a readable point value.
-        let baseline = copy_fixture_dir("v3_populated_v4_sst_db");
+        let baseline = copy_populated_fixture_as_current_format();
         let baseline_report = cntryl_midge::StorageVerifier::verify_path(baseline.path())
             .expect("verify unmodified fixture");
         assert_eq!(baseline_report.health, EngineHealth::Healthy);
@@ -1674,7 +1665,7 @@ mod compatibility_fixtures {
             .expect("shutdown baseline engine");
 
         for wrong_key_bounds in [true, false] {
-            let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+            let temp = copy_populated_fixture_as_current_format();
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
                 let mut manifest: serde_json::Value =
@@ -1714,7 +1705,7 @@ mod compatibility_fixtures {
         for complete in [true, false] {
             // Arrange: complete bounds agree with the SST; older advisory bounds
             // may disagree without hiding a point key from readers.
-            let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+            let temp = copy_populated_fixture_as_current_format();
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
                 let mut manifest: serde_json::Value =
@@ -1791,9 +1782,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v5_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v6_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v5");
+        let temp = copy_fixture_dir("future_v6");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
@@ -1810,56 +1801,5 @@ mod compatibility_fixtures {
         };
         // Assert
         assert_compatibility_error(open_error);
-    }
-
-    #[test]
-    fn should_reload_mixed_key_bound_encodings_when_v3_fixture_upgrades_to_v4() {
-        // Arrange: the v3 fixture's manifest stores key bounds as byte arrays.
-        let temp = copy_fixture_dir("v3_populated_v4_sst_db");
-        let options = || {
-            OpenOptions::local(temp.path())
-                .recovery_policy(RecoveryPolicy::Strict)
-                .build()
-                .expect("build options")
-        };
-
-        // Act: a writable open upgrades FORMAT, then a flush adds a hex-encoded entry.
-        let mut engine = Engine::open(options()).expect("open v3 fixture");
-        let cf = engine
-            .get_column_family("default")
-            .expect("fixture default column family");
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin write");
-        tx.put(b"upgrade/key".to_vec(), b"v4".to_vec(), None)
-            .expect("put");
-        tx.commit(WriteOptions::sync()).expect("commit");
-        engine.flush_cf(&cf).expect("flush");
-        engine
-            .shutdown(Duration::from_secs(5))
-            .expect("shutdown after upgrade");
-        let marker = fs::read_to_string(temp.path().join("FORMAT")).expect("read FORMAT");
-
-        let mut reopened = Engine::open(options()).expect("reopen upgraded fixture");
-        let cf = reopened
-            .get_column_family("default")
-            .expect("default column family");
-        let read = reopened
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin read");
-        let rows = read
-            .scan(&Query::new())
-            .expect("scan")
-            .try_collect()
-            .expect("collect rows");
-        drop(read);
-        reopened
-            .shutdown(Duration::from_secs(5))
-            .expect("shutdown reopened engine");
-
-        // Assert
-        assert_eq!(marker.trim(), "midge-format-version=4");
-        assert_eq!(rows.len(), 4);
-        assert!(rows.iter().any(|(key, _)| key.as_ref() == b"upgrade/key"));
     }
 }
