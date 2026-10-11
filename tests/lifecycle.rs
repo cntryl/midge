@@ -2387,6 +2387,12 @@ mod local_wal_retention {
     //! later compaction would let recovery resurrect that put. The eventual
     //! flush instead bounds how long an idle family can pin the floor.
 
+    #[cfg(feature = "internal-testing")]
+    use cntryl_midge::__internal::io::Fs;
+    #[cfg(feature = "internal-testing")]
+    use cntryl_midge::__internal::simulation::{
+        CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
+    };
     use cntryl_midge::{ColumnFamilyHandle, Engine, OpenOptions, TransactionMode, WriteOptions};
     use std::path::Path;
     use std::time::Duration;
@@ -2666,32 +2672,48 @@ mod local_wal_retention {
         ids
     }
 
-    #[cfg(any(target_os = "macos", feature = "internal-testing"))]
+    #[cfg(feature = "internal-testing")]
     fn segment_path(path: &Path, id: u64) -> std::path::PathBuf {
         path.join("wal").join(format!("{id:020}.wal"))
     }
 
-    #[cfg(target_os = "macos")]
-    fn set_immutable(file: &Path, immutable: bool) {
-        let status = std::process::Command::new("chflags")
-            .arg(if immutable { "uchg" } else { "nouchg" })
-            .arg(file)
-            .status()
-            .expect("run chflags");
-        assert!(status.success(), "chflags failed on {}", file.display());
+    #[cfg(feature = "internal-testing")]
+    fn device_options(named: &Path, device: &CrashDevice) -> OpenOptions {
+        let root: std::sync::Arc<dyn Fs> = std::sync::Arc::new(device.fs());
+        OpenOptions::local(named)
+            .background_compaction(false)
+            .with_memtable_flush_threshold(FLUSH_TRIGGER_BYTES)
+            .filesystem_for_testing(root)
+            .build()
+            .expect("options")
+    }
+
+    #[cfg(feature = "internal-testing")]
+    fn device_segment_ids(device: &CrashDevice) -> Vec<u64> {
+        device
+            .files()
+            .keys()
+            .filter_map(|path| {
+                path.strip_prefix("wal/")?
+                    .strip_suffix(".wal")?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .collect()
     }
 
     /// LT-A, removal-failure variant. Segment 1 holds `put k`; segment 2 holds
     /// `delete k`. Compaction drops both from the SSTs. The idle family's
     /// flush then lifts the floor past both segments. Removing segment 1
-    /// fails (immutable file -> EPERM, standing in for EIO/EACCES); the pass
-    /// must not then remove segment 2.
+    /// fails with an injected I/O error; the pass must not then remove
+    /// segment 2.
+    #[cfg(feature = "internal-testing")]
     fn deleted_key_after_failed_floor_retirement(
         fail_older_removal: bool,
     ) -> (Option<Vec<u8>>, Vec<u64>, Vec<u64>) {
-        let temp = tempfile::TempDir::new().expect("temp");
-        let live = temp.path().join("live");
-        let mut engine = Engine::open(options(&live)).expect("open");
+        let named = tempfile::TempDir::new().expect("named directory");
+        let device = CrashDevice::new();
+        let mut engine = Engine::open(device_options(named.path(), &device)).expect("open");
         let default = engine.get_column_family("default").expect("default");
         let idle = engine.create_column_family("idle").expect("idle");
         put(&engine, &idle, b"idle-key");
@@ -2701,36 +2723,34 @@ mod local_wal_retention {
         engine.flush_cf(&default).expect("flush delete");
         engine.compact_all().expect("compact");
         assert_eq!(get(&engine, "default", b"k"), None, "live engine");
-        let before = wal_segment_ids(&live);
-        #[cfg(target_os = "macos")]
+        let before = device_segment_ids(&device);
         let older = *before.first().expect("an older sealed segment is retained");
-        #[cfg(not(target_os = "macos"))]
-        assert!(!fail_older_removal, "unlink fault fixture requires macOS");
-        #[cfg(target_os = "macos")]
-        if fail_older_removal {
-            set_immutable(&segment_path(&live, older), true);
-            assert!(
-                std::fs::remove_file(segment_path(&live, older)).is_err(),
-                "the immutable-file unlink fault must be active"
-            );
-        }
+        let fault = fail_older_removal.then(|| {
+            device.inject(Fault {
+                op: FaultOp::RemoveFile,
+                path: format!("wal/{older:020}.wal"),
+                nth: 1,
+                effect: FaultEffect::Before,
+                error: FaultError::Io,
+            })
+        });
         engine.flush_cf(&idle).expect("flush idle");
         // flush_cf returns before the post-publication prune; shutdown
         // drains the event loop, so list the segments after it.
         engine.shutdown(Duration::from_secs(10)).expect("shutdown");
         drop(engine);
-        let after = wal_segment_ids(&live);
-        #[cfg(target_os = "macos")]
-        if fail_older_removal {
-            // The fault was transient; the file is ordinary again on restart.
-            set_immutable(&segment_path(&live, older), false);
+        if let Some(fault) = fault {
+            assert!(device.fired(fault), "the older segment's unlink must fail");
         }
-        let reopened = Engine::open(options(&live)).expect("reopen");
+        // The fault was transient; the file is ordinary again on restart.
+        device.disarm_faults();
+        let after = device_segment_ids(&device);
+        let reopened = Engine::open(device_options(named.path(), &device)).expect("reopen");
         (get(&reopened, "default", b"k"), before, after)
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(feature = "internal-testing")]
     #[ignore = "#808 stage 3: failed-local-unlink"]
     fn should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails() {
         // Arrange
@@ -2749,6 +2769,7 @@ mod local_wal_retention {
     }
 
     #[test]
+    #[cfg(feature = "internal-testing")]
     fn should_not_resurrect_deleted_key_when_flushed_segments_retire_without_failure() {
         // Arrange: control for the test above.
         let fail_older_removal = false;

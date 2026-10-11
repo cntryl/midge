@@ -27,7 +27,6 @@
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails",
       "baseline": "red",
-      "platform": "darwin",
       "failure_marker": "deleted key resurrected: segments before idle flush"
     },
     {

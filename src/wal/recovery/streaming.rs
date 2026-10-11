@@ -197,7 +197,7 @@ impl TxnSpool {
         Ok(Self {
             // Anonymous, delete-on-close storage cannot leak a named recovery
             // artifact if the process crashes during replay.
-            file: create_replay_spool()?,
+            file: tempfile::tempfile()?,
             record_count: 0,
         })
     }
@@ -1117,16 +1117,4 @@ pub(crate) fn pending_txn_overhead_bytes() -> usize {
     size_of::<PendingTxn>()
         .saturating_add(size_of::<(u64, u64)>())
         .saturating_mul(2)
-}
-
-/// Keep the replay I/O fault at the actual spool allocation boundary. Both
-/// hooks disappear in production builds; the observation proves the error ran.
-fn create_replay_spool() -> MidgeResult<std::fs::File> {
-    if crate::failpoints::is_active("midge::recovery::inject_spool_create_io") {
-        crate::failpoints::fail_point!("midge::recovery::spool_create_io_injected");
-        return Err(MidgeError::Io(std::io::Error::other(
-            "injected replay spool creation failure",
-        )));
-    }
-    Ok(tempfile::tempfile()?)
 }

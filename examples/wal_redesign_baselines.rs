@@ -30,10 +30,6 @@ struct Case {
     #[serde(default)]
     failure_marker: String,
     #[serde(default)]
-    platform: Option<String>,
-    #[serde(default)]
-    platforms: Vec<String>,
-    #[serde(default)]
     requires_sqrzl: bool,
     #[serde(flatten)]
     extra: serde_json::Map<String, Value>,
@@ -259,20 +255,7 @@ fn sqrzl_available() -> bool {
 }
 
 fn skip_reason(case: &Case, options: &Options) -> Option<&'static str> {
-    let platform = if cfg!(target_os = "macos") {
-        "darwin"
-    } else {
-        std::env::consts::OS
-    };
-    if (!case.platforms.is_empty() && !case.platforms.iter().any(|item| item == platform))
-        || case.platform.as_ref().is_some_and(|item| item != platform)
-    {
-        Some("unsupported-platform")
-    } else if case.requires_sqrzl && !options.sqrzl {
-        Some("sqrzl-not-selected")
-    } else {
-        None
-    }
+    (case.requires_sqrzl && !options.sqrzl).then_some("sqrzl-not-selected")
 }
 
 struct Campaign<'a> {

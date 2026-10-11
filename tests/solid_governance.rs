@@ -680,6 +680,8 @@ mod source_scan {
     pub(crate) struct SourceFile {
         pub(crate) relative: String,
         pub(crate) production: String,
+        /// Functions the file compiles only in test builds.
+        pub(crate) test_only_functions: Vec<String>,
     }
 
     fn src_root() -> PathBuf {
@@ -844,16 +846,34 @@ mod source_scan {
         bytes.len()
     }
 
-    /// Remove gated items, returning the remaining text and the names of
-    /// gated `mod name;` declarations.
     enum GatedModule {
         Named(String),
         Path(String),
     }
 
-    fn strip_gated(source: &str) -> (String, Vec<GatedModule>) {
+    /// A source file split into production text and its gated items.
+    struct Stripped {
+        production: String,
+        modules: Vec<GatedModule>,
+        functions: Vec<String>,
+    }
+
+    /// The name of the item `declaration` declares with `keyword`.
+    fn declared_name<'a>(declaration: &'a str, keyword: &str) -> Option<&'a str> {
+        declaration.strip_prefix(keyword).map(|tail| {
+            tail.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .next()
+                .unwrap_or_default()
+                .trim()
+        })
+    }
+
+    /// Remove gated items, returning the remaining text with the gated
+    /// `mod name;` declarations and functions.
+    fn strip_gated(source: &str) -> Stripped {
         let mut production = String::with_capacity(source.len());
         let mut gated_modules = Vec::new();
+        let mut gated_functions = Vec::new();
         let mut rest = source;
         while !rest.is_empty() {
             let line_end = rest.find('\n').map_or(rest.len(), |end| end + 1);
@@ -888,20 +908,29 @@ mod source_scan {
             let declaration = item
                 .trim_start_matches("pub(crate) ")
                 .trim_start_matches("pub(super) ")
-                .trim_start_matches("pub ");
-            if let Some(name) = declaration.strip_prefix("mod ").map(|tail| {
-                tail.split(|character: char| !(character.is_alphanumeric() || character == '_'))
-                    .next()
-                    .unwrap_or_default()
-            }) {
-                gated_modules.push(path_attribute.map_or_else(
-                    || GatedModule::Named(name.trim().to_string()),
-                    GatedModule::Path,
-                ));
+                .trim_start_matches("pub ")
+                .trim_start_matches("const ")
+                .trim_start_matches("unsafe ");
+            if let Some(name) = declared_name(declaration, "mod ") {
+                gated_modules.push(
+                    path_attribute
+                        .map_or_else(|| GatedModule::Named(name.to_string()), GatedModule::Path),
+                );
+            } else if let Some(name) = declared_name(declaration, "fn ") {
+                gated_functions.push(name.to_string());
             }
             rest = &rest[len..];
         }
-        (production, gated_modules)
+        Stripped {
+            production,
+            modules: gated_modules,
+            functions: gated_functions,
+        }
+    }
+
+    /// The functions `source` compiles only in test builds.
+    pub(crate) fn test_only_functions(source: &str) -> Vec<String> {
+        strip_gated(source).functions
     }
 
     fn module_dir(file: &Path) -> PathBuf {
@@ -932,9 +961,9 @@ mod source_scan {
         let mut stripped = Vec::new();
         for path in all {
             let source = std::fs::read_to_string(&path).expect("read source");
-            let (production, gated) = strip_gated(&source);
+            let stripped_file = strip_gated(&source);
             let directory = module_dir(&path);
-            for module in gated {
+            for module in stripped_file.modules {
                 match module {
                     GatedModule::Named(name) => {
                         excluded.insert(directory.join(format!("{name}.rs")));
@@ -947,9 +976,9 @@ mod source_scan {
                     }
                 }
             }
-            stripped.push((path, production));
+            stripped.push((path, stripped_file.production, stripped_file.functions));
         }
-        for (path, production) in stripped {
+        for (path, production, test_only_functions) in stripped {
             if path.starts_with(src_root().join("bin"))
                 || excluded
                     .iter()
@@ -960,6 +989,7 @@ mod source_scan {
             files.push(SourceFile {
                 relative: relative(&path),
                 production,
+                test_only_functions,
             });
         }
         files
@@ -1132,6 +1162,145 @@ fn should_keep_simulation_out_of_production_builds() {
     );
 }
 
+/// Where the #808 WAL authority lives: replay, retention, publication,
+/// recovery planning and salvage.
+const WAL_AUTHORITY_SCOPE: &[&str] = &[
+    "src/wal/",
+    "src/runtime/actors/wal",
+    "src/runtime/state/recovery",
+    "src/runtime/cloud_startup/",
+    "src/runtime/event_loop/wal_retention",
+    "src/runtime/event_loop/cloud_integration",
+    "src/storage/hybrid_persistence",
+    "src/engine/startup/",
+];
+
+/// Words that name a replay, retention or planning path.
+const WAL_PATH_WORDS: &[&str] = &[
+    "replay",
+    "retire",
+    "retention",
+    "prune",
+    "salvage",
+    "plan",
+    "recover",
+];
+
+/// Test-only functions in the WAL authority scope that name a WAL path, each
+/// with why it may exist and the #808 stage that removes it. Tests must
+/// drive the production path; these are entry points the redesign retires.
+const TEST_ONLY_WAL_PATHS: &[(&str, &str, &str)] = &[
+    (
+        "src/runtime/state/recovery.rs",
+        "replay_wal",
+        "the production replay without a deadline; stage 2 replays the planned segment list",
+    ),
+    (
+        "src/runtime/state/recovery.rs",
+        "try_new_before_cloud_replay",
+        "loads metadata from a host directory for cloud replay tests; stage 2 plans cloud replay",
+    ),
+    (
+        "src/wal/recovery.rs",
+        "replay_wal",
+        "replays a directory without the manifest filter; stage 2 replaces directory replay",
+    ),
+    (
+        "src/wal/recovery.rs",
+        "replay_wal_with_policy",
+        "replays a directory without the manifest filter; stage 2 replaces directory replay",
+    ),
+    (
+        "src/wal/recovery.rs",
+        "reset_wal_replay_file_open_count",
+        "instrumentation for directory replay, which stage 2 replaces",
+    ),
+    (
+        "src/wal/recovery.rs",
+        "wal_replay_file_open_count",
+        "instrumentation for directory replay, which stage 2 replaces",
+    ),
+    (
+        "src/wal/recovery/streaming.rs",
+        "replay_wal_with_checkpoint",
+        "bounded replay through the infallible filter slot; stage 3 deletes the slot",
+    ),
+];
+
+/// A planted shadow, as a free function and as a method, beside production
+/// code and a test module.
+const PLANTED_SHADOWS: &str = r#"
+pub(crate) fn retire_segments() {}
+#[cfg(test)]
+pub(crate) fn retire_segments_for_test() { let _ = "}"; }
+impl Ledger {
+    #[cfg(any(test, feature = "internal-testing"))]
+    #[allow(clippy::unused_self)]
+    const fn plan_without_catalog(&self) {}
+    fn plan(&self) {}
+}
+#[cfg(test)]
+mod tests {
+    fn replay_helper() {}
+}
+"#;
+
+#[test]
+fn should_find_gated_functions_when_scanning_for_shadowed_wal_paths() {
+    // Arrange
+    let source = PLANTED_SHADOWS;
+
+    // Act
+    let functions = source_scan::test_only_functions(source);
+
+    // Assert
+    assert_eq!(
+        functions,
+        ["retire_segments_for_test", "plan_without_catalog"].map(str::to_string)
+    );
+}
+
+/// No test-only function in the WAL authority scope reimplements a
+/// production replay, retention or planning path, so tests exercise what
+/// ships (#808, #837).
+#[test]
+fn should_not_shadow_production_wal_paths_in_tests() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let found: std::collections::BTreeSet<(String, String)> = files
+        .iter()
+        .filter(|file| {
+            WAL_AUTHORITY_SCOPE
+                .iter()
+                .any(|scope| file.relative.starts_with(scope))
+        })
+        .flat_map(|file| {
+            file.test_only_functions
+                .iter()
+                .filter(|name| WAL_PATH_WORDS.iter().any(|word| name.contains(word)))
+                .map(|name| (file.relative.clone(), name.clone()))
+        })
+        .collect();
+
+    // Assert
+    let listed: std::collections::BTreeSet<(String, String)> = TEST_ONLY_WAL_PATHS
+        .iter()
+        .map(|(file, name, _)| ((*file).to_string(), (*name).to_string()))
+        .collect();
+    let unlisted: Vec<_> = found.difference(&listed).collect();
+    assert!(
+        unlisted.is_empty(),
+        "test-only functions shadow production WAL paths; drive the production path instead: {unlisted:#?}"
+    );
+    let stale: Vec<_> = listed.difference(&found).collect();
+    assert!(
+        stale.is_empty(),
+        "remove deleted entries from TEST_ONLY_WAL_PATHS: {stale:#?}"
+    );
+}
+
 /// Code the #808 redesign deleted. Each entry names the issue that removed
 /// it; nothing in the crate, its tests, benches, examples or fuzz targets may
 /// bring it back. Entries are whole identifiers or path segments.
@@ -1157,6 +1326,10 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("local_sst_is_definitively_missing", "#825"),
     ("verify_storage_path_with_sst_fs", "#825"),
     ("recovery_cloud_wal_dir", "#825"),
+    ("replay_wal_with_manifest_filter", "#837"),
+    ("create_replay_spool", "#837"),
+    ("inject_spool_create_io", "#837"),
+    ("spool_create_io_injected", "#837"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
