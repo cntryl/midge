@@ -178,7 +178,7 @@ impl EventLoop {
                 .hybrid_storage
                 .as_ref()
                 .map_or(0, |storage| storage.pending_upload_count()),
-            wal_segments_acked = self.cloud_coordinator.cloud_wal.acked_segments.len(),
+            wal_segments_acked = self.cloud_coordinator.cloud_wal.acked().len(),
             wal_prunes_inflight = self.cloud_coordinator.cloud_wal.prune_inflight.len(),
             wal_preflight_worker_owned = self.cloud_coordinator.cloud_wal_prune_worker.is_some(),
             "Runtime shutdown started"
@@ -254,10 +254,10 @@ impl EventLoop {
             && !deadline.is_expired()
         {
             // UploadQueue and the runtime backlog are two ownership domains
-            // for the same accepted WAL obligation. Terminal storage failure
-            // transfers work back to the latter, so shutdown must keep
-            // admitting it until durability closes or the configured drain
-            // deadline expires.
+            // for the same accepted WAL obligation. A failed readback or
+            // publication transfers work back to the latter, so shutdown must
+            // keep admitting it until durability closes or the configured
+            // drain deadline expires.
             self.drain_cloud_wal_upload_backlog_within(deadline);
             self.tick_hybrid_storage_within(deadline);
             self.drain_hybrid_storage_events_within(deadline);

@@ -40,6 +40,21 @@ mod retirement_lifetime;
 /// keeps exactly the entry points it calls - the batched
 /// `prune_cloud_wal_segments_within` and nothing narrower.
 impl CloudPersistence {
+    /// Verify one segment's upload and publish it alone: the two production
+    /// calls the runtime makes, without its contiguous selection.
+    pub(crate) fn publish_remote_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        source: &crate::io::FsLocation,
+        fencing_epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
+        let upload =
+            self.verify_uploaded_wal_segment(segment_id, expected_max_sequence, source, deadline)?;
+        Ok(self.publish_wal_segments(&[upload], fencing_epoch, deadline)?)
+    }
+
     pub(crate) fn verify_remote_wal_segment(
         &self,
         segment_id: u64,
@@ -1252,7 +1267,7 @@ fn write_authoritative_cloud_wal(
         crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
             .expect("decode test WAL catalog");
     catalog
-        .publish(2, publication.clone())
+        .append_run(2, std::slice::from_ref(&publication))
         .expect("publish test WAL authority");
     storage
         .compare_exchange_remote_object(
@@ -2773,43 +2788,124 @@ fn should_not_overwrite_existing_remote_wal_during_upload() {
             upload_max_sequence,
         )
         .expect("enqueue WAL upload");
-    storage.process_uploads();
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut saw_fail = false;
-    let mut saw_ack = false;
-    while Instant::now() < deadline {
-        for event in storage.process_uploads() {
-            match event {
-                StorageEvent::CloudFail {
-                    segment_id: failed_segment,
-                    ..
-                } if failed_segment == segment_id => saw_fail = true,
-                StorageEvent::CloudAck {
-                    segment_id: acked_segment,
-                    ..
-                } if acked_segment == segment_id => saw_ack = true,
-                _ => {}
-            }
-        }
-        if saw_fail || saw_ack {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
 
     // Act
+    let events = drive_wal_upload_until(&storage, Duration::from_secs(2), |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                StorageEvent::CloudFail { .. } | StorageEvent::CloudAck { .. }
+            )
+        })
+    });
+
     // Assert
-    assert!(saw_fail, "existing remote WAL object must fail upload");
     assert!(
-        !saw_ack,
+        events.iter().any(|event| matches!(
+            event,
+            StorageEvent::CloudFail {
+                segment_id: failed_segment,
+                failures: 1,
+                failure_kind: crate::storage::CloudUploadFailureKind::Corruption,
+                ..
+            } if *failed_segment == segment_id
+        )),
+        "an existing object with other bytes is corruption: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StorageEvent::CloudAck { .. })),
         "existing remote WAL object must not produce a CloudAck"
+    );
+    storage.process_uploads();
+    assert_eq!(
+        storage.pending_upload_count(),
+        0,
+        "no retry can upload over a corrupt object"
     );
     assert_eq!(
         read_cloud_object(&storage, &key),
         existing_bytes,
         "upload must not overwrite an existing remote WAL object"
     );
+}
+
+#[test]
+fn should_acknowledge_wal_upload_when_remote_object_holds_the_same_bytes() {
+    // Arrange: an earlier attempt already landed the same bytes.
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create WAL dir");
+    let segment_id = 14;
+    let max_sequence = 24;
+    let bytes = valid_wal_bytes(max_sequence);
+    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    write_cloud_object(&storage, &key, bytes.clone());
+    let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&wal_path, &bytes).expect("write local WAL");
+    storage
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::host_file(&wal_path),
+            segment_id,
+            max_sequence,
+        )
+        .expect("enqueue WAL upload");
+
+    // Act
+    let events = drive_wal_upload_until(&storage, Duration::from_secs(2), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, StorageEvent::CloudAck { .. }))
+    });
+
+    // Assert
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StorageEvent::CloudAck {
+                segment_id: acked_segment,
+                max_sequence: acked_max_sequence,
+            } if *acked_segment == segment_id && *acked_max_sequence == max_sequence
+        )),
+        "an existing object with the same bytes is this upload: {events:?}"
+    );
+    assert_eq!(read_cloud_object(&storage, &key), bytes);
+}
+
+/// Drive the upload queue until `done` holds for the events seen so far, or
+/// `budget` passes; return those events.
+fn drive_wal_upload_until(
+    storage: &HybridStorage,
+    budget: Duration,
+    done: impl Fn(&[StorageEvent]) -> bool,
+) -> Vec<StorageEvent> {
+    let deadline = Instant::now() + budget;
+    let mut events = Vec::new();
+    while Instant::now() < deadline {
+        events.extend(storage.process_uploads());
+        if done(&events) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    events
+}
+
+/// Each failed attempt's `(failures, failure_kind)`, in order.
+fn wal_upload_failures(
+    events: &[StorageEvent],
+) -> Vec<(u32, crate::storage::CloudUploadFailureKind)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StorageEvent::CloudFail {
+                failures,
+                failure_kind,
+                ..
+            } => Some((*failures, *failure_kind)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -2866,21 +2962,33 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     );
 }
 
-#[test]
-fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
-    // Arrange
-    let tmp = tempfile::tempdir().expect("create WAL retry test dir");
-    let write_attempts = Arc::new(AtomicUsize::new(0));
-    let cloud = Arc::new(AlwaysFailingWriteBackend::new(Arc::clone(&write_attempts)));
-    let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )));
-    let segment_id = 11;
-    let max_sequence = 21;
-    let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
-    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+/// Hybrid storage over `cloud` whose failed WAL uploads retry by `retry`.
+fn hybrid_with_wal_upload_retry(
+    cloud: Arc<dyn crate::storage::StorageBackend>,
+    retry: crate::storage::hybrid::backend::WalUploadRetryPolicy,
+) -> CloudPersistence {
+    CloudPersistence::new(Arc::new(
+        HybridStorage::with_policy_event_sender_and_limits(
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            None,
+            HybridQueueLimits {
+                wal_upload_retry: retry,
+                ..HybridQueueLimits::default()
+            },
+        ),
+    ))
+}
 
+/// Queue a valid sealed WAL segment for upload.
+fn enqueue_test_wal_upload(
+    storage: &CloudPersistence,
+    dir: &std::path::Path,
+    segment_id: u64,
+    max_sequence: u64,
+) {
+    let wal_path = dir.join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
     storage
         .enqueue_wal_segment(
             &crate::io::FsLocation::host_file(&wal_path),
@@ -2888,60 +2996,129 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
             max_sequence,
         )
         .expect("enqueue WAL upload");
+}
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut observed_terminal_failures = Vec::new();
-    while Instant::now() < deadline {
-        let events = storage.process_uploads();
-        observed_terminal_failures.extend(events.into_iter().filter_map(|event| match event {
-            StorageEvent::CloudFail {
-                terminal,
-                failure_kind,
-                ..
-            } => Some((terminal, failure_kind)),
-            _ => None,
-        }));
-        if storage.pending_upload_count() == 0 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+#[test]
+fn should_keep_retrying_failed_wal_upload_when_every_attempt_fails() {
+    // Arrange: retries are due at once, so the test waits on attempts, not
+    // on the wall clock.
+    let tmp = tempfile::tempdir().expect("create WAL retry test dir");
+    let write_attempts = Arc::new(AtomicUsize::new(0));
+    let storage = hybrid_with_wal_upload_retry(
+        Arc::new(AlwaysFailingWriteBackend::new(Arc::clone(&write_attempts))),
+        crate::storage::hybrid::backend::WalUploadRetryPolicy {
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        },
+    );
+    enqueue_test_wal_upload(&storage, tmp.path(), 11, 21);
 
     // Act
-    // Assert
+    let events = drive_wal_upload_until(&storage, Duration::from_secs(30), |events| {
+        wal_upload_failures(events).len() >= 6
+    });
+
+    // Assert: every failure is reported with its count, past the three
+    // attempts a waiter is owed, and the upload stays queued.
+    let other = crate::storage::CloudUploadFailureKind::Other;
     assert_eq!(
-        write_attempts.load(Ordering::SeqCst),
-        3,
-        "permanently failing WAL uploads should stop after the retry budget"
-    );
-    assert_eq!(
-        observed_terminal_failures,
-        vec![
-            (false, crate::storage::CloudUploadFailureKind::Other),
-            (false, crate::storage::CloudUploadFailureKind::Other),
-            (true, crate::storage::CloudUploadFailureKind::Other),
-        ],
-        "only the failure that exhausts storage retry ownership may be terminal"
+        wal_upload_failures(&events)[..6],
+        [
+            (1, other),
+            (2, other),
+            (3, other),
+            (4, other),
+            (5, other),
+            (6, other)
+        ]
     );
     assert_eq!(
         storage.pending_upload_count(),
-        0,
-        "exhausted WAL uploads must leave the queue so cleanup and shutdown are bounded"
+        1,
+        "a failed WAL upload is never dropped from the queue"
     );
 }
 
 #[test]
-fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
-    // Arrange
+fn should_hold_failed_wal_upload_until_its_retry_delay_passes() {
+    // Arrange: a retry delay far longer than the test.
+    let tmp = tempfile::tempdir().expect("create WAL backoff test dir");
+    let write_attempts = Arc::new(AtomicUsize::new(0));
+    let hour = Duration::from_secs(3600);
+    let storage = hybrid_with_wal_upload_retry(
+        Arc::new(AlwaysFailingWriteBackend::new(Arc::clone(&write_attempts))),
+        crate::storage::hybrid::backend::WalUploadRetryPolicy {
+            base_delay: hour,
+            max_delay: hour,
+        },
+    );
+    enqueue_test_wal_upload(&storage, tmp.path(), 11, 21);
+    drive_wal_upload_until(&storage, Duration::from_secs(30), |events| {
+        !wal_upload_failures(events).is_empty()
+    });
+
+    // Act
+    for _ in 0..20 {
+        storage.process_uploads();
+    }
+    let turn = storage.next_upload_turn(Duration::from_millis(1));
+
+    // Assert
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 1);
+    assert!(
+        turn.is_some_and(|turn| turn > Duration::from_mins(59)),
+        "a backed-off upload must not keep its caller polling: {turn:?}"
+    );
+}
+
+#[test]
+fn should_keep_wal_upload_queued_when_upload_worker_panics() {
+    // Arrange: retries wait an hour, so the first failure is the last.
     let tmp = tempfile::tempdir().expect("create WAL worker panic test dir");
     let write_attempts = Arc::new(AtomicUsize::new(0));
-    let cloud = Arc::new(PanickingWriteBackend::new(Arc::clone(&write_attempts)));
-    let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
+    let hour = Duration::from_secs(3600);
+    let storage = hybrid_with_wal_upload_retry(
+        Arc::new(PanickingWriteBackend::new(Arc::clone(&write_attempts))),
+        crate::storage::hybrid::backend::WalUploadRetryPolicy {
+            base_delay: hour,
+            max_delay: hour,
+        },
+    );
+    enqueue_test_wal_upload(&storage, tmp.path(), 12, 22);
+
+    // Act
+    let events = drive_wal_upload_until(&storage, Duration::from_secs(30), |events| {
+        !wal_upload_failures(events).is_empty()
+    });
+
+    // Assert
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        wal_upload_failures(&events),
+        [(1, crate::storage::CloudUploadFailureKind::Other)],
+        "a panicking worker is a failed attempt like any other"
+    );
+    assert_eq!(storage.pending_upload_count(), 1);
+}
+
+#[test]
+fn should_end_wal_upload_without_attempting_it_when_writer_is_fenced() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create fenced WAL upload dir");
+    let write_attempts = Arc::new(AtomicUsize::new(0));
+    let cloud = Arc::new(AlwaysFailingWriteBackend::new(Arc::clone(&write_attempts)));
+    let hybrid = Arc::new(HybridStorage::with_policy(
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )));
-    let segment_id = 12;
-    let max_sequence = 22;
+    ));
+    hybrid
+        .configure_write_authority(Arc::new(|| {
+            Err(MidgeError::Fenced("test writer lost its lease".to_string()))
+        }))
+        .expect("install write authority");
+    let storage = CloudPersistence::new(hybrid);
+    let segment_id = 13;
+    let max_sequence = 23;
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
     storage
@@ -2953,31 +3130,17 @@ fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
         .expect("enqueue WAL upload");
 
     // Act
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let mut terminal_failure = false;
-    while Instant::now() < deadline {
-        terminal_failure |= storage.process_uploads().into_iter().any(|event| {
-            matches!(
-                event,
-                StorageEvent::CloudFail {
-                    segment_id: failed_segment,
-                    terminal: true,
-                    ..
-                } if failed_segment == segment_id
-            )
-        });
-        if storage.pending_upload_count() == 0 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let events = drive_wal_upload_until(&storage, Duration::from_millis(500), |events| {
+        !wal_upload_failures(events).is_empty()
+    });
+    storage.process_uploads();
 
     // Assert
-    assert_eq!(write_attempts.load(Ordering::SeqCst), 3);
-    assert!(
-        terminal_failure,
-        "worker panic must transfer retry ownership"
+    assert_eq!(
+        wal_upload_failures(&events),
+        vec![(1, crate::storage::CloudUploadFailureKind::Fenced)]
     );
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 0);
     assert_eq!(storage.pending_upload_count(), 0);
 }
 
@@ -3009,7 +3172,7 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&first_path), 1, 1)
         .expect("first upload must fit");
     assert!(matches!(
-        storage.ensure_wal_write_admission(),
+        storage.ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default()),
         Err(crate::common::MidgeError::WriteStall(_))
     ));
 
@@ -3021,7 +3184,7 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
     // Assert
     assert!(matches!(error, crate::common::MidgeError::WriteStall(_)));
     assert!(matches!(
-        storage.ensure_wal_write_admission(),
+        storage.ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default()),
         Err(crate::common::MidgeError::WriteStall(_))
     ));
     assert_eq!(storage.pending_upload_count(), 1);
@@ -3059,25 +3222,31 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
     let _ = storage
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&second_path), 22, 22)
         .expect_err("capacity must reject second upload");
-    assert!(storage.ensure_wal_write_admission().is_err());
+    assert!(storage
+        .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+        .is_err());
 
     // Act
     storage.process_uploads();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline && storage.ensure_wal_write_admission().is_err() {
+    while Instant::now() < deadline
+        && storage
+            .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+            .is_err()
+    {
         storage.process_uploads();
         std::thread::sleep(Duration::from_millis(5));
     }
 
     // Assert
     storage
-        .ensure_wal_write_admission()
+        .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
         .expect("completed upload must reopen admission");
     assert_eq!(storage.pending_upload_count(), 0);
 }
 
 #[test]
-fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_times_out() {
+fn should_keep_storage_reservation_for_retry_when_upload_callbacks_are_lost() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create callback timeout test dir");
     let cloud = Arc::new(NeverCompletesBackend::default());
@@ -3100,41 +3269,36 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&wal_path), 3, 3)
         .expect("enqueue WAL upload");
     assert!(
-        storage.ensure_wal_write_admission().is_err(),
+        storage
+            .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+            .is_err(),
         "the only queue reservation must close write admission while upload is stuck"
     );
     storage.process_uploads();
 
     // Act
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let mut timeout_failures = 0;
-    while Instant::now() < deadline && storage.pending_upload_count() != 0 {
-        timeout_failures += storage
-            .process_uploads()
-            .into_iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    StorageEvent::CloudFail {
-                        error,
-                        failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
-                        ..
-                    } if error.contains("timed out")
-                )
-            })
-            .count();
-        if storage.pending_upload_count() == 0 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let events = drive_wal_upload_until(&storage, Duration::from_secs(1), |events| {
+        wal_upload_failures(events).len() >= 3
+    });
 
-    // Assert
-    assert_eq!(timeout_failures, 3, "every bounded retry must time out");
-    assert_eq!(storage.pending_upload_count(), 0);
-    storage
-        .ensure_wal_write_admission()
-        .expect("terminal callback timeouts must release the queue reservation");
+    // Assert: every lost callback times out, so the worker is never stuck,
+    // and the upload stays queued for its next attempt.
+    let timeout = crate::storage::CloudUploadFailureKind::Timeout;
+    assert_eq!(
+        wal_upload_failures(&events),
+        [(1, timeout), (2, timeout), (3, timeout)]
+    );
+    assert!(events.iter().all(|event| match event {
+        StorageEvent::CloudFail { error, .. } => error.contains("timed out"),
+        _ => true,
+    }));
+    assert_eq!(storage.pending_upload_count(), 1);
+    assert!(
+        storage
+            .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+            .is_err(),
+        "the retained upload keeps its queue reservation"
+    );
 }
 
 #[test]
@@ -3657,4 +3821,55 @@ mod recovery_wal_coverage {
             1
         );
     }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_poll_no_faster_than_its_interval_when_overdue_retries_cannot_start() {
+    // Arrange: one worker slot. The worker holds the first upload and the
+    // channel the second; the next two fail at once with no retry delay,
+    // so their retries are overdue but cannot start.
+    let tmp = tempfile::tempdir().expect("create overdue retry dir");
+    let storage = CloudPersistence::new(Arc::new(
+        HybridStorage::with_policy_event_sender_and_limits(
+            Arc::new(NeverCompletesBackend::default()),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            None,
+            HybridQueueLimits {
+                worker_entries: 1,
+                callback_timeout: Duration::from_millis(100),
+                wal_upload_retry: crate::storage::hybrid::backend::WalUploadRetryPolicy {
+                    base_delay: Duration::ZERO,
+                    max_delay: Duration::ZERO,
+                },
+                ..HybridQueueLimits::default()
+            },
+        ),
+    ));
+    // Holding the failpoint gate keeps the worker on its first upload.
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    enqueue_test_wal_upload(&storage, tmp.path(), 1, 1);
+    enqueue_test_wal_upload(&storage, tmp.path(), 2, 2);
+    storage.process_uploads();
+    enqueue_test_wal_upload(&storage, tmp.path(), 3, 3);
+    enqueue_test_wal_upload(&storage, tmp.path(), 4, 4);
+    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
+        .expect("configure WAL upload failures");
+    storage.process_uploads();
+    fail::remove("midge::cloud::inject_fail_wal_upload");
+    let poll = Duration::from_millis(5);
+
+    // Act
+    storage.process_uploads();
+    let turn = storage.next_upload_turn(poll);
+
+    // Assert
+    scenario.teardown();
+    drop(test_guard);
+    assert_eq!(
+        turn,
+        Some(poll),
+        "overdue retries behind a full worker must not spin the event loop"
+    );
 }

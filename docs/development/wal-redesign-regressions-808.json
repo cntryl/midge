@@ -88,8 +88,7 @@
       "target": "lib",
       "source": "src/runtime/event_loop/cloud_integration/tests.rs",
       "test": "should_not_publish_later_upload_when_preceding_segment_is_unacknowledged",
-      "baseline": "red",
-      "failure_marker": "catalog published across an unacknowledged predecessor"
+      "baseline": "green"
     },
     {
       "id": "restarted-segment-id",

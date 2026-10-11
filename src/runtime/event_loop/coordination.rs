@@ -9,10 +9,19 @@ const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Owns cloud WAL admission, acknowledgement, pruning, and cleanup proof state.
 pub(crate) struct CloudWalUploadTracker {
-    pub(super) acked_segments: BTreeMap<u64, u64>,
+    /// Acknowledged segments, each with the last sequence it holds: verified
+    /// uploads, and segments recovery found published.
+    acked_segments: BTreeMap<u64, u64>,
+    /// The verified uploads among `acked_segments` the catalog does not
+    /// publish yet, each as publication adds it. An upload waits here until
+    /// every earlier segment is uploaded too, so they publish as one
+    /// contiguous run (#841).
+    uploaded: BTreeMap<u64, crate::wal::cloud_catalog::PublishedWalSegment>,
     pub(super) upload_backlog: BTreeMap<u64, u64>,
     /// Earliest time at which runtime-owned WAL upload obligations may be
-    /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
+    /// resubmitted: a completed upload whose readback or publication failed,
+    /// or one deferred for memory. A failed upload attempt never comes back
+    /// here; `HybridStorage` retries it itself.
     upload_retry: crate::runtime::retry_schedule::RetrySchedule,
     pub(super) prune_inflight: HashSet<u64>,
 }
@@ -21,11 +30,75 @@ impl CloudWalUploadTracker {
     pub(super) fn new(acked_segments: BTreeMap<u64, u64>) -> Self {
         Self {
             acked_segments,
+            uploaded: BTreeMap::new(),
             upload_backlog: BTreeMap::new(),
             upload_retry: crate::runtime::retry_schedule::RetrySchedule::new(
                 CLOUD_WAL_RUNTIME_RETRY_DELAY,
             ),
             prune_inflight: HashSet::new(),
+        }
+    }
+
+    /// Acknowledged segments, each with the last sequence it holds.
+    pub(super) fn acked(&self) -> &BTreeMap<u64, u64> {
+        &self.acked_segments
+    }
+
+    /// Acknowledge `segment_id` as published, as recovery would.
+    #[cfg(test)]
+    pub(super) fn acknowledge_for_test(&mut self, segment_id: u64, max_sequence: u64) {
+        self.acked_segments.insert(segment_id, max_sequence);
+    }
+
+    /// Acknowledge a verified upload. It is not published yet.
+    pub(super) fn record_upload(&mut self, upload: crate::wal::cloud_catalog::PublishedWalSegment) {
+        self.acked_segments
+            .insert(upload.segment_id, upload.max_sequence);
+        self.uploaded.insert(upload.segment_id, upload);
+    }
+
+    /// Withdraw a segment's acknowledgement, so no run publishes past it
+    /// until it is verified again.
+    pub(super) fn forget_upload(&mut self, segment_id: u64) {
+        self.acked_segments.remove(&segment_id);
+        self.uploaded.remove(&segment_id);
+    }
+
+    /// The catalog no longer publishes `segment_id`: pruning retired it.
+    pub(super) fn retire_pruned(&mut self, segment_id: u64) {
+        self.acked_segments.remove(&segment_id);
+    }
+
+    /// What publishing `run`, a contiguous run of acknowledged segments,
+    /// adds: its verified uploads, oldest first. Segments recovery found
+    /// published add nothing.
+    pub(super) fn unpublished_uploads(
+        &self,
+        run: &[crate::wal::publish::OwedSegment],
+    ) -> Vec<crate::wal::cloud_catalog::PublishedWalSegment> {
+        run.iter()
+            .filter_map(|segment| self.uploaded.get(&segment.segment_id).cloned())
+            .collect()
+    }
+
+    /// The catalog now publishes `run`.
+    pub(super) fn mark_published(&mut self, run: &[crate::wal::publish::OwedSegment]) {
+        for segment in run {
+            self.uploaded.remove(&segment.segment_id);
+        }
+    }
+
+    /// The verified uploads still waiting to be published: they hold local
+    /// WAL the writer owes the cloud, and count against the upload queue's
+    /// limits.
+    pub(super) fn held_uploads(&self) -> crate::storage::hybrid::backend::HeldUploads {
+        crate::storage::hybrid::backend::HeldUploads {
+            entries: self.uploaded.len(),
+            bytes: self
+                .uploaded
+                .values()
+                .map(|upload| upload.size_bytes)
+                .fold(0, u64::saturating_add),
         }
     }
 
@@ -328,7 +401,7 @@ mod tests {
         tracker.upload_backlog.insert(4, 52);
 
         // Assert
-        assert_eq!(tracker.acked_segments.get(&3), Some(&41));
+        assert_eq!(tracker.acked().get(&3), Some(&41));
         assert!(tracker.has_pending_uploads());
     }
 

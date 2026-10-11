@@ -52,8 +52,11 @@
 //!   → runtime::hybrid_persistence maps the WAL object key
 //!   → HybridStorage::enqueue_object_upload()
 //!   → [Pending] → [InProgress] → [Completed]
+//!     (a failed attempt waits in [Failed] and retries with backoff)
 //!   → CloudStorage (upload via CloudExecutor)
 //!   → StorageEvent::CloudAck(segment_id)
+//!   → runtime records the upload, then publishes the contiguous run
+//!     of uploads past the catalog head (`wal::publish`)
 //!   → cloud durability frontier advance
 //! ```
 //!
@@ -94,7 +97,7 @@ pub use hybrid::backend::HybridStorage;
 //   3. Runtime owns WAL/SST/manifest meaning. HybridStorage owns:
 //        - raw local and remote object I/O
 //        - bounded cloud upload
-//        - retry on failure
+//        - retry on failure, with backoff, until the upload succeeds
 //        - disk watermark backpressure
 //        - emitting StorageEvent::CloudAck(segment_id)
 //
@@ -254,6 +257,19 @@ impl StorageObjectMetadata {
 pub enum CloudUploadFailureKind {
     Other,
     Timeout,
+    /// The object under the segment's key holds other bytes. Objects are
+    /// immutable, so no retry can upload this segment.
+    Corruption,
+    /// The writer lost its authority, so its uploads stop.
+    Fenced,
+}
+
+impl CloudUploadFailureKind {
+    /// Whether no retry can succeed, so the upload leaves the queue.
+    #[must_use]
+    pub fn ends_upload(self) -> bool {
+        matches!(self, Self::Corruption | Self::Fenced)
+    }
 }
 
 /// Select exactly the identity used by conditional mutations. GCS JSON
@@ -312,13 +328,14 @@ pub enum StorageEvent {
     CloudAck { segment_id: u64, max_sequence: u64 },
     /// Cloud upload attempt failed - segment NOT durable.
     ///
-    /// While `terminal` is false, `HybridStorage` still owns an internal retry.
-    /// A terminal failure transfers the accepted local WAL obligation back to
-    /// the runtime for delayed callerless retry.
+    /// `HybridStorage` keeps a failed WAL upload queued and retries it with
+    /// backoff until it succeeds, unless `failure_kind` ends it. `failures`
+    /// counts this upload's failed attempts so far, this one included; the
+    /// runtime decides when its waiters stop waiting.
     CloudFail {
         segment_id: u64,
         error: String,
-        terminal: bool,
+        failures: u32,
         failure_kind: CloudUploadFailureKind,
     },
     /// Remote WAL pruning completed after the segment became covered by

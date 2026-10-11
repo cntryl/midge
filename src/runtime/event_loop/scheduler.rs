@@ -101,9 +101,7 @@ impl EventLoop {
             self.cloud_coordinator
                 .hybrid_storage
                 .as_ref()
-                .and_then(|storage| {
-                    (storage.pending_upload_count() > 0).then_some(HYBRID_STORAGE_POLL_INTERVAL)
-                }),
+                .and_then(|storage| storage.next_upload_turn(HYBRID_STORAGE_POLL_INTERVAL)),
             // Terminal storage events can arrive before the prune thread
             // exits. Keep observing the handle after its last event so the
             // publication gate and queued manual requests cannot lose a wake.

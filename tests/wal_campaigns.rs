@@ -38,9 +38,9 @@ mod workload;
 
 use config::{Config, Mode, StoreFaults, RENEWING_LEASE_TTL_MILLIS};
 use harness::{Campaign, FindingKind, Stop, LEASE_LOCK};
-use images::{assert_clean, assert_replays, assert_reproduced, load_image};
-use known::{loses_required_value, publishes_out_of_order, resurrects};
-use search::{campaign, campaign_beyond};
+use images::{assert_clean, assert_reproduced, load_image};
+use known::{loses_required_value, resurrects};
+use search::campaign;
 use std::path::Path;
 use workload::{control_seeds, Durability, Op, Profile, DEFAULT, DETECTION_SEEDS, KEYS};
 
@@ -307,10 +307,15 @@ fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
     assert_clean("simulated-cloud-control", finding);
 }
 
+/// Formerly the detection of `out-of-order-publication` (#841): the catalog
+/// published later segments past one whose uploads failed, so a takeover
+/// recovered later writes without earlier ones. Publication now waits for a
+/// contiguous run, and failed uploads keep retrying.
 #[test]
-fn should_reproduce_out_of_order_publication_when_a_segment_exhausts_its_uploads() {
-    // Arrange: every upload attempt of segment 1 fails, and segments seal
-    // every two asynchronous writes, so later segments upload past it.
+fn should_keep_earlier_writes_when_a_segment_exhausts_its_upload_attempts() {
+    // Arrange: segment 1's first three upload attempts fail, and segments
+    // seal every two asynchronous writes, so later segments upload past it.
+    // The store settles before a fresh-cache takeover.
     let config = Config {
         segment_reuse: false,
         store_faults: StoreFaults::FailSegment {
@@ -334,19 +339,13 @@ fn should_reproduce_out_of_order_publication_when_a_segment_exhausts_its_uploads
         .map(|finding| *finding);
 
     // Assert
-    assert_replays(
-        "out-of-order-publication",
-        finding,
-        publishes_out_of_order,
-        |replayed, found| replayed == found,
-    );
+    assert_clean("segment-upload-attempts", finding);
 }
 
 #[test]
-fn should_find_only_out_of_order_publication_when_cloud_uploads_fail() {
+fn should_find_no_violation_when_cloud_uploads_fail() {
     // Arrange: WAL and SST uploads and deletes fail before or after their
-    // effect, lose their answer or land late. `out-of-order-publication`
-    // is known; any other finding is new.
+    // effect, lose their answer or land late.
     let workloads = control_seeds(16);
     let config = Config {
         segment_reuse: false,
@@ -355,13 +354,7 @@ fn should_find_only_out_of_order_publication_when_cloud_uploads_fail() {
     };
 
     // Act
-    let (finding, _known) = campaign_beyond(
-        Profile::CloudFaults,
-        workloads,
-        12,
-        config,
-        publishes_out_of_order,
-    );
+    let finding = campaign(Profile::CloudFaults, workloads, 12, config);
 
     // Assert
     assert_clean("cloud-faults", finding);

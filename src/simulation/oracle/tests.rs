@@ -363,37 +363,6 @@ fn should_renumber_promises_when_an_earlier_commit_is_forgotten() {
 }
 
 #[test]
-fn should_explain_hole_out_of_order_when_a_later_commit_survives_alone() {
-    // Arrange: an earlier unpromised put is lost while a later one survives.
-    let mut history = history();
-    history.commit(put("a", "v1"));
-    history.commit(put("b", "v2"));
-    let observed = observed(&[("b", "v2")]);
-
-    // Act
-    let in_order = history.check(&observed, &families());
-    let out_of_order = history.allowed_out_of_order(&key("a"));
-
-    // Assert
-    assert!(matches!(in_order, Verdict::Violation(_)), "{in_order:?}");
-    assert!(out_of_order.contains(&None));
-}
-
-#[test]
-fn should_not_explain_lost_promise_out_of_order_when_a_synced_commit_is_lost() {
-    // Arrange
-    let mut history = history();
-    let synced = history.commit(put("a", "v1"));
-    history.synced(synced);
-
-    // Act
-    let out_of_order = history.allowed_out_of_order(&key("a"));
-
-    // Assert
-    assert_eq!(out_of_order, vec![Some(b"v1".to_vec())]);
-}
-
-#[test]
 fn should_not_promise_a_lost_commit_when_a_fresh_cache_follows_a_surviving_one() {
     // Arrange: an unpromised put is lost at a surviving-cache recovery, and
     // a later flush promises only what remained.
@@ -469,17 +438,16 @@ fn should_rebase_cloud_history_when_a_fresh_cache_takes_over() {
 }
 
 #[test]
-fn should_explain_hole_when_a_later_put_outlives_an_earlier_one() {
+fn should_reject_hole_when_a_fresh_cache_recovers_a_later_put_without_an_earlier_one() {
     // Arrange
     let mut histories = Histories::new(BTreeMap::new(), families());
     histories.commit(put("a", "v1"));
     histories.commit(put("b", "v2"));
 
     // Act
-    let violation = histories
-        .check(Recovery::FreshCache, observed(&[("b", "v2")]), families())
-        .expect_err("a hole");
+    let recovered = histories.check(Recovery::FreshCache, observed(&[("b", "v2")]), families());
 
     // Assert
-    assert!(histories.explains_out_of_order(&violation));
+    let violation = recovered.expect_err("a later put survived an earlier, lost one");
+    assert!(!violation.keys.is_empty(), "{violation:?}");
 }

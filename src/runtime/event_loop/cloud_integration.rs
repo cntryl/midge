@@ -8,6 +8,7 @@ use std::convert::TryFrom;
 
 mod ack;
 mod metadata;
+mod publication;
 mod sealing;
 
 impl EventLoop {

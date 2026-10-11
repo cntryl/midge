@@ -18,10 +18,7 @@ fn should_preserve_gc_pin_when_prune_completion_has_no_matching_admission(
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked_segments.get(&1),
-        Some(&10)
-    );
+    assert_eq!(el.cloud_coordinator.cloud_wal.acked().get(&1), Some(&10));
     Ok(())
 }
 
@@ -42,11 +39,7 @@ fn should_preserve_gc_pin_when_exact_sst_prune_proof_fails() -> crate::common::M
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&1));
+    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
@@ -71,11 +64,7 @@ fn should_preserve_gc_pin_when_catalog_retirement_uses_a_stale_writer_epoch(
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&1));
+    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
@@ -105,11 +94,7 @@ fn should_preserve_gc_pin_when_local_unlink_fails_after_catalog_retirement(
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&1));
+    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
     assert!(el.state.persistence_anomaly_detected());
     Ok(())
 }

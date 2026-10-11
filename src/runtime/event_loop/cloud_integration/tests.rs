@@ -84,11 +84,7 @@ fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
     // Act: one failed cloud proof gives the next ready flush its turn.
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&81));
+    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
     el.schedule_next_flush_worker();
     assert!(
         el.flush_actor.is_inflight(),
@@ -114,11 +110,7 @@ fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
     drain_prune_completion_for_test(&mut el);
 
     // Assert: an immutable remains ready throughout the second proof attempt.
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&81));
+    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
     assert!(!remote_wal_path_for_test(&el, 81).exists());
     assert!(el.state.has_due_immutable_flush());
     assert_eq!(el.state.flush_metrics.publish_count, 1);
@@ -176,10 +168,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     assert_eq!(active, 1);
     assert!(el.state.manifest.files.iter().any(|file| file.level > 0));
     assert!(
-        !el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .contains_key(&81),
+        !el.cloud_coordinator.cloud_wal.acked().contains_key(&81),
         "retirement receives the next turn after compaction"
     );
     // Draining retirement completion releases its gate; the run loop gives
@@ -274,16 +263,9 @@ fn should_schedule_wal_retirement_before_another_ready_flush() -> crate::common:
     );
     assert!(!el.flush_actor.is_inflight());
     drain_prune_completion_for_test(&mut el);
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&81));
+    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .contains_key(&82),
+        el.cloud_coordinator.cloud_wal.acked().contains_key(&82),
         "the immutable generation's first segment remains authoritative"
     );
     assert!(remote_wal_path_for_test(&el, 82).exists());
@@ -423,7 +405,7 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
 }
 
 #[test]
-fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
+fn should_fail_all_generation_waiters_given_exhausted_cloud_upload_attempts(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
@@ -450,7 +432,7 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "terminal upload failure".to_string(),
-        terminal: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -466,7 +448,7 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
             response,
             RuntimeResponse::Error {
                 request_id: response_id,
-                error: crate::common::MidgeError::Internal(message),
+                error: crate::common::MidgeError::Timeout(message),
             } if response_id == request_id && message.contains("terminal upload failure")
         ));
     }
@@ -475,7 +457,7 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
 }
 
 #[test]
-fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
+fn should_preserve_timeout_variant_given_exhausted_cloud_upload_timeouts(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: a strict durability caller is still attached when the storage
     // queue exhausts three callback-timeout attempts.
@@ -493,7 +475,7 @@ fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "cloud WAL upload callback timed out".to_string(),
-        terminal: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
     });
 
@@ -531,7 +513,7 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "retryable upload failure".to_string(),
-        terminal: false,
+        failures: 1,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -1370,6 +1352,27 @@ fn seal_segment_without_remote_proof_for_test(
     Ok((seg_id, max_sequence))
 }
 
+/// Seal a segment whose upload reports success but whose readback finds no
+/// object, so the runtime backlog takes the segment back for a fresh upload.
+fn seal_segment_owned_by_runtime_backlog_for_test(
+    el: &mut EventLoop,
+) -> crate::common::MidgeResult<(u64, u64)> {
+    let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+    assert_eq!(
+        el.cloud_coordinator
+            .cloud_wal
+            .upload_backlog
+            .get(&segment_id),
+        Some(&max_sequence),
+        "a failed readback must hand the upload back to the runtime"
+    );
+    Ok((segment_id, max_sequence))
+}
+
 #[test]
 fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment(
 ) -> crate::common::MidgeResult<()> {
@@ -1505,8 +1508,7 @@ fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence:
     el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
-        .acked_segments
-        .insert(segment_id, max_sequence);
+        .acknowledge_for_test(segment_id, max_sequence);
     let record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
         Bytes::from_static(b"prune-candidate"),
@@ -1530,8 +1532,7 @@ fn seed_cloud_prune_candidate_with_records(
     el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
-        .acked_segments
-        .insert(segment_id, max_sequence);
+        .acknowledge_for_test(segment_id, max_sequence);
 
     let mut bytes = Vec::new();
     for mut record in records {
@@ -2824,7 +2825,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -2889,10 +2890,7 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
         "timed-out prune must retain the remote WAL"
     );
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .get(&segment_id),
+        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
         Some(&max_sequence),
         "timed-out prune must remain eligible for retry"
     );
@@ -2915,7 +2913,7 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     assert!(!el
         .cloud_coordinator
@@ -2974,10 +2972,7 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
         "metadata proof outlived the bounded prune attempt: {attempt_elapsed:?}"
     );
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .get(&segment_id),
+        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
         Some(&max_sequence),
         "metadata timeout must retain WAL authority for retry"
     );
@@ -3036,10 +3031,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .get(&segment_id),
+        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
         Some(&max_sequence),
         "ambiguous completion should remain retryable until readback"
     );
@@ -3074,7 +3066,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     assert!(
         !el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "a confirmed-absent catalog entry must settle the prior ambiguous retirement"
     );
@@ -3355,7 +3347,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -3391,7 +3383,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -3438,10 +3430,7 @@ fn should_not_retire_wal_authority_without_cloud_manifest_base() -> crate::commo
     // Assert
     assert!(remote_wal_path_for_test(&el, segment_id).exists());
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .get(&segment_id),
+        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
         Some(&max_sequence)
     );
     let catalog_proof = el
@@ -3521,10 +3510,7 @@ fn should_retain_remote_wal_when_intent_metadata_needs_convergence(
         "cleanup verification must remain read-only"
     );
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .get(&segment_id),
+        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
         Some(&max_sequence)
     );
     assert!(!el
@@ -3583,7 +3569,7 @@ fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -4250,7 +4236,7 @@ fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable() -> crate::com
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -4289,7 +4275,7 @@ fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_cover
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -4354,7 +4340,7 @@ fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -4409,7 +4395,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
@@ -4463,7 +4449,7 @@ fn should_not_prune_remote_wal_when_manifest_bounds_cover_absent_value(
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4558,7 +4544,7 @@ fn should_prune_remote_wal_when_insert_is_canonically_persisted_as_put(
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4604,7 +4590,7 @@ fn should_prune_remote_wal_when_point_delete_is_exactly_covered_by_manifest_sst(
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4645,7 +4631,7 @@ fn should_not_prune_remote_wal_when_point_delete_has_same_sequence_value(
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4691,7 +4677,7 @@ fn should_not_prune_remote_wal_when_expired_value_masquerades_as_same_sequence_p
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4739,7 +4725,7 @@ fn should_prune_remote_wal_when_expired_value_is_exactly_covered_by_manifest_sst
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4776,7 +4762,7 @@ fn should_not_prune_remote_wal_when_manifest_ssts_conflict_at_same_sequence(
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     Ok(())
 }
@@ -4998,7 +4984,7 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&segment_id),
         "failed guarded prune must keep the WAL eligible for retry"
     );
@@ -5059,13 +5045,13 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&blocked_segment));
     assert!(remote_wal_path_for_test(&el, covered_segment).exists());
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&covered_segment));
 
     add_manifest_sst_meta_for_test(
@@ -5084,13 +5070,13 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&blocked_segment));
     assert!(!remote_wal_path_for_test(&el, covered_segment).exists());
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&covered_segment));
     Ok(())
 }
@@ -5118,7 +5104,7 @@ fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::M
     assert_eq!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .keys()
             .copied()
             .collect::<Vec<_>>(),
@@ -5210,10 +5196,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     );
     assert!(remote_wal_path_for_test(&el, segment_id).exists());
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .get(&segment_id),
+        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
         Some(&max_sequence),
         "delete completion must not settle before the blocked provider call returns"
     );
@@ -5229,7 +5212,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     assert!(!el
         .cloud_coordinator
@@ -5289,7 +5272,7 @@ fn should_delete_retired_wal_when_coverage_dependency_changes_after_catalog_cas(
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked_segments
+        .acked()
         .contains_key(&segment_id));
     assert!(!el
         .cloud_coordinator
@@ -5362,7 +5345,7 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
         "a failed conditional delete should leave an ignored physical orphan"
     );
     assert!(
-        !el.cloud_coordinator.cloud_wal.acked_segments.contains_key(&segment_id),
+        !el.cloud_coordinator.cloud_wal.acked().contains_key(&segment_id),
         "post-CAS failure must remove local ACK authority rather than retry an absent catalog entry"
     );
     assert!(!el
@@ -5410,7 +5393,7 @@ fn should_retain_later_batch_members_when_oldest_wal_is_uncovered() -> crate::co
         assert!(
             el.cloud_coordinator
                 .cloud_wal
-                .acked_segments
+                .acked()
                 .contains_key(&segment_id),
             "segment {segment_id} must not retire across the uncovered oldest authority gap"
         );
@@ -5457,16 +5440,9 @@ fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
     drain_prune_completion_for_test(&mut el);
 
     // Assert
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&1));
+    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked_segments
-            .contains_key(&2),
+        el.cloud_coordinator.cloud_wal.acked().contains_key(&2),
         "retiring the newer delete while an older value can still replay would permit resurrection"
     );
     let storage = el
@@ -5798,7 +5774,7 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&second_segment),
         "later acknowledgement must remain buffered until the earlier gap closes"
     );
@@ -5887,7 +5863,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&second_segment),
         "later ack should be buffered while an earlier segment is unacked"
     );
@@ -5895,7 +5871,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
-        terminal: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -5907,7 +5883,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .contains_key(&second_segment),
         "later verified ACK bookkeeping must remain buffered behind an earlier gap"
     );
@@ -6145,7 +6121,7 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
-        terminal: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -6793,7 +6769,7 @@ fn should_ignore_stale_cloud_failure_for_segment_the_runtime_no_longer_owns(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "late storage retry report".to_string(),
-        terminal: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -7796,7 +7772,7 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: second_segment,
         error: "injected later-segment failure".to_string(),
-        terminal: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -8142,10 +8118,10 @@ fn should_requeue_known_wal_publication_when_sequence_range_is_inconsistent(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
+fn should_resume_wal_upload_when_provider_recovers_after_attempts_are_exhausted(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: the storage-owned queue exhausts all three upload attempts while
-    // the sealed local WAL remains an accepted runtime obligation.
+    // Arrange: every upload attempt fails until the waiters' attempts are
+    // spent, while the sealed local WAL remains an accepted obligation.
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -8155,15 +8131,16 @@ fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = el
+    let (_, max_sequence) = el
         .seal_current_cloud_segment()?
-        .expect("seal cloud WAL for terminal retry test");
+        .expect("seal cloud WAL for exhausted retry test");
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure WAL upload failures");
 
-    // Act: exhaust storage retries, restore the provider, and continue driving
-    // the event loop without reopening the database.
-    for _ in 0..8 {
+    // Act: exhaust the waiters' attempts, restore the provider, and continue
+    // driving the event loop without reopening the database.
+    let exhausted_deadline = Instant::now() + Duration::from_secs(2);
+    while !el.state.persistence_anomaly_detected() && Instant::now() < exhausted_deadline {
         el.tick_hybrid_storage();
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -8172,25 +8149,24 @@ fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
     // process-global failpoint write lock before asking that worker to evaluate
     // its (now disabled) failpoint hooks.
     drop(test_guard);
+    assert!(
+        el.state.persistence_anomaly_detected(),
+        "the upload must actually exhaust its waiters' attempts"
+    );
     assert_eq!(
         el.cloud_coordinator
             .hybrid_storage
             .as_ref()
             .expect("hybrid storage")
             .pending_upload_count(),
-        0,
-        "the storage queue must actually exhaust its attempt budget"
+        1,
+        "the storage queue keeps a failed upload for its next retry"
     );
-    assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
-        "terminal queue failure must transfer ownership back to the runtime"
+    assert!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        "exhausted attempts never hand the upload back to the runtime"
     );
 
-    std::thread::sleep(Duration::from_millis(25));
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
     let recovery_deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < recovery_deadline
@@ -8215,19 +8191,13 @@ fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
 #[test]
 fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: storage exhausted its attempt budget and transferred a sealed
-    // segment back to the runtime while unrelated requests remain queued.
+    // Arrange: a failed readback handed a sealed segment back to the
+    // runtime while unrelated requests remain queued.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id,
-        error: "storage retry budget exhausted".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
+    let (segment_id, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     std::thread::sleep(Duration::from_millis(25));
     assert_eq!(
         el.cloud_coordinator
@@ -8340,20 +8310,14 @@ fn should_not_create_cloud_sst_when_shutdown_has_no_active_writes() -> crate::co
 #[test]
 fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::common::MidgeResult<()>
 {
-    // Arrange: a terminal storage failure has transferred an accepted segment
-    // into the runtime backlog immediately before shutdown begins.
+    // Arrange: a failed readback has handed an accepted segment back to the
+    // runtime backlog immediately before shutdown begins.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.shutdown_cloud_drain_timeout = Duration::from_secs(2);
     append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id,
-        error: "storage retry budget exhausted".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
+    let (_, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     let request_id = 90_403;
     let response_rx = el.router.register(request_id, "Shutdown");
 
@@ -8432,20 +8396,14 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
 #[test]
 fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::common::MidgeResult<()>
 {
-    // Arrange: terminal upload failure transfers a sealed WAL back to the
-    // runtime just before shutdown, and lease validation is slower than the
-    // entire shutdown drain budget.
+    // Arrange: a failed readback hands a sealed WAL back to the runtime
+    // just before shutdown, and lease validation is slower than the entire
+    // shutdown drain budget.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id,
-        error: "storage retry budget exhausted".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
+    let (segment_id, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     std::thread::sleep(Duration::from_millis(25));
     el.fencing.leader_store = Some(Arc::new(DelayedLeaderStore::new(
         Duration::from_secs(1),
@@ -9301,7 +9259,6 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
 }
 
 #[test]
-#[ignore = "#808 stage 2: out-of-order-publication"]
 fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: upload both immutable bodies without publishing either one.
@@ -9334,5 +9291,536 @@ fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
         "catalog published across an unacknowledged predecessor: {:?}",
         catalog.segments.keys().collect::<Vec<_>>()
     );
+    Ok(())
+}
+
+fn published_wal_segments_for_test(el: &EventLoop) -> crate::common::MidgeResult<Vec<u64>> {
+    let catalog_path = el
+        .state
+        .db_path
+        .join("cloud_store")
+        .join(crate::wal::cloud_catalog::OBJECT_KEY);
+    let catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&std::fs::read(catalog_path)?)
+            .map_err(crate::common::MidgeError::Corruption)?;
+    Ok(catalog.segments.keys().copied().collect())
+}
+
+#[test]
+fn should_publish_buffered_upload_in_order_when_preceding_segment_is_acknowledged(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the later upload is acknowledged first, so it waits.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    assert_eq!(published_wal_segments_for_test(&el)?, Vec::<u64>::new());
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+
+    // Assert
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), second_max_sequence);
+    Ok(())
+}
+
+#[test]
+fn should_fence_writer_when_uploaded_wal_object_holds_other_bytes() -> crate::common::MidgeResult<()>
+{
+    // Arrange: the object under the segment's key holds other bytes.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let request_id = 46_101;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+    let remote_path = remote_wal_path_for_test(&el, segment_id);
+    let mut other_bytes = std::fs::read(&remote_path)?;
+    let last = other_bytes.len() - 1;
+    other_bytes[last] ^= 0xff;
+    write_test_file(remote_path.clone(), &other_bytes);
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    let response = response
+        .recv_timeout(Duration::from_secs(1))
+        .expect("waiter outcome");
+    assert!(
+        matches!(
+            response,
+            RuntimeResponse::Error {
+                error: crate::common::MidgeError::Corruption(_),
+                ..
+            }
+        ),
+        "{response:?}"
+    );
+    assert!(el.wal_transition.is_fenced());
+    assert_eq!(published_wal_segments_for_test(&el)?, Vec::<u64>::new());
+    assert_eq!(
+        std::fs::read(&remote_path)?,
+        other_bytes,
+        "the object is never overwritten"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_leave_retry_with_storage_queue_when_upload_attempts_are_exhausted(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a caller waits on a sealed segment the storage queue uploads.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    let request_id = 46_201;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "provider unavailable".to_string(),
+        failures: 3,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Timeout(_),
+            ..
+        })
+    ));
+    assert!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        "the storage queue keeps retrying, so the runtime must not upload it again"
+    );
+    assert_eq!(
+        el.durability.cloud_segment_max_sequence(segment_id),
+        Some(max_sequence),
+        "the segment stays owed to the catalog"
+    );
+    assert!(!el.wal_transition.is_fenced());
+    Ok(())
+}
+
+#[test]
+fn should_fence_writer_when_storage_reports_a_corrupt_upload() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, _) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    let request_id = 46_202;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "remote object differs from uploaded bytes".to_string(),
+        failures: 3,
+        failure_kind: crate::storage::CloudUploadFailureKind::Corruption,
+    });
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Corruption(_),
+            ..
+        })
+    ));
+    assert!(el.wal_transition.is_fenced());
+    assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_withdraw_first_upload_when_publishing_its_run_fails() -> crate::common::MidgeResult<()> {
+    // Arrange: the later upload waits for the earlier one, and another
+    // catalog mutation holds the catalog for longer than the acknowledgement
+    // may wait, so publishing their run times out.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(200);
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    let storage = Arc::clone(
+        el.cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage"),
+    );
+    let catalog_mutation = storage.lock_wal_catalog_mutation_within(
+        &crate::common::OperationDeadline::unbounded(),
+        "competing catalog mutation",
+    )?;
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+    drop(catalog_mutation);
+
+    // Assert
+    assert_eq!(published_wal_segments_for_test(&el)?, Vec::<u64>::new());
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    let tracker = &el.cloud_coordinator.cloud_wal;
+    assert!(
+        !tracker.acked().contains_key(&first),
+        "no later publication may pass the withdrawn upload"
+    );
+    assert_eq!(
+        tracker.upload_backlog.get(&first),
+        Some(&first_max_sequence)
+    );
+    assert!(tracker.acked().contains_key(&second));
+    Ok(())
+}
+
+/// Publish `entry` straight into the catalog, as a writer before #841 could
+/// have, bypassing the runtime's contiguous selection.
+fn publish_catalog_entry_for_test(
+    el: &EventLoop,
+    entry: crate::wal::cloud_catalog::PublishedWalSegment,
+) -> crate::common::MidgeResult<()> {
+    let storage = Arc::clone(
+        el.cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage"),
+    );
+    Ok(cloud_persistence(&storage).publish_wal_segments(
+        &[entry],
+        el.state.writer_epoch,
+        &crate::common::OperationDeadline::unbounded(),
+    )?)
+}
+
+#[test]
+fn should_fence_writer_when_catalog_publishes_past_an_owed_segment(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: segments 1 and 2 are durable, and the catalog already
+    // publishes a later segment past the local segment 3, as code before
+    // #841 could leave it. Publishing 3 behind that head can never succeed.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    for _ in 0..2 {
+        append_cloud_async_put(&mut el)?;
+        let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+    }
+    append_cloud_async_put(&mut el)?;
+    let (third, third_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    publish_catalog_entry_for_test(
+        &el,
+        crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+            third + 1,
+            third_max_sequence + 1,
+            el.state.writer_epoch,
+            b"a later segment",
+        ),
+    )?;
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: third,
+        max_sequence: third_max_sequence,
+    });
+
+    // Assert: a refusal no retry can fix fences instead of requeueing.
+    assert!(el.wal_transition.is_fenced());
+    assert!(!el
+        .cloud_coordinator
+        .cloud_wal
+        .upload_backlog
+        .contains_key(&third));
+    Ok(())
+}
+
+#[test]
+fn should_fence_with_conflicting_segment_when_a_later_run_member_conflicts(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the catalog already publishes segment 1 exactly as uploaded,
+    // and another object for segment 2.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let storage = Arc::clone(
+        el.cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage"),
+    );
+    let first_upload = cloud_persistence(&storage).verify_uploaded_wal_segment(
+        first,
+        first_max_sequence,
+        &crate::io::FsLocation::new(Arc::clone(&el.state.fs), crate::wal::segment_key(first)),
+        &crate::common::OperationDeadline::unbounded(),
+    )?;
+    publish_catalog_entry_for_test(&el, first_upload)?;
+    publish_catalog_entry_for_test(
+        &el,
+        crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+            second,
+            second_max_sequence,
+            el.state.writer_epoch,
+            b"another object",
+        ),
+    )?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+
+    // Assert
+    assert_eq!(el.wal_transition.fenced_sealed_segment(), Some(second));
+    assert!(
+        el.cloud_coordinator.cloud_wal.acked().contains_key(&first),
+        "the segment the catalog publishes identically is not withdrawn"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_refuse_writes_when_unpublished_uploads_fill_the_upload_queue(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: an upload queue of two entries, and a first segment whose
+    // upload never lands, so every later upload is verified but waits for
+    // it and leaves the queue unpublished.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let cloud = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open cloud store"),
+    );
+    el.set_hybrid_storage(Arc::new(
+        crate::storage::HybridStorage::with_test_upload_limits(
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            2,
+            u64::MAX,
+        ),
+    ));
+    append_cloud_async_put(&mut el)?;
+    el.seal_cloud_wal_without_enqueue_for_test()?;
+
+    // Act: keep writing cloud_async segments whose uploads land.
+    let mut admitted = 0;
+    let mut admission = el.check_cloud_wal_admission();
+    while admission.is_ok() && admitted < 10 {
+        append_cloud_async_put(&mut el)?;
+        let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+        admitted += 1;
+        admission = el.check_cloud_wal_admission();
+    }
+
+    // Assert: the WAL the writer owes the cloud stays within the queue's
+    // limit even though the queue itself is empty.
+    assert!(
+        matches!(admission, Err(crate::common::MidgeError::WriteStall(_))),
+        "writes kept flowing behind an unpublished segment: {admission:?}"
+    );
+    assert_eq!(admitted, 2);
+    Ok(())
+}
+
+/// Drive the runtime's upload backlog and storage events until the cloud
+/// durability frontier reaches `max_sequence`.
+fn drive_cloud_frontier_to_for_test(el: &mut EventLoop, max_sequence: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while el.state.wal.frontiers.cloud_durable() < max_sequence && Instant::now() < deadline {
+        el.drain_cloud_wal_upload_backlog();
+        el.tick_hybrid_storage();
+        el.drain_hybrid_storage_events();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn should_advance_frontier_through_run_when_its_lost_catalog_answer_had_committed(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: two uploads wait as one run, and the catalog commits their
+    // publication but its answer never arrives.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(500);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open cloud store"),
+    );
+    let lost_answer = Arc::new(CommitThenBlockCatalogCasCallbackBackend::new(cloud_fs));
+    let backend: Arc<dyn crate::storage::StorageBackend> = lost_answer.clone();
+    let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
+    el.set_hybrid_storage(Arc::new(
+        crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            Arc::clone(&backend),
+            Arc::clone(&backend),
+            backend,
+            storage_event_tx,
+            Duration::from_millis(500),
+        ),
+    ));
+    el.cloud_coordinator.hybrid_storage_events = Some(storage_event_rx);
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    lost_answer.arm();
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    assert_eq!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.get(&first),
+        Some(&first_max_sequence),
+        "the lost answer withdraws the run's first upload"
+    );
+    assert_eq!(
+        published_wal_segments_for_test(&el)?,
+        vec![first, second],
+        "the catalog committed the run before its answer was lost"
+    );
+
+    // Act: the withdrawn segment uploads again; its republication finds
+    // the run already published.
+    drive_cloud_frontier_to_for_test(&mut el, second_max_sequence);
+
+    // Assert
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), second_max_sequence);
+    assert!(!el.wal_transition.is_fenced());
+    Ok(())
+}
+
+#[test]
+fn should_publish_whole_run_after_memory_deferral_when_shared_memory_returns(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: two uploads wait as one run while shared maintenance memory
+    // is too short for the catalog publication.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let request_id = 46_301;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(second, DurabilityWaiter::CloudDurability { request_id });
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    let budget = el
+        .cloud_coordinator
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .maintenance_memory()
+        .expect("maintenance memory")
+        .with_contention_errors();
+    let reserve_deadline = Instant::now() + Duration::from_secs(10);
+    let held = loop {
+        match budget.reserve(budget.limit() - 64, "competing maintenance") {
+            Ok(held) => break held,
+            Err(error) => {
+                assert!(
+                    Instant::now() < reserve_deadline,
+                    "shared maintenance budget never drained: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    };
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    assert!(
+        matches!(
+            response.try_recv(),
+            Err(crossbeam::channel::TryRecvError::Empty)
+        ),
+        "memory pressure is backpressure, not a failed write"
+    );
+    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&first));
+    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&second));
+    assert_eq!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.get(&first),
+        Some(&first_max_sequence)
+    );
+
+    // Act: memory returns and the deferred segment uploads again.
+    drop(held);
+    drive_cloud_frontier_to_for_test(&mut el, second_max_sequence);
+
+    // Assert: the whole run publishes and its waiter completes.
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Ok { request_id: actual }) if actual == request_id
+    ));
     Ok(())
 }

@@ -125,23 +125,33 @@ impl WalPublicationCatalog {
         Ok(true)
     }
 
-    pub(crate) fn publish(
+    /// Append `run`, verified uploads oldest first, past the catalog's head
+    /// ([`crate::wal::publish::additions`]). Segments the catalog already
+    /// publishes identically add nothing. Returns whether the catalog
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a writer epoch other than the catalog's, and any run
+    /// [`crate::wal::publish::additions`] refuses; the catalog is then
+    /// unchanged.
+    pub(crate) fn append_run(
         &mut self,
         fencing_epoch: u64,
-        segment: PublishedWalSegment,
-    ) -> Result<bool, String> {
-        self.require_epoch(fencing_epoch)?;
-        match self.segments.get(&segment.segment_id) {
-            Some(existing) if existing == &segment => Ok(false),
-            Some(existing) => Err(format!(
-                "cloud WAL catalog segment {} conflicts with existing publication at writer epoch {}",
-                segment.segment_id, existing.writer_epoch
-            )),
-            None => {
-                self.segments.insert(segment.segment_id, segment);
-                Ok(true)
-            }
+        run: &[PublishedWalSegment],
+    ) -> Result<bool, crate::wal::publish::Refusal> {
+        if fencing_epoch != self.fencing_epoch {
+            return Err(crate::wal::publish::Refusal::EpochMismatch {
+                catalog: self.fencing_epoch,
+                writer: fencing_epoch,
+            });
         }
+        let added = crate::wal::publish::additions(&self.segments, run)?;
+        let changed = !added.is_empty();
+        for segment in added {
+            self.segments.insert(segment.segment_id, segment);
+        }
+        Ok(changed)
     }
 
     pub(crate) fn retire(
@@ -250,10 +260,10 @@ mod tests {
         catalog.fence_to(8).unwrap();
 
         // Act
-        let result = catalog.publish(7, segment(1, 7));
+        let result = catalog.append_run(7, &[segment(1, 7)]);
 
         // Assert
-        let error = result.unwrap_err();
+        let error = result.unwrap_err().to_string();
         assert!(error.contains("requires fencing epoch 8"), "{error}");
         assert!(catalog.segments.is_empty());
     }
@@ -262,7 +272,7 @@ mod tests {
     fn should_retain_publications_when_fencing_catalog_to_new_epoch() {
         // Arrange
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-        catalog.publish(7, segment(1, 7)).unwrap();
+        catalog.append_run(7, &[segment(1, 7)]).unwrap();
 
         // Act
         let changed = catalog.fence_to(8).unwrap();
@@ -316,7 +326,9 @@ mod tests {
         // Arrange
         let expected = segment(1, 7);
         let mut catalog = WalPublicationCatalog::empty(8).unwrap();
-        catalog.publish(8, expected.clone()).unwrap();
+        catalog
+            .append_run(8, std::slice::from_ref(&expected))
+            .unwrap();
         let mut stale = expected.clone();
         stale.content_crc32c = 99;
 

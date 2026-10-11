@@ -66,8 +66,10 @@ mod uploads;
 
 use proofs::PruneWorkerRegistry;
 pub(crate) use proofs::{GuardedObjectProof, RemoteObjectProof};
-pub(crate) use queues::HybridQueueLimits;
+#[cfg(test)]
+pub(crate) use queues::WalUploadRetryPolicy;
 use queues::{BoundedEventQueue, UploadQueue};
+pub(crate) use queues::{HeldUploads, HybridQueueLimits};
 
 const MAX_PENDING_WAL_UPLOADS: usize = 1_024;
 const MAX_PENDING_WAL_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
@@ -84,9 +86,15 @@ const MAX_CLOUD_ERROR_BYTES: usize = 4 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadStatus {
     Pending,
-    InFlight { started_at: Instant },
+    InFlight {
+        started_at: Instant,
+    },
     Completed,
-    Failed { error: String, retries: u32 },
+    /// The last attempt failed; the next starts at `retry_at`.
+    Failed {
+        error: String,
+        retry_at: Instant,
+    },
 }
 
 /// State of a pending WAL segment upload
@@ -98,6 +106,7 @@ pub struct UploadState {
     pub(crate) source: Arc<crate::io::FsLocation>,
     pub status: UploadStatus,
     pub max_sequence: u64,
+    /// Failed attempts so far.
     pub retries: u32,
     size_bytes: u64,
 }
@@ -280,6 +289,7 @@ impl HybridStorage {
         let upload_queue = Arc::new(Mutex::new(UploadQueue::new(
             limits.upload_entries,
             limits.upload_bytes,
+            limits.wal_upload_retry,
         )));
         let terminal_capacity = limits
             .upload_entries

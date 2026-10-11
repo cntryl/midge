@@ -258,7 +258,7 @@ impl EventLoop {
         // state after a later tombstone/TTL compaction.
         self.cloud_coordinator
             .cloud_wal
-            .acked_segments
+            .acked()
             .iter()
             .take_while(|(segment_id, max_sequence)| {
                 **segment_id < recovery_floor_segment

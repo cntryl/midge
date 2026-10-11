@@ -119,18 +119,4 @@ impl Histories {
         self.local = History::new(observed, families);
         Ok(())
     }
-
-    /// Whether a fresh-cache takeover's `violation` is only a WAL hole: its
-    /// state is explained if commits survive out of order with every
-    /// promised commit kept, so a later commit survived an earlier, lost
-    /// one.
-    #[must_use]
-    pub fn explains_out_of_order(&self, violation: &Violation) -> bool {
-        violation.lost_families.is_empty()
-            && violation.keys.iter().all(|mismatch| {
-                self.cloud
-                    .allowed_out_of_order(&mismatch.key)
-                    .contains(&mismatch.observed)
-            })
-    }
 }

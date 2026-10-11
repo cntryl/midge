@@ -14,38 +14,13 @@ pub(crate) fn campaign(
     let found = seeds
         .map(|seed| (seed, profile.workload(seed, len, config.mode)))
         .find_map(|(seed, workload)| Campaign::run(seed, &workload, config).err())?;
-    let class = found.kind.clone();
-    Some(shrink(*found, config, |smaller| {
-        smaller.kind.same_class(&class)
-    }))
+    Some(shrink(*found, config))
 }
 
-/// Run `profile` over `seeds`; return the first finding `known` does not
-/// explain, shrunk, and how many known findings came before it.
-pub(crate) fn campaign_beyond(
-    profile: Profile,
-    seeds: std::ops::Range<u64>,
-    len: usize,
-    config: Config,
-    known: impl Fn(&Finding) -> bool,
-) -> (Option<Finding>, usize) {
-    let mut known_findings = 0;
-    for seed in seeds {
-        let workload = profile.workload(seed, len, config.mode);
-        match Campaign::run(seed, &workload, config) {
-            Err(finding) if known(&finding) => known_findings += 1,
-            Err(finding) => {
-                let shrunk = shrink(*finding, config, |smaller| !known(smaller));
-                return (Some(shrunk), known_findings);
-            }
-            Ok(()) => {}
-        }
-    }
-    (None, known_findings)
-}
-
-/// Drop operations one at a time while `keep` holds for the smaller finding.
-fn shrink(mut finding: Finding, config: Config, keep: impl Fn(&Finding) -> bool) -> Finding {
+/// Drop operations one at a time while the smaller workload still finds the
+/// same class of finding.
+fn shrink(mut finding: Finding, config: Config) -> Finding {
+    let class = finding.kind.clone();
     let mut index = 0;
     let mut attempts = 0;
     while index < finding.workload.len() && attempts < 80 {
@@ -53,7 +28,7 @@ fn shrink(mut finding: Finding, config: Config, keep: impl Fn(&Finding) -> bool)
         let mut candidate = finding.workload.clone();
         candidate.remove(index);
         match Campaign::run(finding.seed, &candidate, config) {
-            Err(smaller) if keep(&smaller) => finding = *smaller,
+            Err(smaller) if smaller.kind.same_class(&class) => finding = *smaller,
             _ => index += 1,
         }
     }

@@ -239,34 +239,6 @@ impl History {
         self.prefix_floor = renumber(&self.prefix_floor);
     }
 
-    /// The values `key` may hold if commits survive out of order: promised
-    /// commits apply, and every other one may survive or not on its own. A
-    /// recovery these explain but [`Self::check`] rejects has a hole: a
-    /// later commit survived an earlier, lost one.
-    fn allowed_out_of_order(&self, key: &Key) -> Vec<Option<Vec<u8>>> {
-        let mut allowed = vec![self.base.get(key).cloned()];
-        for (index, commit) in self.commits.iter().enumerate() {
-            if commit.family != key.0 {
-                continue;
-            }
-            let Some(value) = commit
-                .writes
-                .iter()
-                .filter(|(written, _)| *written == key.1)
-                .map(|(_, value)| value.clone())
-                .next_back()
-            else {
-                continue;
-            };
-            if self.required.contains(&index) {
-                allowed = vec![value];
-            } else {
-                allowed.push(value);
-            }
-        }
-        allowed
-    }
-
     /// How many commits the history holds.
     fn len(&self) -> usize {
         self.commits.len()

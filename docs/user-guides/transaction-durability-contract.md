@@ -158,9 +158,11 @@ before retrying.
 
 The same applies when a commit with writes was applied but a later durability
 step (for example the `cloud_strict()` seal and upload acknowledgment) could not
-finish because of shutdown or upload backpressure: `commit()` reports
-`MidgeError::Timeout` rather than `Busy`, `WriteStall` or `NoSpace`, because the
-write is already visible and a retry could apply it twice.
+finish because of shutdown, upload backpressure or repeated upload failures:
+`commit()` reports `MidgeError::Timeout` rather than `Busy`, `WriteStall`,
+`NoSpace` or an internal error, because the write is already visible and a retry
+could apply it twice. A failed WAL upload keeps retrying in the background, so
+such a write may still become cloud-durable.
 
 `abandoned_runtime_requests_total` and `late_runtime_responses_total` are global
 diagnostic counters. Their deltas include unrelated requests and both successful
