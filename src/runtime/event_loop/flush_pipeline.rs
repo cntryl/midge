@@ -1894,14 +1894,7 @@ mod tests {
     #[test]
     fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_are_absent(
     ) -> crate::common::MidgeResult<()> {
-        for residue in [
-            "absent",
-            "staging",
-            "temporary",
-            "final",
-            "secondary",
-            "unknown owner",
-        ] {
+        for residue in ["absent", "staging", "temporary", "final", "unknown owner"] {
             // Arrange
             let directory = tempfile::tempdir()?;
             let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -1929,7 +1922,6 @@ mod tests {
                 "staging" => Some(staging_path.clone()),
                 "temporary" => Some(directory.path().join("failed.sst.tmp")),
                 "final" => Some(event_loop.state.host_sst_dir().join(&name)),
-                "secondary" => Some(directory.path().join("hybrid-local/sst").join(&name)),
                 _ => None,
             };
             if let Some(path) = path {

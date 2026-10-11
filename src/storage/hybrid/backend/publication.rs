@@ -2,7 +2,7 @@
 
 use super::HybridStorage;
 #[cfg(test)]
-use super::{mpsc, Arc, StorageBackend, StorageEvent, StorageOutcome};
+use super::{mpsc, StorageEvent, StorageOutcome};
 #[cfg(test)]
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 
@@ -34,14 +34,7 @@ impl HybridStorage {
             deadline,
         )?;
         if exists {
-            return Self::ensure_backend_object_matches(
-                &self.stores.sst,
-                key,
-                data,
-                None,
-                self.callback_timeout,
-                deadline,
-            );
+            return self.ensure_remote_object_matches(key, data, None, deadline);
         }
 
         Self::deadline_timeout(
@@ -87,14 +80,7 @@ impl HybridStorage {
                         "cloud immutable upload timed out for '{key}': {error}"
                     )));
                 }
-                Self::ensure_backend_object_matches(
-                    &self.stores.sst,
-                    key,
-                    data,
-                    Some(&error.to_string()),
-                    self.callback_timeout,
-                    deadline,
-                )
+                self.ensure_remote_object_matches(key, data, Some(&error.to_string()), deadline)
             }
             other => Err(MidgeError::Internal(format!(
                 "unexpected cloud immutable upload response: {other:?}"
@@ -103,25 +89,28 @@ impl HybridStorage {
     }
 
     #[cfg(test)]
-    fn ensure_backend_object_matches(
-        backend: &Arc<dyn StorageBackend>,
+    fn ensure_remote_object_matches(
+        &self,
         key: &str,
         expected: &[u8],
         upload_error: Option<&str>,
-        callback_timeout: std::time::Duration,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        let existing =
-            Self::read_object_from_backend_within(backend, key, callback_timeout, deadline)
-                .map_err(|error| {
-                    Self::publication_error(
-                        &format!(
-                            "cloud immutable upload failed{}; readback failed",
-                            upload_error.map_or_else(String::new, |error| format!(": {error}"))
-                        ),
-                        error,
-                    )
-                })?;
+        let existing = Self::read_object_from_backend_within(
+            &self.stores.sst,
+            key,
+            self.callback_timeout,
+            deadline,
+        )
+        .map_err(|error| {
+            Self::publication_error(
+                &format!(
+                    "cloud immutable upload failed{}; readback failed",
+                    upload_error.map_or_else(String::new, |error| format!(": {error}"))
+                ),
+                error,
+            )
+        })?;
         if existing == expected {
             return Ok(());
         }

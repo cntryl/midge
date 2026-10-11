@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
+use crate::storage::StorageBackend;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
