@@ -573,3 +573,20 @@ fn should_leave_other_operations_eager_when_schedule_names_operations() {
     assert_eq!(answered(&upload), "server-error");
     assert!(matches!(read, Err(CloudError::NotFound(_))), "{read:?}");
 }
+
+#[test]
+fn should_land_held_back_put_when_restored_from_an_image() {
+    // Arrange: a put held back when the image is taken.
+    let fates = [(id(Operation::Put, "k", 0), Fate::Late)];
+    let store = scripted(&fates);
+    let _ = put(&store, "k", b"held", &[]).recv_timeout(ANSWER_WAIT);
+    let image = store.image();
+
+    // Act
+    let restored = SimulatedObjectStore::from_image(Schedule::Eager, &image);
+    let landed = restored.land_late_effects();
+
+    // Assert
+    assert_eq!(landed, 1);
+    assert_eq!(restored.object("k").as_deref(), Some(b"held".as_slice()));
+}

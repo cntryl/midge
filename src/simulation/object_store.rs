@@ -72,7 +72,7 @@ impl Operation {
 /// A stable name for one request: its operation, its key with random
 /// generation names replaced by `*`, and how many earlier requests of that
 /// operation named that key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RequestId {
     pub operation: Operation,
     pub key: String,
@@ -449,8 +449,7 @@ struct StoreState {
     trace: Vec<(RequestId, Fate)>,
 }
 
-/// What a store holds at one point, so a campaign can replay from it. Late
-/// effects not yet landed are not part of it.
+/// What a store holds at one point, so a campaign can replay from it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreImage {
     /// Every stored object, as the provider names it.
@@ -458,6 +457,59 @@ pub struct StoreImage {
     /// How many requests each operation has made to each key, so request
     /// ids, and the fates a seeded schedule draws for them, continue.
     occurrences: Vec<((Operation, String), u64)>,
+    /// Requests held back and not yet landed, in arrival order.
+    late: Vec<(RequestId, HeldEffect)>,
+}
+
+/// A held-back request, as an image keeps it. Only mutations are held: a
+/// late read only times out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum HeldEffect {
+    Put {
+        key: String,
+        bytes: Vec<u8>,
+        headers: Vec<(String, String)>,
+    },
+    Delete {
+        key: String,
+        headers: Vec<(String, String)>,
+    },
+}
+
+impl HeldEffect {
+    fn held(effect: &Effect) -> Option<Self> {
+        match effect {
+            Effect::Put {
+                key,
+                bytes,
+                headers,
+            } => Some(Self::Put {
+                key: key.clone(),
+                bytes: bytes.clone(),
+                headers: headers.clone(),
+            }),
+            Effect::Delete { key, headers } => Some(Self::Delete {
+                key: key.clone(),
+                headers: headers.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn effect(&self) -> Effect {
+        match self.clone() {
+            Self::Put {
+                key,
+                bytes,
+                headers,
+            } => Effect::Put {
+                key,
+                bytes,
+                headers,
+            },
+            Self::Delete { key, headers } => Effect::Delete { key, headers },
+        }
+    }
 }
 
 /// A simulated object store; clones share one store and one process view.
@@ -514,6 +566,11 @@ impl SimulatedObjectStore {
             let mut state = store.lock();
             state.objects.clone_from(&image.objects);
             state.occurrences = image.occurrences.iter().cloned().collect();
+            state.late = image
+                .late
+                .iter()
+                .map(|(id, held)| (id.clone(), held.effect()))
+                .collect();
         }
         store
     }
@@ -528,6 +585,11 @@ impl SimulatedObjectStore {
                 .occurrences
                 .iter()
                 .map(|(id, count)| (id.clone(), *count))
+                .collect(),
+            late: state
+                .late
+                .iter()
+                .filter_map(|(id, effect)| Some((id.clone(), HeldEffect::held(effect)?)))
                 .collect(),
         }
     }
