@@ -643,10 +643,14 @@ fn should_remove_orphaned_spill_runs_when_opening_from_injected_root() {
 /// process's lease over quickly.
 const LEASE_TTL: std::time::Duration = std::time::Duration::from_millis(100);
 
-#[test]
-fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
-    // Arrange: a local engine whose every file lives on a simulated device
-    // makes a synced commit, then a buffered one, and its process dies.
+/// Every state a power loss can leave after a local engine on a simulated
+/// device makes a synced commit, then a buffered commit of `tail`, and its
+/// process dies: per state, the open error, or the synced and buffered values
+/// recovery read back.
+#[allow(clippy::type_complexity)]
+fn recover_every_power_loss(
+    tail: &[u8],
+) -> Vec<Result<(Option<Vec<u8>>, Option<Vec<u8>>), String>> {
     let named = tempfile::tempdir().expect("named directory");
     let device = CrashDevice::new();
     let options = |device: &CrashDevice| {
@@ -663,7 +667,7 @@ fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
     let default = engine.get_column_family("default").expect("default family");
     for (key, value, write) in [
         (&b"synced"[..], &b"value"[..], WriteOptions::sync()),
-        (&b"buffered"[..], &b"tail"[..], WriteOptions::buffered()),
+        (&b"buffered"[..], tail, WriteOptions::buffered()),
     ] {
         let mut tx = engine
             .begin_tx(default.id(), TransactionMode::ReadWrite)
@@ -678,45 +682,86 @@ fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
     let decisions = device.decisions();
     let outcomes: usize = decisions.iter().map(|decision| decision.options).product();
     assert!((2..=256).contains(&outcomes), "{decisions:?}");
-
-    // Act: recover from every state a power loss can leave.
-    let mut tails = std::collections::BTreeSet::new();
-    for mut index in 0..outcomes {
-        let choices: Vec<usize> = decisions
-            .iter()
-            .map(|decision| {
-                let choice = index % decision.options;
-                index /= decision.options;
-                choice
-            })
-            .collect();
-        let fork = device.fork();
-        fork.power_loss_with(|decision| {
-            choices[decisions
+    let results = (0..outcomes)
+        .map(|mut index| {
+            let choices: Vec<usize> = decisions
                 .iter()
-                .position(|known| known == decision)
-                .expect("decision is enumerated")]
-        });
-        let mut reopened = Engine::open(options(&fork)).expect("reopen");
-        let tx = reopened
-            .begin_tx(default.id(), TransactionMode::ReadOnly)
-            .expect("read");
-        let synced = tx.get(b"synced").expect("get synced");
-        tails.insert(tx.get(b"buffered").expect("get buffered"));
-        drop(tx);
-        reopened
-            .shutdown(std::time::Duration::from_secs(5))
-            .expect("shutdown");
-
-        // Assert: every outcome keeps the synced commit.
-        assert_eq!(synced.as_deref(), Some(&b"value"[..]), "{choices:?}");
-    }
-
-    // Assert: the tail is lost in some outcomes and intact in others, never
-    // invented or torn into a different value.
-    assert_eq!(
-        tails,
-        std::collections::BTreeSet::from([None, Some(b"tail".to_vec().into())])
-    );
+                .map(|decision| {
+                    let choice = index % decision.options;
+                    index /= decision.options;
+                    choice
+                })
+                .collect();
+            let fork = device.fork();
+            fork.power_loss_with(|decision| {
+                choices[decisions
+                    .iter()
+                    .position(|known| known == decision)
+                    .expect("decision is enumerated")]
+            });
+            let mut reopened =
+                Engine::open(options(&fork)).map_err(|error| format!("{choices:?}: {error}"))?;
+            let tx = reopened
+                .begin_tx(default.id(), TransactionMode::ReadOnly)
+                .expect("read");
+            let read = |key: &[u8]| tx.get(key).expect("get").map(|value| value.to_vec());
+            let values = (read(b"synced"), read(b"buffered"));
+            drop(tx);
+            reopened
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown");
+            Ok(values)
+        })
+        .collect();
     assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+    results
+}
+
+#[test]
+fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
+    // Arrange: a buffered record within one page.
+    let tail = b"tail".to_vec();
+
+    // Act
+    let results = recover_every_power_loss(&tail);
+
+    // Assert: every state opens with the synced commit, and the tail is lost
+    // in some and intact in others, never invented.
+    let tails: std::collections::BTreeSet<Option<Vec<u8>>> = results
+        .into_iter()
+        .map(|result| {
+            let (synced, buffered) = result.expect("open after power loss");
+            assert_eq!(synced.as_deref(), Some(&b"value"[..]));
+            buffered
+        })
+        .collect();
+    assert_eq!(tails, std::collections::BTreeSet::from([None, Some(tail)]));
+}
+
+/// Registered RED case `torn-unsynced-tail`: a power loss leaves a buffered
+/// WAL record that spans pages at full length with one page missing, and a
+/// strict open refuses the never-synced tail as corruption.
+#[test]
+#[ignore = "#808 stage 5: torn-unsynced-tail"]
+fn should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail() {
+    // Arrange: a buffered record spanning two pages.
+    let tail: Vec<u8> = (0..6000_u32).map(|index| (index % 251) as u8).collect();
+
+    // Act
+    let results = recover_every_power_loss(&tail);
+
+    // Assert
+    let refused: Vec<String> = results
+        .iter()
+        .filter_map(|result| result.as_ref().err().cloned())
+        .collect();
+    assert!(
+        refused.is_empty(),
+        "strict open refused a torn unsynced WAL tail: {refused:#?}"
+    );
+    for result in results {
+        let (synced, buffered) = result.expect("opened");
+        assert_eq!(synced.as_deref(), Some(&b"value"[..]));
+        assert!(buffered.is_none() || buffered == Some(tail.clone()));
+    }
 }

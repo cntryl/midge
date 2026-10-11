@@ -1,7 +1,8 @@
 # WAL redesign regression inventory (#808)
 
 This change inventories the 14 original audit classes as 17 executable tests,
-plus two supplemental allocation/history cases. It supplies a baseline runner
+plus two supplemental allocation/history cases and one case the crash
+simulator found (`torn-unsynced-tail`, #817). It supplies a baseline runner
 and CI coverage. It does not implement the redesign or complete its simulator
 stage. Refs #808.
 

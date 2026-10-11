@@ -277,3 +277,87 @@ fn should_keep_length_when_writing_nothing_past_end() {
         assert_eq!(file.len().expect("file length"), 0, "{backend}");
     });
 }
+
+#[test]
+fn should_report_io_when_creating_new_over_existing_file() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        let path = FsPath::new("exists.bin");
+        fs.open(&path, CREATE).expect("create file");
+
+        // Act
+        let result = fs
+            .open(
+                &path,
+                OpenOptions {
+                    create_new: true,
+                    ..CREATE
+                },
+            )
+            .map(|_| ());
+
+        // Assert: `RealFs` classifies only a missing file specially (#832).
+        assert!(
+            matches!(result, Err(FsError::Io(_))),
+            "{backend}: {result:?}"
+        );
+    });
+}
+
+#[test]
+fn should_refuse_read_only_create_when_opening() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        let path = FsPath::new("read-only.bin");
+
+        // Act
+        let result = fs
+            .open(
+                &path,
+                OpenOptions {
+                    create: true,
+                    ..READ_ONLY
+                },
+            )
+            .map(|_| ());
+
+        // Assert
+        assert!(
+            matches!(result, Err(FsError::Io(_))),
+            "{backend}: {result:?}"
+        );
+        assert!(!fs.exists(&path).expect("probe file"), "{backend}");
+    });
+}
+
+#[test]
+fn should_ignore_unsafe_sync_when_directory_is_missing() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        let path = FsPath::new("missing");
+
+        // Act
+        let result = fs.sync_dir(&path, super::traits::Durability::Unsafe);
+
+        // Assert
+        assert!(result.is_ok(), "{backend}: {result:?}");
+    });
+}
+
+#[test]
+fn should_read_nothing_past_end_when_length_is_zero() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        write_file(fs, "four.bin", b"abcd");
+        let file = fs.open(&FsPath::new("four.bin"), READ_ONLY).unwrap();
+
+        // Act
+        let result = file.read_at(10, 0);
+
+        // Assert
+        assert!(
+            result.as_ref().is_ok_and(Bytes::is_empty),
+            "{backend}: {result:?}"
+        );
+    });
+}

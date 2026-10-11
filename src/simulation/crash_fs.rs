@@ -1,37 +1,40 @@
-//! A crash-aware filesystem that models a journaling filesystem on one device
-//! (#817), qualified against the reviews of the earlier draft (#810).
+//! A crash-aware filesystem that models a journaling filesystem (ext4 or XFS
+//! with ordered data) on one device (#817), qualified against the reviews of
+//! the earlier draft (#810).
 //!
 //! The running process sees *live* state, as the page cache does. What a
-//! power loss leaves is decided from logs of the operations not yet durable,
-//! so every outcome is a state the device could really hold:
+//! power loss leaves is decided from logs of the operations not yet durable:
 //!
 //! - **Namespace.** Directory operations form one ordered log, as a metadata
-//!   journal does. A power loss keeps a prefix of it, so the surviving
-//!   namespace is always one the process actually saw. `sync_dir` commits the
-//!   log through the last operation touching that directory; `create_dir_all`
-//!   and the creation of missing parents commit their parents, as `RealFs`
-//!   does. A file `sync` commits no directory entry (POSIX), so a missing
-//!   directory sync stays observable.
+//!   journal does, and a power loss keeps a prefix of it. Every surviving
+//!   namespace is therefore one the process actually saw. A rename is one
+//!   entry. `sync_dir` commits the log through the last operation touching
+//!   that directory, and so does creating a directory, as `RealFs` syncs a new
+//!   directory's parent. A file `sync` commits no directory entry (POSIX).
+//!   Like the journal it models, a directory commit carries every earlier
+//!   operation, so a missing `sync_dir` is observable only until a later
+//!   directory commit covers it.
 //! - **Data.** Each file logs its writes and truncates since its last
-//!   successful `sync`. A power loss keeps the length the file had after
-//!   some prefix of them, or a page boundary inside a growing write, as
-//!   partial writeback leaves. Each dirty page independently keeps any of its
-//!   versions, except versions a committed truncate freed or that an
-//!   uncommitted truncate had not yet reallocated. Bytes past a version's end
-//!   are zero.
+//!   successful `sync`. A power loss keeps the length the file had after some
+//!   prefix of them, or a page boundary inside a growing write, as partial
+//!   writeback leaves. Each dirty page independently keeps any of its
+//!   versions, except that a committed truncate's effect on a page is never
+//!   undone, and a page it freed is not reallocated before it commits. Bytes
+//!   past a version's end are zero. Files settle independently of each other
+//!   and of the namespace prefix.
 //! - **Faults.** Rules fail the nth matching call with `RealFs`'s error
-//!   classes, before or after the effect. A failing file sync drops its dirty
-//!   pages: they stay visible in the page cache but never reach the device,
-//!   and a later sync reports success, as a kernel does after a writeback
-//!   error.
+//!   classes, before or after the effect. A failing file sync drops its
+//!   pending writes: they stay visible in the page cache but never reach the
+//!   device, and a later sync reports success, as a kernel does after a
+//!   writeback error.
 //! - **Processes.** A process crash keeps every live effect without making
 //!   anything more durable. Each process works through a view bound to its
 //!   generation, so a crashed process's late calls fail and never land.
 //!
 //! Choices are seeded per decision and named by stable identities (the path
-//! that created a file, numbered on reuse), so an unrelated file never
-//! shifts another file's choices. The namespace prefix is one global choice,
-//! so any new directory operation can move it.
+//! that created a file, with a count of earlier files that path created), so
+//! an unrelated file never shifts another file's choices. The namespace prefix
+//! is one global choice, so any new directory operation can move it.
 
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions};
@@ -85,6 +88,17 @@ impl DataOp {
         }
     }
 
+    /// Whether this truncate frees `page` outright, rather than zeroing the
+    /// tail of the page its new length lands in.
+    fn frees(&self, before: usize, page: usize) -> bool {
+        match self {
+            Self::Truncate { len } => {
+                page >= len.div_ceil(PAGE_BYTES) && page * PAGE_BYTES < before
+            }
+            Self::Write { .. } => false,
+        }
+    }
+
     fn is_truncate(&self) -> bool {
         matches!(self, Self::Truncate { .. })
     }
@@ -98,10 +112,17 @@ struct Cut {
     applied: usize,
 }
 
+/// A stable name for an inode: the path that created it, and how many
+/// earlier inodes that path created.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Identity {
+    path: String,
+    reuse: u64,
+}
+
 #[derive(Clone)]
 struct Data {
-    /// The path that created the file, numbered when that path is reused.
-    identity: String,
+    identity: Identity,
     /// What reads see.
     live: Vec<u8>,
     /// The device image after the last successful sync.
@@ -111,7 +132,7 @@ struct Data {
 }
 
 impl Data {
-    fn new(identity: String) -> Self {
+    fn new(identity: Identity) -> Self {
         Self {
             identity,
             live: Vec::new(),
@@ -125,19 +146,11 @@ impl Data {
         self.ops.push(op);
     }
 
-    /// The device image after the first `count` pending operations.
-    fn version(&self, count: usize) -> Vec<u8> {
-        let mut image = self.durable.clone();
-        for op in &self.ops[..count] {
-            op.apply(&mut image);
-        }
-        image
-    }
-
     /// Persist every pending operation.
     fn sync(&mut self) {
-        self.durable = self.version(self.ops.len());
-        self.ops.clear();
+        for op in self.ops.drain(..) {
+            op.apply(&mut self.durable);
+        }
     }
 
     /// A writeback error: pending writes never reach the device, but the
@@ -156,10 +169,18 @@ impl Data {
         }
     }
 
-    /// Lengths a power loss can leave, in operation order.
+    /// Lengths a power loss can leave, in operation order. Cuts that leave
+    /// the same length under the same committed truncates are one cut.
     fn cuts(&self) -> Vec<Cut> {
         let mut len = self.durable.len();
+        let mut truncates = 0;
+        let mut seen = BTreeSet::from([(len, truncates)]);
         let mut cuts = vec![Cut { len, applied: 0 }];
+        let mut add = |cut: Cut, truncates: usize, cuts: &mut Vec<Cut>| {
+            if seen.insert((cut.len, truncates)) {
+                cuts.push(cut);
+            }
+        };
         for (index, op) in self.ops.iter().enumerate() {
             let mut next = len;
             op.apply_len(&mut next);
@@ -167,24 +188,35 @@ impl Data {
                 // Partial writeback advances the length a page at a time.
                 let mut boundary = (len / PAGE_BYTES + 1) * PAGE_BYTES;
                 while boundary < next {
-                    cuts.push(Cut {
-                        len: boundary,
-                        applied: index,
-                    });
+                    add(
+                        Cut {
+                            len: boundary,
+                            applied: index,
+                        },
+                        truncates,
+                        &mut cuts,
+                    );
                     boundary += PAGE_BYTES;
                 }
             }
-            cuts.push(Cut {
-                len: next,
-                applied: index + 1,
-            });
+            if op.is_truncate() {
+                truncates += 1;
+            }
+            add(
+                Cut {
+                    len: next,
+                    applied: index + 1,
+                },
+                truncates,
+                &mut cuts,
+            );
             len = next;
         }
         cuts
     }
 
-    /// For every page a pending operation changes: the operations that
-    /// change it (1-based), after the durable version 0.
+    /// For every page a pending operation changes: the versions it can hold,
+    /// as counts of operations applied, after the durable version 0.
     fn page_versions(&self) -> BTreeMap<usize, Vec<usize>> {
         let mut versions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         let mut len = self.durable.len();
@@ -200,29 +232,25 @@ impl Data {
         versions
     }
 
-    /// Versions of `page` among `versions` the device can hold under `cut`:
-    /// not older than a committed truncate that freed the page, and not
-    /// newer than an uncommitted truncate that had not reallocated it.
+    /// Versions of `page` the device can hold under `cut`. A committed
+    /// truncate that changed the page cannot be undone: ordered data writes
+    /// its zeroed tail before the size change commits. A page an uncommitted
+    /// truncate freed is not reallocated before that truncate commits.
     fn eligible(&self, cut: Cut, page: usize, versions: &[usize]) -> Vec<usize> {
-        let mut freed_by = Vec::new();
+        let mut low = 0;
+        let mut high = usize::MAX;
         let mut len = self.durable.len();
         for (index, op) in self.ops.iter().enumerate() {
+            let version = index + 1;
             if op.is_truncate() && op.pages(len).contains(&page) {
-                freed_by.push(index + 1);
+                if version <= cut.applied {
+                    low = version;
+                } else if op.frees(len, page) && high == usize::MAX {
+                    high = version;
+                }
             }
             op.apply_len(&mut len);
         }
-        let low = freed_by
-            .iter()
-            .copied()
-            .filter(|version| *version <= cut.applied)
-            .max()
-            .unwrap_or(0);
-        let high = freed_by
-            .iter()
-            .copied()
-            .find(|version| *version > cut.applied)
-            .unwrap_or(usize::MAX);
         versions
             .iter()
             .copied()
@@ -232,8 +260,10 @@ impl Data {
 
     /// The image a power loss leaves, given its choices. A page choice
     /// outside the eligible versions settles on the nearest eligible one.
+    /// One working image is replayed, so memory stays near the file size.
     fn settle(&self, cut: Cut, choose_page: impl Fn(usize) -> usize) -> Vec<u8> {
-        let mut chosen: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut by_version: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut chosen = BTreeSet::new();
         for (page, versions) in self.page_versions() {
             if page * PAGE_BYTES >= cut.len {
                 continue;
@@ -247,34 +277,48 @@ impl Data {
                 .max()
                 .or_else(|| eligible.first().copied())
                 .unwrap_or(0);
-            chosen.insert(page, version);
+            by_version.entry(version).or_default().push(page);
+            chosen.insert(page);
         }
-        let images: BTreeMap<usize, Vec<u8>> = chosen
-            .values()
-            .copied()
-            .chain([0])
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|version| (version, self.version(version)))
-            .collect();
+        by_version
+            .entry(0)
+            .or_default()
+            .extend((0..cut.len.div_ceil(PAGE_BYTES)).filter(|page| !chosen.contains(page)));
         let mut image = vec![0; cut.len];
-        for page in 0..cut.len.div_ceil(PAGE_BYTES) {
-            let source = &images[chosen.get(&page).unwrap_or(&0)];
-            let start = page * PAGE_BYTES;
-            let end = (start + PAGE_BYTES).min(cut.len).min(source.len());
-            if start < end {
-                image[start..end].copy_from_slice(&source[start..end]);
+        let mut working = self.durable.clone();
+        let mut applied = 0;
+        for (version, pages) in by_version {
+            while applied < version {
+                self.ops[applied].apply(&mut working);
+                applied += 1;
+            }
+            for page in pages {
+                let start = page * PAGE_BYTES;
+                let end = (start + PAGE_BYTES).min(cut.len).min(working.len());
+                if start < end {
+                    image[start..end].copy_from_slice(&working[start..end]);
+                }
             }
         }
         image
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Directory {
-    identity: String,
+    identity: Identity,
     live: BTreeMap<String, Inode>,
     durable: BTreeMap<String, Inode>,
+}
+
+impl Directory {
+    fn new(identity: Identity) -> Self {
+        Self {
+            identity,
+            live: BTreeMap::new(),
+            durable: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -284,7 +328,7 @@ enum Node {
 }
 
 impl Node {
-    fn identity(&self) -> &str {
+    fn identity(&self) -> &Identity {
         match self {
             Self::Directory(directory) => &directory.identity,
             Self::Data(data) => &data.identity,
@@ -392,8 +436,10 @@ impl NamespaceOp {
 pub enum FaultOp {
     Open,
     Read,
+    /// Writes, appends and truncates through a file handle.
     Write,
     Sync,
+    /// Durable directory syncs; `Unsafe` ones do nothing, as in `RealFs`.
     SyncDir,
     CreateDirAll,
     ListDir,
@@ -407,7 +453,7 @@ pub enum FaultOp {
 /// Whether the faulted operation took effect before its error was returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultEffect {
-    /// Nothing was applied. A failing file sync drops its dirty pages.
+    /// Nothing was applied. A failing file sync drops its pending writes.
     Before,
     /// The operation was applied, then the error was returned.
     After,
@@ -427,7 +473,9 @@ pub struct Fault {
     pub op: FaultOp,
     /// Matched as whole path segments; the empty path matches every call.
     pub path: String,
-    /// The matching call that fails, counting from 1.
+    /// The matching call that fails, counting from 1. When several rules
+    /// complete on one call, the first injected fails it and the others wait
+    /// for their next match.
     pub nth: u64,
     pub effect: FaultEffect,
     pub error: FaultError,
@@ -444,15 +492,31 @@ struct FaultRule {
     fired: bool,
 }
 
-/// What one power-loss choice decides.
+/// What one power-loss choice decides. Files are named by the path that
+/// created them and how many earlier files that path created.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Subject {
     /// How many pending directory operations persist, in order.
     Namespace,
     /// Which pending length the file keeps.
-    Length { file: String },
+    Length { file: String, reuse: u64 },
     /// Which version of the page persists.
-    Page { file: String, page: usize },
+    Page {
+        file: String,
+        reuse: u64,
+        page: usize,
+    },
+}
+
+impl Subject {
+    /// A rendering that names the subject, independent of `Debug`.
+    fn key(&self) -> String {
+        match self {
+            Self::Namespace => "namespace".to_string(),
+            Self::Length { file, reuse } => format!("length\0{file}\0{reuse}"),
+            Self::Page { file, reuse, page } => format!("page\0{file}\0{reuse}\0{page}"),
+        }
+    }
 }
 
 /// One choice a power loss makes, among `options` alternatives.
@@ -472,14 +536,18 @@ struct State {
     next_inode: Inode,
     generation: u64,
     faults: Vec<FaultRule>,
-    /// How many inodes each path has created, numbering identities.
+    /// How many inodes each path has created.
     created: BTreeMap<String, u64>,
 }
 
 impl Default for State {
     fn default() -> Self {
+        let root = Identity {
+            path: String::new(),
+            reuse: 0,
+        };
         Self {
-            nodes: BTreeMap::from([(ROOT, Node::Directory(Directory::default()))]),
+            nodes: BTreeMap::from([(ROOT, Node::Directory(Directory::new(root)))]),
             pending: Vec::new(),
             handles: BTreeMap::new(),
             next_inode: ROOT + 1,
@@ -490,8 +558,12 @@ impl Default for State {
     }
 }
 
-fn normalized(path: &str) -> &str {
-    path.trim_matches('/')
+/// A path as whole segments, without empty or `.` segments.
+fn normalized(path: &str) -> String {
+    path.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn within(path: &str, scope: &str) -> bool {
@@ -549,20 +621,16 @@ impl State {
         matches!(self.nodes.get(&inode), Some(Node::Directory(_)))
     }
 
-    /// A stable identity for a new inode at `name` in `parent`: the path
-    /// that creates it, numbered when that path creates again.
-    fn identity(&mut self, parent: Inode, name: &str) -> String {
-        let base = match self.nodes.get(&parent).map(Node::identity) {
-            Some("") | None => name.to_string(),
-            Some(parent) => format!("{parent}/{name}"),
+    /// The identity of a new inode at `name` in `parent`.
+    fn identity(&mut self, parent: Inode, name: &str) -> Identity {
+        let path = match self.nodes.get(&parent).map(|node| &node.identity().path) {
+            Some(parent) if !parent.is_empty() => format!("{parent}/{name}"),
+            _ => name.to_string(),
         };
-        let count = self.created.entry(base.clone()).or_default();
+        let count = self.created.entry(path.clone()).or_default();
+        let reuse = *count;
         *count += 1;
-        if *count == 1 {
-            base
-        } else {
-            format!("{base}@{count}")
-        }
+        Identity { path, reuse }
     }
 
     fn allocate(&mut self, node: Node) -> Inode {
@@ -632,6 +700,25 @@ impl State {
         }
     }
 
+    /// Inodes a live or durable name, a pending directory operation or an
+    /// open handle can still reach.
+    fn reachable(&self) -> BTreeSet<Inode> {
+        let mut retained = BTreeSet::new();
+        let mut reaching: Vec<Inode> = std::iter::once(ROOT)
+            .chain(self.pending.iter().flat_map(NamespaceOp::inodes))
+            .chain(self.handles.keys().map(|&(_, inode)| inode))
+            .collect();
+        while let Some(inode) = reaching.pop() {
+            if !retained.insert(inode) {
+                continue;
+            }
+            if let Some(Node::Directory(directory)) = self.nodes.get(&inode) {
+                reaching.extend(directory.live.values().chain(directory.durable.values()));
+            }
+        }
+        retained
+    }
+
     fn decisions(&self) -> Vec<Decision> {
         let mut decisions = Vec::new();
         if !self.pending.is_empty() {
@@ -640,18 +727,21 @@ impl State {
                 options: self.pending.len() + 1,
             });
         }
-        for node in self.nodes.values() {
+        let reachable = self.reachable();
+        for (inode, node) in &self.nodes {
             let Node::Data(data) = node else {
                 continue;
             };
-            if data.ops.is_empty() {
+            if data.ops.is_empty() || !reachable.contains(inode) {
                 continue;
             }
+            let Identity { path, reuse } = data.identity.clone();
             let cuts = data.cuts();
             if cuts.len() > 1 {
                 decisions.push(Decision {
                     subject: Subject::Length {
-                        file: data.identity.clone(),
+                        file: path.clone(),
+                        reuse,
                     },
                     options: cuts.len(),
                 });
@@ -659,7 +749,8 @@ impl State {
             for (page, versions) in data.page_versions() {
                 decisions.push(Decision {
                     subject: Subject::Page {
-                        file: data.identity.clone(),
+                        file: path.clone(),
+                        reuse,
                         page,
                     },
                     options: versions.len(),
@@ -679,14 +770,17 @@ impl State {
             match node {
                 Node::Directory(directory) => directory.live.clone_from(&directory.durable),
                 Node::Data(data) => {
+                    let Identity { path, reuse } = data.identity.clone();
                     let cuts = data.cuts();
                     let length = choice(&Subject::Length {
-                        file: data.identity.clone(),
+                        file: path.clone(),
+                        reuse,
                     });
                     let cut = cuts[length.min(cuts.len() - 1)];
                     let image = data.settle(cut, |page| {
                         choice(&Subject::Page {
-                            file: data.identity.clone(),
+                            file: path.clone(),
+                            reuse,
                             page,
                         })
                     });
@@ -706,48 +800,36 @@ impl State {
         self.reclaim();
     }
 
-    /// Free inodes that no live or durable name, no pending directory
-    /// operation and no open handle can reach.
+    /// Free inodes nothing can reach any more.
     fn reclaim(&mut self) {
-        let mut retained = BTreeSet::new();
-        let mut reaching: Vec<Inode> = std::iter::once(ROOT)
-            .chain(self.pending.iter().flat_map(NamespaceOp::inodes))
-            .chain(self.handles.keys().map(|&(_, inode)| inode))
-            .collect();
-        while let Some(inode) = reaching.pop() {
-            if !retained.insert(inode) {
-                continue;
-            }
-            if let Some(Node::Directory(directory)) = self.nodes.get(&inode) {
-                reaching.extend(directory.live.values().chain(directory.durable.values()));
-            }
-        }
+        let retained = self.reachable();
         self.nodes.retain(|inode, _| retained.contains(inode));
     }
 
-    /// Count a call against every matching rule; return the first rule it
-    /// completes.
+    /// Count a call against every matching rule. The first rule the call
+    /// completes fails it; any other rule it would complete waits for its
+    /// next match.
     fn fault(&mut self, op: FaultOp, paths: &[&str]) -> Option<(usize, FaultEffect, FsError)> {
+        let paths: Vec<String> = paths.iter().map(|path| normalized(path)).collect();
         let mut first = None;
         for (index, rule) in self.faults.iter_mut().enumerate() {
             let scope = normalized(&rule.fault.path);
-            let matches = rule.fault.op == op
-                && !rule.fired
-                && paths.iter().any(|path| within(normalized(path), scope));
+            let matches =
+                rule.fault.op == op && !rule.fired && paths.iter().any(|path| within(path, &scope));
             if !matches {
                 continue;
             }
-            rule.seen += 1;
-            if rule.seen == rule.fault.nth {
+            if rule.seen + 1 < rule.fault.nth {
+                rule.seen += 1;
+            } else if first.is_none() {
+                rule.seen += 1;
                 rule.fired = true;
-                if first.is_none() {
-                    let message = format!("injected {op:?} fault at {paths:?}");
-                    let error = match rule.fault.error {
-                        FaultError::Io => FsError::Io(message),
-                        FaultError::NoSpace => FsError::NoSpace(message),
-                    };
-                    first = Some((index, rule.fault.effect, error));
-                }
+                let message = format!("injected {op:?} fault at {paths:?}");
+                let error = match rule.fault.error {
+                    FaultError::Io => FsError::Io(message),
+                    FaultError::NoSpace => FsError::NoSpace(message),
+                };
+                first = Some((index, rule.fault.effect, error));
             }
         }
         first
@@ -784,10 +866,7 @@ impl State {
                 existing
             } else {
                 let identity = self.identity(inode, part);
-                let created = self.allocate(Node::Directory(Directory {
-                    identity,
-                    ..Directory::default()
-                }));
+                let created = self.allocate(Node::Directory(Directory::new(identity)));
                 self.link(inode, part, created)?;
                 self.commit_directory(inode);
                 created
@@ -912,9 +991,9 @@ impl CrashDevice {
 
 /// A seeded choice that depends only on the decision's subject.
 fn seeded_choice(seed: u64, decision: &Decision) -> usize {
-    // FNV-1a over a stable rendering, then SplitMix64 finalization.
+    // FNV-1a over the subject's key, then SplitMix64 finalization.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ seed;
-    for byte in format!("{:?}", decision.subject).bytes() {
+    for byte in decision.subject.key().bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
@@ -959,20 +1038,30 @@ impl CrashFs {
         let parts = Self::parts(path)?;
         let mut state = self.state()?;
         let inode = state.faulted(FaultOp::Open, &[&path.0], |state| {
-            if opts.create || opts.create_new {
+            let creating = opts.create || opts.create_new;
+            if creating {
                 if let Some((_, parents)) = parts.split_last() {
                     // `RealFs` creates missing parents durably.
                     state.create_dirs(parents)?;
                 }
             }
+            if (creating || opts.truncate) && opts.mode == OpenMode::ReadOnly {
+                return Err(FsError::Io(format!(
+                    "open {}: creating or truncating needs write access",
+                    path.0
+                )));
+            }
             let (parent, name) = state.parent(&parts)?;
             let inode = match state.directory(parent)?.live.get(&name).copied() {
-                Some(_) if opts.create_new => return Err(FsError::AlreadyExists(path.0.clone())),
+                // `RealFs` classifies everything but a missing file as `Io`.
+                Some(_) if opts.create_new => {
+                    return Err(FsError::Io(format!("open {}: file exists", path.0)))
+                }
                 Some(inode) if state.is_directory(inode) => {
-                    return Err(FsError::Io(format!("is a directory: {}", path.0)))
+                    return Err(FsError::Io(format!("open {}: is a directory", path.0)))
                 }
                 Some(inode) => inode,
-                None if opts.create || opts.create_new => {
+                None if creating => {
                     let identity = state.identity(parent, &name);
                     let inode = state.allocate(Node::Data(Data::new(identity)));
                     state.link(parent, &name, inode)?;
@@ -981,9 +1070,6 @@ impl CrashFs {
                 None => return Err(FsError::NotFound(path.0.clone())),
             };
             if opts.truncate {
-                if opts.mode != OpenMode::ReadWrite {
-                    return Err(FsError::Io("cannot truncate a read-only handle".into()));
-                }
                 let data = state.data_mut(inode)?;
                 if !data.live.is_empty() {
                     data.push(DataOp::Truncate { len: 0 });
@@ -1098,18 +1184,24 @@ impl Fs for CrashFs {
 
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
         let parts = Self::parts(path)?;
-        self.state()?
-            .faulted(FaultOp::SyncDir, &[&path.0], |state| {
-                // `RealFs` opens the directory first, so a missing one is `Io`.
-                let inode = state
-                    .lookup(&parts)
-                    .and_then(|inode| state.directory(inode).map(|_| inode))
-                    .map_err(|error| FsError::Io(format!("open_dir {}: {error}", path.0)))?;
-                if dur == Durability::Durable {
-                    state.commit_directory(inode);
-                }
-                Ok(())
-            })
+        let mut state = self.state()?;
+        if dur == Durability::Unsafe {
+            // `RealFs` does nothing for an unsafe directory sync.
+            return Ok(());
+        }
+        state.faulted(FaultOp::SyncDir, &[&path.0], |state| {
+            // `RealFs` opens the path first, so a missing one is `Io`, and
+            // it fsyncs whatever it opened, a file included.
+            let inode = state
+                .lookup(&parts)
+                .map_err(|error| FsError::Io(format!("open_dir {}: {error}", path.0)))?;
+            if state.is_directory(inode) {
+                state.commit_directory(inode);
+            } else {
+                state.data_mut(inode)?.sync();
+            }
+            Ok(())
+        })
     }
 
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
@@ -1121,7 +1213,7 @@ impl Fs for CrashFs {
                 if let Some((_, parents)) = to_parts.split_last() {
                     state.create_dirs(parents)?;
                 }
-                // `RealFs` reports every rename failure as `Io`.
+                // `RealFs` reports every rename failure as `Io` (#832).
                 let failed = |error: FsError| FsError::Io(format!("rename {}: {error}", to.0));
                 let inode = state.lookup(&from_parts).map_err(failed)?;
                 if from_parts == to_parts {
@@ -1189,6 +1281,11 @@ impl File for CrashFile {
         let inode = self.inode;
         let path = &self.path;
         self.fs.state()?.faulted(FaultOp::Read, &[path], |state| {
+            if start == end {
+                // `RealFs` reads nothing successfully, at any offset.
+                state.data(inode)?;
+                return Ok(Bytes::new());
+            }
             state
                 .data(inode)?
                 .live
@@ -1201,8 +1298,9 @@ impl File for CrashFile {
     fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
         let (start, _) = checked_range(offset, bytes.len() as u64)?;
         if bytes.is_empty() {
-            // `pwrite` of nothing changes nothing, not even the length.
-            return Ok(());
+            // `pwrite` of nothing changes nothing, not even the length, but a
+            // crashed process still cannot reach the device.
+            return self.fs.state().map(drop);
         }
         self.write(DataOp::Write {
             offset: start,
@@ -1216,7 +1314,7 @@ impl File for CrashFile {
     }
 
     fn append(&mut self, bytes: Bytes) -> FsResult<u64> {
-        let offset = self.len()?;
+        let offset = self.fs.state()?.data(self.inode)?.live.len() as u64;
         checked_range(offset, bytes.len() as u64)?;
         self.write_at(offset, bytes)?;
         Ok(offset)

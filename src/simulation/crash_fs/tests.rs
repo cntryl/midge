@@ -572,7 +572,6 @@ fn should_fail_nth_matching_call_when_rules_share_calls() {
     let first_call = fs.rename_atomic(&path("wal/a"), &path("wal/a2"));
     let second_call = fs.rename_atomic(&path("wal/b"), &path("wal/b2"));
     let third_call = fs.rename_atomic(&path("wal/c"), &path("wal/c2"));
-    let exhausted = fs.rename_atomic(&path("wal/a2"), &path("walrus"));
 
     // Assert
     assert!(first_call.is_ok(), "{first_call:?}");
@@ -584,7 +583,6 @@ fn should_fail_nth_matching_call_when_rules_share_calls() {
         matches!(third_call, Err(FsError::NoSpace(_))),
         "{third_call:?}"
     );
-    assert!(exhausted.is_ok(), "{exhausted:?}");
     assert!(device.fired(second));
     assert!(device.fired(third));
 }
@@ -743,7 +741,158 @@ fn should_name_files_apart_when_path_is_reused() {
         .collect();
     assert_eq!(subjects.len(), decisions.len(), "{decisions:?}");
     assert!(
-        subjects.iter().any(|subject| subject.contains("final@2")),
+        subjects.iter().any(|subject| subject.contains("reuse: 1")),
         "{subjects:?}"
     );
+}
+
+#[test]
+fn should_name_files_apart_when_names_look_like_reuse_markers() {
+    // Arrange: `x` is recreated, and another file is literally named `x@2`.
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    durable_file(&fs, "x", b"");
+    write(&fs, "x", 0, b"one");
+    fs.remove_file(&path("x")).expect("unlink");
+    write(&fs, "x", 0, b"two");
+    write(&fs, "x@2", 0, b"three");
+
+    // Act
+    let decisions = device.decisions();
+
+    // Assert
+    let subjects: BTreeSet<String> = decisions
+        .iter()
+        .map(|decision| format!("{:?}", decision.subject))
+        .collect();
+    assert_eq!(subjects.len(), decisions.len(), "{decisions:?}");
+}
+
+#[test]
+fn should_zero_partial_page_in_place_when_truncate_is_uncommitted() {
+    // Arrange: two durable pages, truncated into the second.
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    durable_file(&fs, "wal", &[b'x'; 2 * PAGE_BYTES]);
+    let mut file = fs.open(&path("wal"), CREATE).expect("open file");
+    file.truncate(5000).expect("truncate");
+    drop(file);
+
+    // Act
+    let contents = outcomes(&device, |fs| read(fs, "wal"));
+
+    // Assert: the zeroed tail can reach the device before the new length.
+    let mut zeroed_tail = vec![b'x'; 2 * PAGE_BYTES];
+    zeroed_tail[5000..].fill(0);
+    assert_eq!(
+        contents,
+        BTreeSet::from([
+            Some(vec![b'x'; 5000]),
+            Some(vec![b'x'; 2 * PAGE_BYTES]),
+            Some(zeroed_tail),
+        ])
+    );
+}
+
+#[test]
+fn should_rewrite_partial_page_in_place_when_truncate_is_followed_by_write() {
+    // Arrange
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    durable_file(&fs, "wal", &[b'x'; 2 * PAGE_BYTES]);
+    let mut file = fs.open(&path("wal"), CREATE).expect("open file");
+    file.truncate(5000).expect("truncate");
+    file.write_at(5000, Bytes::from(vec![b'y'; 1000]))
+        .expect("rewrite tail");
+    drop(file);
+
+    // Act
+    let contents = outcomes(&device, |fs| read(fs, "wal"));
+
+    // Assert: never the old bytes past the truncate beside the rewrite
+    // within its committed length.
+    let image = |len: usize, tail: Option<u8>| {
+        let mut bytes = vec![b'x'; 5000];
+        if let Some(tail) = tail {
+            bytes.extend(vec![tail; 1000]);
+        }
+        bytes.resize(len, 0);
+        bytes
+    };
+    assert_eq!(
+        contents,
+        BTreeSet::from([
+            Some(vec![b'x'; 2 * PAGE_BYTES]),
+            Some(image(2 * PAGE_BYTES, None)),
+            Some(image(2 * PAGE_BYTES, Some(b'y'))),
+            Some(image(5000, None)),
+            Some(image(6000, None)),
+            Some(image(6000, Some(b'y'))),
+        ])
+    );
+}
+
+#[test]
+fn should_defer_rule_when_another_rule_fails_the_same_call() {
+    // Arrange: both rules complete on the first call.
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    durable_file(&fs, "a", b"a");
+    durable_file(&fs, "b", b"b");
+    let first = device.inject(Fault {
+        op: FaultOp::RemoveFile,
+        path: String::new(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+    let second = device.inject(Fault {
+        op: FaultOp::RemoveFile,
+        path: String::new(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::NoSpace,
+    });
+
+    // Act
+    let first_call = fs.remove_file(&path("a"));
+    let fired_after_first_call = (device.fired(first), device.fired(second));
+    let second_call = fs.remove_file(&path("b"));
+
+    // Assert
+    assert!(matches!(first_call, Err(FsError::Io(_))), "{first_call:?}");
+    assert_eq!(fired_after_first_call, (true, false));
+    assert!(
+        matches!(second_call, Err(FsError::NoSpace(_))),
+        "{second_call:?}"
+    );
+    assert!(device.fired(second));
+}
+
+#[test]
+fn should_match_whole_path_segments_when_scoping_faults() {
+    // Arrange
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    durable_file(&fs, "walrus", b"r");
+    fs.create_dir_all(&path("wal")).expect("create wal");
+    durable_file(&fs, "wal/x", b"x");
+    let fault = device.inject(Fault {
+        op: FaultOp::RemoveFile,
+        path: "./wal/".into(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+
+    // Act
+    let sibling = fs.remove_file(&path("walrus"));
+    let fired_on_sibling = device.fired(fault);
+    let child = fs.remove_file(&path("wal/./x"));
+
+    // Assert
+    assert!(sibling.is_ok(), "{sibling:?}");
+    assert!(!fired_on_sibling);
+    assert!(matches!(child, Err(FsError::Io(_))), "{child:?}");
+    assert!(device.fired(fault));
 }

@@ -173,6 +173,15 @@
       "test": "should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_epoch",
       "baseline": "red",
       "failure_marker": "acknowledged epoch-1 writes were skipped as stale"
+    },
+    {
+      "id": "torn-unsynced-tail",
+      "fixing_pr_stage": 5,
+      "target": "storage_root_injection",
+      "source": "tests/storage_root_injection.rs",
+      "test": "should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail",
+      "baseline": "red",
+      "failure_marker": "strict open refused a torn unsynced WAL tail"
     }
   ]
 }
