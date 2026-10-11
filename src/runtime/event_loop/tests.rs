@@ -196,7 +196,7 @@ pub(in crate::runtime::event_loop) fn record_wal_history(
     let wal: Arc<dyn crate::io::Fs> = Arc::new(
         crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).expect("open the WAL directory"),
     );
-    crate::runtime::wal_history_fixture::replace(&wal, sealed, open)
+    crate::runtime::wal_history::fixture::replace(&wal, sealed, open)
         .expect("record the WAL history");
     state.wal.history = Some(
         crate::runtime::wal_history::WalHistory::open(wal, open).expect("open the WAL ledger"),
@@ -477,7 +477,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     std::fs::write(&local_segment, &segment_bytes).expect("write recovered local WAL segment");
     let wal: Arc<dyn crate::io::Fs> =
         Arc::new(crate::io::RealFs::new(&wal_dir).expect("open the WAL directory"));
-    crate::runtime::wal_history_fixture::replace(&wal, &[2, 3], 4).expect("record the WAL history");
+    crate::runtime::wal_history::fixture::replace(&wal, &[2, 3], 4).expect("record the WAL history");
 
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;

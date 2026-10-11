@@ -1444,7 +1444,7 @@ mod salvage_quarantine_tests {
 
     /// Record `sealed`, then `open`, as the WAL history under `wal_dir`.
     fn record_history(wal_dir: &std::path::Path, sealed: &[u64], open: u64) {
-        crate::runtime::wal_history_fixture::record_at(
+        crate::runtime::wal_history::fixture::record_at(
             wal_dir.parent().expect("database root"),
             sealed,
             open,

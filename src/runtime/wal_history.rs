@@ -77,21 +77,54 @@ impl WalHistory {
         self.store.ledger()
     }
 
-    /// Make `edit` durable, then apply it.
+    /// Make `edit` durable, then apply it. Every edit pairs with its file
+    /// effects in the methods below, in the order that survives a crash.
     ///
     /// # Errors
     ///
-    /// An invalid edit is refused unchanged. A failed write leaves the
-    /// ledger refusing further edits until the process restarts, and the
-    /// edit may or may not have become durable.
-    pub(crate) fn commit(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
+    /// An invalid edit is refused unchanged. A failed write may or may not
+    /// have made the edit durable; the next edit republishes the ledger
+    /// first.
+    fn commit(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
         self.store.append(edit)
     }
 
-    /// Create segment `id`'s file, empty and durable, before a rotation
-    /// records it.
-    pub(crate) fn create_segment(&self, id: SegmentId) -> MidgeResult<()> {
-        create_segment(self.wal.as_ref(), id)
+    /// The reversible half of a rotation: republish the ledger if an earlier
+    /// write failed, check that the open segment still holds its history,
+    /// then create the next segment, empty and durable. Nothing becomes
+    /// history: a crash leaves at most an empty file that the next attempt
+    /// adopts.
+    ///
+    /// # Errors
+    ///
+    /// `RecoveryFailed` when the open segment's file is gone, `Corruption`
+    /// when the next segment already holds data, and the I/O error otherwise.
+    pub(crate) fn prepare_rotation(&mut self) -> MidgeResult<PreparedRotation> {
+        self.store.heal()?;
+        let ledger = self.ledger();
+        let (seal, open) = (ledger.open_segment(), ledger.next_segment_id());
+        let open_file = FsPath::new(crate::wal::segment_file_name(seal));
+        if !self.wal.exists(&open_file).map_err(FsError::into_midge)? {
+            return Err(MidgeError::RecoveryFailed(format!(
+                "open WAL segment {seal} disappeared; the records appended to it are lost"
+            )));
+        }
+        create_segment(self.wal.as_ref(), open)?;
+        Ok(PreparedRotation { seal, open })
+    }
+
+    /// The irreversible half of a rotation: record `prepared`'s segment
+    /// sealed and the next one open.
+    ///
+    /// # Errors
+    ///
+    /// The ledger write error; the rotation may or may not have become
+    /// durable.
+    pub(crate) fn record_rotation(&mut self, prepared: PreparedRotation) -> MidgeResult<()> {
+        self.commit(&LedgerEdit::Rotate {
+            seal: prepared.seal,
+            open: prepared.open,
+        })
     }
 
     /// Remove segment files the ledger does not name, and staging residue.
@@ -176,7 +209,7 @@ impl WalHistory {
             .collect();
         let open = ledger.next_segment_id().max(open_at_least);
         let aside = copy_aside(self.wal.as_ref(), &affected)?;
-        self.create_segment(open)?;
+        create_segment(self.wal.as_ref(), open)?;
         self.commit(&LedgerEdit::SetAside { from, open })?;
         if let Some(cut) = cut {
             truncate(self.wal.as_ref(), cut)?;
@@ -191,6 +224,14 @@ impl WalHistory {
         );
         Ok(())
     }
+}
+
+/// A next segment a rotation created, which the ledger has not recorded.
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct PreparedRotation {
+    seal: SegmentId,
+    open: SegmentId,
 }
 
 /// What salvage drops from history.
@@ -355,5 +396,7 @@ fn join(dir: &FsPath, leaf: &str) -> FsPath {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod fixture;
 #[cfg(test)]
 mod tests;

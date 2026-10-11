@@ -5,7 +5,8 @@
 // | step                                         | reversible? | failure outcome        |
 // |----------------------------------------------|-------------|------------------------|
 // | ticket / ledger agreement                    | no          | `Fenced`, sealed none  |
-// | create the next segment, empty and durable   | yes         | `Open`, retryable      |
+// | heal the ledger, create the next segment     | yes         | `Open`, retryable      |
+// | open segment missing, next one holds data    | no          | `Fenced`, sealed none  |
 // | drop the writer of the open segment          | no          | `Fenced`, sealed none  |
 // | record `Rotate` in the segment ledger        | no          | `Fenced`, sealed = N   |
 // | open a writer on the next segment            | no          | `Fenced`, sealed = N   |
@@ -19,9 +20,10 @@ use super::{WalActor, WalRotationReceipt, WalTransitionOperation};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::runtime::state::RuntimeState;
+use crate::runtime::wal_history::PreparedRotation;
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::ledger::{LedgerEdit, SegmentId};
+use crate::wal::ledger::SegmentId;
 use crate::wal::FsWalFactoryIo;
 use std::sync::Arc;
 
@@ -87,24 +89,32 @@ impl WalActor {
                 max_sequence,
             });
         };
+        self.begin_io_transition(WalTransitionOperation::Rotate)?;
         if let Err(error) = self.ensure_ledger_agrees(old_segment, next_segment) {
             self.fence_transition(state, error.to_string());
             return Err(error);
         }
-
-        self.begin_io_transition(WalTransitionOperation::Rotate)?;
-        if let Err(error) = self.create_next_segment(next_segment) {
-            if let Err(rollback_error) = self.finish_io_transition() {
-                self.fence_transition(
-                    state,
-                    format!(
-                        "WAL segment creation failed and the reversible transition could not be rolled back: {rollback_error}"
-                    ),
-                );
+        let prepared = match self.prepare_next_segment() {
+            Ok(prepared) => prepared,
+            // History is damaged: the open segment's records are gone, or
+            // the next segment holds data no ledger edit accounts for.
+            Err(error @ (MidgeError::RecoveryFailed(_) | MidgeError::Corruption(_))) => {
+                self.fence_transition(state, error.to_string());
+                return Err(error);
             }
-            return Err(error);
-        }
-        self.record_rotation(state, old_segment, next_segment)?;
+            Err(error) => {
+                if let Err(rollback_error) = self.finish_io_transition() {
+                    self.fence_transition(
+                        state,
+                        format!(
+                            "WAL segment creation failed and the reversible transition could not be rolled back: {rollback_error}"
+                        ),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        self.record_rotation(state, prepared, old_segment)?;
         self.install_next_writer(state, &fs, old_segment, next_segment)?;
         if let Err(error) = self.finish_io_transition() {
             self.fence_transition(
@@ -139,19 +149,22 @@ impl WalActor {
         Ok(())
     }
 
-    /// The reversible step: create the next segment, empty and durable. An
+    /// The reversible step: make the ledger writable again after an earlier
+    /// failed write, then create the next segment, empty and durable. An
     /// empty file an earlier attempt left is adopted.
-    fn create_next_segment(&self, next_segment: SegmentId) -> MidgeResult<()> {
+    fn prepare_next_segment(&mut self) -> MidgeResult<PreparedRotation> {
         WalTransitionBoundary::BeforeSegmentCreate.check()?;
         Self::before_segment_create_boundary()?;
         self.ensure_lease_validity()?;
-        self.history
-            .as_ref()
+        let prepared = self
+            .history
+            .as_mut()
             .ok_or_else(|| {
                 MidgeError::Internal("a file-backed WAL rotated without its segment ledger".into())
             })?
-            .create_segment(next_segment)?;
-        WalTransitionBoundary::AfterSegmentCreate.check()
+            .prepare_rotation()?;
+        WalTransitionBoundary::AfterSegmentCreate.check()?;
+        Ok(prepared)
     }
 
     /// The irreversible step: stop writing the open segment, then make the
@@ -159,23 +172,19 @@ impl WalActor {
     fn record_rotation(
         &mut self,
         state: &mut RuntimeState,
+        prepared: PreparedRotation,
         old_segment: SegmentId,
-        next_segment: SegmentId,
     ) -> MidgeResult<()> {
         drop(self.take_transition_writer());
         self.ensure_transition_authority(state)?;
-        let edit = LedgerEdit::Rotate {
-            seal: old_segment,
-            open: next_segment,
-        };
-        let committed = match self.history.as_mut() {
-            Some(history) => history.commit(&edit),
+        let recorded = match self.history.as_mut() {
+            Some(history) => history.record_rotation(prepared),
             None => Err(MidgeError::Internal(
                 "a file-backed WAL rotated without its segment ledger".to_string(),
             )),
         };
         self.mark_transition_sealed(old_segment);
-        if let Err(error) = committed {
+        if let Err(error) = recorded {
             self.fence_transition(
                 state,
                 format!("the WAL ledger could not record the rotation: {error}"),

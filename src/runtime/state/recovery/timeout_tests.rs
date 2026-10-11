@@ -414,7 +414,7 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
     let target = "00000000000000000001.wal";
     assert_eq!(target, crate::wal::segment_file_name(1));
     std::fs::write(wal_dir.join(target), &before).unwrap();
-    crate::runtime::wal_history_fixture::record_at(directory.path(), &[], 1).unwrap();
+    crate::runtime::wal_history::fixture::record_at(directory.path(), &[], 1).unwrap();
     let (fs, evidence) = read_fs(
         &wal_dir,
         target,
@@ -496,7 +496,7 @@ fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
     std::fs::create_dir_all(&wal_dir).unwrap();
     std::fs::write(wal_dir.join(crate::wal::segment_file_name(5)), b"x").unwrap();
     std::fs::write(wal_dir.join(crate::wal::segment_file_name(6)), b"").unwrap();
-    crate::runtime::wal_history_fixture::record_at(directory.path(), &[5], 6).unwrap();
+    crate::runtime::wal_history::fixture::record_at(directory.path(), &[5], 6).unwrap();
     let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap()));
 
     // Act: open the WAL history the way recovery does.

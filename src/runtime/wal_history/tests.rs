@@ -8,7 +8,7 @@ use super::{replay_segments, SalvageCut, SetAside, WalHistory};
 use crate::common::MidgeError;
 use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions};
 use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
-use crate::wal::ledger::{LedgerEdit, SegmentId};
+use crate::wal::ledger::SegmentId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -47,13 +47,7 @@ fn write_segment(wal: &dyn Fs, id: SegmentId, bytes: &[u8]) {
 
 /// Rotate `history` from its open segment to the next, as the WAL actor does.
 fn rotate(history: &mut WalHistory) -> SegmentId {
-    let seal = history.ledger().open_segment();
-    let open = history.ledger().next_segment_id();
-    history.create_segment(open).expect("create next segment");
-    history
-        .commit(&LedgerEdit::Rotate { seal, open })
-        .expect("record rotation");
-    open
+    super::fixture::rotate(history).expect("rotate")
 }
 
 /// A WAL whose segments 1..=4 hold `segment-N`, with 4 open.
@@ -148,8 +142,8 @@ fn should_adopt_empty_next_segment_when_rotation_crashed_before_recording_it() {
     // Arrange: a rotation created segment 2, then the process crashed before
     // the ledger recorded it.
     let device = CrashDevice::new();
-    let history = WalHistory::open(wal(&device), 1).expect("genesis");
-    history.create_segment(2).expect("create next segment");
+    let mut history = WalHistory::open(wal(&device), 1).expect("genesis");
+    let _unrecorded = history.prepare_rotation().expect("create next segment");
     device.process_crash();
 
     // Act
@@ -165,12 +159,12 @@ fn should_adopt_empty_next_segment_when_rotation_crashed_before_recording_it() {
 fn should_refuse_creating_segment_over_unrecorded_data() {
     // Arrange: segment 2 holds bytes no ledger edit accounts for.
     let device = CrashDevice::new();
-    let history = WalHistory::open(wal(&device), 1).expect("genesis");
-    history.create_segment(2).expect("create next segment");
+    let mut history = WalHistory::open(wal(&device), 1).expect("genesis");
+    let _unrecorded = history.prepare_rotation().expect("create next segment");
     write_segment(wal(&device).as_ref(), 2, b"unrecorded");
 
     // Act
-    let created = history.create_segment(2);
+    let created = history.prepare_rotation();
     let swept = history.sweep_orphans();
 
     // Assert
@@ -354,7 +348,7 @@ fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
     // Arrange: the ledger's next append fails, as on a full disk.
     let device = CrashDevice::new();
     let mut history = four_segments(&device);
-    device.inject(Fault {
+    let fault = device.inject(Fault {
         op: FaultOp::Write,
         path: format!(
             "{}/{}",
@@ -373,6 +367,7 @@ fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
 
     // Assert: the failed retirement removed nothing, and the next one heals
     // the ledger and goes ahead.
+    assert!(device.fired(fault));
     assert!(failed.is_err());
     for id in 1..=4 {
         assert!(kept.contains_key(&key(id)), "segment {id} removed");

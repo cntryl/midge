@@ -130,7 +130,7 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
     )?;
     let wal: Arc<dyn crate::io::Fs> =
         Arc::new(crate::io::RealFs::new(&wal_directory).map_err(crate::io::FsError::into_midge)?);
-    crate::runtime::wal_history_fixture::replace(&wal, &[7], 8)?;
+    crate::runtime::wal_history::fixture::replace(&wal, &[7], 8)?;
 
     // Act
     let mut recovered = RuntimeState::try_new(

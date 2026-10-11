@@ -485,7 +485,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     std::fs::create_dir_all(retained.join("wal")).unwrap();
     let seal = retained.join("wal").join(crate::wal::segment_file_name(1));
     std::fs::write(&seal, framed_wal_bytes(1)).unwrap();
-    crate::runtime::wal_history_fixture::record_at(&retained, &[1], 2).unwrap();
+    crate::runtime::wal_history::fixture::record_at(&retained, &[1], 2).unwrap();
     let target = fixture.candidate.validated.proof.clone();
     let retired = super::super::retire_covered_wal_catalog_prefix_within(
         &fixture.storage,

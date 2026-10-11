@@ -1518,7 +1518,7 @@ fn publish_remote_wal_bytes_for_test(
 /// Bring `el`'s segment ledger to where a writer that sealed `segment_id`
 /// left it: `segment_id` sealed at the log start, `segment_id + 1` open.
 fn seal_ledger_through_for_test(el: &mut EventLoop, segment_id: u64) {
-    crate::runtime::wal_history_fixture::seal_through(
+    crate::runtime::wal_history::fixture::seal_through(
         el.wal_actor
             .history_mut()
             .expect("a file-backed WAL has a segment ledger"),

@@ -672,7 +672,7 @@ fn should_append_nothing_when_healing_fails() {
     let fs = crash_fs(&device);
     let ledger = genesis_ledger();
     let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
-    device.inject(Fault {
+    let sync_fault = device.inject(Fault {
         op: FaultOp::Sync,
         path: LEDGER_FILE.to_string(),
         nth: 1,
@@ -680,7 +680,7 @@ fn should_append_nothing_when_healing_fails() {
         error: FaultError::Io,
     });
     assert!(store.append(&rotate(1)).is_err());
-    device.inject(Fault {
+    let rename_fault = device.inject(Fault {
         op: FaultOp::Rename,
         path: String::new(),
         nth: 1,
@@ -692,6 +692,8 @@ fn should_append_nothing_when_healing_fails() {
     let retried = store.append(&rotate(2));
 
     // Assert: the refused edit is in no reachable state.
+    assert!(device.fired(sync_fault));
+    assert!(device.fired(rename_fault));
     assert!(retried.is_err());
     for_each_power_loss(&device, |fs| {
         let (state, _) = loaded(fs);

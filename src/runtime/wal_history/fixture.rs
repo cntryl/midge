@@ -7,17 +7,15 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::runtime::wal_history::WalHistory;
-use crate::wal::ledger::{LedgerEdit, SegmentId};
+use crate::wal::ledger::SegmentId;
 use std::sync::Arc;
 
 /// Rotate `history`: create the segment after its open one and record it
 /// open, sealing the previous one. Returns the new open segment.
 pub(crate) fn rotate(history: &mut WalHistory) -> MidgeResult<SegmentId> {
-    let seal = history.ledger().open_segment();
-    let open = history.ledger().next_segment_id();
-    history.create_segment(open)?;
-    history.commit(&LedgerEdit::Rotate { seal, open })?;
-    Ok(open)
+    let prepared = history.prepare_rotation()?;
+    history.record_rotation(prepared)?;
+    Ok(history.ledger().open_segment())
 }
 
 /// Bring `history` to where a writer that sealed `segment_id` left it:

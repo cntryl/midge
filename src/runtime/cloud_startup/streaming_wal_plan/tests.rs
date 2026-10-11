@@ -116,7 +116,7 @@ impl Fixture {
         if crate::runtime::wal_history::WalHistory::read(&wal)?.is_none() {
             let open = self.open_segment();
             let sealed: Vec<u64> = self.sealed.iter().copied().collect();
-            crate::runtime::wal_history_fixture::record(&wal, &sealed, open)?;
+            crate::runtime::wal_history::fixture::record(&wal, &sealed, open)?;
         }
         let history = crate::runtime::wal_history::WalHistory::open(wal, 1)?;
         history.sweep_orphans()?;
