@@ -2767,7 +2767,6 @@ mod local_wal_retention {
 
     #[test]
     #[cfg(feature = "internal-testing")]
-    #[ignore = "#808 stage 3: failed-local-unlink"]
     fn should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails() {
         // Arrange
         let fail_older_removal = true;
@@ -2816,11 +2815,10 @@ mod local_wal_retention {
         epochs
     }
 
-    /// LT-C: segment ids are derived from the files present at open, so a
-    /// full prune followed by a restart hands out id 1 again.
+    /// LT-C: segment ids come from the WAL ledger (#842), so a full prune
+    /// followed by a restart never hands out an id an earlier run used.
     #[test]
     #[cfg(feature = "internal-testing")]
-    #[ignore = "#808 stage 2: restarted-segment-id"]
     fn should_allocate_wal_segment_ids_above_previous_runs_when_all_sealed_segments_were_pruned() {
         // Arrange: run 1 seals and fully retires segments 1 and 2.
         let temp = tempfile::TempDir::new().expect("temp");

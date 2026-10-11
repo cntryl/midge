@@ -91,6 +91,26 @@ open must preserve those values on a later healthy open.
 The failed-unlink fixture injects a `remove_file` error on the older retired
 segment through the same device, so it runs on every platform (#837).
 
+The segment ledger (#842) turns `restarted-segment-id` and
+`failed-local-unlink` GREEN. Ids come from the ledger, which never hands out
+one it recorded, and the ledger records a new log start before a file is
+unlinked, so a file whose removal fails is never replayed. The matching
+campaign detections became controls. `predecessor-cache` moved to stage 4:
+a segment id cannot tell a predecessor's stale tail from a successor's
+history once the successor's catalog entries retire, so it needs ownership
+(#820). A cache whose ledger is behind the catalog rejoins only when it holds
+nothing unpublished, and is refused otherwise.
+
+Three fixtures lost their scenario under the ledger and were re-targeted to
+reproduce the same defects:
+- `substitute-upload-collision` now crashes before the ledger retires the
+  local copy, so the intact local member is still history when the remote
+  copy is damaged.
+- `lost-buffered-delete` fails the WAL sync that the post-flush prune would
+  otherwise win the race with.
+- The #811 stale-lease-lock detection now powers off after a clean shutdown,
+  since every open's ledger publication makes the earlier unlink durable.
+
 ## Baseline execution
 
 Run from a clean checkout, with receipts outside the checkout:
