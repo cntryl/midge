@@ -98,6 +98,27 @@ receipts and complete test logs. No case depends on the host platform; Windows
 and macOS CI compile every fixture target. This is baseline maintenance, not a
 complete cross-platform redesign campaign.
 
+## Campaigns
+
+`tests/wal_campaigns.rs` drives the engine through seeded workloads on the
+crash device and judges every recovery with the prefix oracle (#831).
+Control campaigns must find nothing. CI runs their per-PR seed budget with the
+integration tests. The nightly `WAL campaigns` workflow runs 50 times as many
+seeds, from a base that moves each run. Detection campaigns keep fixed seeds,
+so every run proves the same findings (#837).
+
+A finding is saved as a crash image below `MIDGE_CAMPAIGN_IMAGES`, and both
+workflows upload those images as artifacts. To run the nightly budget, then
+replay a saved image:
+
+```sh
+MIDGE_CAMPAIGN_PROFILE=nightly MIDGE_CAMPAIGN_SEED_BASE=1000000 \
+  MIDGE_CAMPAIGN_IMAGES=target/wal-campaigns \
+  cargo test --all-features --test wal_campaigns -- --test-threads=1
+MIDGE_CAMPAIGN_REPLAY=target/wal-campaigns/<case>-seed-<seed> \
+  cargo test --all-features --test wal_campaigns should_replay_saved_image_when_one_is_named
+```
+
 ## Acceptance execution
 
 Omit `--baseline` and select Sqrzl to require all GREEN:

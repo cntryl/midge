@@ -13,6 +13,12 @@
 //! remaining workload, so replaying it needs nothing else. Images are written
 //! below `MIDGE_CAMPAIGN_IMAGES` when that variable names a directory, and
 //! load back for replay.
+//!
+//! Control campaigns, which must find nothing, run a seed budget: the
+//! default per pull request, and `MIDGE_CAMPAIGN_PROFILE=nightly` for the
+//! nightly run, which also moves its seeds to `MIDGE_CAMPAIGN_SEED_BASE`.
+//! Detection campaigns keep fixed seeds, so they prove the same findings on
+//! every run. `MIDGE_CAMPAIGN_REPLAY` names a saved image to replay.
 
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
@@ -22,7 +28,7 @@ use cntryl_midge::__internal::simulation::{
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +42,23 @@ const LEASE_LOCK: &str = ".midge_leader.lock";
 /// Workloads write keys `0..KEYS` in every family; recovery reads them all.
 const KEYS: u8 = 6;
 const DEFAULT: &str = "default";
+/// How many times more seeds the nightly profile explores per control.
+const NIGHTLY_SCALE: u64 = 50;
+
+/// The seeds a control campaign explores: `per_pr` of them, or
+/// [`NIGHTLY_SCALE`] times as many from the nightly seed base.
+fn control_seeds(per_pr: u64) -> std::ops::Range<u64> {
+    let nightly = std::env::var("MIDGE_CAMPAIGN_PROFILE").is_ok_and(|profile| profile == "nightly");
+    let base = std::env::var("MIDGE_CAMPAIGN_SEED_BASE").map_or(0, |base| {
+        base.parse()
+            .expect("MIDGE_CAMPAIGN_SEED_BASE is a seed number")
+    });
+    if nightly {
+        base..base + per_pr * NIGHTLY_SCALE
+    } else {
+        base..base + per_pr
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Durability {
@@ -264,6 +287,8 @@ struct Image {
     /// Whether this point follows a crash, rather than a clean shutdown or
     /// the start of the workload.
     crashed: bool,
+    /// What the campaign reported, so a replay judges the same way.
+    checks: Checks,
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +303,7 @@ struct Finding {
 
 /// Which known #808 bug classes a campaign reports, and how it copes with
 /// #811.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Checks {
     /// Report a reused WAL segment name (`restarted-segment-id`).
     segment_reuse: bool,
@@ -324,21 +349,19 @@ struct Campaign {
 
 impl Campaign {
     fn new(checks: Checks) -> Self {
-        Self::from_image(
-            &Image {
-                files: BTreeMap::new(),
-                history: History::new(BTreeMap::new(), BTreeSet::from([DEFAULT.to_string()])),
-                families: vec![DEFAULT.to_string()],
-                names: BTreeMap::new(),
-                values: 0,
-                remaining: Vec::new(),
-                crashed: false,
-            },
+        Self::from_image(&Image {
+            files: BTreeMap::new(),
+            history: History::new(BTreeMap::new(), BTreeSet::from([DEFAULT.to_string()])),
+            families: vec![DEFAULT.to_string()],
+            names: BTreeMap::new(),
+            values: 0,
+            remaining: Vec::new(),
+            crashed: false,
             checks,
-        )
+        })
     }
 
-    fn from_image(image: &Image, checks: Checks) -> Self {
+    fn from_image(image: &Image) -> Self {
         let device = CrashDevice::with_files(&image.files);
         let restored_names = device.names_ever();
         Self {
@@ -353,7 +376,7 @@ impl Campaign {
             images: Vec::new(),
             faults: Vec::new(),
             stale_lease_locks: 0,
-            checks,
+            checks: image.checks,
         }
     }
 
@@ -409,6 +432,7 @@ impl Campaign {
             values: self.values,
             remaining: remaining.to_vec(),
             crashed,
+            checks: self.checks,
         };
         self.images.push(image);
     }
@@ -621,8 +645,8 @@ impl Campaign {
     }
 
     /// Replay an image from its recovery point; return what it finds.
-    fn replay(image: &Image, checks: Checks) -> Result<(), FindingKind> {
-        let mut campaign = Self::from_image(image, checks);
+    fn replay(image: &Image) -> Result<(), FindingKind> {
+        let mut campaign = Self::from_image(image);
         let stop = if image.crashed {
             Stop::PowerLoss
         } else {
@@ -713,35 +737,52 @@ fn load_image(directory: &Path) -> Image {
     image
 }
 
-/// Save `finding`'s image below `MIDGE_CAMPAIGN_IMAGES`, or a temporary
-/// directory, and load it back: replays run from what was saved.
-fn saved_and_loaded(case: &str, finding: &Finding) -> Image {
-    let temporary = tempfile::tempdir().expect("image directory");
-    let directory = std::env::var_os("MIDGE_CAMPAIGN_IMAGES").map_or_else(
-        || temporary.path().join(case),
-        |root| Path::new(&root).join(format!("{case}-seed-{}", finding.seed)),
-    );
-    save_image(&directory, &finding.image);
+/// Where `finding`'s image is kept, below `MIDGE_CAMPAIGN_IMAGES`.
+fn kept_image_directory(case: &str, finding: &Finding) -> Option<PathBuf> {
+    std::env::var_os("MIDGE_CAMPAIGN_IMAGES")
+        .map(|root| Path::new(&root).join(format!("{case}-seed-{}", finding.seed)))
+}
+
+/// Write `finding`'s image to `directory`, with a readable account of it.
+fn save_finding(directory: &Path, finding: &Finding) {
+    save_image(directory, &finding.image);
     std::fs::write(
         directory.join("finding.txt"),
         format!("{:#?}\n\nworkload: {:#?}\n", finding.kind, finding.workload),
     )
     .expect("write finding");
+}
+
+/// Save `finding`'s image below `MIDGE_CAMPAIGN_IMAGES`, or a temporary
+/// directory, and load it back: replays run from what was saved.
+fn saved_and_loaded(case: &str, finding: &Finding) -> Image {
+    let temporary = tempfile::tempdir().expect("image directory");
+    let directory =
+        kept_image_directory(case, finding).unwrap_or_else(|| temporary.path().join(case));
+    save_finding(&directory, finding);
     load_image(&directory)
+}
+
+/// Assert a control campaign found nothing. A finding's image is kept below
+/// `MIDGE_CAMPAIGN_IMAGES` first, so CI uploads it for replay.
+fn assert_clean(case: &str, finding: Option<Finding>) {
+    let Some(finding) = finding else {
+        return;
+    };
+    let directory = kept_image_directory(case, &finding);
+    if let Some(directory) = &directory {
+        save_finding(directory, &finding);
+    }
+    panic!("{case}: the control found {finding:#?}\nimage: {directory:?}");
 }
 
 /// Assert `finding` matches `signature`, save its image, and prove the saved
 /// image replays it.
-fn assert_reproduced(
-    case: &str,
-    finding: Option<Finding>,
-    signature: impl Fn(&Finding) -> bool,
-    checks: Checks,
-) {
+fn assert_reproduced(case: &str, finding: Option<Finding>, signature: impl Fn(&Finding) -> bool) {
     let finding = finding.unwrap_or_else(|| panic!("{case}: the campaign found nothing"));
     assert!(signature(&finding), "{case}: found {finding:#?}");
     let image = saved_and_loaded(case, &finding);
-    let replayed = Campaign::replay(&image, checks);
+    let replayed = Campaign::replay(&image);
     assert!(
         replayed
             .as_ref()
@@ -754,20 +795,20 @@ fn assert_reproduced(
 #[test]
 fn should_find_no_violation_when_synced_writes_survive_crashes() {
     // Arrange
-    let workloads = 0..8;
+    let workloads = control_seeds(8);
 
     // Act
     let finding = campaign(Profile::CrashControl, workloads, 24, Checks::default());
 
     // Assert
-    assert!(finding.is_none(), "{finding:#?}");
+    assert_clean("crash-control", finding);
 }
 
 #[test]
 fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
     // Arrange: segment-name reuse after restarts is the known
     // `restarted-segment-id`, reported by its own campaign.
-    let workloads = 0..8;
+    let workloads = control_seeds(8);
     let checks = Checks {
         segment_reuse: false,
         ..Checks::default()
@@ -777,7 +818,7 @@ fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
     let finding = campaign(Profile::RetentionControl, workloads, 30, checks);
 
     // Assert
-    assert!(finding.is_none(), "{finding:#?}");
+    assert_clean("retention-control", finding);
 }
 
 #[test]
@@ -785,13 +826,13 @@ fn should_keep_created_families_when_process_crash_precedes_power_loss() {
     // Arrange: the review's lead is that a manifest journal created but not
     // dir-synced before a process crash loses its name at the next power
     // loss.
-    let workloads = 0..8;
+    let workloads = control_seeds(8);
 
     // Act
     let finding = campaign(Profile::FamilyCrashes, workloads, 24, Checks::default());
 
     // Assert
-    assert!(finding.is_none(), "{finding:#?}");
+    assert_clean("family-crashes", finding);
 }
 
 #[test]
@@ -806,23 +847,18 @@ fn should_reproduce_best_effort_delete_when_campaigning() {
     let finding = campaign(Profile::BestEffortDelete, 0..20, 16, checks);
 
     // Assert: a key came back after a best-effort delete.
-    assert_reproduced(
-        "best-effort-delete",
-        finding,
-        |finding| {
-            finding.kind.resurrects()
-                && finding.workload.iter().any(|op| {
-                    matches!(
-                        op,
-                        Op::Delete {
-                            durability: Durability::BestEffort,
-                            ..
-                        }
-                    )
-                })
-        },
-        checks,
-    );
+    assert_reproduced("best-effort-delete", finding, |finding| {
+        finding.kind.resurrects()
+            && finding.workload.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::Delete {
+                        durability: Durability::BestEffort,
+                        ..
+                    }
+                )
+            })
+    });
 }
 
 #[test]
@@ -837,12 +873,9 @@ fn should_reproduce_failed_local_unlink_when_campaigning() {
     let finding = campaign(Profile::FailedUnlink, 0..40, 30, checks);
 
     // Assert: a deleted key came back after a WAL removal failed.
-    assert_reproduced(
-        "failed-local-unlink",
-        finding,
-        |finding| finding.kind.resurrects() && finding.faults_fired > 0,
-        checks,
-    );
+    assert_reproduced("failed-local-unlink", finding, |finding| {
+        finding.kind.resurrects() && finding.faults_fired > 0
+    });
 }
 
 #[test]
@@ -858,7 +891,6 @@ fn should_reproduce_restarted_segment_id_when_campaigning() {
         "restarted-segment-id",
         finding,
         |finding| matches!(&finding.kind, FindingKind::SegmentReuse(name) if name.starts_with("wal/")),
-        Checks::default(),
     );
 }
 
@@ -871,19 +903,14 @@ fn should_reproduce_recovered_tail_loss_when_campaigning() {
     let finding = campaign(Profile::BufferedCrashes, workloads, 12, Checks::default());
 
     // Assert: a value recovery served after a process crash was lost.
-    assert_reproduced(
-        "recovered-tail-not-durable",
-        finding,
-        |finding| {
-            finding.kind.loses_required_value()
-                && finding.workload.contains(&Op::ProcessCrash)
-                && finding
-                    .workload
-                    .iter()
-                    .any(|op| matches!(op, Op::PowerLoss { .. }))
-        },
-        Checks::default(),
-    );
+    assert_reproduced("recovered-tail-not-durable", finding, |finding| {
+        finding.kind.loses_required_value()
+            && finding.workload.contains(&Op::ProcessCrash)
+            && finding
+                .workload
+                .iter()
+                .any(|op| matches!(op, Op::PowerLoss { .. }))
+    });
 }
 
 #[test]
@@ -905,8 +932,25 @@ fn should_reproduce_stale_lease_lock_when_power_is_lost() {
         "stale-lease-lock",
         found,
         |finding| matches!(&finding.kind, FindingKind::OpenRefused(error) if error.contains(LEASE_LOCK)),
-        checks,
     );
+}
+
+/// Replay the image `MIDGE_CAMPAIGN_REPLAY` names, as a campaign saved it
+/// below `MIDGE_CAMPAIGN_IMAGES`; CI uploads those as artifacts. Without the
+/// variable there is nothing to replay.
+#[test]
+fn should_replay_saved_image_when_one_is_named() {
+    // Arrange
+    let Some(directory) = std::env::var_os("MIDGE_CAMPAIGN_REPLAY") else {
+        return;
+    };
+    let image = load_image(Path::new(&directory));
+
+    // Act
+    let replayed = Campaign::replay(&image);
+
+    // Assert
+    assert!(replayed.is_ok(), "the image reproduces {replayed:#?}");
 }
 
 /// Registered RED case `recovered-tail-not-durable`, found by the

@@ -69,6 +69,8 @@ jobs:
 
       - name: Integration tests
         shell: bash
+        env:
+          MIDGE_CAMPAIGN_IMAGES: target/wal-campaigns
         run: |
           set -euo pipefail
           for source in tests/*.rs; do
@@ -83,6 +85,14 @@ jobs:
               cargo test --test "$target" --all-features -- --test-threads=1
             fi
           done
+
+      - name: Retain WAL campaign images
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wal-campaigns-${{ github.sha }}
+          path: target/wal-campaigns
+          if-no-files-found: ignore
 
       - name: Test named backup and empty-compaction aborts
         env:
