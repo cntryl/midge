@@ -23,18 +23,23 @@
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
     Commit, CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp, History, Logging,
-    Verdict, Violation,
+    SimulatedClock, Verdict, Violation,
 };
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Clock, Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Short, so a restart after a simulated crash takes the dead process's
-/// lease over quickly.
-const LEASE_TTL: Duration = Duration::from_millis(40);
+/// Long enough that a live process keeps renewing its lease, short enough
+/// that a crashed process's engine, whose threads outlive the simulated
+/// crash, stops retrying its lease release within a second.
+const LEASE_TTL: Duration = Duration::from_secs(1);
+/// How far a restarted process's lease clock moves past a crash: beyond the
+/// TTL and the default skew allowance, half the TTL, so it takes the dead
+/// process's lease over at once (#835).
+const TAKEOVER: Duration = Duration::from_secs(2);
 /// The local lease's mutation lock. #811: a completed release's unlink is not
 /// made durable, so a power loss can bring the lock back and block every
 /// later open.
@@ -43,7 +48,7 @@ const LEASE_LOCK: &str = ".midge_leader.lock";
 const KEYS: u8 = 6;
 const DEFAULT: &str = "default";
 /// How many times more seeds the nightly profile explores per control.
-const NIGHTLY_SCALE: u64 = 50;
+const NIGHTLY_SCALE: u64 = 100;
 /// The seeds a detection campaign searches. Whether a seed reaches a bug can
 /// depend on background timing, so the search is wide; it stops at the first
 /// finding, which usually comes within the first few seeds.
@@ -291,6 +296,9 @@ struct Image {
     /// Whether this point follows a crash, rather than a clean shutdown or
     /// the start of the workload.
     crashed: bool,
+    /// The lease clock's reading, so a replay never sees a lease record
+    /// stamped in its future.
+    lease_clock_millis: u64,
     /// What the campaign reported, so a replay judges the same way.
     checks: Checks,
 }
@@ -335,6 +343,8 @@ enum Stop {
 
 struct Campaign {
     device: CrashDevice,
+    /// The lease clock every process of this campaign reads.
+    clock: SimulatedClock,
     named: tempfile::TempDir,
     engine: Option<Engine>,
     history: History,
@@ -361,6 +371,7 @@ impl Campaign {
             values: 0,
             remaining: Vec::new(),
             crashed: false,
+            lease_clock_millis: 0,
             checks,
         })
     }
@@ -368,8 +379,11 @@ impl Campaign {
     fn from_image(image: &Image) -> Self {
         let device = CrashDevice::with_files(&image.files);
         let restored_names = device.names_ever();
+        let clock = SimulatedClock::new();
+        clock.advance_to(image.lease_clock_millis);
         Self {
             device,
+            clock,
             named: tempfile::tempdir().expect("named directory"),
             engine: None,
             history: image.history.clone(),
@@ -389,7 +403,7 @@ impl Campaign {
         OpenOptions::local(self.named.path())
             .background_compaction(false)
             .lease_ttl(LEASE_TTL)
-            .lease_clock_skew_tolerance(Duration::ZERO)
+            .lease_clock_for_testing(Arc::new(self.clock.clone()))
             .filesystem_for_testing(root)
             .build()
             .expect("open options")
@@ -436,6 +450,7 @@ impl Campaign {
             values: self.values,
             remaining: remaining.to_vec(),
             crashed,
+            lease_clock_millis: self.clock.now_millis(),
             checks: self.checks,
         };
         self.images.push(image);
@@ -460,9 +475,8 @@ impl Campaign {
     fn recover(&mut self, stop: Stop) -> Result<(), FindingKind> {
         self.device.disarm_faults();
         if stop != Stop::Clean {
-            // A restarted process takes the dead one's lease over once it
-            // is stale.
-            std::thread::sleep(LEASE_TTL * 3);
+            // The restarted process's clock runs past the dead one's lease.
+            self.clock.advance(TAKEOVER);
         }
         let engine = match Engine::open(self.options()) {
             Err(error)
@@ -799,7 +813,7 @@ fn assert_reproduced(case: &str, finding: Option<Finding>, signature: impl Fn(&F
 #[test]
 fn should_find_no_violation_when_synced_writes_survive_crashes() {
     // Arrange
-    let workloads = control_seeds(8);
+    let workloads = control_seeds(32);
 
     // Act
     let finding = campaign(Profile::CrashControl, workloads, 24, Checks::default());
@@ -812,7 +826,7 @@ fn should_find_no_violation_when_synced_writes_survive_crashes() {
 fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
     // Arrange: segment-name reuse after restarts is the known
     // `restarted-segment-id`, reported by its own campaign.
-    let workloads = control_seeds(8);
+    let workloads = control_seeds(32);
     let checks = Checks {
         segment_reuse: false,
         ..Checks::default()
@@ -830,7 +844,7 @@ fn should_keep_created_families_when_process_crash_precedes_power_loss() {
     // Arrange: the review's lead is that a manifest journal created but not
     // dir-synced before a process crash loses its name at the next power
     // loss.
-    let workloads = control_seeds(8);
+    let workloads = control_seeds(32);
 
     // Act
     let finding = campaign(Profile::FamilyCrashes, workloads, 24, Checks::default());

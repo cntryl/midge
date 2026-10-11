@@ -103,9 +103,15 @@ complete cross-platform redesign campaign.
 `tests/wal_campaigns.rs` drives the engine through seeded workloads on the
 crash device and judges every recovery with the prefix oracle (#831).
 Control campaigns must find nothing. CI runs their per-PR seed budget with the
-integration tests. The nightly `WAL campaigns` workflow runs 50 times as many
+integration tests. The nightly `WAL campaigns` workflow runs 100 times as many
 seeds, from a base that moves each run. Detection campaigns keep fixed seeds,
 so every run proves the same findings (#837).
+
+A restarted process takes a crashed one's lease over at once: the test
+advances the lease clock it reads past the old lease's expiry, and it acquires
+the next epoch through the normal path (#835). A crashed process reaches
+neither its device nor the object store again, so it cannot release its lease
+or write after its crash; requests it had in flight can still land late.
 
 A finding is saved as a crash image below `MIDGE_CAMPAIGN_IMAGES`, and both
 workflows upload those images as artifacts. To run the nightly budget, then
