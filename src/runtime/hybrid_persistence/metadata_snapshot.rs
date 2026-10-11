@@ -655,8 +655,11 @@ mod tests {
             last_persisted_sequence: 10,
             ..Manifest::default()
         };
-        crate::metadata::ensure_or_create_format_marker(directory.path())
-            .expect("create local format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(directory.path()),
+            directory.path(),
+        )
+        .expect("create local format marker");
         crate::metadata::ManifestPersistence::save(directory.path(), &remote).unwrap();
         let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
@@ -737,8 +740,11 @@ mod tests {
 
         // Arrange
         let directory = tempfile::tempdir().expect("local cloud cache");
-        crate::metadata::ensure_or_create_format_marker(directory.path())
-            .expect("create local format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(directory.path()),
+            directory.path(),
+        )
+        .expect("create local format marker");
         crate::metadata::ManifestPersistence::save(directory.path(), &Manifest::default())
             .expect("save local manifest");
         std::fs::remove_file(directory.path().join(crate::metadata::files::FORMAT))
@@ -796,8 +802,11 @@ mod tests {
 
         // Arrange
         let directory = tempfile::tempdir().expect("local cloud cache");
-        crate::metadata::ensure_or_create_format_marker(directory.path())
-            .expect("create local format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(directory.path()),
+            directory.path(),
+        )
+        .expect("create local format marker");
         crate::metadata::ManifestPersistence::save(directory.path(), &Manifest::default())
             .expect("save local manifest");
         let cloud = Arc::new(CloudStorage::new(
@@ -1109,8 +1118,11 @@ mod tests {
 
         // Arrange: two provider-backed writers share one lease and metadata store.
         let directory = tempfile::tempdir().expect("cache directory");
-        crate::metadata::ensure_or_create_format_marker(directory.path())
-            .expect("create local format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(directory.path()),
+            directory.path(),
+        )
+        .expect("create local format marker");
         let backend = Arc::new(PausingMetadataPutBackend::new());
         let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
         let lease = || {
@@ -1120,7 +1132,6 @@ mod tests {
                         bucket: "test".into(),
                         prefix: String::new(),
                     },
-                    directory.path().to_path_buf(),
                     Arc::clone(&cloud),
                     Duration::ZERO,
                     Duration::from_secs(30),

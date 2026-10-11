@@ -4,7 +4,7 @@
   "regressions": [
     {
       "id": "best-effort-delete",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_best_effort_deleted_key_when_reopening_after_clean_shutdown",
@@ -13,7 +13,7 @@
     },
     {
       "id": "best-effort-delete",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_best_effort_deleted_key_when_recovering_a_crash_image",
@@ -22,7 +22,7 @@
     },
     {
       "id": "failed-local-unlink",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails",
@@ -32,7 +32,7 @@
     },
     {
       "id": "retired-local-cloud-copy",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "fault_injection",
       "source": "tests/fault_injection/local_wal_gc.rs",
       "test": "should_keep_deleted_key_absent_without_compaction_when_local_wal_removal_fails",
@@ -40,7 +40,7 @@
     },
     {
       "id": "retired-local-cloud-copy",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "fault_injection",
       "source": "tests/fault_injection/local_wal_gc.rs",
       "test": "should_not_resurrect_deleted_key_when_retired_local_wal_copy_survives_restart",
@@ -48,7 +48,7 @@
     },
     {
       "id": "empty-range-pin",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "wal_retention_regressions",
       "source": "tests/wal_retention_regressions.rs",
       "test": "should_retire_cloud_wal_when_empty_range_has_no_replayable_effect",
@@ -57,7 +57,7 @@
     },
     {
       "id": "dropped-family-pin",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "wal_retention_regressions",
       "source": "tests/wal_retention_regressions.rs",
       "test": "should_retire_cloud_wal_when_flushed_family_is_dropped",
@@ -66,7 +66,7 @@
     },
     {
       "id": "dropped-family-pin",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 3,
       "target": "wal_retention_regressions",
       "source": "tests/wal_retention_regressions.rs",
       "test": "should_retire_cloud_wal_when_unflushed_family_is_discarded",
@@ -130,7 +130,7 @@
     },
     {
       "id": "retryable-fsync-failure",
-      "fixing_pr_stage": 3,
+      "fixing_pr_stage": 6,
       "target": "fault_injection",
       "source": "tests/fault_injection.rs",
       "test": "should_not_replay_commit_reported_as_retryable_when_wal_sync_fails",
@@ -139,7 +139,7 @@
     },
     {
       "id": "partial-spilled-admission",
-      "fixing_pr_stage": 3,
+      "fixing_pr_stage": 6,
       "target": "lib",
       "source": "src/runtime/actors/wal/tests/admission.rs",
       "test": "should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget",
@@ -148,7 +148,7 @@
     },
     {
       "id": "abandoned-split-transaction",
-      "fixing_pr_stage": 3,
+      "fixing_pr_stage": 6,
       "target": "lib",
       "source": "src/wal/recovery/streaming/tests.rs",
       "test": "should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_follow",
@@ -159,16 +159,11 @@
   "supplemental_regressions": [
     {
       "id": "failed-allocation-listing",
-      "fixing_pr_stage": 2,
+      "fixing_pr_stage": 1,
       "target": "lib",
       "source": "src/runtime/state/recovery/timeout_tests.rs",
       "test": "should_not_regress_next_segment_id_when_wal_directory_listing_fails",
-      "baseline": "red",
-      "platforms": [
-        "darwin",
-        "linux"
-      ],
-      "failure_marker": "next segment id regressed to 1 with segments 5 and 6 present"
+      "baseline": "green"
     },
     {
       "id": "inverted-epoch-history",

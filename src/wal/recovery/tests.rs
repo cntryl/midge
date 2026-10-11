@@ -2028,7 +2028,7 @@ fn should_not_rescan_fresh_records_when_a_stale_record_carries_a_higher_sequence
 }
 
 #[test]
-#[ignore = "#808 PR 2: allocation and linked history"]
+#[ignore = "#808 stage 2: allocation and linked history"]
 fn should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_epoch() {
     // Arrange: the LR-F3 layout. Segments 5 and 6 hold epoch-1 acknowledged
     // writes. After the next-segment id regressed to 1 at an epoch-2 open,

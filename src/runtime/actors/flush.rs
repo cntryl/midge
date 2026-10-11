@@ -878,7 +878,10 @@ mod tests {
     fn publication_fixture(fail_at_validation: usize) -> MidgeResult<PublicationFixture> {
         let directory = tempfile::tempdir()?;
         let db_path = directory.path().join("db");
-        crate::metadata::ensure_or_create_format_marker(&db_path)?;
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(&db_path),
+            &db_path,
+        )?;
         let sst_dir = db_path.join("sst");
         std::fs::create_dir_all(&sst_dir)?;
         let staging_path = db_path.join("staging").join("flush-1.sst");

@@ -72,127 +72,72 @@ impl RuntimeState {
             .expect("runtime state initialization failed")
     }
 
-    /// Create new runtime state with an explicit recovery policy.
+    /// Recover runtime state from a host directory, or from memory.
+    #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
     pub fn try_new(
         db_path: PathBuf,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
-        Self::try_new_with_recovery_dir(db_path, memory_mode, None, recovery_policy)
+        let root = Self::test_root(&db_path, memory_mode)?;
+        Self::recover(db_path, memory_mode, root, recovery_policy, true, None)
     }
 
-    /// Create new runtime state with an optional override for WAL recovery and
-    /// an explicit recovery policy.
-    /// # Errors
-    ///
-    /// Returns an error if recovery cannot initialize the filesystem, load the manifest,
-    /// replay the intent log, or replay WAL state.
-    pub fn try_new_with_recovery_dir(
-        db_path: PathBuf,
-        memory_mode: bool,
-        recovery_wal_dir: Option<&PathBuf>,
-        recovery_policy: crate::config::RecoveryPolicy,
-    ) -> MidgeResult<Self> {
-        Self::initialize_recovery(
-            db_path,
-            memory_mode,
-            recovery_wal_dir,
-            recovery_policy,
-            true,
-        )
-    }
-
-    /// Load metadata before cloud WAL replay, whose working set is checkpointed
-    /// incrementally by startup after outstanding publication intents are repaired.
+    /// Load metadata from a host directory before cloud WAL replay.
+    #[cfg(test)]
     pub(crate) fn try_new_before_cloud_replay(
         db_path: PathBuf,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
-        Self::initialize_recovery(db_path, false, None, recovery_policy, false)
+        let root = Self::test_root(&db_path, false)?;
+        Self::recover(db_path, false, root, recovery_policy, false, None)
     }
 
-    fn initialize_recovery(
+    #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
+    fn test_root(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {
+        if memory_mode {
+            return Ok(Arc::new(crate::io::MockFs::new()));
+        }
+        Ok(Arc::new(
+            crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?,
+        ))
+    }
+
+    /// Recover runtime state from the database `root`.
+    ///
+    /// With `replay_wal` false, only metadata is loaded: cloud startup replays
+    /// its WAL afterwards, checkpointing incrementally once outstanding
+    /// publication intents are repaired.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if recovery cannot create the database directories,
+    /// validate the format marker, load the manifest or intent log, or replay
+    /// WAL state.
+    pub(crate) fn recover(
         db_path: PathBuf,
         memory_mode: bool,
-        recovery_wal_dir: Option<&PathBuf>,
+        root: Arc<dyn Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
         replay_wal: bool,
+        scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
-        Self::ensure_directories(&db_path, memory_mode)?;
-        let fs = Self::initialize_fs(&db_path, memory_mode)?;
-        Self::initialize_recovery_core(
-            db_path,
-            memory_mode,
-            recovery_wal_dir,
-            recovery_policy,
-            replay_wal,
-            fs,
-            None,
-        )
+        check_scope(scope, "recovery filesystem")?;
+        Self::ensure_directories(root.as_ref(), memory_mode)?;
+        if !memory_mode {
+            crate::metadata::ensure_or_create_format_marker(&root, &db_path)?;
+        }
+        check_scope(scope, "recovery directories")?;
+        let fs = match scope {
+            Some(scope) => crate::io::scope_fs(root, scope.clone()),
+            None => root,
+        };
+        Self::initialize_recovery_core(db_path, memory_mode, recovery_policy, replay_wal, fs, scope)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn initialize_recovery_within(
-        db_path: PathBuf,
-        memory_mode: bool,
-        recovery_wal_dir: Option<&PathBuf>,
-        recovery_policy: crate::config::RecoveryPolicy,
-        replay_wal: bool,
-        fs: Arc<dyn Fs>,
-        scope: &DeadlineScope,
-    ) -> MidgeResult<Self> {
-        scope.check("recovery filesystem view")?;
-        let fs = crate::io::scope_fs(fs, scope.clone());
-        Self::initialize_recovery_core(
-            db_path,
-            memory_mode,
-            recovery_wal_dir,
-            recovery_policy,
-            replay_wal,
-            fs,
-            Some(scope),
-        )
-    }
-
-    pub(crate) fn try_new_with_recovery_dir_within(
-        db_path: PathBuf,
-        memory_mode: bool,
-        recovery_wal_dir: Option<&PathBuf>,
-        policy: crate::config::RecoveryPolicy,
-        scope: &DeadlineScope,
-    ) -> MidgeResult<Self> {
-        scope.check("local recovery filesystem")?;
-        Self::ensure_directories(&db_path, memory_mode)?;
-        scope.check("local recovery directories")?;
-        let fs = Self::initialize_fs(&db_path, memory_mode)?;
-        Self::initialize_recovery_within(
-            db_path,
-            memory_mode,
-            recovery_wal_dir,
-            policy,
-            true,
-            fs,
-            scope,
-        )
-    }
-
-    pub(crate) fn try_new_before_cloud_replay_within(
-        db_path: PathBuf,
-        policy: crate::config::RecoveryPolicy,
-        scope: &DeadlineScope,
-    ) -> MidgeResult<Self> {
-        scope.check("cloud recovery filesystem")?;
-        Self::ensure_directories(&db_path, false)?;
-        scope.check("cloud recovery directories")?;
-        let fs = Self::initialize_fs(&db_path, false)?;
-        Self::initialize_recovery_within(db_path, false, None, policy, false, fs, scope)
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn initialize_recovery_core(
         db_path: PathBuf,
         memory_mode: bool,
-        recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
         replay_wal: bool,
         fs: Arc<dyn Fs>,
@@ -209,7 +154,6 @@ impl RuntimeState {
         } = Self::load_startup_recovery(
             &db_path,
             persistence,
-            recovery_wal_dir,
             recovery_policy,
             replay_wal,
             &fs,
@@ -302,15 +246,13 @@ impl RuntimeState {
     fn load_startup_recovery(
         db_path: &std::path::Path,
         persistence: RuntimePersistence,
-        recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
         replay_wal: bool,
         fs: &Arc<dyn Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<RecoveredStartup> {
-        check_scope(scope, "recovery directories")?;
-        let (wal_dir, sst_dir) = Self::ensure_directories(db_path, persistence.is_memory())?;
-        check_scope(scope, "recovery directories")?;
+        let wal_dir = db_path.join("wal");
+        let sst_dir = db_path.join("sst");
         let RecoveryLoadState {
             opened_in_salvage_mode,
             manifest,
@@ -326,8 +268,8 @@ impl RuntimeState {
         let wal_recovery = if replay_wal {
             Self::recover_wal_state(
                 persistence.is_memory(),
-                recovery_wal_dir.map_or(wal_dir.as_path(), PathBuf::as_path),
-                &sst_dir,
+                fs,
+                &wal_dir,
                 recovery_policy,
                 &manifest,
                 column_families,
@@ -380,21 +322,6 @@ impl RuntimeState {
             records_replayed: 0,
             bytes_replayed: 0,
             opened_in_salvage_mode: false,
-        }
-    }
-
-    fn initialize_fs(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {
-        if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(db_path)?;
-        }
-        if memory_mode {
-            Ok(Arc::new(crate::io::MockFs::new()))
-        } else {
-            Ok(Arc::new(crate::io::real::RealFs::new(db_path).map_err(
-                |error| {
-                    MidgeError::RecoveryFailed(format!("failed to initialize filesystem: {error}"))
-                },
-            )?))
         }
     }
 
@@ -567,8 +494,8 @@ impl RuntimeState {
 
     fn recover_wal_state(
         memory_mode: bool,
+        root: &Arc<dyn Fs>,
         replay_dir: &std::path::Path,
-        sst_dir: &std::path::Path,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
@@ -576,8 +503,8 @@ impl RuntimeState {
     ) -> MidgeResult<WalRecoveryState> {
         let mut wal_recovery = Self::replay_wal_within(
             memory_mode,
+            root,
             replay_dir,
-            sst_dir,
             recovery_policy,
             manifest,
             column_families,
@@ -586,8 +513,9 @@ impl RuntimeState {
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
             .max(Self::manifest_visible_sequence_floor(manifest));
+        let wal = crate::io::subdirectory(Arc::clone(root), "wal");
         wal_recovery.next_segment_id =
-            Self::recover_next_segment_id(memory_mode, replay_dir, scope)?;
+            Self::recover_next_segment_id(memory_mode, wal.as_ref(), scope)?;
         Ok(wal_recovery)
     }
 
@@ -595,22 +523,15 @@ impl RuntimeState {
     /// already hold. Without a readable SST directory nothing is proven
     /// covered, so every record replays.
     fn recovery_wal_coverage(
-        sst_dir: &std::path::Path,
+        root: &Arc<dyn Fs>,
         manifest: &Manifest,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<crate::runtime::cloud_startup::replay_coverage::ReplayCoverage> {
         check_scope(scope, "local SST coverage filesystem")?;
-        let db_path = sst_dir.parent().unwrap_or(sst_dir);
-        let fs: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
-        let fs = scope.map_or_else(
-            || Arc::clone(&fs),
-            |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
-        );
         Ok(
             crate::runtime::cloud_startup::replay_coverage::ReplayCoverage::new(
                 manifest.clone(),
-                fs,
+                Arc::clone(root),
                 usize::MAX,
             ),
         )
@@ -619,16 +540,16 @@ impl RuntimeState {
     #[cfg(test)]
     fn replay_wal(
         memory_mode: bool,
+        root: &Arc<dyn Fs>,
         replay_dir: &std::path::Path,
-        sst_dir: &std::path::Path,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
     ) -> MidgeResult<WalRecoveryState> {
         Self::replay_wal_within(
             memory_mode,
+            root,
             replay_dir,
-            sst_dir,
             recovery_policy,
             manifest,
             column_families,
@@ -638,15 +559,19 @@ impl RuntimeState {
 
     fn replay_wal_within(
         memory_mode: bool,
+        root: &Arc<dyn Fs>,
         replay_dir: &std::path::Path,
-        sst_dir: &std::path::Path,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<WalRecoveryState> {
         check_scope(scope, "local WAL replay")?;
-        if memory_mode || !replay_dir.exists() {
+        let wal_exists = !memory_mode
+            && root
+                .exists(&crate::io::FsPath::new("wal"))
+                .map_err(FsError::into_midge)?;
+        if !wal_exists {
             return Ok(WalRecoveryState {
                 column_families,
                 recovered_sequence: 0,
@@ -657,25 +582,10 @@ impl RuntimeState {
             });
         }
 
-        let storage = match crate::io::RealFs::new(replay_dir) {
-            Ok(storage) => {
-                let fs: Arc<dyn Fs> = Arc::new(storage);
-                scope.map_or_else(
-                    || Arc::clone(&fs),
-                    |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
-                )
-            }
-            Err(error) => {
-                return Self::handle_wal_recovery_failure(
-                    recovery_policy,
-                    format!("failed to initialize WAL recovery filesystem: {error}"),
-                    column_families,
-                );
-            }
-        };
+        let storage = crate::io::subdirectory(Arc::clone(root), "wal");
         Self::replay_wal_storage_within(
             replay_dir,
-            sst_dir,
+            root,
             recovery_policy,
             manifest,
             column_families,
@@ -686,7 +596,7 @@ impl RuntimeState {
 
     fn replay_wal_storage_within(
         replay_dir: &std::path::Path,
-        sst_dir: &std::path::Path,
+        root: &Arc<dyn Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         mut column_families: HashMap<u32, ColumnFamilyState>,
@@ -702,17 +612,15 @@ impl RuntimeState {
             }
         };
         let coverage = scope
-            .map(|scope| Self::recovery_wal_coverage(sst_dir, manifest, Some(scope)))
+            .map(|scope| Self::recovery_wal_coverage(root, manifest, Some(scope)))
             .transpose()?;
         let mut proven = crate::runtime::hybrid_persistence::ProvenSstIdentities::default();
-        let legacy_fs = if scope.is_none() {
-            crate::io::RealFs::new(sst_dir).ok()
-        } else {
-            None
-        };
+        let legacy_fs = scope
+            .is_none()
+            .then(|| crate::io::subdirectory(Arc::clone(root), "sst"));
         let legacy_coverage = legacy_fs.map(|fs| {
             crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
-                Arc::new(fs),
+                fs,
                 "",
                 manifest,
                 &mut proven,
@@ -1019,32 +927,33 @@ impl RuntimeState {
         }
     }
 
+    /// The next WAL segment id: one past the highest sealed segment present.
+    /// A directory that cannot be listed fails the open, because guessing
+    /// would restart ids below segments that still hold acknowledged writes.
     fn recover_next_segment_id(
         memory_mode: bool,
-        replay_dir: &std::path::Path,
+        wal: &dyn Fs,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
         check_scope(scope, "WAL segment identity discovery")?;
-        if memory_mode || !replay_dir.exists() {
+        let root = crate::io::FsPath::new("");
+        if memory_mode || !wal.exists(&root).map_err(FsError::into_midge)? {
             return Ok(1);
         }
         let mut max_segment_id: u64 = 0;
-        if let Ok(entries) = std::fs::read_dir(replay_dir) {
-            for entry in entries.flatten() {
-                check_scope(scope, "WAL segment identity entry")?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("wal") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                if stem.eq_ignore_ascii_case("wal") {
-                    continue;
-                }
-                if let Ok(id) = stem.parse::<u64>() {
-                    max_segment_id = max_segment_id.max(id);
-                }
+        for entry in wal.list_dir(&root).map_err(FsError::into_midge)? {
+            check_scope(scope, "WAL segment identity entry")?;
+            if entry.is_dir {
+                continue;
+            }
+            let Some(stem) = entry.name.strip_suffix(".wal") else {
+                continue;
+            };
+            if stem.eq_ignore_ascii_case("wal") {
+                continue;
+            }
+            if let Ok(id) = stem.parse::<u64>() {
+                max_segment_id = max_segment_id.max(id);
             }
         }
         max_segment_id
@@ -1151,12 +1060,20 @@ impl RuntimeState {
         }
     }
 
+    fn local_sst_exists(&self, sst_name: &str) -> MidgeResult<bool> {
+        self.fs
+            .exists(&crate::io::FsPath::new(crate::cloud_layout::object_key(
+                sst_name,
+            )))
+            .map_err(FsError::into_midge)
+    }
+
     fn delete_sst_if_exists(&mut self, sst_name: &str) -> MidgeResult<()> {
         self.check_startup_scope("recovery SST deletion")?;
-        let path = self.sst_dir.join(sst_name);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        let path = crate::io::FsPath::new(crate::cloud_layout::object_key(sst_name));
+        match self.fs.remove_file(&path) {
+            Ok(()) | Err(FsError::NotFound(_)) => Ok(()),
+            Err(error @ FsError::Timeout(_)) => Err(error.into_midge()),
             Err(error) => {
                 if self.recovery_policy() == crate::config::RecoveryPolicy::Strict {
                     Err(MidgeError::RecoveryFailed(format!(
@@ -1188,8 +1105,7 @@ impl RuntimeState {
 
         match phase {
             PublicationPhase::OutputDurable => {
-                let path = self.sst_dir.join(&file_meta.name);
-                if path.exists() {
+                if self.local_sst_exists(&file_meta.name)? {
                     if !self.validate_local_recovered_sst(file_meta)? {
                         return Ok(false);
                     }
@@ -1238,8 +1154,7 @@ impl RuntimeState {
             (PublicationPhase::OutputDurable, CompactionManifestState::Prepublication) => {
                 for file_meta in added {
             self.check_startup_scope("compaction intent proof")?;
-                    let path = self.sst_dir.join(&file_meta.name);
-                    if !path.exists() {
+                    if !self.local_sst_exists(&file_meta.name)? {
                         continue;
                     }
                     if !self.validate_local_recovered_sst(file_meta)? {
@@ -1393,9 +1308,7 @@ impl RuntimeState {
     ) -> MidgeResult<()> {
         for file_meta in added {
             self.check_startup_scope("compaction intent proof")?;
-            if self.manifest_has_file(&file_meta.name)
-                || !self.sst_dir.join(&file_meta.name).exists()
-            {
+            if self.manifest_has_file(&file_meta.name) || !self.local_sst_exists(&file_meta.name)? {
                 continue;
             }
             if !self.validate_local_recovered_sst(file_meta)? {
@@ -1417,9 +1330,7 @@ impl RuntimeState {
     ) -> MidgeResult<()> {
         for file_meta in added {
             self.check_startup_scope("compaction intent proof")?;
-            if self.manifest_has_file(&file_meta.name)
-                || !self.sst_dir.join(&file_meta.name).exists()
-            {
+            if self.manifest_has_file(&file_meta.name) || !self.local_sst_exists(&file_meta.name)? {
                 continue;
             }
             if !self.validate_local_recovered_sst(file_meta)? {
@@ -1717,8 +1628,8 @@ mod salvage_quarantine_tests {
         // Act
         let result = RuntimeState::replay_wal(
             false,
+            &crate::io::real::test_root(directory.path()),
             &wal_dir,
-            &directory.path().join("sst"),
             crate::config::RecoveryPolicy::Strict,
             &Manifest::default(),
             HashMap::new(),
@@ -1745,7 +1656,7 @@ mod salvage_quarantine_tests {
         conflicting_repeated_sequence(&wal_dir);
 
         // Act
-        let recovered = salvage_replay(&wal_dir, &directory.path().join("sst"));
+        let recovered = salvage_replay(&wal_dir);
 
         // Assert: the first write survives and replay stops at the
         // conflicting frame, which is not counted as replayed.
@@ -1771,7 +1682,7 @@ mod salvage_quarantine_tests {
         );
 
         // Act
-        let recovered = salvage_replay(&wal_dir, &directory.path().join("sst"));
+        let recovered = salvage_replay(&wal_dir);
 
         // Assert
         assert!(recovered.opened_in_salvage_mode);
@@ -1819,11 +1730,11 @@ mod salvage_quarantine_tests {
         prefix_len as u64
     }
 
-    fn salvage_replay(wal_dir: &std::path::Path, sst_dir: &std::path::Path) -> WalRecoveryState {
+    fn salvage_replay(wal_dir: &std::path::Path) -> WalRecoveryState {
         RuntimeState::replay_wal(
             false,
+            &crate::io::real::test_root(wal_dir.parent().expect("database root")),
             wal_dir,
-            sst_dir,
             crate::config::RecoveryPolicy::Salvage,
             &Manifest::default(),
             HashMap::new(),
@@ -1840,7 +1751,7 @@ mod salvage_quarantine_tests {
         let prefix_len = corrupt_middle_segment(&wal_dir);
 
         // Act
-        let recovered = salvage_replay(&wal_dir, &directory.path().join("sst"));
+        let recovered = salvage_replay(&wal_dir);
 
         // Assert
         assert!(recovered.opened_in_salvage_mode);
@@ -1879,7 +1790,7 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         corrupt_middle_segment(&wal_dir);
-        salvage_replay(&wal_dir, &directory.path().join("sst"));
+        salvage_replay(&wal_dir);
         write(
             &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
             &[frame(b"after", 7)],
@@ -1888,8 +1799,8 @@ mod salvage_quarantine_tests {
         // Act
         let reopened = RuntimeState::replay_wal(
             false,
+            &crate::io::real::test_root(directory.path()),
             &wal_dir,
-            &directory.path().join("sst"),
             crate::config::RecoveryPolicy::Strict,
             &Manifest::default(),
             HashMap::new(),

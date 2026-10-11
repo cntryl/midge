@@ -669,3 +669,449 @@ fn should_bound_legacy_sst_backfill_work_when_persisting() {
     assert!(uses_worker);
     assert!(batches_edits);
 }
+
+/// Source scanning shared by the #808 WAL-authority rules: production code is
+/// every `src/` file outside test-only modules, minus items gated on `test`,
+/// `internal-testing` or `failpoints`.
+mod source_scan {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    pub(crate) struct SourceFile {
+        pub(crate) relative: String,
+        pub(crate) production: String,
+    }
+
+    fn src_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+    }
+
+    fn relative(path: &Path) -> String {
+        path.strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .expect("source below manifest")
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
+    /// Split a `cfg` predicate list at its top-level commas.
+    fn predicate_list(list: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let (mut depth, mut start) = (0usize, 0);
+        for (index, character) in list.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(list[start..index].trim());
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(list[start..].trim());
+        parts.retain(|part| !part.is_empty());
+        parts
+    }
+
+    /// Whether a `cfg` predicate holds only in test builds: `test`, or the
+    /// `internal-testing`/`failpoints` features.
+    fn test_only(predicate: &str) -> bool {
+        let predicate = predicate.trim();
+        let inner = |prefix: &str| {
+            predicate
+                .strip_prefix(prefix)
+                .and_then(|tail| tail.strip_suffix(')'))
+                .map(predicate_list)
+        };
+        if predicate == "test" {
+            true
+        } else if let Some(feature) = predicate
+            .strip_prefix("feature = \"")
+            .and_then(|tail| tail.strip_suffix('"'))
+        {
+            matches!(feature, "internal-testing" | "failpoints")
+        } else if let Some(parts) = inner("all(") {
+            parts.into_iter().any(test_only)
+        } else if let Some(parts) = inner("any(") {
+            !parts.is_empty() && parts.into_iter().all(test_only)
+        } else {
+            false
+        }
+    }
+
+    /// Whether `line` opens a `cfg` attribute whose item compiles only in
+    /// test builds.
+    fn is_gate(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("#[cfg(") {
+            return false;
+        }
+        let end = attribute_end(trimmed);
+        trimmed[..end]
+            .strip_prefix("#[cfg(")
+            .and_then(|tail| tail.strip_suffix(")]"))
+            .is_some_and(test_only)
+    }
+
+    /// Byte offset just past the `cfg` attribute that starts `line`.
+    fn attribute_end(line: &str) -> usize {
+        let mut depth = 0usize;
+        for (index, character) in line.char_indices() {
+            match character {
+                '[' | '(' => depth += 1,
+                ']' | ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        line.len()
+    }
+
+    /// Byte length of the item starting at `text`: through its matching `}`,
+    /// or through the first top-level `;` when that comes first.
+    fn item_len(text: &str) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    while index < bytes.len() && bytes[index] != b'\n' {
+                        index += 1;
+                    }
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    let mut nesting = 0usize;
+                    while index < bytes.len() {
+                        if bytes[index..].starts_with(b"/*") {
+                            nesting += 1;
+                            index += 2;
+                        } else if bytes[index..].starts_with(b"*/") {
+                            nesting -= 1;
+                            index += 2;
+                            if nesting == 0 {
+                                break;
+                            }
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    continue;
+                }
+                b'r' if matches!(bytes.get(index + 1), Some(b'"' | b'#'))
+                    && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric()) =>
+                {
+                    let hashes = bytes[index + 1..]
+                        .iter()
+                        .take_while(|byte| **byte == b'#')
+                        .count();
+                    let open = index + 1 + hashes;
+                    if bytes.get(open) == Some(&b'"') {
+                        let mut closing = b"\"".to_vec();
+                        closing.extend(std::iter::repeat_n(b'#', hashes));
+                        index = text[open + 1..]
+                            .find(std::str::from_utf8(&closing).expect("ASCII delimiter"))
+                            .map_or(bytes.len(), |end| open + 1 + end + closing.len());
+                        continue;
+                    }
+                }
+                b'"' => {
+                    index += 1;
+                    while index < bytes.len() && bytes[index] != b'"' {
+                        if bytes[index] == b'\\' {
+                            index += 1;
+                        }
+                        index += 1;
+                    }
+                }
+                b'\'' if bytes.get(index + 2) == Some(&b'\'') => index += 2,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return index + 1;
+                    }
+                }
+                b';' if depth == 0 => return index + 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        bytes.len()
+    }
+
+    /// Remove gated items, returning the remaining text and the names of
+    /// gated `mod name;` declarations.
+    enum GatedModule {
+        Named(String),
+        Path(String),
+    }
+
+    fn strip_gated(source: &str) -> (String, Vec<GatedModule>) {
+        let mut production = String::with_capacity(source.len());
+        let mut gated_modules = Vec::new();
+        let mut rest = source;
+        while !rest.is_empty() {
+            let line_end = rest.find('\n').map_or(rest.len(), |end| end + 1);
+            let line = &rest[..line_end];
+            if !is_gate(line) {
+                production.push_str(line);
+                rest = &rest[line_end..];
+                continue;
+            }
+            let after_attribute = attribute_end(line);
+            let mut path_attribute = None;
+            if line[after_attribute..].trim().is_empty() {
+                rest = &rest[line_end..];
+            } else {
+                // The gated item starts on the attribute's own line.
+                rest = &rest[after_attribute..];
+            }
+            // Further attributes belong to the same gated item.
+            while rest.trim_start().starts_with("#[") {
+                let end = rest.find('\n').map_or(rest.len(), |end| end + 1);
+                if let Some(path) = rest[..end]
+                    .trim()
+                    .strip_prefix("#[path = \"")
+                    .and_then(|tail| tail.strip_suffix("\"]"))
+                {
+                    path_attribute = Some(path.to_string());
+                }
+                rest = &rest[end..];
+            }
+            let len = item_len(rest);
+            let item = rest[..len].trim();
+            let declaration = item
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub(super) ")
+                .trim_start_matches("pub ");
+            if let Some(name) = declaration.strip_prefix("mod ").map(|tail| {
+                tail.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                    .next()
+                    .unwrap_or_default()
+            }) {
+                gated_modules.push(path_attribute.map_or_else(
+                    || GatedModule::Named(name.trim().to_string()),
+                    GatedModule::Path,
+                ));
+            }
+            rest = &rest[len..];
+        }
+        (production, gated_modules)
+    }
+
+    fn module_dir(file: &Path) -> PathBuf {
+        let parent = file.parent().expect("source directory").to_path_buf();
+        match file.file_name().and_then(|name| name.to_str()) {
+            Some("mod.rs" | "lib.rs" | "main.rs") => parent,
+            _ => parent.join(file.file_stem().expect("source stem")),
+        }
+    }
+
+    /// Every production `src/` file with its production-only text.
+    pub(crate) fn production_files() -> Vec<SourceFile> {
+        let mut files = Vec::new();
+        let mut excluded: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut pending = vec![src_root()];
+        let mut all = Vec::new();
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("list sources") {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    all.push(path);
+                }
+            }
+        }
+        all.sort();
+        let mut stripped = Vec::new();
+        for path in all {
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let (production, gated) = strip_gated(&source);
+            let directory = module_dir(&path);
+            for module in gated {
+                match module {
+                    GatedModule::Named(name) => {
+                        excluded.insert(directory.join(format!("{name}.rs")));
+                        excluded.insert(directory.join(&name));
+                    }
+                    GatedModule::Path(relative) => {
+                        let parent = path.parent().expect("source directory");
+                        excluded.insert(parent.join(&relative));
+                        excluded.insert(parent.join(relative.trim_end_matches(".rs")));
+                    }
+                }
+            }
+            stripped.push((path, production));
+        }
+        for (path, production) in stripped {
+            if path.starts_with(src_root().join("bin"))
+                || excluded
+                    .iter()
+                    .any(|gated| path == *gated || path.starts_with(gated))
+            {
+                continue;
+            }
+            files.push(SourceFile {
+                relative: relative(&path),
+                production,
+            });
+        }
+        files
+    }
+}
+
+/// Calls that reach host storage without the injected database root.
+const HOST_IO: &[&str] = &[
+    "std::fs",
+    "tokio::fs",
+    "RealFs::new(",
+    "RealFs::open_existing(",
+    "tempfile::",
+    ".exists()",
+    ".try_exists(",
+    ".is_file()",
+    ".is_dir()",
+    ".read_dir()",
+    ".metadata()",
+    ".symlink_metadata()",
+    ".canonicalize()",
+    "filesystem::FileSystem::new(",
+];
+
+/// Whether `source` imports `std::fs` through a grouped `use std::{..}`.
+fn imports_std_fs_in_group(source: &str) -> bool {
+    source.match_indices("use std::{").any(|(start, _)| {
+        let group = &source[start..];
+        let group = &group[..group.find('}').map_or(group.len(), |end| end + 1)];
+        group
+            .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .any(|word| word == "fs")
+    })
+}
+
+/// Code that is the host boundary itself, or reads host state that is not
+/// database storage. Each entry says why it may touch the host directly.
+const HOST_BOUNDARY: &[(&str, &str)] = &[
+    ("src/io/real.rs", "the production Fs adapter"),
+    (
+        "src/io/durable_dir.rs",
+        "host directory creation behind RealFs roots",
+    ),
+    (
+        "src/engine/startup/storage_root.rs",
+        "the single constructor of the engine's host-backed root",
+    ),
+    (
+        "src/engine/api/options/memory.rs",
+        "reads cgroup memory limits",
+    ),
+    (
+        "src/compaction/repair.rs",
+        "resolves the host mount for free-space checks",
+    ),
+    (
+        "src/storage/providers/azure.rs",
+        "reads workload-identity token files",
+    ),
+    (
+        "src/storage/providers/gcs.rs",
+        "reads service-account credential files",
+    ),
+    (
+        "src/storage/providers/s3.rs",
+        "reads web-identity and profile files",
+    ),
+];
+
+/// Not yet routed through the injected root. #808 stage 1 removes every
+/// entry; an entry whose file no longer touches the host must be deleted.
+const UNROUTED: &[&str] = &[
+    "src/engine/backup.rs",
+    "src/engine/backup/paths.rs",
+    "src/engine/startup/epoch_floor.rs",
+    "src/engine/startup/storage.rs",
+    "src/engine/verification.rs",
+    "src/runtime/actors/flush.rs",
+    "src/runtime/actors/gc.rs",
+    "src/runtime/cloud_startup/cloud_recovery/metadata.rs",
+    "src/runtime/cloud_startup/cloud_recovery/mod.rs",
+    "src/runtime/cloud_startup/cloud_recovery/sst_proof.rs",
+    "src/runtime/cloud_startup/mod.rs",
+    "src/runtime/cloud_startup/streaming_wal_plan.rs",
+    "src/runtime/event_loop/cloud_integration/ack.rs",
+    "src/runtime/event_loop/cloud_integration/sealing.rs",
+    "src/runtime/event_loop/compaction.rs",
+    "src/runtime/event_loop/resources.rs",
+    "src/runtime/event_loop/wal_retention/cloud.rs",
+    "src/runtime/hybrid_persistence.rs",
+    "src/runtime/hybrid_persistence/metadata_snapshot.rs",
+    "src/runtime/storage_residue.rs",
+    "src/runtime/transaction_spill/format.rs",
+    "src/runtime/transaction_spill/mod.rs",
+    "src/runtime/transaction_spill/range.rs",
+    "src/sst/fs/mod.rs",
+    "src/sst/fs/reader_io/mod.rs",
+    "src/sst/fs/scratch.rs",
+    "src/sst/identity.rs",
+    "src/storage/filesystem.rs",
+    "src/storage/filesystem/windows.rs",
+    "src/storage/hybrid/backend/file_publication.rs",
+    "src/storage/hybrid/backend/uploads.rs",
+    "src/storage/simulated.rs",
+    "src/wal/recovery/streaming.rs",
+];
+
+/// Production code reaches durable storage only through the injected `Fs`
+/// root, so a crash-simulating filesystem sees every effect (#808 stage 1).
+#[test]
+fn should_route_storage_io_through_injected_fs() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let mut violations = std::collections::BTreeMap::new();
+    for file in files {
+        let hits: Vec<_> = file
+            .production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| HOST_IO.iter().any(|token| line.contains(token)))
+            .map(str::trim)
+            .map(str::to_string)
+            .collect();
+        let mut hits = hits;
+        if imports_std_fs_in_group(&file.production) {
+            hits.push("use std::{.., fs, ..}".to_string());
+        }
+        if !hits.is_empty() {
+            violations.insert(file.relative, hits);
+        }
+    }
+
+    // Assert
+    let unexpected: Vec<_> = violations
+        .iter()
+        .filter(|(file, _)| {
+            !HOST_BOUNDARY.iter().any(|(allowed, _)| allowed == file)
+                && !UNROUTED.contains(&file.as_str())
+        })
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "production code bypasses the injected filesystem root: {unexpected:#?}"
+    );
+    let stale: Vec<_> = UNROUTED
+        .iter()
+        .filter(|file| !violations.contains_key(**file))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "remove routed files from UNROUTED: {stale:?}"
+    );
+}

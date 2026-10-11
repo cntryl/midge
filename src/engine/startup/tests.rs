@@ -8,14 +8,11 @@ fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeR
     let temp = tempfile::tempdir()?;
     let parent = std::fs::canonicalize(temp.path())?;
     let db_path = parent.join("nested/database");
-    let storage_path = StartupStoragePath {
-        db_path: db_path.clone(),
-        memory_mode: false,
-    };
+    let opts = OpenOptions::local(&db_path).build()?;
     crate::io::durable_dir::take_synced_dirs();
 
     // Act
-    storage_path.prepare()?;
+    StartupStoragePath::resolve(&opts)?;
 
     // Assert: the parent entry for each newly created directory is synced
     // before startup proceeds to lease, WAL, metadata, or SST writes.
@@ -210,9 +207,8 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
     let opts = OpenOptions::in_memory()
         .block_cache_policy(crate::engine::BlockCachePolicy::ClockPro)
         .build()?;
-    let storage_path = StartupStoragePath::resolve(opts.storage());
-    storage_path.prepare()?;
-    let startup_lease = StartupLease::acquire(&opts, 0)?;
+    let storage_path = StartupStoragePath::resolve(&opts)?;
+    let startup_lease = StartupLease::acquire(&opts, &storage_path, 0)?;
 
     // Act
     let materialized =

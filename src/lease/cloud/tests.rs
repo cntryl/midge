@@ -2786,7 +2786,6 @@ fn should_release_provider_lease_after_terminal_renewal_failure() {
     let lease = Arc::new(
         CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
             test_config(),
-            temp_cache_path(),
             Arc::clone(&cloud),
             Duration::from_secs(1),
             Duration::from_secs(10),
@@ -2912,7 +2911,7 @@ fn should_persist_expiry_not_before_local_validity_when_ttl_has_fractional_secon
     let ttl = Duration::from_millis(1500);
     let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
         test_config(),
-        dir.path(),
+        crate::io::real::test_root(dir.path()),
         Duration::ZERO,
         ttl,
     ));

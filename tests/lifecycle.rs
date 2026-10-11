@@ -2629,7 +2629,7 @@ mod local_wal_retention {
     }
 
     #[test]
-    #[ignore = "#808 PR 4: best-effort-delete"]
+    #[ignore = "#808 stage 3: best-effort-delete"]
     fn should_not_resurrect_best_effort_deleted_key_when_reopening_after_clean_shutdown() {
         // Arrange / Act
         let value = deleted_key_after_recovery("best_effort_delete", "clean");
@@ -2641,7 +2641,7 @@ mod local_wal_retention {
     }
 
     #[test]
-    #[ignore = "#808 PR 4: best-effort-delete"]
+    #[ignore = "#808 stage 3: best-effort-delete"]
     fn should_not_resurrect_best_effort_deleted_key_when_recovering_a_crash_image() {
         // Arrange / Act
         let value = deleted_key_after_recovery("best_effort_delete", "crash");
@@ -2732,7 +2732,7 @@ mod local_wal_retention {
 
     #[test]
     #[cfg(target_os = "macos")]
-    #[ignore = "#808 PR 4: failed-local-unlink"]
+    #[ignore = "#808 stage 3: failed-local-unlink"]
     fn should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails() {
         // Arrange
         let fail_older_removal = true;
@@ -2784,7 +2784,7 @@ mod local_wal_retention {
     /// full prune followed by a restart hands out id 1 again.
     #[test]
     #[cfg(feature = "internal-testing")]
-    #[ignore = "#808 PR 2: restarted-segment-id"]
+    #[ignore = "#808 stage 2: restarted-segment-id"]
     fn should_allocate_wal_segment_ids_above_previous_runs_when_all_sealed_segments_were_pruned() {
         // Arrange: run 1 seals and fully retires segments 1 and 2.
         let temp = tempfile::TempDir::new().expect("temp");

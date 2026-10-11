@@ -113,7 +113,10 @@ impl Engine {
                 "backup capture barrier reports an unhealthy engine".to_string(),
             ));
         }
-        let database_format_version = crate::metadata::format::validate_format_marker(&source)?;
+        let database_format_version = crate::metadata::format::validate_format_marker(
+            &crate::io::RealFs::open_existing(&source).map_err(crate::io::FsError::into_midge)?,
+            &source,
+        )?;
         let pinned = pin_durable_files(&source, self.simulated_cloud_mode, parent)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
@@ -227,7 +230,11 @@ impl Engine {
                 }
             }?;
             let _ = verification;
-            let restored_format = crate::metadata::format::validate_format_marker(staging)?;
+            let restored_format = crate::metadata::format::validate_format_marker(
+                &crate::io::RealFs::open_existing(staging)
+                    .map_err(crate::io::FsError::into_midge)?,
+                staging,
+            )?;
             if restored_format != manifest.database_format_version {
                 return Err(MidgeError::Corruption(format!(
                     "backup inventory format {} does not match restored database format {}",

@@ -119,8 +119,13 @@ impl RuntimeState {
     ) -> MidgeResult<()> {
         self.ensure_metadata_current()?;
         if !self.is_memory_mode() {
-            crate::runtime::IntentPersistence::save(&self.db_path, intents)
-                .map_err(crate::common::MidgeError::Internal)?;
+            if let Err(message) = crate::runtime::IntentPersistence::save_with_fs(&self.fs, intents)
+            {
+                // The root carries the startup deadline: an expired budget is
+                // a timeout, not an internal failure of the save.
+                self.check_startup_scope("intent log save")?;
+                return Err(crate::common::MidgeError::Internal(message));
+            }
         }
         Ok(())
     }

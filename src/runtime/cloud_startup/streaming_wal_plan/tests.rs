@@ -1386,7 +1386,7 @@ fn should_preserve_recovery_inputs_when_salvage_planner_exhausts_aggregate_head_
 }
 
 #[test]
-#[ignore = "#808 PR 5: interrupted-salvage-floor"]
+#[ignore = "#808 stage 5: interrupted-salvage-floor"]
 fn should_preserve_sequence_floor_when_salvage_is_interrupted_before_authority_commit(
 ) -> MidgeResult<()> {
     // Arrange: a verifiable suffix proves sequence 3 was allocated.

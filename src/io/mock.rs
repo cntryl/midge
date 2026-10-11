@@ -21,6 +21,9 @@ struct MockFileData {
 #[derive(Debug, Clone, Default)]
 pub struct MockFs {
     files: Arc<Mutex<HashMap<String, MockFileData>>>,
+    /// Directories created explicitly. A directory also exists implicitly
+    /// while some file lies below it, as on a real filesystem.
+    directories: Arc<Mutex<std::collections::BTreeSet<String>>>,
     #[cfg(test)]
     sync_dir_calls: Arc<Mutex<Vec<(FsPath, Durability)>>>,
     #[cfg(test)]
@@ -152,7 +155,13 @@ impl Fs for MockFs {
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        Ok(self.files.lock().contains_key(&path.0))
+        let files = self.files.lock();
+        if path.0.is_empty() || files.contains_key(&path.0) {
+            return Ok(true);
+        }
+        let prefix = dir_prefix(path);
+        Ok(self.directories.lock().contains(&path.0)
+            || files.keys().any(|key| key.starts_with(&prefix)))
     }
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
@@ -166,8 +175,16 @@ impl Fs for MockFs {
         }
     }
 
-    fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
-        // Mock filesystem doesn't track directories
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        let mut directories = self.directories.lock();
+        let mut current = String::new();
+        for part in path.0.split('/').filter(|part| !part.is_empty()) {
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(part);
+            directories.insert(current.clone());
+        }
         Ok(())
     }
 
@@ -175,8 +192,16 @@ impl Fs for MockFs {
         // Directories are implicit: a child is a directory when some key
         // continues past it. Return immediate child basenames like RealFs.
         let files = self.files.lock();
+        let directories = self.directories.lock();
         let prefix = dir_prefix(path);
         let mut children = std::collections::BTreeMap::new();
+        for rest in directories
+            .iter()
+            .filter_map(|directory| directory.strip_prefix(&prefix))
+        {
+            let child = rest.split_once('/').map_or(rest, |(child, _)| child);
+            children.insert(child.to_string(), true);
+        }
         for rest in files.keys().filter_map(|key| key.strip_prefix(&prefix)) {
             match rest.split_once('/') {
                 Some((child, _)) => {
@@ -192,7 +217,7 @@ impl Fs for MockFs {
             .map(|(name, is_dir)| DirEntry { name, is_dir })
             .collect();
 
-        if entries.is_empty() && !path.0.is_empty() {
+        if entries.is_empty() && !path.0.is_empty() && !directories.contains(&path.0) {
             return Err(FsError::NotFound(path.0.clone()));
         }
 
@@ -201,11 +226,13 @@ impl Fs for MockFs {
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let mut files = self.files.lock();
-        let before = files.len();
+        let mut directories = self.directories.lock();
+        let before = files.len() + directories.len();
         let prefix = dir_prefix(path);
         files.retain(|k, _| !k.starts_with(&prefix));
+        directories.retain(|directory| directory != &path.0 && !directory.starts_with(&prefix));
 
-        if files.len() == before {
+        if files.len() + directories.len() == before {
             return Err(FsError::NotFound(path.0.clone()));
         }
         Ok(())

@@ -141,3 +141,36 @@ fn should_error_on_short_read_when_reading_past_eof() {
         assert_eq!(file.read_at(0, 4).unwrap().as_ref(), b"abcd", "{backend}");
     });
 }
+
+#[test]
+fn should_report_directories_as_existing_when_created_or_holding_files() {
+    for_each_backend(|backend, fs| {
+        // Arrange
+        fs.create_dir_all(&FsPath::new("wal"))
+            .expect("create empty directory");
+        write_file(fs, "sst/table.sst", b"sst");
+
+        // Act
+        let empty = fs
+            .exists(&FsPath::new("wal"))
+            .expect("probe empty directory");
+        let populated = fs
+            .exists(&FsPath::new("sst"))
+            .expect("probe populated directory");
+        let missing = fs
+            .exists(&FsPath::new("missing"))
+            .expect("probe missing directory");
+        let listed = fs
+            .list_dir(&FsPath::new("wal"))
+            .expect("list empty directory");
+
+        // Assert
+        assert!(empty, "{backend}: a created directory exists");
+        assert!(populated, "{backend}: a directory holding files exists");
+        assert!(!missing, "{backend}: a missing directory does not exist");
+        assert!(
+            listed.is_empty(),
+            "{backend}: an empty directory lists nothing"
+        );
+    });
+}

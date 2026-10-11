@@ -157,8 +157,7 @@ impl EngineStartup {
     ) -> MidgeResult<(Engine, Option<crate::runtime::StartupAdmission>)> {
         check_scope(scope, "startup entry")?;
         Self::trace_open(opts);
-        let storage_path = StartupStoragePath::resolve(opts.storage());
-        storage_path.prepare()?;
+        let storage_path = StartupStoragePath::resolve(opts)?;
         check_scope(scope, "storage path preparation")?;
 
         let minimum_epoch = super::timing::measure("lease_epoch_floor", || {
@@ -171,9 +170,9 @@ impl EngineStartup {
         check_scope(scope, "lease epoch discovery")?;
         let startup_lease = super::timing::measure("lease_acquisition", || {
             if let Some(scope) = scope {
-                StartupLease::acquire_within(opts, minimum_epoch, scope)
+                StartupLease::acquire_within(opts, &storage_path, minimum_epoch, scope)
             } else {
-                StartupLease::acquire(opts, minimum_epoch)
+                StartupLease::acquire(opts, &storage_path, minimum_epoch)
             }
         })?;
         if let Some(observer) = opts.startup_observer() {

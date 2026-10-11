@@ -14,6 +14,35 @@ is retained in Git history at `33cc1a72e10282eba32e8cfb090aa2fea7535f77`.
 The crash-device-dependent #811 fixture follows the ownership work; #811 stays
 open. Existing production storage and lease protocols are unchanged.
 
+## Implementation sequence
+
+The redesign lands as serial pull requests. `fixing_pr_stage` in the registry
+names the stage whose pull request turns a case GREEN:
+
+| Stage | Scope |
+|---|---|
+| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator |
+| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication |
+| 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs |
+| 4 | Ownership, lineage and storage-enforced fencing |
+| 5 | One salvage rule |
+| 6 | Typed commit outcomes, admission envelope, one transaction rule |
+| 7 | Invariant catalog and durability contract |
+
+Decisions that refine the #808 target design:
+
+- The WAL ledger is a local journal, `wal/LEDGER`, in every mode. Cloud startup
+  replaces the mirrored manifest files with the shared generation, so a
+  holder's unpublished tail cannot live in the manifest. The catalog still holds
+  the shared published prefix.
+- Retirement is prefix-only: it advances `log_start` and never deletes a segment
+  behind a retained one.
+- There is no `control_through` frontier: column-family DDL is recorded only in
+  the manifest, never in the WAL.
+- Contiguous catalog publication lands with the ledger in stage 2.
+- Rotation does not pre-open the next segment, because the next header links
+  the previous segment's final digest.
+
 ## Named regressions
 
 [The registry](wal-redesign-regressions-808.json) assigns each test to its fixing
