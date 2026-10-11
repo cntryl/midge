@@ -36,12 +36,13 @@
 //! thousand keys.
 
 use crate::storage::cloud::{CloudBackend, CloudCallback, CloudError, CloudEvent, ObjectMetadata};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The kind of request a [`RequestId`] names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Operation {
     Put,
     Get,
@@ -135,13 +136,14 @@ pub enum Fate {
 pub enum Schedule {
     /// Every request is applied and answered at once.
     Eager,
-    /// Requests whose key starts with one of `scope` (every request when
-    /// `scope` is empty) draw their fate from `fates` by `seed` and their id;
-    /// the rest are eager.
+    /// Requests whose key starts with one of `scope` and whose operation is
+    /// one of `operations` (every key, or every operation, when empty) draw
+    /// their fate from `fates` by `seed` and their id; the rest are eager.
     Seeded {
         seed: u64,
         fates: Vec<Fate>,
         scope: Vec<String>,
+        operations: Vec<Operation>,
     },
     /// Listed requests get their fate; the rest are eager.
     Scripted(BTreeMap<RequestId, Fate>),
@@ -150,12 +152,17 @@ pub enum Schedule {
 impl Schedule {
     fn fate(&self, id: &RequestId) -> Fate {
         match self {
-            Self::Seeded { seed, fates, scope }
-                if !fates.is_empty()
-                    && (scope.is_empty()
-                        || scope
-                            .iter()
-                            .any(|prefix| id.key.starts_with(prefix.as_str()))) =>
+            Self::Seeded {
+                seed,
+                fates,
+                scope,
+                operations,
+            } if !fates.is_empty()
+                && (scope.is_empty()
+                    || scope
+                        .iter()
+                        .any(|prefix| id.key.starts_with(prefix.as_str())))
+                && (operations.is_empty() || operations.contains(&id.operation)) =>
             {
                 let key = format!("{}\0{}\0{}", id.operation.name(), id.key, id.occurrence);
                 let index = digest(0, seed.to_le_bytes().into_iter().chain(key.into_bytes()))
@@ -442,6 +449,17 @@ struct StoreState {
     trace: Vec<(RequestId, Fate)>,
 }
 
+/// What a store holds at one point, so a campaign can replay from it. Late
+/// effects not yet landed are not part of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreImage {
+    /// Every stored object, as the provider names it.
+    pub objects: BTreeMap<String, Vec<u8>>,
+    /// How many requests each operation has made to each key, so request
+    /// ids, and the fates a seeded schedule draws for them, continue.
+    occurrences: Vec<((Operation, String), u64)>,
+}
+
 /// A simulated object store; clones share one store and one process view.
 #[derive(Clone)]
 pub struct SimulatedObjectStore {
@@ -485,6 +503,33 @@ impl SimulatedObjectStore {
     #[must_use]
     pub fn eager() -> Self {
         Self::new(Schedule::Eager)
+    }
+
+    /// A store holding what `image` captured, deciding later fates by
+    /// `schedule`.
+    #[must_use]
+    pub fn from_image(schedule: Schedule, image: &StoreImage) -> Self {
+        let store = Self::new(schedule);
+        {
+            let mut state = store.lock();
+            state.objects.clone_from(&image.objects);
+            state.occurrences = image.occurrences.iter().cloned().collect();
+        }
+        store
+    }
+
+    /// What the store holds now.
+    #[must_use]
+    pub fn image(&self) -> StoreImage {
+        let state = self.lock();
+        StoreImage {
+            objects: state.objects.clone(),
+            occurrences: state
+                .occurrences
+                .iter()
+                .map(|(id, count)| (id.clone(), *count))
+                .collect(),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, StoreState> {

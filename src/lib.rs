@@ -209,7 +209,7 @@ pub mod __internal {
         };
         #[cfg(feature = "cloud-common")]
         pub use crate::simulation::object_store::{
-            Fate, Operation, RequestId, Schedule, SimulatedObjectStore,
+            Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore, StoreImage,
         };
         pub use crate::simulation::oracle::{
             Commit, History, Key, Logging, Mismatch, Verdict, Violation,
