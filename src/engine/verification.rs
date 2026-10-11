@@ -753,7 +753,8 @@ mod tests {
             wal,
         )
         .expect("write WAL");
-        crate::wal::ledger_fixture::record_at(&db_path, &[], 1).expect("record WAL history");
+        crate::runtime::wal_history_fixture::record_at(&db_path, &[], 1)
+            .expect("record WAL history");
         let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act

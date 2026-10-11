@@ -35,8 +35,6 @@ pub mod encoding;
 pub mod frame;
 pub(crate) mod fs;
 pub(crate) mod ledger;
-#[cfg(test)]
-pub(crate) mod ledger_fixture;
 pub(crate) mod ledger_store;
 pub mod policy;
 pub(crate) mod publish;

@@ -30,6 +30,8 @@ pub mod state;
 pub(crate) mod storage_residue;
 pub(crate) mod transaction_spill;
 pub(crate) mod wal_history;
+#[cfg(test)]
+pub(crate) mod wal_history_fixture;
 pub(crate) mod wal_transition;
 pub(crate) mod wal_transition_boundary;
 

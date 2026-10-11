@@ -128,9 +128,9 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
         wal_directory.join(crate::wal::segment_file_name(1)),
         wal_directory.join(crate::wal::segment_file_name(7)),
     )?;
-    std::fs::write(wal_directory.join(crate::wal::segment_file_name(8)), b"")?;
-    std::fs::remove_file(wal_directory.join(crate::wal::ledger_store::LEDGER_FILE))?;
-    crate::wal::ledger_fixture::record_at(directory.path(), &[7], 8)?;
+    let wal: Arc<dyn crate::io::Fs> =
+        Arc::new(crate::io::RealFs::new(&wal_directory).map_err(crate::io::FsError::into_midge)?);
+    crate::runtime::wal_history_fixture::replace(&wal, &[7], 8)?;
 
     // Act
     let mut recovered = RuntimeState::try_new(

@@ -115,11 +115,8 @@ impl Fixture {
         );
         if crate::runtime::wal_history::WalHistory::read(&wal)?.is_none() {
             let open = self.open_segment();
-            if !self.segment(open).exists() {
-                std::fs::write(self.segment(open), b"")?;
-            }
             let sealed: Vec<u64> = self.sealed.iter().copied().collect();
-            crate::wal::ledger_fixture::record(&wal, &sealed, open)?;
+            crate::runtime::wal_history_fixture::record(&wal, &sealed, open)?;
         }
         let history = crate::runtime::wal_history::WalHistory::open(wal, 1)?;
         history.sweep_orphans()?;
@@ -215,6 +212,7 @@ fn should_serve_planned_wal_sources_without_staging_copies() -> MidgeResult<()> 
     fixture.publish(2, 2, 7, &second)?;
     let local_first = fixture.local(1, &first)?;
     let local_second = fixture.local(2, &second)?;
+    drop(fixture.history()?);
     #[cfg(unix)]
     let original_inode = {
         use std::os::unix::fs::MetadataExt;
@@ -653,14 +651,16 @@ fn should_not_set_local_wal_aside_before_startup_persists_its_floor() -> MidgeRe
 
 #[test]
 fn should_replay_every_segment_when_valid_local_copy_fills_cloud_hole() -> MidgeResult<()> {
-    // Arrange
+    // Arrange: the cache still holds segments 2 and 3, which it sealed.
     let mut fixture = Fixture::new()?;
     let second = framed_wal(2, 7, b"two");
+    let third = framed_wal(3, 7, b"three");
     fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
     fixture.publish(2, 2, 7, &second)?;
-    fixture.publish(3, 3, 7, &framed_wal(3, 7, b"three"))?;
+    fixture.publish(3, 3, 7, &third)?;
     corrupt_publication(&mut fixture, 2);
     fixture.local(2, &second)?;
+    fixture.local(3, &third)?;
 
     // Act
     let recovered = fixture.build(RecoveryPolicy::Salvage)?;
