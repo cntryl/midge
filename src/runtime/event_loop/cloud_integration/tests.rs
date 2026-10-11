@@ -466,7 +466,7 @@ fn should_fail_all_generation_waiters_given_exhausted_cloud_upload_attempts(
             response,
             RuntimeResponse::Error {
                 request_id: response_id,
-                error: crate::common::MidgeError::Internal(message),
+                error: crate::common::MidgeError::Timeout(message),
             } if response_id == request_id && message.contains("terminal upload failure")
         ));
     }
@@ -9455,7 +9455,7 @@ fn should_leave_retry_with_storage_queue_when_upload_attempts_are_exhausted(
     assert!(matches!(
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Error {
-            error: crate::common::MidgeError::Internal(_),
+            error: crate::common::MidgeError::Timeout(_),
             ..
         })
     ));

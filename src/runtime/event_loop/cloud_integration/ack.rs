@@ -156,12 +156,14 @@ impl EventLoop {
             return;
         }
         let error = match failure_kind {
-            CloudUploadFailureKind::Timeout => crate::common::MidgeError::Timeout(format!(
-                "Cloud durability timed out after storage retries; the upload keeps retrying: {error}"
-            )),
-            CloudUploadFailureKind::Other => crate::common::MidgeError::Internal(format!(
-                "Cloud durability failed after storage retries; the upload keeps retrying: {error}"
-            )),
+            // The commit is applied and its upload keeps retrying, so it may
+            // still become durable: the outcome is unknown, never a failure.
+            CloudUploadFailureKind::Timeout | CloudUploadFailureKind::Other => {
+                crate::common::MidgeError::Timeout(format!(
+                    "Cloud durability unconfirmed after {failures} failed upload attempts; \
+                     the upload keeps retrying, so treat the outcome as unknown: {error}"
+                ))
+            }
             CloudUploadFailureKind::Corruption => crate::common::MidgeError::Corruption(format!(
                 "cloud WAL segment {segment_id} cannot be uploaded: {error}"
             )),

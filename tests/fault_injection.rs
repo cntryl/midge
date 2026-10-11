@@ -8339,55 +8339,52 @@ mod cloud_persistence_hardening {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_ack() {
-        // Arrange
+    fn should_finish_cloud_strict_upload_after_reporting_timeout_when_provider_recovers() {
+        // Arrange: every upload attempt fails until the provider recovers.
         let _guard = failpoint_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let recovery_opts = opts_for_mode("cloud");
-        let failure_opts = recovery_opts
-            .clone()
-            .with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
-        let db_path = cloud_db_path(&recovery_opts);
+        let opts = opts_for_mode("cloud");
+        let db_path = cloud_db_path(&opts);
         let scenario = fail::FailScenario::setup();
         fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
             .expect("configure wal upload failure failpoint");
-
-        let mut engine = Engine::open(failure_opts.to_open_options()).expect("open cloud engine");
+        let engine = Engine::open(opts.to_open_options()).expect("open cloud engine");
         let default_cf = default_cf(&engine);
         let mut tx = engine
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin write tx");
         tx.put(
-            b"cloud-strict-fail".to_vec(),
-            b"strict-fail-value".to_vec(),
+            b"cloud-strict-retry".to_vec(),
+            b"strict-retry-value".to_vec(),
             None,
         )
-        .expect("put strict-fail value");
+        .expect("put strict-retry value");
 
-        // Act
+        // Act: the commit applied, but its upload keeps failing; then the
+        // provider recovers and the retried upload lands.
         let error = tx
             .commit(WriteOptions::cloud_strict())
-            .expect_err("cloud_strict should fail when the authoritative upload fails");
-        assert_shutdown_fails_with_pending_cloud_uploads(&mut engine);
-
-        // Assert
-        match error {
-            MidgeError::Internal(message) => {
-                assert!(
-                    message.contains("Cloud durability failed"),
-                    "expected cloud durability failure, got: {message}"
-                );
-            }
-            other => panic!("expected cloud durability failure, got: {other:?}"),
-        }
-
+            .expect_err("cloud_strict cannot confirm durability while uploads fail");
         fail::remove("midge::cloud::inject_fail_wal_upload");
+        let durable = wait_for_cloud_catch_up(&engine, 1);
+        shutdown_test_engine(engine);
         scenario.teardown();
-
         reset_dir(&db_path.join("wal"));
-        let reopened = Engine::open(recovery_opts.to_open_options()).expect("reopen cloud engine");
-        assert_eq!(get_default(&reopened, b"cloud-strict-fail"), None);
+        let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+        // Assert: an applied commit whose durability is unconfirmed has an
+        // unknown outcome, never a retryable or internal failure.
+        assert!(
+            matches!(&error, MidgeError::Timeout(_)),
+            "expected an unknown outcome, got: {error:?}"
+        );
+        assert!(durable.wal_cloud_durable_seq >= durable.current_sequence);
+        assert_eq!(
+            get_default(&reopened, b"cloud-strict-retry"),
+            Some(Bytes::from_static(b"strict-retry-value")),
+            "the retried upload must make the write cloud-durable"
+        );
         shutdown_test_engine(reopened);
     }
 
