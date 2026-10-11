@@ -23,7 +23,7 @@ names the stage whose pull request turns a case GREEN:
 
 | Stage | Scope | Issues |
 |---|---|---|
-| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #835 (cloud campaigns, lease control) |
+| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #837 (fixture re-targeting, campaign budgets), #835 (cloud campaigns, lease control) |
 | 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818 |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |
@@ -59,12 +59,15 @@ commit with its specific cause before checking restart behavior. The existing
 unit test that expects `NoSpace` describes the current implementation; the
 outcome stage must update both contracts together when typed outcomes ship.
 
-The non-corruption salvage fixture injects I/O failure at the shipping replay
-spool allocation boundary. A callback inside the error branch proves the fault
-fired. A healthy control verifies every acknowledged transaction member. Both
-`Ok` and `Err` from the faulted open must preserve those values on a later
-healthy open. No temporary-directory environment variables are used. The hook
-is disabled in production builds and is removed with replay spooling in #808.
+The non-corruption salvage fixture runs the engine on a crash device (#837).
+Each WAL read of a salvage open fails in turn with a plain I/O error, on its
+own copy of the device, so the fixture does not depend on how many reads
+recovery makes before replay. A healthy control verifies every acknowledged
+write, and every faulted read must fire. Both `Ok` and `Err` from a faulted
+open must preserve those values on a later healthy open.
+
+The failed-unlink fixture injects a `remove_file` error on the older retired
+segment through the same device, so it runs on every platform (#837).
 
 ## Baseline execution
 
@@ -75,9 +78,8 @@ cargo run --locked --all-features --example wal_redesign_baselines -- --baseline
   --output /tmp/midge-wal-baseline
 ```
 
-This checks expected RED/GREEN states for applicable cases. Unsupported
-platform cases and an unselected Sqrzl case are explicitly recorded as skipped;
-`coverage_complete` is false. No baseline receipt sets `acceptance_passed`.
+This checks expected RED/GREEN states for applicable cases. An unselected
+Sqrzl case is explicitly recorded as skipped; `coverage_complete` is false. No baseline receipt sets `acceptance_passed`.
 A registry with no executed cases fails. To require the provider regression:
 
 ```sh
@@ -91,11 +93,10 @@ setup fails before running that test and cannot count as RED evidence. Each
 Cargo/test process tree has a 300-second deadline, configurable with
 `--timeout-seconds`. Timeout is never a matching RED result.
 
-Linux CI executes all applicable cases with Sqrzl. macOS CI executes the native
-partition, including the immutable-file unlink fault, and records the provider
-skip. Windows CI compiles all portable fixture targets. Linux and macOS retain
-receipts and complete test logs. Their union covers every registry entry; this
-is baseline maintenance, not a complete cross-platform redesign campaign.
+Linux CI executes every case, the provider case with Sqrzl, and retains
+receipts and complete test logs. No case depends on the host platform; Windows
+and macOS CI compile every fixture target. This is baseline maintenance, not a
+complete cross-platform redesign campaign.
 
 ## Acceptance execution
 
@@ -107,10 +108,7 @@ SQRZL_SECRET_ACCESS_KEY=easy-peasy cargo run --locked --all-features --example w
 ```
 
 Acceptance requires clean, stable source, exactly one executed test per
-selector, no skipped case, and every test GREEN. Because the unlink fixture is
-macOS-specific, complete current registry acceptance runs on macOS. The
-redesign must supply a portable adapter-based version before claiming the
-planned cross-mode campaign coverage.
+selector, no skipped case, and every test GREEN.
 
 RED evidence requires a failed libtest summary and the selected test's specific
 assertion inside its failure block. Compiler warnings, missing selectors,
@@ -123,9 +121,8 @@ invalidate their own source identity.
 
 ## Scope and remaining qualification
 
-This PR adds no persisted layout, durability policy, public API, simulation
-oracle, or production adapter path. Its sole shipping-path addition is a
-feature-gated replay spool I/O failpoint. The full #808 exit criteria still
-require the reviewed simulator, adapter injection, all fixing stages, engine
-campaigns, removal audit, qualified develop-to-main promotion, and exact-main
-readback. Merging this inventory must not close #808 or #811.
+The inventory adds no persisted layout, durability policy or public API. The
+full #808 exit criteria still require the reviewed simulator, adapter
+injection, all fixing stages, engine campaigns, removal audit, qualified
+develop-to-main promotion, and exact-main readback. Merging this inventory
+must not close #808 or #811.

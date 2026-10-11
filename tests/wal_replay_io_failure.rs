@@ -1,135 +1,126 @@
 //! #808: non-corruption replay errors must preserve acknowledged WAL data.
-//! A separate binary isolates the process-global replay failpoint.
+//! The engine runs on a crash device so a WAL read can fail on demand.
 
-#![cfg(all(feature = "internal-testing", feature = "failpoints"))]
+#![cfg(feature = "internal-testing")]
 
-use cntryl_midge::__internal::wal::{encoding, frame, WalOpKind};
-use cntryl_midge::{
-    Engine, MemoryBudget, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
-};
+use cntryl_midge::__internal::io::Fs;
+use cntryl_midge::__internal::simulation::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+use cntryl_midge::{Engine, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-fn options(path: &Path) -> OpenOptions {
-    OpenOptions::local(path)
-        .memory_budget(MemoryBudget::Bytes(64 * 1024 * 1024))
-        .transaction_memory_pool_size(8 * 1024)
+const KEYS: usize = 12;
+
+fn options(named: &Path, device: &CrashDevice) -> OpenOptions {
+    let root: Arc<dyn Fs> = Arc::new(device.fs());
+    OpenOptions::local(named)
         .background_compaction(false)
         .recovery_policy(RecoveryPolicy::Salvage)
+        .filesystem_for_testing(root)
         .build()
         .expect("options")
 }
 
-fn assert_acknowledged_writes(engine: &Engine) {
+/// Acknowledged keys a healthy open does not return.
+fn missing_acknowledged_writes(engine: &Engine) -> Vec<usize> {
     let cf = engine.get_column_family("default").expect("default");
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("read");
-    assert_eq!(
-        tx.get(b"acked-small").expect("get small").as_deref(),
-        Some(b"v".as_slice()),
-        "acknowledged writes vanished after salvage open"
-    );
-    for index in 0..12 {
-        assert_eq!(
-            tx.get(format!("acked-big-{index:03}").as_bytes())
-                .expect("get big")
-                .as_deref(),
-            Some(vec![b'x'; 8 * 1024].as_slice()),
-            "acknowledged writes vanished after salvage open: member {index}"
-        );
+    (0..KEYS)
+        .filter(|index| {
+            tx.get(format!("acked-{index:03}").as_bytes())
+                .expect("get")
+                .as_deref()
+                != Some(b"v".as_slice())
+        })
+        .collect()
+}
+
+/// Fail the `nth` WAL read of an open on a copy of `device`, then open the
+/// copy again without faults. Returns the acknowledged keys the healthy
+/// open lost, or `None` once the open makes fewer than `nth` WAL reads.
+fn fail_wal_read(named: &Path, device: &CrashDevice, nth: u64) -> Option<Vec<usize>> {
+    let trial = device.fork();
+    let fault = trial.inject(Fault {
+        op: FaultOp::Read,
+        path: "wal".into(),
+        nth,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+    let reopened = Engine::open(options(named, &trial));
+    trial.disarm_faults();
+    if !trial.fired(fault) {
+        return None;
     }
+    match reopened {
+        Ok(mut engine) => engine
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown faulted open"),
+        Err(error) => eprintln!("open with WAL read {nth} failing returned {error:?}"),
+    }
+    let mut healthy = Engine::open(options(named, &trial)).expect("healthy open after injected Io");
+    let missing = missing_acknowledged_writes(&healthy);
+    healthy
+        .shutdown(Duration::from_secs(10))
+        .expect("healthy shutdown");
+    Some(missing)
 }
 
 #[test]
 #[ignore = "#808 stage 5: noncorruption-salvage"]
 fn should_keep_acknowledged_writes_when_salvage_replay_hits_a_transient_io_error() {
-    // Arrange: sync-acknowledged writes include a split transaction requiring
-    // the shipping replay spool. The healthy control proves all members exist.
-    let temp = tempfile::tempdir().expect("temp");
-    let db = temp.path().join("db");
-    let mut engine = Engine::open(options(&db)).expect("open");
+    // Arrange: sync-acknowledged writes live only in the WAL. The healthy
+    // control proves recovery replays every one of them.
+    let named = tempfile::tempdir().expect("named directory");
+    let device = CrashDevice::new();
+    let mut engine = Engine::open(options(named.path(), &device)).expect("open");
     let cf = engine.get_column_family("default").expect("default");
-    let mut tx = engine
-        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-        .expect("begin");
-    tx.put(b"acked-small".to_vec(), b"v".to_vec(), None)
-        .expect("put");
-    tx.commit(WriteOptions::sync()).expect("commit small");
-    let mut tx = engine
-        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-        .expect("begin");
-    for index in 0..12 {
+    for index in 0..KEYS {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin");
         tx.put(
-            format!("acked-big-{index:03}").into_bytes(),
-            vec![b'x'; 8 * 1024],
+            format!("acked-{index:03}").into_bytes(),
+            b"v".to_vec(),
             None,
         )
-        .expect("put big");
+        .expect("put");
+        tx.commit(WriteOptions::sync()).expect("commit");
     }
-    tx.commit(WriteOptions::sync()).expect("commit spilled");
-    assert_acknowledged_writes(&engine);
     engine.shutdown(Duration::from_secs(10)).expect("shutdown");
     drop(engine);
-    let bytes = std::fs::read(db.join("wal/wal.log")).expect("read WAL");
-    let mut offset = 0;
-    let mut split = false;
-    while offset < bytes.len() {
-        let end = offset + frame::WAL_FRAME_HEADER_LEN;
-        let (length, _) = frame::decode_frame_header(&bytes[offset..end]).expect("frame");
-        split |= encoding::decode(&bytes[end..end + length])
-            .expect("record")
-            .op
-            == WalOpKind::TxnBegin;
-        offset = end + length;
-    }
-    assert!(split, "the fixture must exercise spool creation");
-    let mut control = Engine::open(options(&db)).expect("healthy recovery control");
-    assert_acknowledged_writes(&control);
+    let mut control =
+        Engine::open(options(named.path(), &device)).expect("healthy recovery control");
+    let control_missing = missing_acknowledged_writes(&control);
     control
         .shutdown(Duration::from_secs(10))
         .expect("control shutdown");
     drop(control);
 
-    // Act: inject Io at spool creation on every platform. Observe the error
-    // branch itself; a misspelled or removed injection must fail this fixture.
-    let scenario = fail::FailScenario::setup();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let observed = hits.clone();
-    fail::cfg_callback("midge::recovery::spool_create_io_injected", move || {
-        observed.fetch_add(1, Ordering::SeqCst);
-    })
-    .expect("observe replay fault");
-    fail::cfg("midge::recovery::inject_spool_create_io", "return").expect("inject replay Io");
-    let reopened = Engine::open(options(&db));
-    fail::remove("midge::recovery::inject_spool_create_io");
-    fail::remove("midge::recovery::spool_create_io_injected");
-    scenario.teardown();
-    assert!(
-        hits.load(Ordering::SeqCst) > 0,
-        "the spool creation Io fault must fire"
-    );
-    let recovered = match reopened {
-        Ok(mut engine) => {
-            engine
-                .shutdown(Duration::from_secs(10))
-                .expect("shutdown salvage open");
-            Some(engine)
-        }
-        Err(error) => {
-            eprintln!("faulted open returned {error:?}");
-            None
-        }
-    };
-    drop(recovered);
+    // Act: each WAL read the open makes fails in turn, on its own copy of
+    // the device, with a plain I/O error, which is not evidence of
+    // corruption.
+    let trials: Vec<(u64, Vec<usize>)> = (1..)
+        .map_while(|nth| fail_wal_read(named.path(), &device, nth).map(|missing| (nth, missing)))
+        .collect();
 
-    // Assert: both Err and Ok paths must permit a later healthy recovery of
-    // every acknowledged value. Quarantining WAL and then returning Err fails.
-    let mut healthy = Engine::open(options(&db)).expect("healthy open after injected Io");
-    assert_acknowledged_writes(&healthy);
-    healthy
-        .shutdown(Duration::from_secs(10))
-        .expect("healthy shutdown");
+    // Assert: whether a faulted open failed or salvaged, the next healthy
+    // open recovers every acknowledged value. Quarantining the WAL on an I/O
+    // error loses them.
+    assert!(
+        control_missing.is_empty(),
+        "control lost {control_missing:?}"
+    );
+    assert!(!trials.is_empty(), "no WAL read fault fired");
+    let lost: Vec<_> = trials
+        .iter()
+        .filter(|(_, missing)| !missing.is_empty())
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "acknowledged writes vanished after salvage open: (failed read, lost keys) {lost:?}"
+    );
 }

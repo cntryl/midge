@@ -174,18 +174,6 @@ jobs:
       - name: Compile all named WAL audit fixtures
         run: cargo test --all-features --no-run --lib --test lifecycle --test fault_injection --test wal_retention_regressions --test wal_replay_io_failure
 
-      - name: Check native WAL audit baseline on macOS
-        if: runner.os == 'macOS'
-        run: cargo run --locked --all-features --example wal_redesign_baselines -- --baseline --output "${{ runner.temp }}/wal-audit-baseline"
-
-      - name: Retain native WAL audit baseline
-        if: always() && runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
-        with:
-          name: wal-audit-baseline-macos-${{ github.sha }}
-          path: ${{ runner.temp }}/wal-audit-baseline
-          if-no-files-found: error
-
       - name: Test cloud WAL salvage on Windows
         if: matrix.os == 'windows-latest'
         run: cargo test --lib streaming_wal_plan::tests --all-features
