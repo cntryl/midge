@@ -12,14 +12,17 @@
 //!
 //! ## Durability
 //!
-//! LEDGER is only ever published whole: [`LedgerStore::create`],
-//! [`LedgerStore::compact`] and [`LedgerStore::open`] write `LEDGER.tmp`,
-//! sync it, rename it over LEDGER and sync the directory. LEDGER is never
-//! truncated in place. [`LedgerStore::append`] adds one frame and syncs the
-//! file, so only the final frame can be torn by a crash. A damaged frame is
-//! that torn tail when no complete, checksum-valid frame follows it; when one
-//! does, acknowledged edits would be lost, so it is corruption. A damaged
-//! snapshot is always corruption.
+//! LEDGER is only ever published whole, as one snapshot:
+//! [`LedgerStore::create`], [`LedgerStore::compact`] and [`LedgerStore::open`]
+//! write `LEDGER.tmp`, sync it, rename it over LEDGER and sync the directory.
+//! LEDGER is never truncated in place. [`LedgerStore::append`] adds one frame
+//! and syncs the file, so only the final frame can be torn by a crash. A
+//! damaged frame is that torn tail when no complete, checksum-valid frame
+//! follows it; when one does, acknowledged edits would be lost, so it is
+//! corruption. A damaged snapshot is always corruption.
+//!
+//! Every open and every [`COMPACT_AFTER_EDITS`] appends replace the journal
+//! with a snapshot, so its size stays bounded however long the WAL runs.
 
 use super::ledger::{LedgerEdit, WalLedger};
 use crate::common::{MidgeError, MidgeResult};
@@ -37,6 +40,8 @@ const VERSION: u32 = 1;
 const HEADER_LEN: usize = MAGIC.len() + 4;
 /// The `len` and `crc32c` words before each payload.
 const FRAME_HEADER_LEN: usize = 8;
+/// Edits appended after a snapshot before the store compacts.
+pub(crate) const COMPACT_AFTER_EDITS: usize = 1024;
 
 /// How LEDGER ended when it was loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +64,8 @@ enum Frame {
 ///
 /// The store keeps the ledger LEDGER holds and refuses an edit that does not
 /// apply to it, so it never writes a journal that cannot be loaded. After a
-/// failed write the content of LEDGER is unknown, so the store refuses to
-/// append until [`LedgerStore::compact`] succeeds or the store is reopened.
+/// failed write the content of LEDGER is unknown: the store republishes its
+/// ledger as a snapshot (it heals) before it appends again.
 pub(crate) struct LedgerStore {
     /// Rooted at the WAL directory.
     fs: Arc<dyn Fs>,
@@ -68,6 +73,8 @@ pub(crate) struct LedgerStore {
     ledger: WalLedger,
     /// LEDGER's length in bytes.
     len: u64,
+    /// Edits appended after the snapshot.
+    edits: usize,
     /// A write failed, so `ledger` and `len` may not describe LEDGER.
     failed: bool,
 }
@@ -76,8 +83,6 @@ pub(crate) struct LedgerStore {
 struct Parsed {
     ledger: WalLedger,
     tail: LedgerTail,
-    /// The length of the header and every valid frame.
-    valid_len: usize,
 }
 
 /// What the bytes at one offset of LEDGER hold.
@@ -119,36 +124,42 @@ impl LedgerStore {
                 "WAL ledger {LEDGER_FILE} already exists"
             )));
         }
+        if !ledger.is_initialized() {
+            return Err(MidgeError::InvalidArgument(
+                "cannot persist an uninitialized WAL ledger".into(),
+            ));
+        }
         let mut store = Self {
             fs,
-            ledger: WalLedger::empty(),
+            ledger: ledger.clone(),
             len: 0,
+            edits: 0,
             failed: true,
         };
-        store.compact(ledger)?;
+        store.compact()?;
         Ok(store)
     }
 
-    /// Open the existing LEDGER for appending (after `load`).
+    /// Open the existing LEDGER for appending; `Ok(None)` if absent.
     ///
-    /// Republishes the valid frames, without a torn tail, as a new LEDGER
-    /// (staged, synced, renamed, directory synced). The state `load` reported
-    /// is therefore durable once this returns, even when it was read from a
-    /// crashed process's unsynced writes, and the next append starts right
-    /// after a valid frame.
-    pub(crate) fn open(fs: Arc<dyn Fs>) -> MidgeResult<Self> {
+    /// Publishes the loaded ledger, without a torn tail, as a new snapshot
+    /// LEDGER (staged, synced, renamed, directory synced). The state loaded is
+    /// therefore durable once this returns, even when it was read from a
+    /// crashed process's unsynced writes, and the journal starts small again.
+    pub(crate) fn open(fs: Arc<dyn Fs>) -> MidgeResult<Option<Self>> {
         let Some(bytes) = read_ledger(fs.as_ref())? else {
-            return Err(corruption("is missing"));
+            return Ok(None);
         };
         let parsed = parse(&bytes)?;
-        let valid = &bytes[..parsed.valid_len];
-        publish(&fs, valid)?;
-        Ok(Self {
+        let mut store = Self {
             fs,
             ledger: parsed.ledger,
-            len: byte_len(valid),
-            failed: false,
-        })
+            len: 0,
+            edits: 0,
+            failed: true,
+        };
+        store.compact()?;
+        Ok(Some(store))
     }
 
     /// The ledger as persisted.
@@ -159,13 +170,13 @@ impl LedgerStore {
     /// Append one edit frame and sync (durable when this returns).
     ///
     /// An edit that does not apply to the ledger is refused, as corruption,
-    /// without writing anything.
+    /// without writing anything. After an earlier failed write the store
+    /// heals first; if it cannot, nothing is written. Once
+    /// [`COMPACT_AFTER_EDITS`] edits follow the snapshot, the store compacts;
+    /// a failed compaction does not fail the durable append, and the next
+    /// append heals.
     pub(crate) fn append(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
-        if self.failed {
-            return Err(MidgeError::Io(std::io::Error::other(
-                "an earlier WAL ledger write failed; compact or reopen the ledger",
-            )));
-        }
+        self.heal()?;
         let mut next = self.ledger.clone();
         next.apply(edit)?;
         let frame = encode_frame(&Frame::Edit(edit.clone()))?;
@@ -175,28 +186,41 @@ impl LedgerStore {
         }
         self.ledger = next;
         self.len += byte_len(&frame);
+        self.edits += 1;
+        if self.edits >= COMPACT_AFTER_EDITS {
+            if let Err(error) = self.compact() {
+                tracing::warn!(%error, "WAL ledger compaction failed; the next edit retries it");
+            }
+        }
         Ok(())
     }
 
-    /// Replace LEDGER with a single snapshot of `ledger` (same tmp + sync + rename + dir sync),
-    /// then append after it. Never truncates LEDGER in place.
+    /// Make LEDGER describe the store again after a failed write, by
+    /// republishing the ledger as a snapshot. Does nothing otherwise.
     ///
-    /// LEDGER afterwards holds exactly `ledger`, so a successful compaction
-    /// also clears an earlier failed write.
-    pub(crate) fn compact(&mut self, ledger: &WalLedger) -> MidgeResult<()> {
-        if !ledger.is_initialized() {
-            return Err(MidgeError::InvalidArgument(
-                "cannot persist an uninitialized WAL ledger".into(),
-            ));
+    /// # Errors
+    ///
+    /// Returns the publication error; the store stays unhealed.
+    pub(crate) fn heal(&mut self) -> MidgeResult<()> {
+        if self.failed {
+            self.compact()?;
         }
+        Ok(())
+    }
+
+    /// Replace LEDGER with a single snapshot of the ledger (tmp + sync +
+    /// rename + dir sync), then append after it. Never truncates LEDGER in
+    /// place. LEDGER afterwards holds exactly the ledger, so a successful
+    /// compaction also clears an earlier failed write.
+    pub(crate) fn compact(&mut self) -> MidgeResult<()> {
         let mut image = Vec::with_capacity(HEADER_LEN);
         image.extend_from_slice(&MAGIC);
         image.extend_from_slice(&VERSION.to_le_bytes());
-        image.extend(encode_frame(&Frame::Snapshot(ledger.clone()))?);
+        image.extend(encode_frame(&Frame::Snapshot(self.ledger.clone()))?);
         self.failed = true;
         publish(&self.fs, &image)?;
-        self.ledger = ledger.clone();
         self.len = byte_len(&image);
+        self.edits = 0;
         self.failed = false;
         Ok(())
     }
@@ -349,14 +373,12 @@ fn parse(bytes: &[u8]) -> MidgeResult<Parsed> {
                 return Ok(Parsed {
                     ledger,
                     tail: LedgerTail::Clean,
-                    valid_len: at,
                 })
             }
             NextFrame::Torn => {
                 return Ok(Parsed {
                     ledger,
                     tail: LedgerTail::Torn,
-                    valid_len: at,
                 })
             }
             NextFrame::Frame {

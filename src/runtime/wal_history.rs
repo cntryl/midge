@@ -42,11 +42,10 @@ impl WalHistory {
     /// Open the ledger for writing, under the lease. A database without one
     /// gets one whose first open segment is `first_open`.
     pub(crate) fn open(wal: Arc<dyn Fs>, first_open: SegmentId) -> MidgeResult<Self> {
-        if LedgerStore::load(&wal)?.is_some() {
-            let store = LedgerStore::open(Arc::clone(&wal))?;
-            return Ok(Self { wal, store });
+        match LedgerStore::open(Arc::clone(&wal))? {
+            Some(store) => Ok(Self { wal, store }),
+            None => Self::genesis(wal, first_open),
         }
-        Self::genesis(wal, first_open)
     }
 
     /// Start the history of a new database: create its first segment, then

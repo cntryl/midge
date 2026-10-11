@@ -200,7 +200,9 @@ fn should_continue_appending_when_store_reopens() {
     drop(store);
 
     // Act
-    let mut reopened = LedgerStore::open(Arc::clone(&fs)).expect("open LEDGER");
+    let mut reopened = LedgerStore::open(Arc::clone(&fs))
+        .expect("open LEDGER")
+        .expect("LEDGER exists");
     reopened.append(&rotate(2)).expect("append after reopen");
 
     // Assert
@@ -241,7 +243,7 @@ fn should_refuse_create_when_ledger_is_uninitialized() {
 }
 
 #[test]
-fn should_refuse_open_when_ledger_is_absent() {
+fn should_return_none_when_opening_absent_ledger() {
     // Arrange
     let fs = mock_fs();
 
@@ -249,7 +251,7 @@ fn should_refuse_open_when_ledger_is_absent() {
     let result = LedgerStore::open(Arc::clone(&fs));
 
     // Assert
-    assert!(result.is_err());
+    assert!(matches!(result, Ok(None)));
 }
 
 #[test]
@@ -573,7 +575,7 @@ fn should_replace_file_with_snapshot_when_compacting() {
     let compacted = applied(&ledger, &edits);
 
     // Act
-    store.compact(&compacted).expect("compact LEDGER");
+    store.compact().expect("compact LEDGER");
 
     // Assert
     let mut expected = header();
@@ -590,7 +592,7 @@ fn should_keep_later_appends_when_compacted_ledger_reloads() {
     let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
     store.append(&rotate(1)).expect("append edit");
     let compacted = applied(&ledger, &[rotate(1)]);
-    store.compact(&compacted).expect("compact LEDGER");
+    store.compact().expect("compact LEDGER");
 
     // Act
     store.append(&rotate(2)).expect("append after compaction");
@@ -621,7 +623,9 @@ fn should_drop_torn_tail_when_opening() {
     assert_eq!(tail, LedgerTail::Torn);
 
     // Act
-    let mut store = LedgerStore::open(Arc::clone(&fs)).expect("open LEDGER");
+    let mut store = LedgerStore::open(Arc::clone(&fs))
+        .expect("open LEDGER")
+        .expect("LEDGER exists");
     let replacement = LedgerEdit::SetAside { from: 2, open: 9 };
     store.append(&replacement).expect("append after torn tail");
 
@@ -633,7 +637,7 @@ fn should_drop_torn_tail_when_opening() {
 }
 
 #[test]
-fn should_refuse_append_when_earlier_append_failed() {
+fn should_heal_before_appending_when_earlier_append_failed() {
     // Arrange
     let device = CrashDevice::new();
     let fs = crash_fs(&device);
@@ -649,12 +653,102 @@ fn should_refuse_append_when_earlier_append_failed() {
     let failed = store.append(&rotate(1));
 
     // Act
-    let refused = store.append(&rotate(1));
+    let retried = store.append(&rotate(1));
 
-    // Assert
+    // Assert: the retry republished the ledger it knew, then appended.
     assert!(device.fired(fault));
     assert!(failed.is_err());
-    assert!(refused.is_err());
+    assert!(retried.is_ok());
+    let expected = applied(&ledger, &[rotate(1)]);
+    for_each_power_loss(&device, |fs| {
+        assert_eq!(loaded(fs), (expected.clone(), LedgerTail::Clean));
+    });
+}
+
+#[test]
+fn should_append_nothing_when_healing_fails() {
+    // Arrange: the append's sync fails, then so does the heal's rename.
+    let device = CrashDevice::new();
+    let fs = crash_fs(&device);
+    let ledger = genesis_ledger();
+    let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    device.inject(Fault {
+        op: FaultOp::Sync,
+        path: LEDGER_FILE.to_string(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+    assert!(store.append(&rotate(1)).is_err());
+    device.inject(Fault {
+        op: FaultOp::Rename,
+        path: String::new(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+
+    // Act
+    let retried = store.append(&rotate(2));
+
+    // Assert: the refused edit is in no reachable state.
+    assert!(retried.is_err());
+    for_each_power_loss(&device, |fs| {
+        let (state, _) = loaded(fs);
+        assert!(
+            state == ledger || state == applied(&ledger, &[rotate(1)]),
+            "{state:?}"
+        );
+    });
+}
+
+#[test]
+fn should_bound_ledger_size_when_many_edits_append() {
+    // Arrange: far more edits than one compaction interval.
+    let fs = mock_fs();
+    let ledger = genesis_ledger();
+    let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    let mut expected = ledger.clone();
+    let mut edits = Vec::new();
+    for seal in 1..=u64::try_from(2 * COMPACT_AFTER_EDITS).expect("edit count") {
+        edits.push(rotate(seal));
+        edits.push(LedgerEdit::AdvanceLogStart { to: seal + 1 });
+    }
+
+    // Act
+    for edit in &edits {
+        store.append(edit).expect("append edit");
+        expected.apply(edit).expect("edit applies");
+    }
+
+    // Assert: at most one interval of edits follows a snapshot.
+    let largest_edit = edits.iter().map(|edit| edit_frame(edit).len()).max();
+    let bound = header().len()
+        + snapshot_frame(&expected).len()
+        + COMPACT_AFTER_EDITS * largest_edit.expect("edits");
+    assert!(ledger_bytes(&fs).len() <= bound);
+    assert_eq!(loaded(&fs), (expected, LedgerTail::Clean));
+}
+
+#[test]
+fn should_publish_snapshot_when_opening() {
+    // Arrange
+    let fs = mock_fs();
+    let ledger = genesis_ledger();
+    let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    store.append(&rotate(1)).expect("append edit");
+    store.append(&rotate(2)).expect("append edit");
+    drop(store);
+
+    // Act
+    LedgerStore::open(Arc::clone(&fs))
+        .expect("open LEDGER")
+        .expect("LEDGER exists");
+
+    // Assert
+    let mut expected = header();
+    expected.extend(snapshot_frame(&applied(&ledger, &[rotate(1), rotate(2)])));
+    assert_eq!(ledger_bytes(&fs), expected);
 }
 
 #[test]
@@ -675,7 +769,7 @@ fn should_append_again_when_compaction_follows_failed_append() {
     assert!(device.fired(fault));
 
     // Act
-    store.compact(&ledger).expect("compact LEDGER");
+    store.compact().expect("compact LEDGER");
     store.append(&rotate(1)).expect("append after compaction");
 
     // Assert
@@ -719,7 +813,7 @@ fn should_leave_absent_or_created_ledger_when_power_fails_during_create() {
 }
 
 #[test]
-fn should_leave_old_or_new_ledger_when_power_fails_during_compact() {
+fn should_keep_ledger_when_power_fails_during_compact() {
     // Arrange
     let device = CrashDevice::new();
     let ledger = genesis_ledger();
@@ -729,8 +823,7 @@ fn should_leave_old_or_new_ledger_when_power_fails_during_compact() {
         store.append(edit).expect("append edit");
     }
     drop(store);
-    let old = applied(&ledger, &edits);
-    let new = applied(&old, &[LedgerEdit::AdvanceLogStart { to: 4 }]);
+    let kept = applied(&ledger, &edits);
     let faults = interruptions(&[
         FaultOp::Open,
         FaultOp::Write,
@@ -743,27 +836,21 @@ fn should_leave_old_or_new_ledger_when_power_fails_during_compact() {
 
     for scenario in scenarios {
         let fork = device.fork();
-        let mut store = LedgerStore::open(crash_fs(&fork)).expect("open LEDGER");
+        let mut store = LedgerStore::open(crash_fs(&fork))
+            .expect("open LEDGER")
+            .expect("LEDGER exists");
         let fault = scenario.clone().map(|fault| fork.inject(fault));
 
         // Act
-        let compacted = store.compact(&new).is_ok();
+        let _ = store.compact();
 
-        // Assert
+        // Assert: compaction never changes what the ledger holds.
         assert!(fault.is_none_or(|fault| fork.fired(fault)), "{scenario:?}");
         for_each_power_loss(&fork, |fs| {
             let state = LedgerStore::load(fs)
                 .unwrap_or_else(|error| panic!("{scenario:?}: unreadable ledger: {error}"))
                 .unwrap_or_else(|| panic!("{scenario:?}: LEDGER vanished"));
-            if compacted {
-                assert_eq!(state, (new.clone(), LedgerTail::Clean), "{scenario:?}");
-            } else {
-                assert!(
-                    state == (old.clone(), LedgerTail::Clean)
-                        || state == (new.clone(), LedgerTail::Clean),
-                    "{scenario:?}: {state:?}"
-                );
-            }
+            assert_eq!(state, (kept.clone(), LedgerTail::Clean), "{scenario:?}");
         });
     }
 }
@@ -784,7 +871,9 @@ fn should_leave_old_or_new_ledger_when_power_fails_during_append() {
 
     for scenario in scenarios {
         let fork = device.fork();
-        let mut store = LedgerStore::open(crash_fs(&fork)).expect("open LEDGER");
+        let mut store = LedgerStore::open(crash_fs(&fork))
+            .expect("open LEDGER")
+            .expect("LEDGER exists");
         let fault = scenario.clone().map(|fault| fork.inject(fault));
 
         // Act
@@ -825,7 +914,9 @@ fn should_keep_appended_edit_when_create_was_interrupted() {
     assert_eq!(loaded(&fs), (ledger.clone(), LedgerTail::Clean));
 
     // Act
-    let mut store = LedgerStore::open(Arc::clone(&fs)).expect("open LEDGER");
+    let mut store = LedgerStore::open(Arc::clone(&fs))
+        .expect("open LEDGER")
+        .expect("LEDGER exists");
     store.append(&rotate(1)).expect("append edit");
 
     // Assert
@@ -857,7 +948,9 @@ fn should_keep_loaded_state_when_power_fails_after_open() {
     let seen = loaded(&fs);
 
     // Act
-    LedgerStore::open(Arc::clone(&fs)).expect("open LEDGER");
+    LedgerStore::open(Arc::clone(&fs))
+        .expect("open LEDGER")
+        .expect("LEDGER exists");
 
     // Assert
     for_each_power_loss(&device, |fs| {
