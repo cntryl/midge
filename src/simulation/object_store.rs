@@ -25,6 +25,12 @@
 //!   as timer-driven lease reads, are still numbered by arrival, so a seeded
 //!   schedule can be scoped to key prefixes and leave them eager.
 //!
+//! - **A crashed process is cut off.** Each process uses its own view of the
+//!   store ([`SimulatedObjectStore::process`]). After
+//!   [`SimulatedObjectStore::process_crash`], requests through earlier views
+//!   fail at once without effect and without a request id, as a dead process
+//!   sends nothing; their late effects can still land (#835).
+//!
 //! Listing returns every key in one page; real providers page at about a
 //! thousand keys.
 
@@ -432,12 +438,16 @@ struct StoreState {
     /// Late effects not yet landed, in arrival order.
     late: Vec<(RequestId, Effect)>,
     trace: Vec<(RequestId, Fate)>,
+    /// Bumped by each process crash; views of older processes are cut off.
+    generation: u64,
 }
 
-/// A simulated object store; clones share one store.
+/// A simulated object store; clones share one store and one process view.
 #[derive(Clone)]
 pub struct SimulatedObjectStore {
     state: Arc<Mutex<StoreState>>,
+    /// The process generation this view serves.
+    generation: u64,
 }
 
 impl SimulatedObjectStore {
@@ -450,8 +460,25 @@ impl SimulatedObjectStore {
                 occurrences: BTreeMap::new(),
                 late: Vec::new(),
                 trace: Vec::new(),
+                generation: 0,
             })),
+            generation: 0,
         }
+    }
+
+    /// A view of the store for a process started now.
+    #[must_use]
+    pub fn process(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            generation: self.lock().generation,
+        }
+    }
+
+    /// Every process using a view taken before now crashes: its later
+    /// requests fail with a transport error, without effect.
+    pub fn process_crash(&self) {
+        self.lock().generation += 1;
     }
 
     /// A store that applies and answers every request at once.
@@ -518,6 +545,11 @@ impl SimulatedObjectStore {
 
     fn submit(&self, operation: Operation, key: &str, effect: Effect, callback: &CloudCallback) {
         let mut state = self.lock();
+        if self.generation != state.generation {
+            drop(state);
+            let _ = callback.send(failed(effect.land(&mut Objects::new()), Failure::Transport));
+            return;
+        }
         let stable = stable_key(key);
         let occurrence = state
             .occurrences
