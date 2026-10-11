@@ -207,6 +207,13 @@ impl History {
     /// from it on are gone from the WAL, so no later promise covers them and
     /// none may survive. Promised commits survived anyway, and commits that
     /// bypassed the WAL are kept.
+    ///
+    /// `index` comes from the smallest prefix that explains a recovery, so a
+    /// commit with no visible effect there, such as a delete of an absent
+    /// key, can be forgotten although it survived; a later recovery that
+    /// shows it is then wrongly a violation. An unacknowledged commit kept
+    /// below `index` stays optional, so it may still surface later without
+    /// one.
     pub fn forget_wal_from(&mut self, index: usize) {
         let mut kept = Vec::new();
         let mut renumbered = BTreeMap::new();
@@ -227,6 +234,35 @@ impl History {
         };
         self.required = renumber(&self.required);
         self.prefix_floor = renumber(&self.prefix_floor);
+    }
+
+    /// The values `key` may hold if commits survive out of order: promised
+    /// commits apply, and every other one may survive or not on its own. A
+    /// recovery these explain but [`Self::check`] rejects has a hole: a
+    /// later commit survived an earlier, lost one.
+    #[must_use]
+    pub fn allowed_out_of_order(&self, key: &Key) -> Vec<Option<Vec<u8>>> {
+        let mut allowed = vec![self.base.get(key).cloned()];
+        for (index, commit) in self.commits.iter().enumerate() {
+            if commit.family != key.0 {
+                continue;
+            }
+            let Some(value) = commit
+                .writes
+                .iter()
+                .filter(|(written, _)| *written == key.1)
+                .map(|(_, value)| value.clone())
+                .next_back()
+            else {
+                continue;
+            };
+            if self.required.contains(&index) {
+                allowed = vec![value];
+            } else {
+                allowed.push(value);
+            }
+        }
+        allowed
     }
 
     /// How many commits the history holds.

@@ -324,3 +324,71 @@ fn should_keep_promised_commits_when_forgetting_after_the_prefix() {
     assert_eq!(verdict, Verdict::Consistent { prefix: 0 });
     assert_eq!(history.len(), 1);
 }
+
+#[test]
+fn should_renumber_promises_when_an_earlier_commit_is_forgotten() {
+    // Arrange: family `a` loses an unpromised put; family `b` flushes the
+    // put after it, which survives and moves down one place.
+    let lost = Commit {
+        family: "a".to_string(),
+        writes: vec![(b"k".to_vec(), Some(b"lost".to_vec()))],
+        logging: Logging::Wal,
+        acknowledged: true,
+    };
+    let flushed = Commit {
+        family: "b".to_string(),
+        ..lost.clone()
+    };
+    let mut history = History::new(
+        BTreeMap::new(),
+        BTreeSet::from(["a".to_string(), "b".to_string()]),
+    );
+    history.commit(lost);
+    history.commit(flushed);
+    history.flushed("b");
+    history.forget_wal_from(0);
+
+    // Act
+    let without_flushed = history.check(
+        &BTreeMap::new(),
+        &BTreeSet::from(["a".to_string(), "b".to_string()]),
+    );
+
+    // Assert: the flushed put is still required, the forgotten one gone.
+    assert_eq!(history.len(), 1);
+    assert!(
+        matches!(without_flushed, Verdict::Violation(_)),
+        "{without_flushed:?}"
+    );
+}
+
+#[test]
+fn should_explain_hole_out_of_order_when_a_later_commit_survives_alone() {
+    // Arrange: an earlier unpromised put is lost while a later one survives.
+    let mut history = history();
+    history.commit(put("a", "v1"));
+    history.commit(put("b", "v2"));
+    let observed = observed(&[("b", "v2")]);
+
+    // Act
+    let in_order = history.check(&observed, &families());
+    let out_of_order = history.allowed_out_of_order(&key("a"));
+
+    // Assert
+    assert!(matches!(in_order, Verdict::Violation(_)), "{in_order:?}");
+    assert!(out_of_order.contains(&None));
+}
+
+#[test]
+fn should_not_explain_lost_promise_out_of_order_when_a_synced_commit_is_lost() {
+    // Arrange
+    let mut history = history();
+    let synced = history.commit(put("a", "v1"));
+    history.synced(synced);
+
+    // Act
+    let out_of_order = history.allowed_out_of_order(&key("a"));
+
+    // Assert
+    assert_eq!(out_of_order, vec![Some(b"v1".to_vec())]);
+}
