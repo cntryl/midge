@@ -120,7 +120,10 @@ impl Fs for StreamingWalFs {
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         if replay_directory(path) {
-            return Ok(Metadata { len: 0 });
+            return Ok(Metadata {
+                len: 0,
+                is_dir: true,
+            });
         }
         let source = self.source(path)?;
         source.fs.metadata(&source.path)

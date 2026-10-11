@@ -20,7 +20,7 @@ jobs:
   core:
     name: Core (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: 0
 

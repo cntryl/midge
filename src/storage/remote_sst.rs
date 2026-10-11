@@ -374,6 +374,7 @@ impl Fs for RemoteSstFs {
         }
         Ok(Metadata {
             len: self.remote_file(path)?.metadata.size,
+            is_dir: false,
         })
     }
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

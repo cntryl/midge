@@ -90,7 +90,7 @@ fn deadline_input_case_inner(
     let directory = tempfile::tempdir()?;
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
     let delegate = Arc::new(crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?),
+        Arc::new(crate::io::RealFs::new(state.host_sst_dir()).map_err(FsError::into_midge)?),
         4096,
     ));
     let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(3);
@@ -105,8 +105,8 @@ fn deadline_input_case_inner(
         let name = format!("input-{index}.sst");
         let mut writer = delegate.create()?;
         writer.add_with_meta(key, Some(value), 10, EntryType::Put, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &state.sst_dir.join(&name))?;
-        let bytes = std::fs::read(state.sst_dir.join(&name))?;
+        crate::sst::fs::finish_writer_to_path(writer, &state.host_sst_dir().join(&name))?;
+        let bytes = std::fs::read(state.host_sst_dir().join(&name))?;
         state
             .manifest
             .test_mut()
@@ -161,7 +161,7 @@ fn deadline_input_case_inner(
     actor.cancel_and_join_worker(&mut state, None);
     for (name, original) in originals {
         assert_eq!(
-            std::fs::read(state.sst_dir.join(name))?,
+            std::fs::read(state.host_sst_dir().join(name))?,
             original,
             "accepted timeout preserves each exact authoritative input"
         );
@@ -536,8 +536,10 @@ fn verify_rollover_partitions(
     let mut actual = Vec::new();
     for name in outputs {
         assert_eq!(directory.join(name).exists(), !ephemeral);
-        let remote = cloud_path.join(crate::cloud_layout::object_key(name));
-        let reader = crate::sst::fs::SstFileIo::open_with_real_fs(&remote)?;
+        let reader = crate::sst::fs::SstFileIo::open(
+            &crate::cloud_layout::object_key(name),
+            crate::io::real::test_root(cloud_path),
+        )?;
         actual.extend(reader.scan_range_state(None, None)?.into_iter().filter_map(
             |(key, state)| match state {
                 crate::types::KeyState::Value(value, _, _, _) => Some((key, value)),
@@ -556,7 +558,10 @@ fn verify_rollover_partitions(
             &crate::common::OperationDeadline::unbounded(),
         )?;
         drop(reader);
-        std::fs::write(remote, b"replacement")?;
+        std::fs::write(
+            cloud_path.join(crate::cloud_layout::object_key(name)),
+            b"replacement",
+        )?;
         assert!(
             hybrid
                 .verify_remote_object_guards_within(
@@ -603,9 +608,20 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
     );
     let budget = ResourceBudget::new(1024 * 1024);
 
+    let source =
+        crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?;
+
     // Act
-    let result =
-        hybrid.publish_immutable_file("sst/object", &path, 7, crc32c::crc32c(b"payload"), &budget);
+    let result = hybrid.publish_immutable_file(
+        crate::storage::hybrid::backend::ImmutableFileSource {
+            key: "sst/object",
+            fs: &source,
+            path: &crate::io::FsPath::new("source"),
+            size: 7,
+            checksum: crc32c::crc32c(b"payload"),
+        },
+        &budget,
+    );
     let started_upload = backend.pending.lock().take().is_some();
 
     // Assert

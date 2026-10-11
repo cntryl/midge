@@ -33,7 +33,6 @@ enum CompactionManifestState {
 
 struct RecoveredStartup {
     wal_dir: PathBuf,
-    sst_dir: PathBuf,
     opened_in_salvage_mode: bool,
     manifest: Manifest,
     intent_log: Vec<IntentLogEntry>,
@@ -146,7 +145,6 @@ impl RuntimeState {
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
         let RecoveredStartup {
             wal_dir,
-            sst_dir,
             opened_in_salvage_mode,
             manifest,
             intent_log,
@@ -173,7 +171,6 @@ impl RuntimeState {
         let mut state = Self {
             db_path,
             wal_dir,
-            sst_dir,
             sequence: wal_recovery.recovered_sequence,
             compaction_output_generation: recovered_compaction_output_generation,
             transaction: TransactionCoordination {
@@ -252,7 +249,6 @@ impl RuntimeState {
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<RecoveredStartup> {
         let wal_dir = db_path.join("wal");
-        let sst_dir = db_path.join("sst");
         let RecoveryLoadState {
             opened_in_salvage_mode,
             manifest,
@@ -280,7 +276,6 @@ impl RuntimeState {
         };
         Ok(RecoveredStartup {
             wal_dir,
-            sst_dir,
             opened_in_salvage_mode,
             manifest,
             intent_log,

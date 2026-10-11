@@ -1,6 +1,8 @@
 //! Runtime assessment of files that are present but not authoritative.
 
+use crate::common::MidgeResult;
 use crate::config::EngineHealth;
+use crate::io::{Fs, FsError, FsPath};
 use crate::metadata::Manifest;
 use std::collections::HashSet;
 use std::path::Path;
@@ -22,48 +24,45 @@ pub(crate) struct HealthInputs {
 }
 
 impl StorageResidueAssessment {
-    pub(crate) fn scan_sst_dir(db_path: &Path, manifest: &Manifest) -> Self {
-        let sst_dir = db_path.join("sst");
+    /// Inventory the SST directory of `fs` against the manifest. `check` runs
+    /// before each entry, so a startup deadline can stop a long listing. A
+    /// directory that cannot be listed holds no known residue, except when
+    /// the listing itself ran out of time.
+    pub(crate) fn scan(
+        fs: &dyn Fs,
+        manifest: &Manifest,
+        mut check: impl FnMut(&'static str) -> MidgeResult<()>,
+    ) -> MidgeResult<Self> {
+        let entries = match fs.list_dir(&FsPath::new(crate::sst::fs::SST_DIR)) {
+            Ok(entries) => entries,
+            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
+            Err(_) => return Ok(Self::default()),
+        };
         let published: HashSet<_> = manifest
             .files
             .iter()
             .map(|file| file.name.as_str())
             .collect();
-        let mut orphan_ssts = Vec::new();
-        let mut sst_temp_files = Vec::new();
-
-        if let Ok(entries) = std::fs::read_dir(sst_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-
-                let is_tmp = name.ends_with(".sst.tmp")
-                    || path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"));
-                if is_tmp {
-                    sst_temp_files.push(name.to_string());
-                    continue;
-                }
-
-                if path.extension().and_then(|ext| ext.to_str()) == Some("sst")
-                    && !published.contains(name)
-                {
-                    orphan_ssts.push(name.to_string());
-                }
+        let mut residue = Self::default();
+        for entry in entries {
+            check("storage residue inventory entry")?;
+            let name = entry.name;
+            let path = Path::new(&name);
+            if name.ends_with(".sst.tmp")
+                || path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+            {
+                residue.sst_temp_files.push(name);
+            } else if path.extension().is_some_and(|extension| extension == "sst")
+                && !published.contains(name.as_str())
+            {
+                residue.orphan_ssts.push(name);
             }
         }
-
-        orphan_ssts.sort();
-        sst_temp_files.sort();
-
-        Self {
-            orphan_ssts,
-            sst_temp_files,
-        }
+        residue.orphan_ssts.sort();
+        residue.sst_temp_files.sort();
+        Ok(residue)
     }
 }
 

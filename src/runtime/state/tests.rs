@@ -227,8 +227,8 @@ fn write_sst_entries_for_recovery_test(
             .expect("write recovery test entry");
     }
     let bytes = writer.finish_bytes().expect("finish recovery test SST");
-    std::fs::create_dir_all(&state.sst_dir).expect("create recovery test SST directory");
-    std::fs::write(state.sst_dir.join(name), &bytes).expect("persist recovery test SST");
+    std::fs::create_dir_all(state.host_sst_dir()).expect("create recovery test SST directory");
+    std::fs::write(state.host_sst_dir().join(name), &bytes).expect("persist recovery test SST");
 
     crate::runtime::FileMeta {
         name: name.to_string(),
@@ -303,9 +303,9 @@ fn should_replay_published_compaction_from_remote_ssts_without_local_staging() {
     assert!(!state.manifest_has_file(&input_name));
     assert!(state.manifest_has_file(&output_name));
     assert!(state.intent_log.is_empty());
-    assert!(!state.sst_dir.join(&output_name).exists());
-    assert!(remote_state.sst_dir.join(&input_name).exists());
-    assert!(remote_state.sst_dir.join(&output_name).exists());
+    assert!(!state.host_sst_dir().join(&output_name).exists());
+    assert!(remote_state.host_sst_dir().join(&input_name).exists());
+    assert!(remote_state.host_sst_dir().join(&output_name).exists());
 }
 
 #[test]
@@ -380,7 +380,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
     );
     assert!(!state.manifest_has_file(&name));
     assert_eq!(state.intent_log.len(), 1);
-    assert!(!state.sst_dir.join(name).exists());
+    assert!(!state.host_sst_dir().join(name).exists());
 }
 
 #[test]
@@ -1263,7 +1263,7 @@ fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_re
         "duplicate publication intents must produce one manifest owner"
     );
     assert!(second_reopen.intent_log.is_empty());
-    assert!(second_reopen.sst_dir.join(sst_name).exists());
+    assert!(second_reopen.host_sst_dir().join(sst_name).exists());
 }
 
 #[test]
@@ -1271,7 +1271,7 @@ fn should_sweep_non_authoritative_flush_staging_during_startup_cleanup() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let staging_dir = state.sst_dir.join(".flush-staging");
+    let staging_dir = state.host_sst_dir().join(".flush-staging");
     std::fs::create_dir_all(&staging_dir).expect("create flush staging directory");
     std::fs::write(staging_dir.join("1-1.sst"), b"unpublished")
         .expect("write abandoned staging file");
@@ -1292,7 +1292,7 @@ fn should_sweep_non_authoritative_overlap_repair_runs_during_startup_cleanup() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let repair_dir = state.sst_dir.join(".compaction-repair");
+    let repair_dir = state.host_sst_dir().join(".compaction-repair");
     std::fs::create_dir_all(&repair_dir).expect("create repair scratch directory");
     std::fs::write(repair_dir.join("abandoned.sst"), b"non-authoritative")
         .expect("write abandoned repair run");
@@ -1379,8 +1379,8 @@ fn should_roll_back_output_durable_compaction_when_manifest_is_still_prepublicat
     // Assert
     assert!(state.manifest_has_file(&input_name));
     assert!(!state.manifest_has_file(&output_name));
-    assert!(state.sst_dir.join(&input_name).exists());
-    assert!(!state.sst_dir.join(&output_name).exists());
+    assert!(state.host_sst_dir().join(&input_name).exists());
+    assert!(!state.host_sst_dir().join(&output_name).exists());
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1451,7 +1451,7 @@ fn persist_proof_mirror(
     std::fs::create_dir_all(mirror_dir).expect("create proof mirror directory");
     for output in outputs.iter().take(output_count) {
         std::fs::copy(
-            state.sst_dir.join(&output.name),
+            state.host_sst_dir().join(&output.name),
             mirror_dir.join(&output.name),
         )
         .expect("persist proof mirrored output");
@@ -1557,7 +1557,7 @@ fn should_replay_every_compaction_publication_crash_point_to_complete_authority(
             }
             if crash_point.inputs_garbage_collected() {
                 for input_name in &input_names {
-                    std::fs::remove_file(state.sst_dir.join(input_name))
+                    std::fs::remove_file(state.host_sst_dir().join(input_name))
                         .expect("remove garbage-collected proof input");
                 }
             }
@@ -1650,7 +1650,7 @@ fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() 
 
     // Assert
     assert!(reopened.manifest_has_file(&input_name));
-    assert!(reopened.sst_dir.join(input_name).exists());
+    assert!(reopened.host_sst_dir().join(input_name).exists());
 }
 
 #[test]
@@ -1688,7 +1688,7 @@ fn should_publish_remove_only_compaction_after_manifest_phase_crash() {
 
     // Assert
     assert!(!reopened.manifest_has_file(&input_name));
-    assert!(!reopened.sst_dir.join(input_name).exists());
+    assert!(!reopened.host_sst_dir().join(input_name).exists());
 }
 
 #[test]
@@ -1813,8 +1813,8 @@ fn should_recover_published_retry_when_legacy_stale_intent_precedes_it() {
         .expect("published retry should disambiguate stale output");
 
     // Assert
-    assert!(!state.sst_dir.join(stale_output_name).exists());
-    assert!(state.sst_dir.join(retry_output_name).exists());
+    assert!(!state.host_sst_dir().join(stale_output_name).exists());
+    assert!(state.host_sst_dir().join(retry_output_name).exists());
     assert!(state.intent_log.is_empty());
 }
 
@@ -1858,9 +1858,9 @@ fn should_recover_manifest_published_retry_when_it_precedes_stale_output_intent(
     assert!(!state.manifest_has_file(&input_name));
     assert!(state.manifest_has_file(&retry_output_name));
     assert!(!state.manifest_has_file(&stale_output_name));
-    assert!(!state.sst_dir.join(input_name).exists());
-    assert!(state.sst_dir.join(retry_output_name).exists());
-    assert!(!state.sst_dir.join(stale_output_name).exists());
+    assert!(!state.host_sst_dir().join(input_name).exists());
+    assert!(state.host_sst_dir().join(retry_output_name).exists());
+    assert!(!state.host_sst_dir().join(stale_output_name).exists());
 }
 
 #[test]
@@ -1902,8 +1902,8 @@ fn should_fail_closed_when_multiple_retry_outputs_are_manifest_visible() {
     ));
     assert!(state.manifest_has_file(&first_output_name));
     assert!(state.manifest_has_file(&second_output_name));
-    assert!(state.sst_dir.join(first_output_name).exists());
-    assert!(state.sst_dir.join(second_output_name).exists());
+    assert!(state.host_sst_dir().join(first_output_name).exists());
+    assert!(state.host_sst_dir().join(second_output_name).exists());
     assert_eq!(state.intent_log.len(), 2);
 }
 
@@ -1958,8 +1958,8 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
     // Assert
     assert!(reopened.manifest_has_file(&input_name));
     assert!(!reopened.manifest_has_file(&output_name));
-    assert!(reopened.sst_dir.join(input_name).exists());
-    assert!(!reopened.sst_dir.join(output_name).exists());
+    assert!(reopened.host_sst_dir().join(input_name).exists());
+    assert!(!reopened.host_sst_dir().join(output_name).exists());
     assert!(reopened.persistence_anomaly_detected());
 }
 
@@ -1998,8 +1998,8 @@ fn should_fail_closed_when_output_durable_compaction_manifest_is_partial() {
         crate::common::MidgeError::RecoveryFailed(_)
     ));
     assert!(state.manifest_has_file(&first_input_name));
-    assert!(state.sst_dir.join(&first_input_name).exists());
-    assert!(state.sst_dir.join(&output_name).exists());
+    assert!(state.host_sst_dir().join(&first_input_name).exists());
+    assert!(state.host_sst_dir().join(&output_name).exists());
 }
 
 #[test]
@@ -2009,13 +2009,13 @@ fn should_delete_untracked_compaction_output_during_startup_residue_cleanup() {
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
     let orphan_name = crate::cloud_layout::file_name(0, 1, 9);
     let _orphan = write_valid_sst_for_recovery_test(&state, &orphan_name, 1, b"orphan", 9);
-    assert!(state.sst_dir.join(&orphan_name).exists());
+    assert!(state.host_sst_dir().join(&orphan_name).exists());
 
     // Act
     state.cleanup_storage_residue();
 
     // Assert
-    assert!(!state.sst_dir.join(orphan_name).exists());
+    assert!(!state.host_sst_dir().join(orphan_name).exists());
 }
 
 #[test]

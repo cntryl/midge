@@ -7,6 +7,27 @@ use crate::storage::cloud::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// Publish the file named `source` in `directory` through a host root.
+fn publish_source(
+    storage: &HybridStorage,
+    key: &str,
+    directory: &std::path::Path,
+    bytes: &[u8],
+    budget: &ResourceBudget,
+) -> MidgeResult<super::super::GuardedObjectProof> {
+    let fs = crate::io::RealFs::new(directory).map_err(FsError::into_midge)?;
+    storage.publish_immutable_file(
+        ImmutableFileSource {
+            key,
+            fs: &fs,
+            path: &FsPath::new("source"),
+            size: bytes.len() as u64,
+            checksum: crc32c::crc32c(bytes),
+        },
+        budget,
+    )
+}
+
 struct PanicLocalBackend;
 
 impl StorageBackend for PanicLocalBackend {
@@ -88,11 +109,11 @@ fn should_not_call_local_backend_when_publishing_with_ephemeral_cache() -> Midge
     let budget = ResourceBudget::new(2 * 1024 * 1024);
 
     // Act
-    storage.publish_immutable_file(
+    publish_source(
+        &storage,
         "sst/retired.sst",
-        &path,
-        bytes.len() as u64,
-        crc32c::crc32c(bytes),
+        directory.path(),
+        bytes,
         &budget,
     )?;
     assert!(storage.local_object_cache_is_absent("sst/retired.sst")?);
@@ -211,13 +232,7 @@ fn should_reject_admitted_publication_when_readback_bytes_or_identity_changes() 
         let budget = ResourceBudget::new(2 * 1024 * 1024);
 
         // Act
-        let result = storage.publish_immutable_file(
-            "sst/object",
-            &path,
-            bytes.len() as u64,
-            crc32c::crc32c(&bytes),
-            &budget,
-        );
+        let result = publish_source(&storage, "sst/object", directory.path(), &bytes, &budget);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while budget.used() != 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
@@ -346,7 +361,7 @@ fn should_preserve_timeout_when_admitted_pinned_range_readback_exhausts_deadline
     let budget = ResourceBudget::new(2 * 1024 * 1024);
 
     // Act: the real cloud callback adapter expires while the provider owns readback.
-    let result = storage.publish_immutable_file(key, &path, size, crc32c::crc32c(&bytes), &budget);
+    let result = publish_source(&storage, key, directory.path(), &bytes, &budget);
     let charge_while_held = budget.used();
     let completion = backend.pending.lock().take();
     let valid_range = completion.as_ref().is_some_and(|held| {

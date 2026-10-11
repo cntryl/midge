@@ -267,7 +267,7 @@ impl BudgetFixture {
             .map(|file| {
                 Ok((
                     file.name.clone(),
-                    std::fs::read(el.state.sst_dir.join(&file.name))?,
+                    std::fs::read(el.state.host_sst_dir().join(&file.name))?,
                 ))
             })
             .collect::<MidgeResult<Vec<_>>>()?;

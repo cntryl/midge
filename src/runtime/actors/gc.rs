@@ -12,7 +12,6 @@ use crate::runtime::RuntimeMsg;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -94,21 +93,18 @@ impl GcActor {
             .collect();
 
         // List actual files on disk
-        let disk_ssts = match std::fs::read_dir(&state.sst_dir) {
+        let listed = state
+            .fs
+            .list_dir(&crate::io::FsPath::new(crate::sst::fs::SST_DIR));
+        let disk_ssts = match listed {
             Ok(entries) => entries
-                .filter_map(|entry| {
-                    entry
-                        .ok()
-                        .and_then(|e| e.file_name().into_string().ok())
-                        .filter(|name| {
-                            let path = std::path::Path::new(&name);
-                            path.extension()
-                                .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
-                                || path
-                                    .file_name()
-                                    .and_then(|file_name| file_name.to_str())
-                                    .is_some_and(|file_name| file_name.ends_with(".sst.tmp"))
-                        })
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| {
+                    std::path::Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
+                        || name.ends_with(".sst.tmp")
                 })
                 .collect::<HashSet<_>>(),
             Err(e) => {
@@ -168,7 +164,7 @@ impl GcActor {
         let mut cloud_sst_deletes = Vec::new();
 
         for sst_name in sst_names {
-            let sst_path = state.sst_dir.join(sst_name);
+            let sst_path = crate::sst::fs::sst_key(sst_name);
 
             // Check that file is not in active manifest
             let is_active = state.manifest.files.iter().any(|f| f.name == *sst_name);
@@ -200,24 +196,24 @@ impl GcActor {
             }
 
             if hybrid_storage.is_some() {
-                cloud_sst_deletes.push((sst_name.clone(), sst_path));
+                cloud_sst_deletes.push(sst_name.clone());
                 continue;
             }
 
             // Actually delete the file
-            match std::fs::remove_file(&sst_path) {
+            match state.fs.remove_file(&sst_path) {
                 Ok(()) => {
-                    tracing::info!(sst_name, path = %sst_path.display(), "Deleted obsolete SST");
+                    tracing::info!(sst_name, path = sst_path.0, "Deleted obsolete SST");
                     deleted_count += 1;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!(sst_name, path = %sst_path.display(), "Obsolete SST already missing");
+                Err(crate::io::FsError::NotFound(_)) => {
+                    tracing::debug!(sst_name, path = sst_path.0, "Obsolete SST already missing");
                     deleted_count += 1;
                 }
                 Err(e) => {
                     tracing::warn!(
                         sst_name,
-                        path = %sst_path.display(),
+                        path = sst_path.0,
                         error = %e,
                         "Failed to delete SST file"
                     );
@@ -230,12 +226,10 @@ impl GcActor {
         if let Some(storage) = hybrid_storage {
             scheduled_count = cloud_sst_deletes.len();
             if !cloud_sst_deletes.is_empty() {
-                let retry_names = cloud_sst_deletes
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
+                let retry_names = cloud_sst_deletes.clone();
                 match Self::spawn_cloud_sst_delete_worker(
                     storage,
+                    Arc::clone(&state.fs),
                     cloud_sst_deletes,
                     Arc::clone(&self.failed_cloud_deletes),
                     self.retry_notifier.clone(),
@@ -454,7 +448,8 @@ impl GcActor {
 
     fn spawn_cloud_sst_delete_worker(
         storage: Arc<crate::storage::HybridStorage>,
-        ssts: Vec<(String, PathBuf)>,
+        fs: Arc<dyn crate::io::Fs>,
+        ssts: Vec<String>,
         failed_cloud_deletes: Arc<parking_lot::Mutex<VecDeque<String>>>,
         retry_notifier: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<JoinHandle<()>> {
@@ -462,7 +457,8 @@ impl GcActor {
             .name("midge-sst-gc".to_string())
             .spawn(move || {
                 let storage = CloudPersistence::new(storage);
-                for (sst_name, sst_path) in ssts {
+                for sst_name in ssts {
+                    let sst_path = crate::sst::fs::sst_key(&sst_name);
                     if let Err(error) = storage.delete_sst_object_blocking(&sst_name) {
                         tracing::warn!(
                             sst_name,
@@ -477,21 +473,21 @@ impl GcActor {
                         continue;
                     }
 
-                    let resident_bytes = std::fs::metadata(&sst_path).ok().map(|metadata| metadata.len());
-                    match std::fs::remove_file(&sst_path) {
+                    let resident_bytes = fs.metadata(&sst_path).ok().map(|metadata| metadata.len);
+                    match fs.remove_file(&sst_path) {
                         Ok(()) => {
                             storage.release_local_sst_bytes(resident_bytes.unwrap_or(0));
                             tracing::info!(
                                 sst_name,
-                                path = %sst_path.display(),
+                                path = sst_path.0,
                                 "Deleted obsolete SST after cloud provider cleanup"
                             );
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(crate::io::FsError::NotFound(_)) => {},
                         Err(error) => {
                             tracing::warn!(
                                 sst_name,
-                                path = %sst_path.display(),
+                                path = sst_path.0,
                                 %error,
                                 "Failed to delete obsolete local SST after cloud provider cleanup"
                             );
@@ -581,9 +577,9 @@ mod tests {
         // is a deadlock until the response timeout breaks it.
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        std::fs::create_dir_all(&state.sst_dir).expect("sst dir");
+        std::fs::create_dir_all(state.host_sst_dir()).expect("sst dir");
         let name = crate::cloud_layout::file_name(0, 0, 1);
-        let path = state.sst_dir.join(&name);
+        let path = state.host_sst_dir().join(&name);
         std::fs::write(&path, b"obsolete").expect("obsolete SST");
         let (notifier, notifications) = crossbeam::channel::unbounded();
         let mut actor = GcActor::new();

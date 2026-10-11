@@ -44,10 +44,7 @@ pub(crate) trait FlushStorage: Send + Sync {
 
     fn publish_sst(
         &self,
-        key: &str,
-        path: &Path,
-        size_bytes: u64,
-        checksum: u32,
+        source: crate::storage::hybrid::backend::ImmutableFileSource<'_>,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<()>;
 
@@ -87,14 +84,11 @@ impl FlushStorage for HybridFlushStorage {
 
     fn publish_sst(
         &self,
-        key: &str,
-        path: &Path,
-        size_bytes: u64,
-        checksum: u32,
+        source: crate::storage::hybrid::backend::ImmutableFileSource<'_>,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<()> {
         if let Some(hybrid) = &self.hybrid {
-            hybrid.publish_immutable_file(key, path, size_bytes, checksum, budget)?;
+            hybrid.publish_immutable_file(source, budget)?;
         }
         Ok(())
     }
@@ -144,7 +138,7 @@ pub(crate) struct FlushPublishTask {
     pub build: FlushBuildOutput,
     pub sst_name: String,
     pub sst_seq: u64,
-    pub sst_dir: PathBuf,
+    /// The database root; staging and final SSTs are root-relative in it.
     pub fs: Arc<dyn crate::io::Fs>,
     pub storage: Arc<dyn FlushStorage>,
     pub lease_healthy: Option<Arc<AtomicBool>>,
@@ -220,13 +214,13 @@ pub struct FlushActor {
 impl FlushActor {
     #[cfg(test)]
     pub fn new(
-        sst_dir: &Path,
+        fs: Arc<dyn crate::io::Fs>,
         memory_mode: bool,
         compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
     ) -> MidgeResult<Self> {
         Self::new_with_memory_limit(
-            sst_dir,
+            fs,
             memory_mode,
             compression_policy,
             completion_tx,
@@ -234,8 +228,10 @@ impl FlushActor {
         )
     }
 
+    /// Start the worker. It builds SSTs through `fs`, the database root, so
+    /// staging, scratch and final outputs are all root-relative paths in it.
     pub(crate) fn new_with_memory_limit(
-        sst_dir: &Path,
+        fs: Arc<dyn crate::io::Fs>,
         memory_mode: bool,
         compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
@@ -250,11 +246,12 @@ impl FlushActor {
             });
         }
 
-        let fs = Arc::new(crate::io::RealFs::new(sst_dir).map_err(FsError::into_midge)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(compression_policy)
-                .with_compaction_scratch_directory(sst_dir.join(".flush-staging")),
+                .with_compaction_scratch_directory(PathBuf::from(
+                    crate::sst::fs::FLUSH_STAGING_DIR,
+                )),
         );
         let (task_tx, task_rx) =
             crossbeam::channel::bounded::<FlushWorkerTask>(FLUSH_WORKER_CHANNEL_CAPACITY);
@@ -515,7 +512,7 @@ impl FlushActor {
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<FlushPublicationDelta> {
         validate_task_lease(task)?;
-        let final_path = task.sst_dir.join(&task.sst_name);
+        let final_path = crate::sst::fs::sst_location(&task.sst_name);
         finalize_staged_sst(task, &final_path, budget)?;
         crate::failpoints::fail_point!("midge::flush_worker::after_sst_finalization");
         crate::failpoints::fail_point!("midge::flush::after_sst_write_before_publish");
@@ -551,10 +548,13 @@ fn upload(
         .content_crc32c
         .ok_or_else(|| MidgeError::Corruption("flush output lacks checksum".into()))?;
     task.storage.publish_sst(
-        &crate::cloud_layout::object_key(&task.sst_name),
-        final_path,
-        task.build.file_meta.size_bytes,
-        checksum,
+        crate::storage::hybrid::backend::ImmutableFileSource {
+            key: &crate::cloud_layout::object_key(&task.sst_name),
+            fs: task.fs.as_ref(),
+            path: &db_relative_fs_path(task, final_path)?,
+            size: task.build.file_meta.size_bytes,
+            checksum,
+        },
         budget,
     )
 }
@@ -656,7 +656,7 @@ fn finalize_staged_sst(
     {
         validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
         task.fs
-            .create_dir_all(&crate::io::FsPath::new("sst"))
+            .create_dir_all(&crate::io::FsPath::new(crate::sst::fs::SST_DIR))
             .map_err(FsError::into_midge)?;
         let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
         validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
@@ -668,7 +668,7 @@ fn finalize_staged_sst(
     validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
     task.fs
         .sync_dir(
-            &crate::io::FsPath::new("sst"),
+            &crate::io::FsPath::new(crate::sst::fs::SST_DIR),
             crate::io::Durability::Durable,
         )
         .map_err(FsError::into_midge)?;
@@ -685,7 +685,9 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
     let Some(staging_dir) = task.build.staging_path.parent() else {
         return;
     };
-    if staging_dir.file_name().and_then(|name| name.to_str()) != Some(".flush-staging") {
+    if staging_dir.file_name().and_then(|name| name.to_str())
+        != Some(crate::sst::fs::STAGING_DIR_NAME)
+    {
         return;
     }
     let Ok(staging_path) = db_relative_fs_path(task, &task.build.staging_path) else {
@@ -709,7 +711,7 @@ fn validate_final_sst(
 ) -> MidgeResult<()> {
     // A freshly written SST always carries both proofs, so anything missing
     // here is a defect in the writer rather than an older manifest.
-    crate::sst::identity::SstIdentity::of_path(path)?
+    crate::sst::fs::identity_with_fs(&task.fs, path)?
         .verify_against(
             expected.expected_sst(),
             None,
@@ -944,7 +946,6 @@ mod tests {
             },
             sst_name: crate::cloud_layout::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
-            sst_dir,
             fs: publication_fs,
             storage: Arc::new(HybridFlushStorage::new(
                 Some(Arc::clone(&hybrid)),
@@ -1096,7 +1097,11 @@ mod tests {
         assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         assert_eq!(
-            std::fs::read(fixture.task.sst_dir.join(&fixture.task.sst_name))?,
+            std::fs::read(
+                fixture
+                    .db_path
+                    .join(crate::sst::fs::sst_location(&fixture.task.sst_name))
+            )?,
             bytes
         );
         Ok(())
@@ -1116,7 +1121,10 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
-        assert!(fixture.task.sst_dir.join(&fixture.task.sst_name).exists());
+        assert!(fixture
+            .db_path
+            .join(crate::sst::fs::sst_location(&fixture.task.sst_name))
+            .exists());
         assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         assert_eq!(budget.used(), 0);
@@ -1245,7 +1253,9 @@ mod tests {
         });
         sync_fs.set_sync_dir_failure(true);
         fixture.task.fs = sync_fs.clone();
-        let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
+        let final_path = fixture
+            .db_path
+            .join(crate::sst::fs::sst_location(&fixture.task.sst_name));
 
         // Act
         let error = finalize_staged_sst(
@@ -1294,7 +1304,9 @@ mod tests {
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
         });
-        let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
+        let final_path = fixture
+            .db_path
+            .join(crate::sst::fs::sst_location(&fixture.task.sst_name));
 
         // Act
         let error = finalize_staged_sst(
@@ -1319,7 +1331,7 @@ mod tests {
 
         // Act
         let mut actor = FlushActor::new(
-            directory.path(),
+            crate::io::real::test_root(directory.path()),
             false,
             crate::codec::CompressionPolicy::default(),
             completion_tx,
@@ -1339,7 +1351,7 @@ mod tests {
 
         // Act
         let actor = FlushActor::new(
-            Path::new("/unused"),
+            Arc::new(crate::io::MockFs::new()),
             true,
             crate::codec::CompressionPolicy::default(),
             completion_tx,

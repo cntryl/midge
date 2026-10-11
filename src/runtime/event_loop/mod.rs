@@ -243,15 +243,12 @@ impl EventLoop {
             flush_worker_mode.is_inline(),
             flush_worker_mode.worker_msg_tx(),
         );
-        let (sst_dir, memory_mode, initial_segment_id) = (
-            state.sst_dir.clone(),
-            state.is_memory_mode(),
-            state.wal.current_segment_id,
-        );
+        let (memory_mode, initial_segment_id) =
+            (state.is_memory_mode(), state.wal.current_segment_id);
         let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
         Self::apply_runtime_state_config(&mut state, &config);
 
-        let resources = resources::assemble_sst_resources(&state, &sst_dir, memory_mode, &config)?;
+        let resources = resources::assemble_sst_resources(&state, memory_mode, &config);
         let sst_factory = resources.factory;
         let read_resources = resources.reads;
         state.writer_epoch = config.writer_epoch;
@@ -262,7 +259,7 @@ impl EventLoop {
 
         // Create actors - they handle memory_mode internally
         let flush_actor = FlushActor::new_with_memory_limit(
-            &sst_dir,
+            Arc::clone(&state.fs),
             memory_mode,
             config.compression_policy.clone(),
             flush_completion_tx,
@@ -602,12 +599,7 @@ impl EventLoop {
         let mut cf_snapshots = std::collections::HashMap::new();
         for (&cf_id, cf_state) in &self.state.column_families {
             let sst_view = self.state.manifest.read_view_for(cf_id);
-            let sst_path_prefix = self
-                .state
-                .sst_dir
-                .strip_prefix(&self.state.db_path)
-                .unwrap_or_else(|_| std::path::Path::new("sst"))
-                .to_path_buf();
+            let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
             cf_snapshots.insert(
                 cf_id,
                 CfSnapshotData {

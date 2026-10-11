@@ -53,12 +53,7 @@ impl EventLoop {
             self.checkpoint_backfilled_bounds()?;
             return Ok(false);
         };
-        let path_prefix = self
-            .state
-            .sst_dir
-            .strip_prefix(&self.state.db_path)
-            .unwrap_or_else(|_| std::path::Path::new("sst"))
-            .to_path_buf();
+        let path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
         let fs = self.read_resources.as_ref().map_or_else(
             || std::sync::Arc::clone(&self.state.fs),
             |resources| resources.sst_fs(),
@@ -177,12 +172,7 @@ impl EventLoop {
 
         let sst_view = self.state.manifest.read_view_for(cf_id);
 
-        let sst_path_prefix = self
-            .state
-            .sst_dir
-            .strip_prefix(&self.state.db_path)
-            .unwrap_or_else(|_| std::path::Path::new("sst"))
-            .to_path_buf();
+        let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
         let snapshot = super::super::ReadSnapshot::new_with_view_resources(
             cf_id,
             cf_state.memtable.clone(),
@@ -492,7 +482,7 @@ mod tests {
     ) -> crate::common::MidgeResult<(tempfile::TempDir, EventLoop, std::path::PathBuf)> {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let state = RuntimeState::new(tmp.path().to_path_buf(), false);
-        std::fs::create_dir_all(&state.sst_dir)?;
+        std::fs::create_dir_all(state.host_sst_dir())?;
 
         let router = Arc::new(ResponseRouter::new());
         let mut el = EventLoop::new(
@@ -504,9 +494,10 @@ mod tests {
         )?;
 
         let sst_name = "00000001.sst".to_string();
-        let sst_path = el.state.sst_dir.join(&sst_name);
+        let sst_path = el.state.host_sst_dir().join(&sst_name);
         let fs = std::sync::Arc::new(
-            crate::io::RealFs::new(&el.state.sst_dir).map_err(crate::io::FsError::into_midge)?,
+            crate::io::RealFs::new(el.state.host_sst_dir())
+                .map_err(crate::io::FsError::into_midge)?,
         );
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
@@ -678,7 +669,7 @@ mod tests {
         for index in 1..=4 {
             let name = format!("{index:08}.sst");
             if index > 1 {
-                std::fs::copy(&sst_path, event_loop.state.sst_dir.join(&name))?;
+                std::fs::copy(&sst_path, event_loop.state.host_sst_dir().join(&name))?;
             }
             let mut file = template.clone();
             file.name = name;

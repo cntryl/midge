@@ -5,7 +5,6 @@ use super::{
 };
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
-use crate::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
 use std::path::Path;
@@ -763,9 +762,7 @@ impl RuntimeStorageMaterialization {
         )?);
         let sst_read_fs: Arc<dyn crate::io::Fs> =
             Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-                Arc::new(
-                    crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?,
-                ),
+                Arc::clone(&storage_path.root),
                 sst_backend,
                 opts.storage_io_timeout(),
             ));
@@ -884,14 +881,12 @@ impl RuntimeStorageMaterialization {
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
         sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
-    ) -> MidgeResult<Arc<crate::storage::remote_sst::RemoteSstFs>> {
-        let local_fs =
-            Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?);
-        Ok(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            local_fs,
+    ) -> Arc<crate::storage::remote_sst::RemoteSstFs> {
+        Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            Arc::clone(&storage_path.root),
             sst_storage.clone(),
             opts.storage_io_timeout(),
-        )))
+        ))
     }
 
     fn materialize_cloud(
@@ -920,7 +915,7 @@ impl RuntimeStorageMaterialization {
             fence_provider_ddl(&hybrid_storage, startup_lease, opts.storage_io_timeout())?;
         }
         let sst_read_fs: Arc<dyn crate::io::Fs> =
-            Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage)?;
+            Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage);
         let sst_read_fs = scope.map_or_else(
             || sst_read_fs.clone(),
             |scope| crate::io::scope_fs(sst_read_fs.clone(), scope.clone()),

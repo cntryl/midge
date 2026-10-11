@@ -746,34 +746,6 @@ impl SstFileIo {
             .saturating_add(crate::sst::types::SST_FOOTER_SIZE as u64)
     }
 
-    /// Open an SST file using `RealFs` (convenience method for single-file access)
-    /// This creates a new `RealFs` instance for the parent directory of the SST file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the filesystem cannot be opened or the SST metadata cannot be read.
-    pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fs = Arc::new(crate::io::RealFs::new(parent).map_err(FsError::into_midge)?);
-        // Use filename relative to parent dir so RealFs (rooted at parent) resolves it correctly
-        let path_str = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        Self::open(&path_str, fs)
-    }
-
-    /// Summarize an SST file opened via `RealFs`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be opened or summarized.
-    #[cfg(test)]
-    pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
-        Self::open_with_real_fs(path)?.into_streaming_summary()
-    }
-
     /// Stream a summary through the caller's filesystem abstraction.
     pub(crate) fn summarize_with_fs(path: &str, fs: Arc<dyn Fs>) -> MidgeResult<SstFileSummary> {
         Self::open(path, fs)?.into_streaming_summary()

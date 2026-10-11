@@ -307,11 +307,16 @@ impl EventLoop {
             return;
         };
         for name in names {
-            let path = self.state.sst_dir.join(name);
-            let size = std::fs::metadata(&path).ok().map(|metadata| metadata.len());
-            match std::fs::remove_file(&path) {
+            let path = crate::sst::fs::sst_key(name);
+            let size = self
+                .state
+                .fs
+                .metadata(&path)
+                .ok()
+                .map(|metadata| metadata.len);
+            match self.state.fs.remove_file(&path) {
                 Ok(()) => storage.release_local_sst_bytes(size.unwrap_or(0)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(crate::io::FsError::NotFound(_)) => {}
                 Err(error) => {
                     tracing::warn!(%error, sst_name = name, "retaining local SST cache after failed eviction");
                 }
@@ -573,12 +578,7 @@ impl CompactionCoordinator {
             {
                 event_loop
                     .compaction_actor
-                    .settle_compaction_error_reservation(
-                        &event_loop.state,
-                        hybrid.as_ref(),
-                        token,
-                        Some(&error),
-                    );
+                    .settle_compaction_error_reservation(hybrid.as_ref(), token, Some(&error));
             }
             let completion_error = error.replay();
             Self::complete_pending_waits(event_loop, false, Some(&completion_error));
@@ -714,7 +714,7 @@ impl CompactionCoordinator {
                     output_ssts,
                     cf_id,
                     target_level,
-                    &event_loop.state.sst_dir,
+                    &event_loop.state.host_sst_dir(),
                 )?;
             // Legacy phase fixtures prepare local bytes without launching a
             // worker. Give their accepted synthetic owner an explicit identity.
@@ -1108,7 +1108,7 @@ impl CompactionCoordinator {
         Self::check_manual_deadline(pending.manual_deadline)?;
         event_loop.publish_snapshot();
         let output_sizes =
-            Self::resident_output_sizes(&event_loop.state.sst_dir, &pending.token.output_ssts)?;
+            Self::resident_output_sizes(event_loop.state.fs.as_ref(), &pending.token.output_ssts)?;
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
         let reservation = event_loop.compaction_actor.finish_publication(
@@ -1160,7 +1160,6 @@ impl CompactionCoordinator {
             } else {
                 Vec::new()
             },
-            sst_dir: event_loop.state.sst_dir.clone(),
             fs: std::sync::Arc::clone(&event_loop.state.fs),
             hybrid_storage: event_loop.cloud_coordinator.hybrid_storage.clone(),
             cloud_metadata_storage: event_loop.cloud_coordinator.cloud_metadata_storage.clone(),
@@ -1200,7 +1199,7 @@ impl CompactionCoordinator {
         if let (Some(hybrid), Some(token)) =
             (&event_loop.cloud_coordinator.hybrid_storage, reservation)
         {
-            match Self::resident_output_sizes(&event_loop.state.sst_dir, output_ssts) {
+            match Self::resident_output_sizes(event_loop.state.fs.as_ref(), output_ssts) {
                 Ok(output_sizes) => {
                     hybrid.compaction_inputs_retained_with_token(token, &output_sizes);
                 }
@@ -1228,23 +1227,23 @@ impl CompactionCoordinator {
     }
 
     fn resident_output_sizes(
-        directory: &std::path::Path,
+        fs: &dyn crate::io::Fs,
         outputs: &[String],
     ) -> crate::common::MidgeResult<Vec<u64>> {
         outputs
             .iter()
             .map(|name| {
-                let path = directory.join(name);
-                match std::fs::metadata(&path) {
-                    Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+                let path = crate::sst::fs::sst_key(name);
+                match fs.metadata(&path) {
+                    Ok(metadata) if !metadata.is_dir => Ok(metadata.len),
                     Ok(_) => Err(crate::common::MidgeError::Internal(format!(
                         "published compaction output is not a regular file: {}",
-                        path.display()
+                        path.0
                     ))),
                     // A remotely proved output can already have been evicted.
                     // Other metadata errors cannot establish that disk is free.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-                    Err(error) => Err(error.into()),
+                    Err(crate::io::FsError::NotFound(_)) => Ok(0),
+                    Err(error) => Err(error.into_midge()),
                 }
             })
             .collect()
@@ -1308,7 +1307,7 @@ impl CompactionCoordinator {
         {
             event_loop
                 .compaction_actor
-                .settle_failed_compaction_reservation(&event_loop.state, hybrid.as_ref(), token);
+                .settle_failed_compaction_reservation(hybrid.as_ref(), token);
         }
         Self::defer_failed_repair_retry(event_loop, repair, "publication start");
         let wait_error = error.replay();
@@ -1360,11 +1359,7 @@ impl CompactionCoordinator {
             {
                 event_loop
                     .compaction_actor
-                    .settle_failed_compaction_reservation(
-                        &event_loop.state,
-                        hybrid.as_ref(),
-                        token,
-                    );
+                    .settle_failed_compaction_reservation(hybrid.as_ref(), token);
             }
         }
         Self::defer_failed_repair_retry(event_loop, repair && !authoritative, "publication");
@@ -1433,7 +1428,7 @@ impl CompactionCoordinator {
         let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
             let output_sizes =
-                match Self::resident_output_sizes(&event_loop.state.sst_dir, output_ssts) {
+                match Self::resident_output_sizes(event_loop.state.fs.as_ref(), output_ssts) {
                     Ok(sizes) => sizes,
                     Err(error) => {
                         return Self::record_publish_failure(event_loop, request_id, &error)

@@ -23,11 +23,9 @@ use std::path::{Component, Path, PathBuf};
 /// Real filesystem backend
 pub struct RealFs {
     base_path: PathBuf,
-    /// Working directory `base_path` was resolved from, recorded at the same
-    /// instant. Relative host paths naming this filesystem's contents were
-    /// written in that frame, so callers must resolve them there rather than
-    /// against a process working directory that may since have moved.
-    relative_anchor: Option<PathBuf>,
+    /// `base_path` as the caller named it, made absolute at construction
+    /// without resolving symlinks.
+    named_root: PathBuf,
 }
 
 /// A host-backed database root for tests, created if missing.
@@ -55,13 +53,7 @@ impl RealFs {
         let path = base_path.as_ref().to_path_buf();
         super::durable_dir::create_path_durably(&path)
             .map_err(|error| io_err("create_path_durably", &path, &error))?;
-        let relative_anchor = std::env::current_dir().ok();
-        let path =
-            fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
-        Ok(Self {
-            base_path: path,
-            relative_anchor,
-        })
+        Self::resolved(&path)
     }
 
     /// Open a filesystem root that must already exist, without creating it.
@@ -81,12 +73,17 @@ impl RealFs {
                 path.display()
             )));
         }
-        let relative_anchor = std::env::current_dir().ok();
-        let path =
-            fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
+        Self::resolved(&path)
+    }
+
+    fn resolved(path: &Path) -> FsResult<Self> {
+        let named_root =
+            std::path::absolute(path).map_err(|error| io_err("absolute", path, &error))?;
+        let base_path =
+            fs::canonicalize(path).map_err(|error| io_err("canonicalize", path, &error))?;
         Ok(Self {
-            base_path: path,
-            relative_anchor,
+            base_path,
+            named_root,
         })
     }
 
@@ -183,7 +180,7 @@ impl Fs for RealFs {
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         Some(HostAddressing {
             root: &self.base_path,
-            anchor: self.relative_anchor.as_deref(),
+            named_root: &self.named_root,
         })
     }
 
@@ -221,7 +218,10 @@ impl Fs for RealFs {
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         let full = self.full_path(path)?;
         let meta = fs::metadata(&full).map_err(|error| file_op_err("metadata", &full, &error))?;
-        Ok(Metadata { len: meta.len() })
+        Ok(Metadata {
+            len: meta.len(),
+            is_dir: meta.is_dir(),
+        })
     }
 
     /// Creates missing directories durably: each new entry's parent is

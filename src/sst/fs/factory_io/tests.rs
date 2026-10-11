@@ -4,6 +4,7 @@ use crate::io::FsPath;
 use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
 use crate::MidgeError;
+use std::path::PathBuf;
 
 #[test]
 fn should_reject_valueless_put_when_writing_sst() -> MidgeResult<()> {
@@ -91,6 +92,14 @@ impl Fs for RecordingFs {
             inner: self.inner.open(path, options)?,
             events: Arc::clone(&self.events),
         }))
+    }
+
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        options: OpenOptions,
+    ) -> FsResult<Box<dyn File>> {
+        self.inner.open_persistent_handle(path, options)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -360,7 +369,7 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
     assert!(budget.peak() > 0 && budget.peak() <= budget.limit());
     assert_eq!(budget.used(), 0);
     assert!(factory.compaction_scratch_cleanup_verified());
-    let reader = super::super::SstFileIo::open_with_real_fs(&output)?;
+    let reader = super::super::SstFileIo::open("large.sst", factory.output_fs())?;
     for sequence in 0_u64..1024 {
         assert!(
             matches!(reader.get_state(&sequence.to_be_bytes())?, KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
@@ -372,9 +381,8 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
 #[test]
 fn should_reject_flush_entry_when_shared_writer_memory_is_exhausted() -> MidgeResult<()> {
     // Arrange
-    let directory = tempfile::tempdir()?;
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-        .with_compaction_scratch_directory(directory.path().to_path_buf());
+        .with_compaction_scratch_directory(PathBuf::from("scratch"));
     let budget = crate::common::resource_budget::ResourceBudget::new(0);
     let mut writer = factory.create_for_flush(budget.clone())?;
 
@@ -442,8 +450,8 @@ fn should_track_compaction_scratch_in_recoverable_directory_until_confirmed_clea
         // Arrange
         let directory = tempfile::tempdir()?;
         let scratch_directory = directory.path().join("sst/.flush-staging");
-        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-            .with_compaction_scratch_directory(scratch_directory.clone());
+        let factory = FsSstFactoryIo::new(crate::io::real::test_root(directory.path()), 4096)
+            .with_compaction_scratch_directory(PathBuf::from("sst/.flush-staging"));
         let writer = factory.create_for_compaction(
             crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
         )?;

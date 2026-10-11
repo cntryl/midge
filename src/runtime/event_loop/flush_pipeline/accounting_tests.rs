@@ -81,7 +81,8 @@ impl Fixture {
             .collect();
         assert_eq!(installed.len(), 1);
         let fs = Arc::new(
-            crate::io::RealFs::new(&self.event_loop.state.sst_dir).map_err(FsError::into_midge)?,
+            crate::io::RealFs::new(self.event_loop.state.host_sst_dir())
+                .map_err(FsError::into_midge)?,
         );
         let reader = crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
             .open(std::path::Path::new(&delta.file_meta.name))?;
@@ -95,7 +96,13 @@ impl Fixture {
             )
         );
         assert_eq!(
-            std::fs::metadata(self.event_loop.state.sst_dir.join(&delta.file_meta.name))?.len(),
+            std::fs::metadata(
+                self.event_loop
+                    .state
+                    .host_sst_dir()
+                    .join(&delta.file_meta.name)
+            )?
+            .len(),
             delta.file_meta.size_bytes
         );
         Ok(())
@@ -213,7 +220,7 @@ fn fail_actual_publication(fixture: &mut Fixture) -> MidgeResult<FailedPublicati
         .sst_name
         .clone()
         .expect("reserved name");
-    let path = fixture.event_loop.state.sst_dir.join(&name);
+    let path = fixture.event_loop.state.host_sst_dir().join(&name);
     std::fs::create_dir(&path)?;
     fixture
         .event_loop
@@ -264,7 +271,7 @@ fn should_preserve_original_publication_when_actual_retry_runs_during_shutdown()
             failed,
             replay,
         } = fail_actual_publication(&mut fixture)?;
-        let path = fixture.event_loop.state.sst_dir.join(&name);
+        let path = fixture.event_loop.state.host_sst_dir().join(&name);
         // Act: finish that real failed attempt once; retry the same immutable during drain.
         fixture
             .event_loop
@@ -287,11 +294,16 @@ fn should_preserve_original_publication_when_actual_retry_runs_during_shutdown()
         assert_eq!(retained.accounting.started, original.started);
         assert!(retained.accounting.attempt_started.is_none());
         assert_eq!(retained.sst_name.as_deref(), Some(name.as_str()));
-        assert!(retained
+        let staging_path = &retained
             .built
             .as_ref()
             .expect("real built output retained")
-            .staging_path
+            .staging_path;
+        assert!(fixture
+            .event_loop
+            .state
+            .db_path
+            .join(staging_path)
             .is_file());
         assert_eq!(ordinary(&once).publication_attempts, 1);
         assert_eq!(ordinary(&once).publication_failures, 1);

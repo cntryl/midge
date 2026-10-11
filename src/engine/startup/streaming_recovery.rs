@@ -107,7 +107,7 @@ impl CloudReplay {
         };
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut actor = FlushActor::new_with_memory_limit(
-            &materialized.state.sst_dir,
+            Arc::clone(&materialized.state.fs),
             false,
             materialized.runtime_config.compression_policy.clone(),
             tx,
@@ -245,7 +245,7 @@ fn checkpoint_family(
     state.next_flush_id = state.next_flush_id.checked_add(1).ok_or_else(|| {
         MidgeError::ResourceLimit("flush identity space exhausted during recovery".into())
     })?;
-    let staging_path = state.sst_dir.join(".flush-staging").join(format!(
+    let staging_path = std::path::Path::new(crate::sst::fs::FLUSH_STAGING_DIR).join(format!(
         "recovery-{}-{}.tmp",
         config.writer_epoch, identity.flush_id
     ));
@@ -309,7 +309,6 @@ fn publish_checkpoint_output(
             build,
             sst_name: name.clone(),
             sst_seq,
-            sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 config.hybrid_storage.clone(),

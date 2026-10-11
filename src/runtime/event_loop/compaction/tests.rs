@@ -421,7 +421,7 @@ fn should_keep_compaction_allowance_when_published_output_metadata_fails() -> Mi
         let directory = tempfile::tempdir()?;
         let (mut event_loop, hybrid) = event_loop_with_storage(&directory, true)?;
         let output = published_output(&mut event_loop);
-        let path = event_loop.state.sst_dir.join(&output);
+        let path = event_loop.state.host_sst_dir().join(&output);
         std::os::unix::fs::symlink(&output, &path)?;
         assert!(std::fs::metadata(&path).is_err());
         let reservation = hybrid
@@ -450,7 +450,7 @@ fn should_keep_compaction_allowance_when_published_output_is_not_a_file() -> Mid
         let directory = tempfile::tempdir()?;
         let (mut event_loop, hybrid) = event_loop_with_storage(&directory, true)?;
         let output = published_output(&mut event_loop);
-        std::fs::create_dir(event_loop.state.sst_dir.join(&output))?;
+        std::fs::create_dir(event_loop.state.host_sst_dir().join(&output))?;
         let reservation = hybrid
             .reserve_compaction_staging_with_token(STAGING_BYTES)
             .expect("reserve compaction window");
@@ -501,7 +501,7 @@ fn should_account_resident_outputs_when_compaction_publication_retains_inputs() 
     let directory = tempfile::tempdir()?;
     let (mut event_loop, hybrid) = event_loop_with_storage(&directory, true)?;
     let output = published_output(&mut event_loop);
-    std::fs::write(event_loop.state.sst_dir.join(&output), [0_u8; 300])?;
+    std::fs::write(event_loop.state.host_sst_dir().join(&output), [0_u8; 300])?;
     hybrid.reconcile_local_disk_usage(100, 0);
     let reservation = hybrid
         .reserve_compaction_staging_with_token(STAGING_BYTES)
@@ -610,8 +610,8 @@ fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> 
     let directory = tempfile::tempdir()?;
     let mut event_loop = stale_writer_event_loop(&directory)?;
     let input_name = crate::cloud_layout::compaction_file_name(0, 1, 1, 0);
-    let input_path = event_loop.state.sst_dir.join(&input_name);
-    std::fs::create_dir_all(&event_loop.state.sst_dir)?;
+    let input_path = event_loop.state.host_sst_dir().join(&input_name);
+    std::fs::create_dir_all(event_loop.state.host_sst_dir())?;
     std::fs::write(&input_path, b"still read by the new holder")?;
 
     // Act
@@ -648,7 +648,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         let input = "input.sst".to_string();
-        let input_path = event_loop.state.sst_dir.join(&input);
+        let input_path = event_loop.state.host_sst_dir().join(&input);
         std::fs::write(&input_path, b"retained predecessor input")?;
         event_loop.state.record_compaction_publication_intent(
             0,

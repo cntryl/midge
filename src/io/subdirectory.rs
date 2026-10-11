@@ -12,34 +12,33 @@ use std::sync::Arc;
 /// The directory itself is not created; callers create it through the parent
 /// when they need it to exist.
 pub(crate) fn subdirectory(inner: Arc<dyn Fs>, prefix: &str) -> Arc<dyn Fs> {
-    let host_root = inner.host_addressing().map(|frame| frame.root.join(prefix));
-    let anchor = inner
+    let host = inner
         .host_addressing()
-        .and_then(|frame| frame.anchor.map(Path::to_path_buf));
+        .map(|frame| (frame.root.join(prefix), frame.named_root.join(prefix)));
     Arc::new(Subdirectory {
         inner,
         prefix: prefix.into(),
-        host_root,
-        anchor,
+        host,
     })
 }
 
 struct Subdirectory {
     inner: Arc<dyn Fs>,
     prefix: PathBuf,
-    host_root: Option<PathBuf>,
-    anchor: Option<PathBuf>,
+    /// The view's canonical and named host roots, when the parent has them.
+    host: Option<(PathBuf, PathBuf)>,
 }
 
 impl Subdirectory {
     fn path(&self, path: &FsPath) -> FsResult<FsPath> {
         let supplied = Path::new(&path.0);
         let relative = if supplied.is_absolute() {
-            supplied
-                .strip_prefix(self.host_root.as_deref().ok_or_else(|| {
+            self.host_addressing()
+                .ok_or_else(|| {
                     FsError::Io("unrooted filesystem view rejects absolute path".into())
-                })?)
-                .map_err(|_| FsError::Io("path escapes filesystem view".into()))?
+                })?
+                .relative(supplied)
+                .ok_or_else(|| FsError::Io("path escapes filesystem view".into()))?
         } else {
             supplied
         };
@@ -87,10 +86,9 @@ impl Fs for Subdirectory {
     }
 
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
-        self.host_root.as_deref().map(|root| HostAddressing {
-            root,
-            anchor: self.anchor.as_deref(),
-        })
+        self.host
+            .as_ref()
+            .map(|(root, named_root)| HostAddressing { root, named_root })
     }
 
     fn coordination_key(&self) -> u64 {

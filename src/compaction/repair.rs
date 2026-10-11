@@ -56,7 +56,7 @@ impl RepairScratch {
             ));
         }
         let fs = factory.output_fs();
-        let directory = output_dir.join(".compaction-repair");
+        let directory = output_dir.join(crate::sst::fs::REPAIR_DIR_NAME);
         let key = crate::sst::fs::fs_relative_sst_path(&fs, &directory)?;
         if fs.exists(&key).map_err(FsError::into_midge)?
             && !fs.list_dir(&key).map_err(FsError::into_midge)?.is_empty()

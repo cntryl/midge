@@ -1625,7 +1625,7 @@ fn same_size_sst_with_different_crc(bytes: &[u8]) -> Vec<u8> {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let path = temp_dir.path().join("changed.sst");
     std::fs::write(&path, &changed).expect("write changed SST");
-    crate::sst::fs::SstFileIo::open_with_real_fs(&path)
+    crate::sst::fs::SstFileIo::open("changed.sst", crate::io::real::test_root(temp_dir.path()))
         .expect("changed same-size SST should remain structurally readable");
 
     changed
@@ -1679,7 +1679,7 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
 
     // Assert
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "startup must leave ordinary manifest SSTs in object storage"
     );
     assert!(
@@ -1782,7 +1782,7 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
     // Act
     // Assert
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "readable cloud SST must stay remote despite stale LIST"
     );
 }
@@ -1839,7 +1839,7 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
         "unexpected wrong-sized cloud SST recovery error: {error}"
     );
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "wrong-sized cloud SST must not be installed into the local cache"
     );
 }
@@ -1888,7 +1888,7 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
     // Act
     // Assert
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "startup must not install a full SST in the local cache"
     );
 }
@@ -1929,7 +1929,7 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
             largest_seq: Some(1),
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&sst_name), &stale_local_sst_bytes)
+    std::fs::write(state.host_sst_dir().join(&sst_name), &stale_local_sst_bytes)
         .expect("write stale local SST cache");
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
@@ -1943,7 +1943,7 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
         .expect("valid cloud metadata should permit opening without local cache restoration");
 
     assert_eq!(
-        std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+        std::fs::read(state.host_sst_dir().join(&sst_name)).expect("read retained local SST"),
         stale_local_sst_bytes,
         "startup leaves disposable local bytes untouched; readers use authoritative cloud objects"
     );
@@ -1979,7 +1979,7 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
             largest_seq: Some(1),
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&sst_name), &stale_local_sst_bytes)
+    std::fs::write(state.host_sst_dir().join(&sst_name), &stale_local_sst_bytes)
         .expect("write stale same-size local SST cache");
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
@@ -1995,7 +1995,7 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
     // Act
     // Assert
     assert_eq!(
-        std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+        std::fs::read(state.host_sst_dir().join(&sst_name)).expect("read retained local SST"),
         stale_local_sst_bytes,
         "ordinary startup does not scan or replace disposable local SST bytes"
     );
@@ -2030,7 +2030,7 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
             largest_seq: Some(1),
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&sst_name), &committed_sst_bytes)
+    std::fs::write(state.host_sst_dir().join(&sst_name), &committed_sst_bytes)
         .expect("write valid local SST cache");
     let cloud = cloud_with_stale_sst_listing();
     Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
@@ -2047,7 +2047,7 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
         "salvage must not drop a manifest SST that still has a valid local recoverable copy"
     );
     assert_eq!(
-        std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+        std::fs::read(state.host_sst_dir().join(&sst_name)).expect("read retained local SST"),
         committed_sst_bytes,
         "valid local SST cache must remain intact"
     );
@@ -2080,7 +2080,8 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
             content_crc32c: None,
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&name), corrupt_bytes).expect("persist damaged local SST");
+    std::fs::write(state.host_sst_dir().join(&name), corrupt_bytes)
+        .expect("persist damaged local SST");
     let cloud = cloud_with_stale_sst_listing();
 
     // Act
@@ -2092,7 +2093,7 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
     assert!(state.manifest.files.is_empty());
     assert!(state.persistence_anomaly_detected());
     assert!(
-        state.sst_dir.join(name).exists(),
+        state.host_sst_dir().join(name).exists(),
         "unverified bytes remain available for inspection"
     );
 }
@@ -2127,7 +2128,7 @@ fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_read
     // Act
     // Assert
     assert!(
-        state.sst_dir.join(&sst_name).exists(),
+        state.host_sst_dir().join(&sst_name).exists(),
         "readable cloud SST should be staged despite stale LIST"
     );
 }
@@ -2180,7 +2181,7 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
         "unexpected intent SST proof error: {error}"
     );
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "intent SST with mismatched proof must not be staged"
     );
 }

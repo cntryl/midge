@@ -29,8 +29,12 @@ impl ManifestActor {
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: &FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
         if !state.is_memory_mode() {
-            let sst_path = state.sst_dir.join(&file_meta.name);
-            if !sst_path.exists() {
+            let sst_path = crate::sst::fs::sst_key(&file_meta.name);
+            if !state
+                .fs
+                .exists(&sst_path)
+                .map_err(crate::io::FsError::into_midge)?
+            {
                 return Err(crate::common::MidgeError::Internal(format!(
                     "SST file '{}' not found in sst dir",
                     file_meta.name
@@ -38,7 +42,9 @@ impl ManifestActor {
             }
 
             // Try opening the SST to validate footer/format correctness
-            if let Err(e) = crate::sst::fs::SstFileIo::open_with_real_fs(&sst_path) {
+            if let Err(e) =
+                crate::sst::fs::SstFileIo::open(&sst_path.0, std::sync::Arc::clone(&state.fs))
+            {
                 return Err(crate::common::MidgeError::Corruption(format!(
                     "SST file '{}' failed validation: {}",
                     file_meta.name, e
@@ -220,7 +226,6 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::FsError;
     use crate::sst::traits::SstFactory;
 
     #[test]
@@ -495,15 +500,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let sst_name = crate::cloud_layout::file_name(0, 0, 3);
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
-        assert!(state.sst_dir.exists(), "sst dir must exist");
-        let sst_path = state.sst_dir.join(&sst_name);
+        assert!(state.host_sst_dir().exists(), "sst dir must exist");
+        let sst_path = state.host_sst_dir().join(&sst_name);
 
-        let factory = crate::sst::FsSstFactoryIo::new(
-            std::sync::Arc::new(
-                crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?,
-            ),
-            4096,
-        );
+        let factory = crate::sst::FsSstFactoryIo::new(std::sync::Arc::clone(&state.fs), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"value"), 10, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
@@ -527,9 +527,9 @@ mod tests {
         };
 
         assert_eq!(
-            state.sst_dir.join(&sst_name),
+            state.host_sst_dir().join(&sst_name),
             sst_path,
-            "state.sst_dir should match the temp dir used for file creation"
+            "state.host_sst_dir() should match the temp dir used for file creation"
         );
         let mut actor = ManifestActor::new();
 
