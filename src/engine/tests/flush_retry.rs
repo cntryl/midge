@@ -154,6 +154,7 @@ impl RetryFixture {
         )?;
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             options.storage(),
+            &crate::lease::test_lease_root(options.storage()),
             options.lease_clock_skew_tolerance(),
             options.storage_io_timeout(),
             options.lease_ttl(),

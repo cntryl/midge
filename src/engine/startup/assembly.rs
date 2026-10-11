@@ -170,9 +170,9 @@ impl EngineStartup {
         check_scope(scope, "lease epoch discovery")?;
         let startup_lease = super::timing::measure("lease_acquisition", || {
             if let Some(scope) = scope {
-                StartupLease::acquire_within(opts, minimum_epoch, scope)
+                StartupLease::acquire_within(opts, &storage_path, minimum_epoch, scope)
             } else {
-                StartupLease::acquire(opts, minimum_epoch)
+                StartupLease::acquire(opts, &storage_path, minimum_epoch)
             }
         })?;
         if let Some(observer) = opts.startup_observer() {

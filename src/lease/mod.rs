@@ -45,7 +45,6 @@ pub use traits::{
 };
 
 use crate::config::Storage;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -128,8 +127,6 @@ impl LeaseConfig {
     }
 }
 
-static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 // Keep the dependency direction common <- lease: the higher lease layer owns
 // conversion of its error into the shared public error type.
 impl From<LeaseError> for crate::common::MidgeError {
@@ -172,84 +169,66 @@ pub(crate) struct CreatedLease {
     pub(crate) validity: Option<Arc<LeaseValidity>>,
 }
 
+/// The database root a test lease coordinates through: in memory for
+/// in-memory storage, otherwise the host directory.
+#[cfg(test)]
+pub(crate) fn test_lease_root(storage: &Storage) -> Arc<dyn crate::io::Fs> {
+    match storage {
+        Storage::InMemory => Arc::new(crate::io::MockFs::new()),
+        Storage::Local { path } => crate::io::real::test_root(path),
+        Storage::Cloud {
+            local_cache_path, ..
+        }
+        | Storage::CloudSimulated {
+            local_cache_path, ..
+        } => crate::io::real::test_root(local_cache_path),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn create_lease_with_validity(
     storage: &Storage,
     clock_skew_tolerance: std::time::Duration,
 ) -> Result<CreatedLease, LeaseError> {
-    create_lease_with_validity_and_timeout(
-        storage,
-        clock_skew_tolerance,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn create_lease_with_validity_and_timeout(
-    storage: &Storage,
-    clock_skew_tolerance: std::time::Duration,
-    storage_io_timeout: std::time::Duration,
-) -> Result<CreatedLease, LeaseError> {
     create_lease_with_validity_and_timeout_and_ttl(
         storage,
+        &test_lease_root(storage),
         clock_skew_tolerance,
-        storage_io_timeout,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         std::time::Duration::from_secs(30),
     )
 }
 
+/// Create the primary lease for `storage`. Local and simulated leases keep
+/// their coordination files in the database `root`.
 pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
     storage: &Storage,
+    root: &Arc<dyn crate::io::Fs>,
     clock_skew_tolerance: std::time::Duration,
     storage_io_timeout: std::time::Duration,
     lease_ttl: std::time::Duration,
 ) -> Result<CreatedLease, LeaseError> {
     match storage {
-        Storage::InMemory => {
-            // In-memory mode: use filesystem lease on temp directory (no disk I/O)
-            // Generate a unique temp path for lease coordination without actually
-            // creating the directory (memory mode must not touch filesystem).
-            // NOTE: On some platforms (notably Windows) `SystemTime` resolution is not truly
-            // nanosecond-granular, so concurrent callers can collide. Add a counter to ensure
-            // uniqueness even under heavy parallel test load.
-            let unique = INMEM_LEASE_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let temp_path = std::env::temp_dir().join(format!(
-                "midge_inmem_{}_{}_{}",
-                std::process::id(),
-                unique,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            // Memory mode: use MockFs for lease coordination (no disk I/O)
-            Ok(CreatedLease {
-                lease: Arc::new(FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
-                    &temp_path,
-                    true,
-                    lease_ttl,
-                    clock_skew_tolerance,
-                )?),
-                validity: None,
-            })
-        }
-        Storage::Local { path } => {
-            // Local storage: use filesystem lease with RealFs
-            let lease = Arc::new(FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
-                path.as_path(),
-                false,
+        Storage::InMemory => Ok(CreatedLease {
+            lease: Arc::new(FileSystemLease::with_root(
+                Arc::clone(root),
                 lease_ttl,
                 clock_skew_tolerance,
-            )?);
+            )),
+            validity: None,
+        }),
+        Storage::Local { .. } => {
+            let lease = Arc::new(FileSystemLease::with_root(
+                Arc::clone(root),
+                lease_ttl,
+                clock_skew_tolerance,
+            ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
                 lease,
             })
         }
-        Storage::Cloud {
-            local_cache_path,
-            topology,
-        } => {
+        Storage::Cloud { topology, .. } => {
             // Cloud storage: use cloud lease with TTL-based coordination
             let control = topology.control();
             let lease_provider = control.provider();
@@ -267,7 +246,6 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
             let lease = Arc::new(
                 CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
                     config,
-                    local_cache_path.clone(),
                     cloud,
                     clock_skew_tolerance,
                     lease_ttl,
@@ -278,18 +256,14 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 lease,
             })
         }
-        Storage::CloudSimulated {
-            local_cache_path,
-            bucket,
-            prefix,
-        } => {
+        Storage::CloudSimulated { bucket, prefix, .. } => {
             let config = CloudLeaseConfig {
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
             let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
                 config,
-                local_cache_path.clone(),
+                Arc::clone(root),
                 clock_skew_tolerance,
                 lease_ttl,
             ));

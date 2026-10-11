@@ -13,7 +13,9 @@ use super::traits::{
     CloudMetadataGeneration, CloudMetadataHead, LeaderRecord, LeaderStore, LeaseError, LeaseGuard,
     LeaseValidity, PrimaryLease,
 };
-use crate::io::{staging, Fs, FsError, FsPath, OpenMode, OpenOptions, RealFs};
+#[cfg(test)]
+use crate::io::RealFs;
+use crate::io::{staging, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1084,16 +1086,18 @@ impl CloudStorageLease {
     /// The lease coordination file will be written here.
     #[cfg(test)]
     pub fn new(config: CloudLeaseConfig, local_cache_path: impl AsRef<std::path::Path>) -> Self {
+        let cache: Result<Arc<dyn Fs>, FsError> =
+            RealFs::new(local_cache_path).map(|fs| Arc::new(fs) as Arc<dyn Fs>);
         Self::new_with_ttl(
             config,
-            local_cache_path,
+            cache,
             Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
         )
     }
 
     fn new_with_ttl(
         config: CloudLeaseConfig,
-        local_cache_path: impl AsRef<std::path::Path>,
+        cache: Result<Arc<dyn Fs>, FsError>,
         ttl: Duration,
     ) -> Self {
         let holder_id = format!(
@@ -1107,17 +1111,14 @@ impl CloudStorageLease {
 
         let clock_skew_tolerance = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2);
         let validity = Arc::new(LeaseValidity::new());
-        let leader_store: Arc<dyn LeaderStore> = match RealFs::new(local_cache_path) {
-            Ok(fs) => {
-                let fs: Arc<dyn Fs> = Arc::new(fs);
-                Arc::new(SimulatedLeaderStore::new(
-                    fs,
-                    owner_token.clone(),
-                    ttl,
-                    Arc::clone(&validity),
-                    clock_skew_tolerance,
-                ))
-            }
+        let leader_store: Arc<dyn LeaderStore> = match cache {
+            Ok(fs) => Arc::new(SimulatedLeaderStore::new(
+                fs,
+                owner_token.clone(),
+                ttl,
+                Arc::clone(&validity),
+                clock_skew_tolerance,
+            )),
             Err(error) => Arc::new(UnavailableLeaderStore::new(error.to_string())),
         };
 
@@ -1149,13 +1150,15 @@ impl CloudStorageLease {
         Ok(self)
     }
 
+    /// A simulated-cloud lease whose leader record lives in the local cache
+    /// `root`.
     pub(crate) fn new_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
-        local_cache_path: impl AsRef<std::path::Path>,
+        root: Arc<dyn Fs>,
         clock_skew_tolerance: Duration,
         ttl: Duration,
     ) -> Self {
-        Self::new_with_ttl(config, local_cache_path, ttl)
+        Self::new_with_ttl(config, Ok(root), ttl)
             .with_clock_skew_tolerance(clock_skew_tolerance)
             .expect("engine validates lease clock-skew tolerance")
     }
@@ -1163,12 +1166,11 @@ impl CloudStorageLease {
     #[cfg(test)]
     pub fn new_provider_backed(
         config: CloudLeaseConfig,
-        local_cache_path: std::path::PathBuf,
+        _local_cache_path: std::path::PathBuf,
         cloud: Arc<CloudStorage>,
     ) -> Self {
         Self::new_provider_backed_with_ttl(
             config,
-            local_cache_path,
             cloud,
             Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
         )
@@ -1176,7 +1178,6 @@ impl CloudStorageLease {
 
     fn new_provider_backed_with_ttl(
         config: CloudLeaseConfig,
-        _local_cache_path: std::path::PathBuf,
         cloud: Arc<CloudStorage>,
         ttl: Duration,
     ) -> Self {
@@ -1214,12 +1215,11 @@ impl CloudStorageLease {
 
     pub(crate) fn new_provider_backed_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
-        local_cache_path: std::path::PathBuf,
         cloud: Arc<CloudStorage>,
         clock_skew_tolerance: Duration,
         ttl: Duration,
     ) -> Self {
-        Self::new_provider_backed_with_ttl(config, local_cache_path, cloud, ttl)
+        Self::new_provider_backed_with_ttl(config, cloud, ttl)
             .with_clock_skew_tolerance(clock_skew_tolerance)
             .expect("engine validates lease clock-skew tolerance")
     }

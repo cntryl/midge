@@ -8,9 +8,8 @@ use crate::io::FsError;
 use crate::runtime::IntentLogEntry;
 #[cfg(test)]
 use std::fs;
-use std::path::Path;
 #[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct IntentPersistence;
 
@@ -184,6 +183,7 @@ impl IntentPersistence {
         )
     }
 
+    #[cfg(test)]
     pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;

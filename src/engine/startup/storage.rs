@@ -184,27 +184,34 @@ impl StartupLease {
     /// Acquire the primary lease with an epoch strictly above
     /// `minimum_epoch`, the highest writer epoch already durable in this
     /// engine's storage.
-    pub(super) fn acquire(opts: &OpenOptions, minimum_epoch: u64) -> MidgeResult<Self> {
-        Self::acquire_configured(opts, minimum_epoch, None)
+    pub(super) fn acquire(
+        opts: &OpenOptions,
+        path: &StartupStoragePath,
+        minimum_epoch: u64,
+    ) -> MidgeResult<Self> {
+        Self::acquire_configured(opts, path, minimum_epoch, None)
     }
 
     pub(super) fn acquire_within(
         opts: &OpenOptions,
+        path: &StartupStoragePath,
         minimum_epoch: u64,
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
         scope.check("lease creation")?;
-        Self::acquire_configured(opts, minimum_epoch, Some(scope))
+        Self::acquire_configured(opts, path, minimum_epoch, Some(scope))
     }
 
     fn acquire_configured(
         opts: &OpenOptions,
+        path: &StartupStoragePath,
         minimum_epoch: u64,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         let storage = opts.storage();
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             storage,
+            &path.root,
             opts.lease_clock_skew_tolerance(),
             opts.storage_io_timeout(),
             opts.lease_ttl(),

@@ -20,7 +20,10 @@
 
 use super::fs_leader_store::FsLeaderStore;
 use super::traits::{LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease};
-use crate::io::{Fs, MockFs, RealFs};
+use crate::io::Fs;
+#[cfg(test)]
+use crate::io::{MockFs, RealFs};
+#[cfg(test)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -61,6 +64,7 @@ impl FileSystemLease {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_ttl_and_clock_skew_tolerance(
         db_path: &Path,
         use_mock_fs: bool,
@@ -73,10 +77,16 @@ impl FileSystemLease {
             let realfs = RealFs::new(db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
             Arc::new(realfs)
         };
-        Ok(Self::with_fs(fs, ttl, clock_skew_tolerance))
+        Ok(Self::with_root(fs, ttl, clock_skew_tolerance))
     }
 
-    fn with_fs(fs: Arc<dyn Fs>, ttl: Duration, clock_skew_tolerance: Duration) -> Self {
+    /// A lease whose coordination files live in the database `root`.
+    pub(crate) fn with_root(
+        root: Arc<dyn Fs>,
+        ttl: Duration,
+        clock_skew_tolerance: Duration,
+    ) -> Self {
+        let fs = root;
         let instance = LEASE_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let holder_id = format!(
             "{}.{}@{}",
@@ -102,7 +112,7 @@ impl FileSystemLease {
 
     #[cfg(test)]
     pub(crate) fn new_with_fs_for_test(fs: Arc<dyn Fs>, ttl: Duration) -> Self {
-        Self::with_fs(fs, ttl, ttl / 2)
+        Self::with_root(fs, ttl, ttl / 2)
     }
 
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {

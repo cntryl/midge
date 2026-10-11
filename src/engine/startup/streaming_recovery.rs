@@ -482,33 +482,34 @@ fn install_checkpoint_output(
             storage.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
         if cloud_metadata_published {
-            std::fs::remove_file(state.sst_dir.join(name))?;
+            state
+                .fs
+                .remove_file(&crate::io::FsPath::new(crate::cloud_layout::object_key(
+                    name,
+                )))
+                .map_err(crate::io::FsError::into_midge)?;
             storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
-            storage.reconcile_local_disk_usage(
-                super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                    &state.sst_dir,
-                    state.startup_scope.as_ref(),
-                )?
-                .saturating_add(
-                    super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                        &state.db_path.join("hybrid_local/sst"),
-                        state.startup_scope.as_ref(),
-                    )?,
-                ),
-                super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                    &state.wal_dir,
-                    state.startup_scope.as_ref(),
-                )?
-                .saturating_add(
-                    super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                        &state.db_path.join("hybrid_local/wal"),
-                        state.startup_scope.as_ref(),
-                    )?,
-                ),
-            );
+            let (sst_bytes, wal_bytes) = local_storage_bytes(state)?;
+            storage.reconcile_local_disk_usage(sst_bytes, wal_bytes);
         }
     }
     Ok(())
+}
+
+/// Local SST and WAL bytes, counting both the runtime directories and the
+/// hybrid cache below the database root.
+pub(super) fn local_storage_bytes(state: &crate::runtime::RuntimeState) -> MidgeResult<(u64, u64)> {
+    let bytes = |directory: &str| {
+        super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
+            state.fs.as_ref(),
+            directory,
+            state.startup_scope.as_ref(),
+        )
+    };
+    Ok((
+        bytes("sst")?.saturating_add(bytes("hybrid_local/sst")?),
+        bytes("wal")?.saturating_add(bytes("hybrid_local/wal")?),
+    ))
 }
 
 pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {

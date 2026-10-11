@@ -15,7 +15,6 @@ use super::StartupStoragePath;
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
 use crate::io::FsError;
-use std::path::Path;
 use std::sync::Arc;
 
 pub(super) struct StartupEpochFloor;
@@ -49,8 +48,7 @@ impl StartupEpochFloor {
         if storage_path.memory_mode {
             return Ok(0);
         }
-        let local_wal =
-            Self::local_wal_epoch(&storage_path.db_path, opts.recovery_policy(), scope)?;
+        let local_wal = Self::local_wal_epoch(&storage_path.root, opts.recovery_policy(), scope)?;
         let catalog = match opts.storage() {
             Storage::Cloud { topology, .. } => {
                 let wal = crate::storage::providers::build_cloud_storage_with_timeout(
@@ -87,31 +85,29 @@ impl StartupEpochFloor {
     /// WAL failures surface as `RecoveryFailed`, the same classification
     /// replay itself would report for them.
     fn local_wal_epoch(
-        db_path: &Path,
+        root: &Arc<dyn crate::io::Fs>,
         recovery_policy: RecoveryPolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
-        let wal_dir = db_path.join("wal");
-        if !wal_dir.exists() {
+        if !root
+            .exists(&crate::io::FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+        {
             return Ok(0);
         }
         let replay_policy = match recovery_policy {
             RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
             RecoveryPolicy::Salvage => crate::wal::recovery::ReplayPolicy::SalvageValidPrefix,
         };
-        let result = crate::io::RealFs::new(&wal_dir)
-            .map_err(FsError::into_midge)
-            .and_then(|storage| {
-                let mut storage: Arc<dyn crate::io::Fs> = Arc::new(storage);
-                if let Some(scope) = scope {
-                    storage = crate::io::scope_fs(storage, scope.clone());
-                }
-                crate::wal::recovery::max_writer_epoch(
-                    storage.as_ref(),
-                    &crate::io::FsPath::new(""),
-                    replay_policy,
-                )
-            });
+        let mut storage = crate::io::subdirectory(Arc::clone(root), "wal");
+        if let Some(scope) = scope {
+            storage = crate::io::scope_fs(storage, scope.clone());
+        }
+        let result = crate::wal::recovery::max_writer_epoch(
+            storage.as_ref(),
+            &crate::io::FsPath::new(""),
+            replay_policy,
+        );
         if let Some(scope) = scope {
             scope.check("local WAL epoch discovery")?;
         }

@@ -119,7 +119,7 @@ impl RuntimeState {
     ) -> MidgeResult<()> {
         self.ensure_metadata_current()?;
         if !self.is_memory_mode() {
-            crate::runtime::IntentPersistence::save(&self.db_path, intents)
+            crate::runtime::IntentPersistence::save_with_fs(&self.fs, intents)
                 .map_err(crate::common::MidgeError::Internal)?;
         }
         Ok(())

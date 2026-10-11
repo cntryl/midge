@@ -1128,7 +1128,6 @@ mod tests {
                         bucket: "test".into(),
                         prefix: String::new(),
                     },
-                    directory.path().to_path_buf(),
                     Arc::clone(&cloud),
                     Duration::ZERO,
                     Duration::from_secs(30),
