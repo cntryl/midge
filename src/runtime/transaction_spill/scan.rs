@@ -28,7 +28,8 @@ enum RunKeyDirection {
 }
 
 pub(super) struct RunKeyCursor {
-    path: std::path::PathBuf,
+    root: super::SpillRoot,
+    path: crate::io::FsPath,
     cursor: u64,
     data_end: u64,
     start: Option<Vec<u8>>,
@@ -89,6 +90,7 @@ impl RunKeyCursor {
         };
 
         Ok(Self {
+            root: run.root.clone(),
             path: run.path.clone(),
             cursor,
             data_end: header.ordinal_table_offset,
@@ -106,7 +108,7 @@ impl RunKeyCursor {
     }
 
     fn next_forward_key(&mut self) -> MidgeResult<Option<Bytes>> {
-        let mut file = RunFile::open(&self.path)?;
+        let mut file = RunFile::open(&*self.root, &self.path)?;
         while self.cursor < self.data_end {
             file.seek_to(self.cursor)?;
             let (key, next_cursor) = read_op_primary_key_frame(&mut file)?;
@@ -136,7 +138,7 @@ impl RunKeyCursor {
     }
 
     fn load_reverse_chunk(&mut self) -> MidgeResult<bool> {
-        let mut file = RunFile::open(&self.path)?;
+        let mut file = RunFile::open(&*self.root, &self.path)?;
         let (chunk_start, chunk_end) = {
             let RunKeyDirection::Reverse { chunks, .. } = &mut self.direction else {
                 return Ok(false);
@@ -291,7 +293,8 @@ impl Ord for HeadEntry {
 /// ascending start for forward scans, by descending end for reverse scans.
 /// It holds a position and nothing else, so it costs no pool memory.
 struct RunRangeCursor {
-    path: std::path::PathBuf,
+    root: super::SpillRoot,
+    path: crate::io::FsPath,
     header: RangeHeader,
     order: RangeOrder,
     /// Forward cursors count up from `0`; reverse cursors count down from
@@ -310,6 +313,7 @@ impl RunRangeCursor {
     ) -> MidgeResult<Self> {
         let header = run.with_reader(|reader| Ok(reader.range_header()))?;
         Ok(Self {
+            root: run.root.clone(),
             path: run.range_path.clone(),
             header,
             order: if reverse {
@@ -341,7 +345,7 @@ impl RunRangeCursor {
                 self.position
             };
             if file.is_none() {
-                file = Some(RunFile::open(&self.path)?);
+                file = Some(RunFile::open(&*self.root, &self.path)?);
             }
             let file = file.as_mut().expect("opened above");
             let entry = read_ordered_range(file, &self.header, self.order, position)?;

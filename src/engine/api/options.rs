@@ -685,10 +685,9 @@ impl OpenOptionsBuilder {
     /// Serve the database from `filesystem` instead of the host directory, so
     /// tests can fault or crash its storage effects. The filesystem is the
     /// database root; the configured path names it only. Metadata, WAL,
-    /// lease and SST files are served from it; transaction spill runs still
-    /// use the configured path until #808 stage 1 routes them. Only local
-    /// databases accept an injected filesystem until cloud working storage
-    /// is routed too. The filesystem must support
+    /// lease, SST and transaction spill files are served from it. Only local
+    /// databases accept an injected filesystem until #808 stage 1 routes
+    /// cloud working storage too. The filesystem must support
     /// [`crate::io::Fs::open_persistent_handle`], which SST builds use for
     /// scratch.
     #[cfg(feature = "internal-testing")]

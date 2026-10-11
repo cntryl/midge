@@ -135,7 +135,7 @@ fn should_count_transaction_queue_rejections_once_without_retaining_requests() {
     let directory = tempfile::tempdir().expect("spill directory");
     let mut writes = transaction_spill::TransactionWriteSet::new(
         Arc::new(transaction_spill::TransactionMemoryPool::new(512)),
-        directory.path(),
+        &crate::io::real::test_root(directory.path()),
         false,
         7003,
     );

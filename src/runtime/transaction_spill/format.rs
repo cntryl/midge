@@ -4,14 +4,14 @@ use super::range::{
 };
 use super::{
     consider_lookup, op_heap_bytes, op_primary_key_bytes, IntentLookup, OrdinalOp, SpillDiskBudget,
-    SpillDiskCharge, SpillReaderCache, SpillRun, TransactionMemoryPool, TransactionOp,
+    SpillDiskCharge, SpillReaderCache, SpillRoot, SpillRun, TransactionMemoryPool, TransactionOp,
     MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC, RUN_VERSION, SPARSE_INDEX_STRIDE,
 };
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::stream::{FileReader, FileWriter};
+use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use bytes::Bytes;
-use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
 use std::sync::Arc;
 
 /// Read-ahead window for one open spill file.
@@ -83,15 +83,41 @@ pub(super) fn sparse_index_decodes() -> usize {
 /// intact across frames and removes an `lseek` per field.
 #[derive(Debug)]
 pub(super) struct RunFile {
-    reader: BufReader<File>,
+    reader: BufReader<FileReader<Box<dyn File>>>,
     position: u64,
     #[cfg(test)]
     tracker: Option<Arc<RunFileTracker>>,
 }
 
+/// Classify a failure on a spill file the write set itself owns, never as a
+/// caller's mistake: a run that vanished lost intents the transaction still
+/// needs, and a name collision is an engine fault.
+fn spill_file_error(error: FsError) -> MidgeError {
+    match error {
+        FsError::NotFound(path) => {
+            MidgeError::Corruption(format!("transaction spill run is missing: {path}"))
+        }
+        FsError::AlreadyExists(path) => {
+            MidgeError::Internal(format!("transaction spill file already exists: {path}"))
+        }
+        error => error.into_midge(),
+    }
+}
+
 impl RunFile {
-    pub(super) fn open(path: &Path) -> MidgeResult<Self> {
-        let file = File::open(path)?;
+    pub(super) fn open(root: &dyn Fs, path: &FsPath) -> MidgeResult<Self> {
+        let file = root
+            .open_persistent_handle(
+                path,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(spill_file_error)?;
+        let file = FileReader::new(file)?;
         #[cfg(test)]
         let tracker = RUN_FILE_TRACKER.with(|tracker| tracker.borrow().clone());
         #[cfg(test)]
@@ -129,8 +155,8 @@ impl RunFile {
         self.position
     }
 
-    fn len(&self) -> MidgeResult<u64> {
-        Ok(self.reader.get_ref().metadata()?.len())
+    fn len(&self) -> u64 {
+        self.reader.get_ref().len()
     }
 }
 
@@ -175,14 +201,14 @@ impl RunReader {
     }
 
     pub(super) fn open(run: &SpillRun) -> MidgeResult<Self> {
-        let mut data = RunFile::open(&run.path)?;
+        let mut data = RunFile::open(&*run.root, &run.path)?;
         let header = read_header(&mut data)?;
         if header.record_count != run.record_count {
             return Err(MidgeError::Corruption(
                 "transaction spill record count changed".to_string(),
             ));
         }
-        let mut range = RunFile::open(&run.range_path)?;
+        let mut range = RunFile::open(&*run.root, &run.range_path)?;
         let range_header = read_range_header(&mut range)?;
         let charge = sparse_charge_upper_bound(&data, &header)?;
         let (sparse, charged_bytes) = if run.pool.try_reserve(charge) {
@@ -242,7 +268,7 @@ impl Drop for RunReader {
 
 fn sparse_charge_upper_bound(file: &RunFile, header: &RunHeader) -> MidgeResult<usize> {
     let encoded_bytes = file
-        .len()?
+        .len()
         .checked_sub(header.sparse_index_offset)
         .ok_or_else(|| {
             MidgeError::Corruption(
@@ -294,13 +320,13 @@ fn sparse_chunks_from_entries(entries: &[(Bytes, u64)], data_end: u64) -> Vec<(u
 
 #[cfg(test)]
 pub(super) fn write_run(
-    spill_dir: &Path,
+    root: &SpillRoot,
     txn_id: u64,
     run_number: usize,
     ops: &mut [OrdinalOp],
 ) -> MidgeResult<SpillRun> {
     write_run_with_budget(
-        spill_dir,
+        root,
         txn_id,
         run_number,
         ops,
@@ -311,7 +337,7 @@ pub(super) fn write_run(
 
 #[cfg(test)]
 pub(super) fn write_run_with_budget(
-    spill_dir: &Path,
+    root: &SpillRoot,
     txn_id: u64,
     run_number: usize,
     ops: &mut [OrdinalOp],
@@ -319,7 +345,7 @@ pub(super) fn write_run_with_budget(
     pool: &Arc<TransactionMemoryPool>,
 ) -> MidgeResult<SpillRun> {
     write_run_with_reader_cache(
-        spill_dir,
+        root,
         txn_id,
         run_number,
         ops,
@@ -330,7 +356,7 @@ pub(super) fn write_run_with_budget(
 }
 
 pub(super) fn write_run_with_reader_cache(
-    spill_dir: &Path,
+    root: &SpillRoot,
     txn_id: u64,
     run_number: usize,
     ops: &mut [OrdinalOp],
@@ -338,10 +364,11 @@ pub(super) fn write_run_with_reader_cache(
     pool: &Arc<TransactionMemoryPool>,
     reader_cache: &Arc<SpillReaderCache>,
 ) -> MidgeResult<SpillRun> {
-    let path = spill_dir.join(format!("{txn_id:016x}-{run_number:08x}.run"));
-    let temp_path = path.with_extension("run.tmp");
-    let range_path = path.with_extension("ranges");
-    let range_temp_path = path.with_extension("ranges.tmp");
+    let name = format!("{txn_id:016x}-{run_number:08x}");
+    let path = super::spill_path(&format!("{name}.run"));
+    let temp_path = super::spill_path(&format!("{name}.run.tmp"));
+    let range_path = super::spill_path(&format!("{name}.ranges"));
+    let range_temp_path = super::spill_path(&format!("{name}.ranges.tmp"));
     let disk_charge = budget
         .map(|budget| {
             let bytes = spill_size_bound(ops)?;
@@ -349,6 +376,7 @@ pub(super) fn write_run_with_reader_cache(
             Ok::<_, MidgeError>(std::sync::Arc::new(SpillDiskCharge {
                 budget: budget.clone(),
                 bytes,
+                root: root.clone(),
                 paths: [
                     path.clone(),
                     temp_path.clone(),
@@ -358,24 +386,27 @@ pub(super) fn write_run_with_reader_cache(
             }))
         })
         .transpose()?;
-    fs::create_dir_all(spill_dir)?;
-    let result = write_run_file(&temp_path, ops)
-        .and_then(|()| write_range_index_file(&range_temp_path, ops))
+    root.create_dir_all(&FsPath::new(super::SPILL_DIR))
+        .map_err(FsError::into_midge)?;
+    let result = write_run_file(&**root, &temp_path, ops)
+        .and_then(|()| write_range_index_file(&**root, &range_temp_path, ops))
         .and_then(|()| {
-            fs::rename(&range_temp_path, &range_path)?;
-            fs::rename(&temp_path, &path)?;
+            root.rename_atomic(&range_temp_path, &range_path)
+                .map_err(FsError::into_midge)?;
+            root.rename_atomic(&temp_path, &path)
+                .map_err(FsError::into_midge)?;
             // Spill files are private pre-commit scratch. WAL commit is their
             // durability boundary, so no parent-directory fsync is required.
             Ok(())
         });
     if let Err(error) = result {
-        let _ = fs::remove_file(&temp_path);
-        let _ = fs::remove_file(&range_temp_path);
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(&range_path);
+        for path in [&temp_path, &range_temp_path, &path, &range_path] {
+            let _ = root.remove_file(path);
+        }
         return Err(error);
     }
     Ok(SpillRun {
+        root: root.clone(),
         path,
         range_path,
         record_count: ops.len(),
@@ -434,13 +465,29 @@ fn spill_size_bound(ops: &[OrdinalOp]) -> MidgeResult<u64> {
     Ok(bytes)
 }
 
-fn write_run_file(path: &Path, ops: &mut [OrdinalOp]) -> MidgeResult<()> {
+/// Create a spill file that must not already exist.
+pub(super) fn create_spill_file(root: &dyn Fs, path: &FsPath) -> MidgeResult<FileWriter> {
+    let file = root
+        .open_persistent_handle(
+            path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: false,
+                create_new: true,
+                truncate: false,
+            },
+        )
+        .map_err(spill_file_error)?;
+    Ok(FileWriter::new(file))
+}
+
+fn write_run_file(root: &dyn Fs, path: &FsPath, ops: &mut [OrdinalOp]) -> MidgeResult<()> {
     ops.sort_unstable_by(|left, right| {
         left.primary_key()
             .cmp(right.primary_key())
             .then_with(|| left.ordinal.cmp(&right.ordinal))
     });
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let mut file = create_spill_file(root, path)?;
     file.write_all(&[0; RUN_HEADER_LEN])?;
 
     let mut ordinal_offsets = Vec::with_capacity(ops.len());
@@ -476,6 +523,7 @@ fn write_run_file(path: &Path, ops: &mut [OrdinalOp]) -> MidgeResult<()> {
     )?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header)?;
+    file.flush()?;
     // Spill runs are pre-commit scratch that startup deletes wholesale, so an
     // fsync here buys no durability and only costs write latency.
     Ok(())
@@ -540,7 +588,7 @@ pub(super) fn for_each_run_ordinal<F>(run: &SpillRun, mut visitor: F) -> MidgeRe
 where
     F: FnMut(OrdinalOp) -> MidgeResult<()>,
 {
-    let mut file = RunFile::open(&run.path)?;
+    let mut file = RunFile::open(&*run.root, &run.path)?;
     let header = read_header(&mut file)?;
     if header.record_count != run.record_count {
         return Err(MidgeError::Corruption(
@@ -574,7 +622,7 @@ where
         visitor(ordinal_op)?;
     }
     validate_sparse_index(&mut file, &header)?;
-    validate_range_index(&run.range_path)
+    validate_range_index(&*run.root, &run.range_path)
 }
 
 fn validate_sparse_index(file: &mut RunFile, header: &RunHeader) -> MidgeResult<()> {
@@ -780,7 +828,7 @@ fn lookup_run_ranges(
     })
 }
 
-fn write_op_frame(file: &mut File, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
+fn write_op_frame(file: &mut FileWriter, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
     let (tag, cf_id, ttl, key, second) = match &ordinal_op.op {
         TransactionOp::Put {
             cf_id,
@@ -981,7 +1029,7 @@ pub(super) fn read_op_primary_key_frame(file: &mut RunFile) -> MidgeResult<(Byte
     Ok((Bytes::from(key), file.position()))
 }
 
-fn write_frame(file: &mut File, payload: &[u8]) -> MidgeResult<()> {
+fn write_frame(file: &mut FileWriter, payload: &[u8]) -> MidgeResult<()> {
     let length = u32::try_from(payload.len()).map_err(|_| {
         MidgeError::ResourceLimit("transaction spill frame exceeds u32 length".to_string())
     })?;
@@ -991,7 +1039,7 @@ fn write_frame(file: &mut File, payload: &[u8]) -> MidgeResult<()> {
     Ok(())
 }
 
-pub(super) fn write_frame_parts(file: &mut File, parts: &[&[u8]]) -> MidgeResult<()> {
+pub(super) fn write_frame_parts(file: &mut FileWriter, parts: &[&[u8]]) -> MidgeResult<()> {
     let payload_len = parts.iter().try_fold(0_usize, |total, part| {
         total.checked_add(part.len()).ok_or_else(|| {
             MidgeError::ResourceLimit("transaction spill frame length overflow".to_string())
@@ -1016,7 +1064,7 @@ pub(super) fn write_frame_parts(file: &mut File, parts: &[&[u8]]) -> MidgeResult
     Ok(())
 }
 
-fn write_sparse_frame(file: &mut File, key: &[u8], offset: u64) -> MidgeResult<()> {
+fn write_sparse_frame(file: &mut FileWriter, key: &[u8], offset: u64) -> MidgeResult<()> {
     let key_len = field_len_bytes(key.len())?;
     let offset = offset.to_le_bytes();
     write_frame_parts(file, &[&key_len, key, &offset])
@@ -1115,12 +1163,11 @@ pub(super) fn u64_to_usize(value: u64) -> MidgeResult<usize> {
     })
 }
 
-pub(super) fn remove_run(path: &Path) {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+pub(super) fn remove_run(root: &dyn Fs, path: &FsPath) {
+    match root.remove_file(path) {
+        Ok(()) | Err(FsError::NotFound(_)) => {}
         Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "failed to remove transaction spill run");
+            tracing::warn!(path = path.0, %error, "failed to remove transaction spill run");
         }
     }
 }

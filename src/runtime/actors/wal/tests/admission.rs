@@ -27,8 +27,12 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
         .memtable
         .put_bytes_with_seq(key.clone(), Bytes::from_static(b"old"), 2, None)?;
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
-    let mut write_set =
-        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), false, 1);
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
     write_set.push(crate::runtime::TransactionOp::Put {
         cf_id: 0,
         key,
@@ -154,8 +158,12 @@ fn append_admission_test_transaction(
 ) -> MidgeResult<()> {
     if spilled {
         let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
-        let mut write_set =
-            crate::runtime::transaction_spill::TransactionWriteSet::new(pool, path, true, 1);
+        let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+            pool,
+            &crate::io::real::test_root(path),
+            true,
+            1,
+        );
         write_set.push(crate::runtime::TransactionOp::Put {
             cf_id: 0,
             key: Bytes::from_static(b"failed-key"),
@@ -214,8 +222,12 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     );
     actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
-    let mut write_set =
-        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), true, 1);
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        true,
+        1,
+    );
     write_set.push(crate::runtime::TransactionOp::Put {
         cf_id: 0,
         key: Bytes::from_static(b"retryable-key"),
@@ -493,8 +505,12 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     );
     actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
-    let mut write_set =
-        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), true, 1);
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        true,
+        1,
+    );
     write_set.push(crate::runtime::TransactionOp::Put {
         cf_id: 0,
         key: Bytes::from_static(b"big-key"),

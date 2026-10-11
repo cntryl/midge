@@ -1027,6 +1027,10 @@ const HOST_BOUNDARY: &[(&str, &str)] = &[
         "src/storage/providers/s3.rs",
         "reads web-identity and profile files",
     ),
+    (
+        "src/wal/recovery/streaming.rs",
+        "anonymous delete-on-close replay spool holding no database state; #808 stage 6 deletes it",
+    ),
 ];
 
 /// Not yet routed through the injected root. #808 stage 1 removes every
@@ -1046,14 +1050,10 @@ const UNROUTED: &[&str] = &[
     "src/runtime/event_loop/wal_retention/cloud.rs",
     "src/runtime/hybrid_persistence.rs",
     "src/runtime/hybrid_persistence/metadata_snapshot.rs",
-    "src/runtime/transaction_spill/format.rs",
-    "src/runtime/transaction_spill/mod.rs",
-    "src/runtime/transaction_spill/range.rs",
     "src/storage/filesystem.rs",
     "src/storage/filesystem/windows.rs",
     "src/storage/hybrid/backend/uploads.rs",
     "src/storage/simulated.rs",
-    "src/wal/recovery/streaming.rs",
 ];
 
 /// Production code reaches durable storage only through the injected `Fs`
@@ -1102,5 +1102,14 @@ fn should_route_storage_io_through_injected_fs() {
     assert!(
         stale.is_empty(),
         "remove routed files from UNROUTED: {stale:?}"
+    );
+    let stale_boundary: Vec<_> = HOST_BOUNDARY
+        .iter()
+        .filter(|(file, _)| !violations.contains_key(*file))
+        .map(|(file, _)| file)
+        .collect();
+    assert!(
+        stale_boundary.is_empty(),
+        "remove files that no longer touch the host from HOST_BOUNDARY: {stale_boundary:?}"
     );
 }

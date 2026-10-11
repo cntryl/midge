@@ -16,7 +16,6 @@ use crate::runtime::transaction_spill::{
 };
 use crate::runtime::{KeyAssertion, RuntimeHandle};
 use crate::types::ConflictPolicy;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -164,7 +163,7 @@ pub(crate) struct TransactionInit {
     pub(crate) start_sequence: u64,
     pub(crate) read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     pub(crate) cloud_mode: bool,
-    pub(crate) db_path: PathBuf,
+    pub(crate) root: Arc<dyn crate::io::Fs>,
     pub(crate) memory_mode: bool,
     pub(crate) transaction_memory_pool: Arc<TransactionMemoryPool>,
     pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
@@ -407,7 +406,7 @@ impl Transaction {
             conflict_policy: ConflictPolicy::LastWriteWins,
             write_set: TransactionWriteSet::new(
                 Arc::clone(&init.transaction_memory_pool),
-                &init.db_path,
+                &init.root,
                 init.memory_mode,
                 init.id,
             )

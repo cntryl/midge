@@ -320,6 +320,7 @@ fn fixture_engine(
         runtime: Some(runtime),
         runtime_handle,
         db_path: directory.to_path_buf(),
+        root: crate::io::real::test_root(directory),
         memory_mode: false,
         cloud_mode: true,
         simulated_cloud_mode: true,

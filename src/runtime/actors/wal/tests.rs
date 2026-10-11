@@ -1692,7 +1692,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
             let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0));
             let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
                 pool,
-                temp.path(),
+                &crate::io::real::test_root(temp.path()),
                 false,
                 1,
             );
@@ -2122,8 +2122,12 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
         FsWalFactoryIo::new(fs).create_writer(crate::wal::ACTIVE_FILE_NAME)?,
     );
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
-    let mut write_set =
-        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), false, 1);
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
     for key in [b"first".as_slice(), b"second".as_slice()] {
         write_set.push(crate::runtime::TransactionOp::Put {
             cf_id: 0,
@@ -2581,7 +2585,7 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                     Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0));
                 let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
                     pool,
-                    temp.path(),
+                    &crate::io::real::test_root(temp.path()),
                     false,
                     1,
                 );

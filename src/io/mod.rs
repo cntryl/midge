@@ -32,6 +32,7 @@ pub mod mock;
 pub mod real;
 mod scoped_fs;
 pub mod staging;
+pub(crate) mod stream;
 mod subdirectory;
 pub mod traits;
 #[cfg(test)]

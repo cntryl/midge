@@ -342,6 +342,22 @@ pub trait Fs: Send + Sync + 'static {
 }
 
 impl FsError {
+    /// Carry a filesystem error through a `std::io` interface. The error rides
+    /// along as the payload, so converting back to [`crate::common::MidgeError`]
+    /// classifies it exactly as [`Self::into_midge`] does.
+    pub(crate) fn into_io(self) -> std::io::Error {
+        let kind = match &self {
+            FsError::NotFound(_) => std::io::ErrorKind::NotFound,
+            FsError::AlreadyExists(_) => std::io::ErrorKind::AlreadyExists,
+            FsError::Corruption(_) => std::io::ErrorKind::InvalidData,
+            FsError::NoSpace(_) => std::io::ErrorKind::StorageFull,
+            FsError::Timeout(_) => std::io::ErrorKind::TimedOut,
+            FsError::Unsupported(_) => std::io::ErrorKind::Unsupported,
+            FsError::Io(_) | FsError::Unavailable(_) => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, self)
+    }
+
     /// Map a filesystem error onto the public error type.
     pub(crate) fn into_midge(self) -> crate::common::MidgeError {
         match self {
