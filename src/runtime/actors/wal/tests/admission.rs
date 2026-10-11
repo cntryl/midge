@@ -18,7 +18,7 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(crate::wal::ACTIVE_FILE_NAME)?,
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
     );
     let key = Bytes::from_static(b"duplicate-sequence");
     state
@@ -218,7 +218,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer("wal.log")?,
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
     );
     actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
@@ -312,7 +312,7 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         )?;
         actor.install_filesystem_for_test(
             fs.clone(),
-            FsWalFactoryIo::new(fs.clone()).create_writer("wal.log")?,
+            FsWalFactoryIo::new(fs.clone()).create_writer(&crate::wal::segment_file_name(1))?,
         );
         actor.set_storage_budget(setup.hybrid_storage.clone());
         let seed = prepare_put_transaction(
@@ -325,7 +325,7 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         )?;
         actor.append_prepared_transactions(&mut state, vec![seed])?;
         let physical_before = fs
-            .metadata(&FsPath::new("wal.log"))
+            .metadata(&FsPath::new(crate::wal::segment_file_name(1)))
             .map_err(FsError::into_midge)?
             .len;
         fs.fail_next
@@ -339,7 +339,7 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         assert!(matches!(result, Err(MidgeError::NoSpace(_))));
         assert!(physical_before > 0);
         assert_eq!(
-            fs.metadata(&FsPath::new("wal.log"))
+            fs.metadata(&FsPath::new(crate::wal::segment_file_name(1)))
                 .map_err(FsError::into_midge)?
                 .len,
             physical_before
@@ -448,7 +448,7 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
     let dyn_fs: Arc<dyn Fs> = fs.clone();
     actor.install_filesystem_for_test(
         Arc::clone(&dyn_fs),
-        FsWalFactoryIo::new(dyn_fs).create_writer("wal.log")?,
+        FsWalFactoryIo::new(dyn_fs).create_writer(&crate::wal::segment_file_name(1))?,
     );
     fs.fail_next
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -499,7 +499,7 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer("wal.log")?,
+        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(&crate::wal::segment_file_name(1))?,
     );
     actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
@@ -554,7 +554,9 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
 
     // Act: the begin frame is admitted and written, the op frame is not.
     let first_result = actor.append_spilled_transaction(&mut state, &source, params(1));
-    let wal_len_after_first = fs.metadata(&FsPath::new("wal.log")).map_or(0, |m| m.len);
+    let wal_len_after_first = fs
+        .metadata(&FsPath::new(crate::wal::segment_file_name(1)))
+        .map_or(0, |m| m.len);
     let fenced_after_first = actor.is_fenced();
     // The budget frees up (e.g. uploads retire WAL); the caller retries.
     setup.hybrid_storage.release_local_wal_bytes(pre_admitted);
@@ -562,7 +564,7 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
 
     // Assert
     eprintln!(
-        "free {free}, begin bound {begin_bound}, first {first_result:?}, wal.log after first \
+        "free {free}, begin bound {begin_bound}, first {first_result:?}, open segment after first \
          {wal_len_after_first} B, fenced after first {fenced_after_first}, retry {retry:?}, \
          anomaly {}",
         state.persistence_anomaly_detected()
