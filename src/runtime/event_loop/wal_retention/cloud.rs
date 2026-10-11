@@ -332,18 +332,15 @@ impl EventLoop {
             return true;
         }
 
-        let local_path = self
+        let local_path = crate::wal::segment_key(segment_id);
+        let local_bytes = self
             .state
-            .wal_dir
-            .join(crate::wal::segment_file_name(segment_id));
-        let local_bytes = std::fs::metadata(&local_path)
+            .fs
+            .metadata(&local_path)
             .ok()
-            .map(|metadata| metadata.len());
+            .map(|metadata| metadata.len);
         crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
-        let removed = match self.state.fs.remove_file(&crate::io::FsPath::new(format!(
-            "wal/{}",
-            crate::wal::segment_file_name(segment_id)
-        ))) {
+        let removed = match self.state.fs.remove_file(&local_path) {
             Ok(()) => true,
             Err(crate::io::FsError::NotFound(_)) => false,
             Err(error) => {
@@ -369,7 +366,11 @@ impl EventLoop {
                 storage.release_local_wal_bytes(bytes);
             }
         }
-        tracing::debug!(segment_id, path = %local_path.display(), "Durably removed cloud-durable local WAL segment");
+        tracing::debug!(
+            segment_id,
+            path = local_path.0,
+            "Durably removed cloud-durable local WAL segment"
+        );
         true
     }
 }

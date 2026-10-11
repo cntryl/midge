@@ -21,7 +21,7 @@ names the stage whose pull request turns a case GREEN:
 
 | Stage | Scope | Issues |
 |---|---|---|
-| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816; simulator #817 |
+| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #825; simulator #817 |
 | 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818 |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |

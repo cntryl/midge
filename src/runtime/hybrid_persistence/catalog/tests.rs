@@ -259,9 +259,13 @@ impl CatalogExpiryFixture {
         // Act
         let result = match schedule {
             "startup-fence" => storage.fence_cloud_wal_catalog(7).map(|_| ()),
-            "publication" => {
-                storage.publish_remote_wal_segment(2, 2, &publication_path, 7, &deadline)
-            }
+            "publication" => storage.publish_remote_wal_segment(
+                2,
+                2,
+                &crate::io::FsLocation::host_file(&publication_path),
+                7,
+                &deadline,
+            ),
             "prune-proof" => {
                 super::super::authoritative_wal_catalog_within(&storage, &deadline).map(|_| ())
             }
@@ -383,7 +387,7 @@ fn strict_recovery(
     catalog: &WalPublicationCatalog,
 ) -> crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery {
     crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
-        root,
+        &crate::io::real::test_root(root),
         remote,
         catalog,
         crate::config::RecoveryPolicy::Strict,
@@ -510,7 +514,9 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .local_segments
         .contains_key(&1));
     assert_eq!(
-        successor.enqueue_wal_segment(1, &seal, 1).unwrap(),
+        successor
+            .enqueue_wal_segment(&crate::io::FsLocation::host_file(&seal), 1, 1)
+            .unwrap(),
         fixture.segment.object_key
     );
     wait_wal_ack(&successor);
@@ -518,7 +524,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .publish_remote_wal_segment(
             1,
             1,
-            &seal,
+            &crate::io::FsLocation::host_file(&seal),
             8,
             &crate::common::OperationDeadline::unbounded(),
         )

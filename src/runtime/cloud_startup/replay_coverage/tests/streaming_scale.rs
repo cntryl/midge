@@ -179,7 +179,7 @@ impl ScaleFixture {
 
     fn recovery(&self) -> MidgeResult<StreamingCloudWalRecovery> {
         StreamingCloudWalRecovery::build(
-            &self.directory.path().join("local"),
+            &crate::io::real::test_root(self.directory.path().join("local")),
             &self.cloud,
             &self.catalog,
             RecoveryPolicy::Strict,

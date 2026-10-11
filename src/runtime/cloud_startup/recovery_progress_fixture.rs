@@ -222,8 +222,10 @@ fn wal_fixture(
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
     observations.set_phase("planner")?;
+    let local_root: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(local).map_err(FsError::into_midge)?);
     let recovered = StreamingCloudWalRecovery::build(
-        local,
+        &local_root,
         remote,
         &wal.catalog,
         RecoveryPolicy::Strict,
@@ -307,8 +309,7 @@ fn inventory_fixture(
     );
     // In-memory runtime metadata keeps the sampled local database completely
     // flat; the actual cloud inventory reconciliation and HEADs still execute.
-    let mut state =
-        crate::runtime::RuntimeState::try_new(local.to_path_buf(), true, RecoveryPolicy::Strict)?;
+    let mut state = crate::runtime::RuntimeState::try_new(local, true, RecoveryPolicy::Strict)?;
     state.manifest.replace_files(files);
     observations.set_phase("metadata_inventory")?;
     super::CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)?;

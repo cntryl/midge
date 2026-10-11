@@ -410,6 +410,7 @@ impl BudgetFixture {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             store.as_ref(),
+            &crate::io::real::test_root(directory.path()),
             directory.path(),
             crate::config::RecoveryPolicy::Strict,
         )?;

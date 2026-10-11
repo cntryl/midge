@@ -5,7 +5,6 @@ use crate::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
 use crate::runtime::RuntimeState;
-use std::path::Path;
 use std::sync::Arc;
 
 impl RuntimeRecoveryMaterialization {
@@ -150,7 +149,6 @@ impl RuntimeRecoveryMaterialization {
 
     pub(super) fn replay_and_repair(
         materialized: RuntimeStorageMaterialization,
-        db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<Self> {
         let scope = materialized
@@ -158,12 +156,11 @@ impl RuntimeRecoveryMaterialization {
             .startup_scope
             .clone()
             .unwrap_or_else(|| DeadlineScope::new(OperationDeadline::unbounded()));
-        Self::replay_and_repair_within(materialized, db_path, recovery_policy, &scope)
+        Self::replay_and_repair_within(materialized, recovery_policy, &scope)
     }
 
     pub(super) fn replay_and_repair_within(
         mut materialized: RuntimeStorageMaterialization,
-        db_path: &Path,
         recovery_policy: RecoveryPolicy,
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
@@ -216,7 +213,7 @@ impl RuntimeRecoveryMaterialization {
             let config = &materialized.runtime_config;
             CloudStartupRecovery::mirror_cloud_metadata_within(
                 metadata_storage,
-                db_path,
+                &materialized.state.fs,
                 recovery_policy,
                 CloudMetadataMirrorAuthority {
                     store: config.leader_store.as_deref().ok_or_else(|| {

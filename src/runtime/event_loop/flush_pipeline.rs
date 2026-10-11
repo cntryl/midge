@@ -1657,7 +1657,7 @@ mod tests {
             crate::runtime::RuntimeConfig::default(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        let wal_dir = event_loop.state.wal_dir.clone();
+        let wal_dir = event_loop.state.host_wal_dir().clone();
         for segment_id in 1..=3 {
             std::fs::write(
                 wal_dir.join(crate::wal::segment_file_name(segment_id)),
@@ -2182,7 +2182,10 @@ mod tests {
             },
         )?;
         let current = event_loop.state.wal.current_segment_id;
-        let active = event_loop.state.wal_dir.join(crate::wal::ACTIVE_FILE_NAME);
+        let active = event_loop
+            .state
+            .host_wal_dir()
+            .join(crate::wal::ACTIVE_FILE_NAME);
         let active_len_before = std::fs::metadata(&active)?.len();
         assert!(
             event_loop
@@ -2351,7 +2354,7 @@ mod tests {
         );
         let mut frame = Vec::new();
         crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
-        let wal_dir = event_loop.state.wal_dir.clone();
+        let wal_dir = event_loop.state.host_wal_dir().clone();
         std::fs::write(wal_dir.join(crate::wal::segment_file_name(1)), frame)?;
         std::fs::write(
             wal_dir.join(crate::wal::segment_file_name(2)),
@@ -2400,7 +2403,7 @@ mod tests {
         std::fs::write(
             event_loop
                 .state
-                .wal_dir
+                .host_wal_dir()
                 .join(crate::wal::segment_file_name(1)),
             frame,
         )?;
@@ -2434,7 +2437,7 @@ mod tests {
         assert_eq!(RUNTIME_FILE_READS.with(std::cell::Cell::get), 2);
         assert!(event_loop
             .state
-            .wal_dir
+            .host_wal_dir()
             .join(crate::wal::segment_file_name(1))
             .exists());
         Ok(())
@@ -2469,7 +2472,7 @@ mod tests {
             std::fs::write(
                 event_loop
                     .state
-                    .wal_dir
+                    .host_wal_dir()
                     .join(crate::wal::segment_file_name(segment_id)),
                 frame,
             )?;
@@ -2504,7 +2507,7 @@ mod tests {
         for segment_id in 1..=3 {
             assert!(event_loop
                 .state
-                .wal_dir
+                .host_wal_dir()
                 .join(crate::wal::segment_file_name(segment_id))
                 .exists());
         }
@@ -2538,7 +2541,7 @@ mod tests {
             std::fs::write(
                 event_loop
                     .state
-                    .wal_dir
+                    .host_wal_dir()
                     .join(crate::wal::segment_file_name(segment_id)),
                 frame,
             )?;
@@ -2565,7 +2568,7 @@ mod tests {
         for segment_id in 1..=3 {
             assert!(event_loop
                 .state
-                .wal_dir
+                .host_wal_dir()
                 .join(crate::wal::segment_file_name(segment_id))
                 .exists());
         }
@@ -2748,6 +2751,7 @@ mod tests {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &cloud,
             leader_store.as_ref(),
+            &crate::io::real::test_root(replacement.path()),
             replacement.path(),
             crate::config::RecoveryPolicy::Strict,
         )?;
@@ -2907,7 +2911,7 @@ mod tests {
         let durable_before = event_loop.state.wal.frontiers.local_durable();
         let sealed_path = event_loop
             .state
-            .wal_dir
+            .host_wal_dir()
             .join(crate::wal::segment_file_name(segment_before - 1));
         let scenario = fail::FailScenario::setup();
         fail::cfg("midge::wal::inject_no_space_on_sync", "return")
@@ -2928,7 +2932,7 @@ mod tests {
         assert!(
             event_loop
                 .state
-                .wal_dir
+                .host_wal_dir()
                 .join(crate::wal::ACTIVE_FILE_NAME)
                 .exists(),
             "failed sync must retain the active WAL writer file"

@@ -28,6 +28,7 @@ pub(crate) mod buffered_read;
 #[cfg(test)]
 mod conformance_tests;
 pub(crate) mod durable_dir;
+mod location;
 pub mod mock;
 pub mod real;
 mod scoped_fs;
@@ -39,6 +40,7 @@ pub mod traits;
 pub(crate) mod transient_read;
 mod whole_file;
 
+pub(crate) use location::FsLocation;
 pub use mock::MockFs;
 pub use real::RealFs;
 pub(crate) use scoped_fs::scope_fs;

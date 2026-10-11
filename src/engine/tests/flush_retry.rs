@@ -147,11 +147,7 @@ impl RetryFixture {
             .build()?;
         let gate = Arc::new(PublicationGate::default());
         let (storage, events) = fixture_storage(directory.path(), &gate)?;
-        let state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
-            false,
-            options.recovery_policy(),
-        )?;
+        let state = RuntimeState::try_new(directory.path(), false, options.recovery_policy())?;
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             options.storage(),
             &crate::lease::test_lease_root(options.storage()),

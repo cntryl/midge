@@ -304,7 +304,7 @@ fn mirror_observation(scope: &DeadlineScope) -> MirrorObservation {
     let mut deadlines = Vec::new();
     let outcome = crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata_within(
         &cloud,
-        directory.path(),
+        &crate::io::real::test_root(directory.path()),
         crate::config::RecoveryPolicy::Strict,
         crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
             store: store.as_ref(),

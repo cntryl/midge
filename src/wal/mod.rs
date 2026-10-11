@@ -50,6 +50,15 @@ pub fn segment_file_name(segment_id: u64) -> String {
     format!("{segment_id:0WAL_SEGMENT_ID_WIDTH$}.wal")
 }
 
+/// The WAL directory below the database root.
+pub(crate) const WAL_DIR: &str = "wal";
+
+/// Root filesystem key of the sealed WAL segment `segment_id`.
+#[must_use]
+pub(crate) fn segment_key(segment_id: u64) -> crate::io::FsPath {
+    crate::io::FsPath::new(format!("{WAL_DIR}/{}", segment_file_name(segment_id)))
+}
+
 /// Format the full cloud object key for an epoch-scoped sealed WAL segment.
 #[must_use]
 pub fn segment_object_key(segment_id: u64, writer_epoch: u64) -> String {

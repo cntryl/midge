@@ -98,10 +98,10 @@ pub use hybrid::backend::HybridStorage;
 //        - emitting StorageEvent::CloudAck(segment_id)
 //
 //   4. HybridStorage MUST maintain:
-//        struct UploadState { segment_id, local_path, retries, status }
+//        struct UploadState { segment_id, source, retries, status }
 //
 //   5. HybridStorage MUST expose format-neutral operations:
-//        fn enqueue_object_upload(request_id: u64, key: String, path: Path)
+//        fn enqueue_object_upload(request_id: u64, key: String, source: FsLocation)
 //        fn poll() -> Vec<StorageEvent>
 //      Called through runtime-owned format orchestration.
 //

@@ -7,7 +7,6 @@ use crate::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
-use std::path::Path;
 use std::sync::Arc;
 
 struct CloudClassStores {
@@ -34,16 +33,27 @@ fn check_startup_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeRes
 fn hydrate_metadata(
     storage: &crate::storage::cloud::CloudStorage,
     authority: &dyn crate::lease::LeaderStore,
-    db_path: &Path,
+    path: &StartupStoragePath,
     policy: RecoveryPolicy,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
     if let Some(scope) = scope {
         CloudStartupRecovery::hydrate_cloud_metadata_within(
-            storage, authority, db_path, policy, scope,
+            storage,
+            authority,
+            &path.root,
+            &path.db_path,
+            policy,
+            scope,
         )
     } else {
-        CloudStartupRecovery::hydrate_cloud_metadata(storage, authority, db_path, policy)
+        CloudStartupRecovery::hydrate_cloud_metadata(
+            storage,
+            authority,
+            &path.root,
+            &path.db_path,
+            policy,
+        )
     }
 }
 
@@ -55,7 +65,7 @@ fn initialize_startup_state(
 ) -> MidgeResult<RuntimeState> {
     check_startup_scope(scope, "local recovery initialization")?;
     RuntimeState::recover(
-        path.db_path.clone(),
+        &path.db_path,
         path.memory_mode,
         Arc::clone(&path.root),
         opts.recovery_policy(),
@@ -66,7 +76,7 @@ fn initialize_startup_state(
 
 #[allow(clippy::too_many_arguments)]
 fn build_wal_plan(
-    db_path: &Path,
+    root: &Arc<dyn crate::io::Fs>,
     remote: &Arc<dyn crate::storage::StorageBackend>,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     policy: RecoveryPolicy,
@@ -78,7 +88,7 @@ fn build_wal_plan(
     use crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery;
     if let Some(scope) = scope {
         StreamingCloudWalRecovery::build_within(
-            db_path,
+            root,
             remote,
             catalog,
             policy,
@@ -89,7 +99,7 @@ fn build_wal_plan(
         )
     } else {
         StreamingCloudWalRecovery::build(
-            db_path,
+            root,
             remote,
             catalog,
             policy,
@@ -105,7 +115,7 @@ fn commit_salvage_plan(
     persistence: &CloudPersistence,
     epoch: u64,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-    db_path: &Path,
+    root: &Arc<dyn crate::io::Fs>,
     validate: &dyn Fn() -> MidgeResult<()>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
@@ -114,12 +124,12 @@ fn commit_salvage_plan(
             persistence,
             epoch,
             catalog,
-            db_path,
+            root,
             validate,
             scope,
         )
     } else {
-        plan.commit_set_aside_with_authority(persistence, epoch, catalog, db_path, validate)
+        plan.commit_set_aside_with_authority(persistence, epoch, catalog, root, validate)
     }
 }
 
@@ -157,21 +167,29 @@ fn fence_provider_ddl_within(
 }
 
 fn require_empty_local_cache_for_cloud_bootstrap(
-    db_path: &Path,
+    path: &StartupStoragePath,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
-    let mut directories = vec![db_path.to_path_buf()];
+    let mut directories = vec![String::new()];
     while let Some(directory) = directories.pop() {
         check_startup_scope(scope, "bootstrap cache discovery")?;
-        for entry in std::fs::read_dir(directory)? {
+        let entries = path
+            .root
+            .list_dir(&crate::io::FsPath::new(directory.as_str()))
+            .map_err(|error| MidgeError::Io(error.into_io()))?;
+        for entry in entries {
             check_startup_scope(scope, "bootstrap cache entry")?;
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                directories.push(entry.path());
+            let child = if directory.is_empty() {
+                entry.name
+            } else {
+                format!("{directory}/{}", entry.name)
+            };
+            if entry.is_dir {
+                directories.push(child);
             } else {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "local cache '{}' contains state without a committed cloud metadata generation",
-                    entry.path().display()
+                    path.db_path.join(child).display()
                 )));
             }
         }
@@ -465,7 +483,7 @@ impl RuntimeStorageMaterialization {
         hybrid_storage: &crate::storage::HybridStorage,
         authority: &DdlLeaseAuthority,
         wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &Path,
+        db_path: &std::path::Path,
         timeout: std::time::Duration,
     ) -> MidgeResult<()> {
         Self::bootstrap_provider_metadata_scoped(
@@ -474,7 +492,11 @@ impl RuntimeStorageMaterialization {
             hybrid_storage,
             authority,
             wal_catalog,
-            db_path,
+            &StartupStoragePath {
+                db_path: db_path.to_path_buf(),
+                memory_mode: false,
+                root: crate::io::real::test_root(db_path),
+            },
             timeout,
             None,
         )
@@ -510,7 +532,7 @@ impl RuntimeStorageMaterialization {
         hybrid_storage: &crate::storage::HybridStorage,
         authority: &DdlLeaseAuthority,
         wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &Path,
+        path: &StartupStoragePath,
         timeout: std::time::Duration,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<()> {
@@ -543,7 +565,7 @@ impl RuntimeStorageMaterialization {
                 return hydrate_metadata(
                     metadata_storage,
                     leader_store,
-                    db_path,
+                    path,
                     RecoveryPolicy::Strict,
                     scope,
                 );
@@ -557,11 +579,11 @@ impl RuntimeStorageMaterialization {
         hydrate_metadata(
             metadata_storage,
             leader_store,
-            db_path,
+            path,
             RecoveryPolicy::Strict,
             scope,
         )?;
-        require_empty_local_cache_for_cloud_bootstrap(db_path, scope)?;
+        require_empty_local_cache_for_cloud_bootstrap(path, scope)?;
         if !wal_catalog.segments.is_empty() || wal_catalog.sequence_floor != 0 {
             return Err(MidgeError::RecoveryFailed(
                 "cannot bootstrap empty cloud metadata over existing WAL state".into(),
@@ -607,7 +629,7 @@ impl RuntimeStorageMaterialization {
         hydrate_metadata(
             metadata_storage,
             leader_store,
-            db_path,
+            path,
             RecoveryPolicy::Strict,
             scope,
         )
@@ -785,7 +807,7 @@ impl RuntimeStorageMaterialization {
         );
         let streaming = super::timing::measure("wal_plan", || {
             build_wal_plan(
-                &storage_path.db_path,
+                &storage_path.root,
                 &wal_backend,
                 &wal_catalog,
                 opts.recovery_policy(),
@@ -801,7 +823,7 @@ impl RuntimeStorageMaterialization {
             &CloudPersistence::new(Arc::clone(&cloud.hybrid_storage)),
             startup_lease.writer_epoch,
             &wal_catalog,
-            &storage_path.db_path,
+            &storage_path.root,
             &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
             scope,
         )?;
@@ -929,14 +951,14 @@ impl RuntimeStorageMaterialization {
             &hybrid_storage,
             &authority,
             &wal_catalog,
-            &storage_path.db_path,
+            storage_path,
             opts.storage_io_timeout(),
             scope,
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
         let streaming = super::timing::measure("wal_plan", || {
             build_wal_plan(
-                &storage_path.db_path,
+                &storage_path.root,
                 &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
                 &wal_catalog,
                 opts.recovery_policy(),
@@ -952,7 +974,7 @@ impl RuntimeStorageMaterialization {
             &CloudPersistence::new(Arc::clone(&hybrid_storage)),
             startup_lease.writer_epoch,
             &wal_catalog,
-            &storage_path.db_path,
+            &storage_path.root,
             &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
             scope,
         )?;
@@ -1094,5 +1116,63 @@ mod authority_tests {
             .remote_object_proof_optional(registry_key)
             .unwrap()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_cache_tests {
+    use super::*;
+    use crate::io::{Fs, FsPath};
+
+    fn cache(files: &[&str], directories: &[&str]) -> StartupStoragePath {
+        let root = Arc::new(crate::io::MockFs::new());
+        for directory in directories {
+            root.create_dir_all(&FsPath::new(*directory)).unwrap();
+        }
+        for file in files {
+            root.open(
+                &FsPath::new(*file),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .and_then(|mut handle| handle.append(bytes::Bytes::from_static(b"state")))
+            .unwrap();
+        }
+        StartupStoragePath {
+            db_path: std::path::PathBuf::from("named-cache"),
+            memory_mode: false,
+            root,
+        }
+    }
+
+    #[test]
+    fn should_accept_bootstrap_when_cache_root_holds_only_empty_directories() {
+        // Arrange
+        let path = cache(&[], &["wal", "sst/nested"]);
+
+        // Act
+        let result = require_empty_local_cache_for_cloud_bootstrap(&path, None);
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn should_refuse_bootstrap_when_cache_root_holds_nested_file() {
+        // Arrange
+        let path = cache(&["sst/nested/000001.sst"], &["wal"]);
+
+        // Act
+        let result = require_empty_local_cache_for_cloud_bootstrap(&path, None);
+
+        // Assert
+        assert!(
+            matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("000001.sst")),
+            "{result:?}"
+        );
     }
 }

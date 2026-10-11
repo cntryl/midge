@@ -22,7 +22,8 @@ impl ControlObject {
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    pub(crate) fn metadata(&self) -> &StorageObjectMetadata {
+    /// The object store's identity and size for this control object.
+    pub(crate) fn object_metadata(&self) -> &StorageObjectMetadata {
         &self.metadata
     }
 }

@@ -39,60 +39,6 @@ pub(crate) struct StreamingCloudWalRecovery {
 
 impl StreamingCloudWalRecovery {
     pub(crate) fn build(
-        db_path: &Path,
-        remote: &Arc<dyn StorageBackend>,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        policy: RecoveryPolicy,
-        timeout: Duration,
-        read_window: usize,
-        limits: StreamingReplayLimits,
-    ) -> MidgeResult<Self> {
-        Self::build_within(
-            db_path,
-            remote,
-            catalog,
-            policy,
-            timeout,
-            read_window,
-            limits,
-            &DeadlineScope::new(OperationDeadline::unbounded()),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn build_within(
-        db_path: &Path,
-        remote: &Arc<dyn StorageBackend>,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        policy: RecoveryPolicy,
-        timeout: Duration,
-        read_window: usize,
-        limits: StreamingReplayLimits,
-        scope: &DeadlineScope,
-    ) -> MidgeResult<Self> {
-        scope.check("cloud WAL planning")?;
-        let local: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
-        Self::build_with_local_fs_within(
-            db_path,
-            &local,
-            remote,
-            catalog,
-            policy,
-            timeout,
-            read_window,
-            limits,
-            scope,
-        )
-    }
-
-    /// `build` over an explicit filesystem rooted at `db_path`. Every local
-    /// WAL mutation (rename, removal, retained copy, truncation) goes through
-    /// `local`, so fault injection reaches the destructive salvage steps.
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
-    pub(crate) fn build_with_local_fs(
-        db_path: &Path,
         local: &Arc<dyn Fs>,
         remote: &Arc<dyn StorageBackend>,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
@@ -101,8 +47,7 @@ impl StreamingCloudWalRecovery {
         read_window: usize,
         limits: StreamingReplayLimits,
     ) -> MidgeResult<Self> {
-        Self::build_with_local_fs_within(
-            db_path,
+        Self::build_within(
             local,
             remote,
             catalog,
@@ -114,9 +59,11 @@ impl StreamingCloudWalRecovery {
         )
     }
 
+    /// Plan recovery over `local`, the database root. Every local WAL
+    /// mutation (rename, removal, retained copy, truncation) goes through it,
+    /// so fault injection reaches the destructive salvage steps.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn build_with_local_fs_within(
-        db_path: &Path,
+    pub(crate) fn build_within(
         local: &Arc<dyn Fs>,
         remote: &Arc<dyn StorageBackend>,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
@@ -169,7 +116,6 @@ impl StreamingCloudWalRecovery {
             );
         }
         let context = WalPlanningContext {
-            db_path,
             local,
             policy,
             read_window,
@@ -183,7 +129,6 @@ impl StreamingCloudWalRecovery {
         } = merge_local_sources(&context, &mut plan, &mut sources)?;
         skipped.extend(skipped_local);
         enforce_epoch_order(
-            db_path,
             &mut plan,
             &mut sources,
             &mut active_source,
@@ -237,7 +182,6 @@ fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {
 }
 
 struct WalPlanningContext<'a> {
-    db_path: &'a Path,
     local: &'a Arc<dyn Fs>,
     policy: RecoveryPolicy,
     read_window: usize,
@@ -258,7 +202,6 @@ fn merge_local_sources(
     sources: &mut BTreeMap<u64, ReplaySource>,
 ) -> MidgeResult<LocalSources> {
     let WalPlanningContext {
-        db_path,
         local,
         policy,
         read_window,
@@ -266,11 +209,7 @@ fn merge_local_sources(
         scope,
     } = *context;
     scope.check("local WAL source discovery")?;
-    let paths = CloudStartupRecovery::collect_local_wal_paths(
-        &db_path.join("wal"),
-        policy,
-        &mut plan.opened_in_salvage_mode,
-    )?;
+    let paths = CloudStartupRecovery::collect_local_wal_paths(local.as_ref())?;
     let Some((segments, active)) = paths else {
         return Ok(LocalSources {
             active: None,
@@ -692,7 +631,6 @@ fn quarantine_active(fs: &dyn Fs, active: &Path) -> MidgeResult<()> {
 }
 
 fn enforce_epoch_order(
-    db_path: &Path,
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
     active: &mut Option<ReplaySource>,
@@ -747,7 +685,7 @@ fn enforce_epoch_order(
         }
         if active.take().is_some() {
             plan.set_aside_local_paths
-                .push(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME));
+                .push(Path::new(crate::wal::WAL_DIR).join(crate::wal::ACTIVE_FILE_NAME));
         }
     }
     Ok(())
@@ -801,7 +739,7 @@ fn stop_at_first_hole(
     active: &mut Option<ReplaySource>,
 ) -> MidgeResult<()> {
     let WalPlanningContext {
-        db_path,
+        local,
         limits,
         scope,
         ..
@@ -821,30 +759,21 @@ fn stop_at_first_hole(
         "stopping salvage replay at lost WAL segment; setting later WAL aside"
     );
     let mut max_sequence = 0;
-    let wal_dir = db_path.join("wal");
+    let wal_dir = Path::new(crate::wal::WAL_DIR);
     // Every local file at or past the hole goes, including failed copies,
     // or the next open would find the same hole and drop newer writes.
     let mut local_paths = Vec::new();
-    let entries = match std::fs::read_dir(&wal_dir) {
-        Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
+    let entries = match local.list_dir(&FsPath::new(crate::wal::WAL_DIR)) {
+        Ok(entries) => entries,
+        Err(FsError::NotFound(_)) => Vec::new(),
+        Err(error) => return Err(error.into_midge()),
     };
     for entry in entries {
         scope.check("WAL salvage discovery")?;
-        if entry
-            .file_name()
-            .to_str()
-            .and_then(crate::wal::parse_segment_id)
-            .is_some_and(|segment_id| segment_id >= hole)
-        {
-            local_paths.push(entry.path());
+        if crate::wal::parse_segment_id(&entry.name).is_some_and(|segment_id| segment_id >= hole) {
+            local_paths.push(wal_dir.join(&entry.name));
         }
     }
-    let local = crate::io::scope_fs(
-        Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?),
-        scope.clone(),
-    );
     for path in &local_paths {
         scope.check("WAL salvage frontier")?;
         // A corrupt local-only file is in neither the catalog nor the plan;

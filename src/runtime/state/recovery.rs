@@ -2,7 +2,7 @@
 
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionState, Fs, HashMap, IntentLogEntry, Manifest,
-    MidgeError, MidgeResult, PathBuf, PublicationPhase, RecoveryLoadState, RecoveryStatus,
+    MidgeError, MidgeResult, PublicationPhase, RecoveryLoadState, RecoveryStatus,
     RuntimeDiagnostics, RuntimeMode, RuntimePersistence, RuntimeState, SkipListMemtable,
     SnapshotPinRegistry, SnapshotState, TransactionCoordination, WalRecoveryState, WalState,
     WritePressureState,
@@ -32,7 +32,6 @@ enum CompactionManifestState {
 }
 
 struct RecoveredStartup {
-    wal_dir: PathBuf,
     opened_in_salvage_mode: bool,
     manifest: Manifest,
     intent_log: Vec<IntentLogEntry>,
@@ -66,7 +65,7 @@ impl RuntimeState {
     /// Create new runtime state with the given database path.
     /// If `memory_mode` is true, filesystem is never touched.
     #[cfg(test)]
-    pub fn new(db_path: PathBuf, memory_mode: bool) -> Self {
+    pub fn new(db_path: std::path::PathBuf, memory_mode: bool) -> Self {
         Self::try_new(db_path, memory_mode, crate::config::RecoveryPolicy::Strict)
             .expect("runtime state initialization failed")
     }
@@ -74,21 +73,23 @@ impl RuntimeState {
     /// Recover runtime state from a host directory, or from memory.
     #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
     pub fn try_new(
-        db_path: PathBuf,
+        db_path: impl AsRef<std::path::Path>,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
-        let root = Self::test_root(&db_path, memory_mode)?;
+        let db_path = db_path.as_ref();
+        let root = Self::test_root(db_path, memory_mode)?;
         Self::recover(db_path, memory_mode, root, recovery_policy, true, None)
     }
 
     /// Load metadata from a host directory before cloud WAL replay.
     #[cfg(test)]
     pub(crate) fn try_new_before_cloud_replay(
-        db_path: PathBuf,
+        db_path: impl AsRef<std::path::Path>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
-        let root = Self::test_root(&db_path, false)?;
+        let db_path = db_path.as_ref();
+        let root = Self::test_root(db_path, false)?;
         Self::recover(db_path, false, root, recovery_policy, false, None)
     }
 
@@ -114,7 +115,7 @@ impl RuntimeState {
     /// validate the format marker, load the manifest or intent log, or replay
     /// WAL state.
     pub(crate) fn recover(
-        db_path: PathBuf,
+        db_path: &std::path::Path,
         memory_mode: bool,
         root: Arc<dyn Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
@@ -124,7 +125,7 @@ impl RuntimeState {
         check_scope(scope, "recovery filesystem")?;
         Self::ensure_directories(root.as_ref(), memory_mode)?;
         if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(&root, &db_path)?;
+            crate::metadata::ensure_or_create_format_marker(&root, db_path)?;
         }
         check_scope(scope, "recovery directories")?;
         let fs = match scope {
@@ -135,7 +136,7 @@ impl RuntimeState {
     }
 
     fn initialize_recovery_core(
-        db_path: PathBuf,
+        db_path: &std::path::Path,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
         replay_wal: bool,
@@ -144,13 +145,12 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
         let RecoveredStartup {
-            wal_dir,
             opened_in_salvage_mode,
             manifest,
             intent_log,
             wal: wal_recovery,
         } = Self::load_startup_recovery(
-            &db_path,
+            db_path,
             persistence,
             recovery_policy,
             replay_wal,
@@ -169,8 +169,8 @@ impl RuntimeState {
             crate::metadata::accounting::Medium::Persistent
         };
         let mut state = Self {
-            db_path,
-            wal_dir,
+            #[cfg(test)]
+            db_path: db_path.to_path_buf(),
             sequence: wal_recovery.recovered_sequence,
             compaction_output_generation: recovered_compaction_output_generation,
             transaction: TransactionCoordination {
@@ -275,7 +275,6 @@ impl RuntimeState {
             Self::empty_wal_recovery(&manifest, column_families)
         };
         Ok(RecoveredStartup {
-            wal_dir,
             opened_in_salvage_mode,
             manifest,
             intent_log,

@@ -113,8 +113,7 @@ fn should_retain_invalid_restored_sst_when_staging_filesystem_cannot_discard_it(
     // Arrange: salvage restores bytes that satisfy the name-only proof but
     // are not an SST, and the staging filesystem refuses to delete them.
     let temp = tempfile::tempdir()?;
-    let mut state =
-        RuntimeState::try_new(temp.path().to_path_buf(), false, RecoveryPolicy::Salvage)?;
+    let mut state = RuntimeState::try_new(temp.path(), false, RecoveryPolicy::Salvage)?;
     state.fs = Arc::new(RemoveRefusingFs {
         inner: crate::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
     });
@@ -142,4 +141,86 @@ fn should_retain_invalid_restored_sst_when_staging_filesystem_cannot_discard_it(
         "a discard the staging filesystem refused must leave the bytes in place, not bypass it"
     );
     Ok(())
+}
+
+/// An in-memory root whose `wal/` cannot be listed, as on a damaged disk.
+struct UnlistableWalFs(crate::io::MockFs);
+
+impl crate::io::Fs for UnlistableWalFs {
+    fn coordination_key(&self) -> u64 {
+        self.0.coordination_key()
+    }
+
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        self.0.open(path, options)
+    }
+
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.0.remove_file(path)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.0.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.0.metadata(path)
+    }
+
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.0.create_dir_all(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        Err(crate::io::FsError::Io(format!(
+            "injected unreadable entry while listing {}",
+            path.0
+        )))
+    }
+
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.0.remove_dir_all(path)
+    }
+
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.0.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.0.rename_atomic(from, to)
+    }
+}
+
+#[test]
+fn should_fail_open_when_local_wal_directory_cannot_be_listed() {
+    // Arrange: local WAL may hold acknowledged writes that never reached the
+    // cloud, so even a salvage open cannot proceed as if it held none.
+    let fs = UnlistableWalFs(crate::io::MockFs::new());
+
+    // Act
+    let result = CloudStartupRecovery::collect_local_wal_paths(&fs);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::RecoveryFailed(_))),
+        "{result:?}"
+    );
 }

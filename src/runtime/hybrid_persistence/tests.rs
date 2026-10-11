@@ -659,7 +659,7 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
     let result = storage.publish_remote_wal_segment(
         segment_id,
         max_sequence,
-        &local_path,
+        &crate::io::FsLocation::host_file(&local_path),
         2,
         &crate::common::OperationDeadline::unbounded(),
     );
@@ -698,7 +698,7 @@ fn should_converge_catalog_copies_after_publication() {
         .publish_remote_wal_segment(
             segment_id,
             max_sequence,
-            &local_path,
+            &crate::io::FsLocation::host_file(&local_path),
             2,
             &crate::common::OperationDeadline::unbounded(),
         )
@@ -793,7 +793,7 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
         publisher_storage.publish_remote_wal_segment(
             segment_id,
             max_sequence,
-            &local_path,
+            &crate::io::FsLocation::host_file(&local_path),
             2,
             &crate::common::OperationDeadline::unbounded(),
         )
@@ -867,7 +867,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
         publisher_storage.publish_remote_wal_segment(
             published_segment_id,
             published_max_sequence,
-            &published_local_path,
+            &crate::io::FsLocation::host_file(&published_local_path),
             2,
             &crate::common::OperationDeadline::unbounded(),
         )
@@ -966,7 +966,7 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
         publisher_storage.publish_remote_wal_segment(
             holding_segment_id,
             holding_max_sequence,
-            &holding_local_path,
+            &crate::io::FsLocation::host_file(&holding_local_path),
             2,
             &crate::common::OperationDeadline::unbounded(),
         )
@@ -978,7 +978,7 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
     let waiting_result = storage.publish_remote_wal_segment(
         waiting_segment_id,
         waiting_max_sequence,
-        &waiting_local_path,
+        &crate::io::FsLocation::host_file(&waiting_local_path),
         2,
         &crate::common::OperationDeadline::from_budget(Duration::from_millis(100)),
     );
@@ -1222,12 +1222,30 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
             HybridQueueLimits::default(),
         ),
     ));
-    let wal_path = tmp.path().join("segment.wal");
-    std::fs::write(&wal_path, valid_wal_bytes(17)).expect("write WAL segment");
+    // The sealed segment exists only in an in-memory root: the upload must
+    // read it through the root, not from a host path.
+    let wal_bytes = valid_wal_bytes(17);
+    let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    crate::io::Fs::open(
+        root.as_ref(),
+        &crate::wal::segment_key(17),
+        crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadWrite,
+            create: true,
+            create_new: true,
+            truncate: false,
+        },
+    )
+    .and_then(|mut file| file.append(Bytes::from(wal_bytes.clone())))
+    .expect("write WAL segment");
 
     // Act
     storage
-        .enqueue_wal_segment(17, &wal_path, 17)
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::new(root, crate::wal::segment_key(17)),
+            17,
+            17,
+        )
         .expect("enqueue WAL segment");
     storage.process_uploads();
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1247,12 +1265,12 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
         .expect("publish control object");
 
     // Assert
-    let wal_size = std::fs::metadata(&wal_path)
-        .expect("read WAL segment metadata")
-        .len();
     assert_eq!(
         wal_mock.get_uploads(),
-        vec![(crate::wal::cloud_segment::object_key(17, 1), wal_size)]
+        vec![(
+            crate::wal::cloud_segment::object_key(17, 1),
+            wal_bytes.len() as u64
+        )]
     );
     assert_eq!(
         sst_mock
@@ -2904,7 +2922,11 @@ fn should_not_overwrite_existing_remote_wal_during_upload() {
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, valid_wal_bytes(upload_max_sequence)).expect("write local WAL");
     storage
-        .enqueue_wal_segment(segment_id, &wal_path, upload_max_sequence)
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::host_file(&wal_path),
+            segment_id,
+            upload_max_sequence,
+        )
         .expect("enqueue WAL upload");
     storage.process_uploads();
 
@@ -2957,7 +2979,11 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
 
     mock_cloud.clear_history();
     storage
-        .enqueue_wal_segment(segment_id, &wal_path, max_sequence)
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::host_file(&wal_path),
+            segment_id,
+            max_sequence,
+        )
         .expect("enqueue WAL upload");
     storage.process_uploads();
 
@@ -3016,7 +3042,11 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
     std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
 
     storage
-        .enqueue_wal_segment(segment_id, &wal_path, max_sequence)
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::host_file(&wal_path),
+            segment_id,
+            max_sequence,
+        )
         .expect("enqueue WAL upload");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -3080,7 +3110,11 @@ fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
     storage
-        .enqueue_wal_segment(segment_id, &wal_path, max_sequence)
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::host_file(&wal_path),
+            segment_id,
+            max_sequence,
+        )
         .expect("enqueue WAL upload");
 
     // Act
@@ -3142,7 +3176,7 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
         ),
     ));
     storage
-        .enqueue_wal_segment(1, &first_path, 1)
+        .enqueue_wal_segment(&crate::io::FsLocation::host_file(&first_path), 1, 1)
         .expect("first upload must fit");
     assert!(matches!(
         storage.ensure_wal_write_admission(),
@@ -3151,7 +3185,7 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
 
     // Act
     let error = storage
-        .enqueue_wal_segment(2, &second_path, 1)
+        .enqueue_wal_segment(&crate::io::FsLocation::host_file(&second_path), 2, 1)
         .expect_err("second upload must be rejected at capacity");
 
     // Assert
@@ -3195,10 +3229,10 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
     std::fs::write(&first_path, valid_wal_bytes(21)).expect("write first WAL");
     std::fs::write(&second_path, valid_wal_bytes(22)).expect("write second WAL");
     storage
-        .enqueue_wal_segment(21, &first_path, 21)
+        .enqueue_wal_segment(&crate::io::FsLocation::host_file(&first_path), 21, 21)
         .expect("enqueue first upload");
     let _ = storage
-        .enqueue_wal_segment(22, &second_path, 22)
+        .enqueue_wal_segment(&crate::io::FsLocation::host_file(&second_path), 22, 22)
         .expect_err("capacity must reject second upload");
     assert!(storage.ensure_wal_write_admission().is_err());
 
@@ -3243,7 +3277,7 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
     let wal_path = tmp.path().join(crate::wal::segment_file_name(3));
     std::fs::write(&wal_path, valid_wal_bytes(3)).expect("write WAL");
     storage
-        .enqueue_wal_segment(3, &wal_path, 3)
+        .enqueue_wal_segment(&crate::io::FsLocation::host_file(&wal_path), 3, 3)
         .expect("enqueue WAL upload");
     assert!(
         storage.ensure_wal_write_admission().is_err(),

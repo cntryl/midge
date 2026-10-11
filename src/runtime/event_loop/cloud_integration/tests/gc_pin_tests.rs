@@ -89,7 +89,10 @@ fn should_preserve_gc_pin_when_local_unlink_fails_after_catalog_retirement(
     )?;
     seed_cloud_prune_candidate(&mut el, 1, 10);
     install_prune_gc_pins_for_test(&mut el, 1, 10);
-    let path = el.state.wal_dir.join(crate::wal::segment_file_name(1));
+    let path = el
+        .state
+        .host_wal_dir()
+        .join(crate::wal::segment_file_name(1));
     std::fs::remove_file(&path)?;
     std::fs::create_dir(&path)?;
     el.cloud_coordinator.cloud_wal.prune_inflight.insert(1);

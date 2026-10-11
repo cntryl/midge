@@ -166,6 +166,7 @@ impl Engine {
                 .get_leader_store()
                 .expect("provider-backed test lease has a leader store")
                 .as_ref(),
+            &crate::io::real::test_root(db_path),
             db_path,
             recovery_policy,
         )
@@ -183,7 +184,7 @@ impl Engine {
             .expect("provider-backed test lease has a leader store");
         crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata(
             cloud,
-            db_path,
+            &crate::io::real::test_root(db_path),
             recovery_policy,
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: store.as_ref(),

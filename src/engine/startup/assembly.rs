@@ -203,14 +203,12 @@ impl EngineStartup {
             if let Some(scope) = scope {
                 RuntimeRecoveryMaterialization::replay_and_repair_within(
                     materialized,
-                    &storage_path.db_path,
                     opts.recovery_policy(),
                     scope,
                 )
             } else {
                 RuntimeRecoveryMaterialization::replay_and_repair(
                     materialized,
-                    &storage_path.db_path,
                     opts.recovery_policy(),
                 )
             }

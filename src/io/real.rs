@@ -49,6 +49,7 @@ impl RealFs {
     /// # Errors
     ///
     /// Returns an error when the base directory cannot be created.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         super::durable_dir::create_path_durably(&path)
@@ -235,7 +236,7 @@ impl Fs for RealFs {
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         let full = self.full_path(path)?;
         let entries = fs::read_dir(&full)
-            .map_err(|e| io_err("read_dir", &full, &e))?
+            .map_err(|error| file_op_err("read_dir", &full, &error))?
             .map(|entry| {
                 let entry = entry.map_err(|e| io_err("read_dir_entry", &full, &e))?;
                 let name = entry.file_name().to_string_lossy().to_string();

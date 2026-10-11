@@ -1641,12 +1641,9 @@ fn cloud_with_stale_sst_listing() -> crate::storage::cloud::CloudStorage {
 fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 42);
     let sst_bytes = test_sst_bytes();
     state
@@ -1694,12 +1691,9 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
 fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publications() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     state
         .manifest
         .test_mut()
@@ -1744,12 +1738,9 @@ fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publicat
 fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 1);
     let sst_bytes = test_sst_bytes();
     state
@@ -1791,12 +1782,9 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
 fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 3);
     let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
     let wrong_sst_bytes = test_sst_bytes_with_value(b"different-cloud-object-bytes");
@@ -1848,12 +1836,9 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
 fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 4);
     let wrong_sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&wrong_sst_bytes) ^ 0xffff_ffff;
@@ -1897,12 +1882,9 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
 fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 5);
     let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
     let stale_local_sst_bytes = test_sst_bytes_with_value(b"different-local-cache-bytes");
@@ -1953,12 +1935,9 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
 fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 6);
     let committed_sst_bytes = test_sst_bytes();
     let stale_local_sst_bytes = same_size_sst_with_different_crc(&committed_sst_bytes);
@@ -2005,12 +1984,9 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
 fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Salvage,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Salvage)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let committed_sst_bytes = test_sst_bytes();
     state
@@ -2062,12 +2038,9 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
 fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_missing() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Salvage,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Salvage)
+            .expect("create runtime state");
     let name = crate::cloud_layout::file_name(0, 0, 8);
     let corrupt_bytes = same_size_sst_with_different_crc(&test_sst_bytes());
     state
@@ -2102,12 +2075,9 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
 fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_readable() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 2);
     let sst_bytes = test_sst_bytes();
     let cloud = cloud_with_stale_sst_listing();
@@ -2137,12 +2107,9 @@ fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_read
 fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
@@ -2260,12 +2227,9 @@ mod salvage_removes_definitively_lost_ssts {
         size_bytes: u64,
     ) -> (tempfile::TempDir, crate::runtime::RuntimeState, String) {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let mut state = crate::runtime::RuntimeState::try_new(
-            temp_dir.path().to_path_buf(),
-            false,
-            RecoveryPolicy::Salvage,
-        )
-        .expect("create runtime state");
+        let mut state =
+            crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Salvage)
+                .expect("create runtime state");
         let sst_name = crate::cloud_layout::file_name(0, 0, sst_seq);
         state
             .manifest
