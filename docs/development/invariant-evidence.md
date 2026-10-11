@@ -433,7 +433,7 @@ Uncovered boundary: Call observation is not physical power-loss proof for every 
 
 Composed native regression: [should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Held native immutable WAL PUT succeeds, remains an uncatalogued orphan, and cannot alter the successor catalog. Two absent-cache fresh-process recoveries exclude its complete transaction. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
-Production: [src/wal/cloud_segment.rs:39](../../src/wal/cloud_segment.rs#L39) `object_key`; [src/wal/cloud_catalog.rs:190](../../src/wal/cloud_catalog.rs#L190) `WalPublicationCatalog::validate`; [src/runtime/cloud_startup/streaming_wal_plan.rs:333](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L333) `validate_publication_identity`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:371](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L371) `reject_cloud_wal_without_catalog_within`.
+Production: [src/wal/cloud_segment.rs:39](../../src/wal/cloud_segment.rs#L39) `object_key`; [src/wal/cloud_catalog.rs:190](../../src/wal/cloud_catalog.rs#L190) `WalPublicationCatalog::validate`; [src/runtime/cloud_startup/streaming_wal_plan.rs:333](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L333) `validate_publication_identity`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:321](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L321) `reject_cloud_wal_without_catalog`.
 
 Exact evidence and assertion markers:
 
@@ -477,7 +477,7 @@ Uncovered boundary: Native fixture checks one protocol and controlled sequences.
 
 ## CLOUD-4
 
-Production: [src/runtime/cloud_startup/cloud_recovery/mod.rs:673](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L673) `ensure_local_sst_cache_from_cloud_storage`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:705](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L705) `reconcile_manifest_ssts`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:747](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L747) `validate_manifest_sst_size`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:1086](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L1086) `cloud_recovery_sst_proofs_for_intent_replay`.
+Production: [src/runtime/cloud_startup/cloud_recovery/mod.rs:505](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L505) `validate_manifest_ssts_in_store`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:705](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L705) `reconcile_manifest_ssts`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:747](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L747) `validate_manifest_sst_size`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:1086](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L1086) `cloud_recovery_sst_proofs_for_intent_replay`.
 
 Exact evidence and assertion markers:
 

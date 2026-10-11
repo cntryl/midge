@@ -312,7 +312,7 @@ fn inventory_fixture(
     let mut state = crate::runtime::RuntimeState::try_new(local, true, RecoveryPolicy::Strict)?;
     state.manifest.replace_files(files);
     observations.set_phase("metadata_inventory")?;
-    super::CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)?;
+    super::CloudStartupRecovery::validate_manifest_ssts_in_store(&mut state, &cloud)?;
     observations.check_failure()?;
     let retained_inventory = serde_json::to_vec(&state.manifest.files)
         .map_err(|error| MidgeError::Internal(format!("retained fixture inventory: {error}")))?;

@@ -1,3 +1,4 @@
+use super::error::cloud_outcome_from_result;
 use super::*;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

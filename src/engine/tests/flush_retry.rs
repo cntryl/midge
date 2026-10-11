@@ -151,6 +151,7 @@ impl RetryFixture {
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             options.storage(),
             &crate::lease::test_lease_root(options.storage()),
+            None,
             options.lease_clock_skew_tolerance(),
             options.storage_io_timeout(),
             options.lease_ttl(),
@@ -316,6 +317,7 @@ fn fixture_engine(
         memory_mode: false,
         cloud_mode: true,
         simulated_cloud_mode: true,
+        backup_source: Some(directory.to_path_buf()),
         sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
         column_families,

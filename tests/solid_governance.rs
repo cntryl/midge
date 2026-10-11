@@ -981,7 +981,8 @@ const HOST_IO: &[&str] = &[
     ".metadata()",
     ".symlink_metadata()",
     ".canonicalize()",
-    "filesystem::FileSystem::new(",
+    "FileSystem::new(",
+    "FileSystem::open_existing(",
 ];
 
 /// Whether `source` imports `std::fs` through a grouped `use std::{..}`.
@@ -1031,20 +1032,27 @@ const HOST_BOUNDARY: &[(&str, &str)] = &[
         "src/wal/recovery/streaming.rs",
         "anonymous delete-on-close replay spool holding no database state; #808 stage 6 deletes it",
     ),
-];
-
-/// Not yet routed through the injected root. #808 stage 1 removes every
-/// entry; an entry whose file no longer touches the host must be deleted.
-const UNROUTED: &[&str] = &[
-    "src/engine/backup.rs",
-    "src/engine/backup/paths.rs",
-    "src/engine/startup/epoch_floor.rs",
-    "src/engine/startup/storage.rs",
-    "src/engine/verification.rs",
-    "src/runtime/cloud_startup/cloud_recovery/mod.rs",
-    "src/storage/filesystem.rs",
-    "src/storage/filesystem/windows.rs",
-    "src/storage/simulated.rs",
+    (
+        "src/storage/filesystem.rs",
+        "the host-directory object store: inode identity, flock and hard-link publication",
+    ),
+    (
+        "src/storage/filesystem/windows.rs",
+        "Windows range reads for the host-directory object store",
+    ),
+    (
+        "src/storage/simulated.rs",
+        "places a simulated cloud in the root's host directory unless a test injects a store",
+    ),
+    (
+        "src/engine/backup.rs",
+        "captures a host database directory by file handle and restores into one; \
+         a root or store without a host directory is refused",
+    ),
+    (
+        "src/engine/backup/paths.rs",
+        "resolves and publishes user-chosen backup and restore directories",
+    ),
 ];
 
 /// Production code reaches durable storage only through the injected `Fs`
@@ -1077,22 +1085,11 @@ fn should_route_storage_io_through_injected_fs() {
     // Assert
     let unexpected: Vec<_> = violations
         .iter()
-        .filter(|(file, _)| {
-            !HOST_BOUNDARY.iter().any(|(allowed, _)| allowed == file)
-                && !UNROUTED.contains(&file.as_str())
-        })
+        .filter(|(file, _)| !HOST_BOUNDARY.iter().any(|(allowed, _)| allowed == file))
         .collect();
     assert!(
         unexpected.is_empty(),
         "production code bypasses the injected filesystem root: {unexpected:#?}"
-    );
-    let stale: Vec<_> = UNROUTED
-        .iter()
-        .filter(|file| !violations.contains_key(**file))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "remove routed files from UNROUTED: {stale:?}"
     );
     let stale_boundary: Vec<_> = HOST_BOUNDARY
         .iter()
@@ -1123,6 +1120,13 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("summarize_with_real_fs_for_compaction", "#814"),
     ("scan_sst_dir", "#814"),
     ("relative_anchor", "#814"),
+    ("reject_simulated_cloud_wal_without_catalog", "#825"),
+    ("reject_cloud_wal_without_catalog_within", "#825"),
+    ("ensure_local_sst_cache_from_cloud", "#825"),
+    ("ensure_local_sst_cache_from_cloud_storage", "#825"),
+    ("local_sst_is_definitively_missing", "#825"),
+    ("verify_storage_path_with_sst_fs", "#825"),
+    ("recovery_cloud_wal_dir", "#825"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

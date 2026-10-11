@@ -10,7 +10,7 @@ use super::StartupStoragePath;
 use crate::common::MidgeResult;
 use crate::config::Storage;
 use crate::io::{Fs, FsError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -56,5 +56,22 @@ impl StartupStoragePath {
             memory_mode,
             root,
         })
+    }
+}
+
+/// Open an existing host database directory for offline inspection, without
+/// creating anything.
+///
+/// # Errors
+///
+/// A missing directory has no FORMAT marker to validate, so it is a
+/// compatibility error; any other failure keeps its filesystem class.
+pub(in crate::engine) fn existing_host_root(db_path: &Path) -> MidgeResult<Arc<dyn Fs>> {
+    match crate::io::RealFs::open_existing(db_path) {
+        Ok(fs) => Ok(Arc::new(fs)),
+        Err(error) if !db_path.exists() => Err(crate::common::MidgeError::CompatibilityError(
+            format!("failed to read FORMAT marker: database path is missing: {error}"),
+        )),
+        Err(error) => Err(error.into_midge()),
     }
 }

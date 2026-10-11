@@ -1,6 +1,6 @@
 //! The structured cloud error taxonomy and outcome type.
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 use crate::common::MidgeError;
 
 /// Structured cloud provider failure, classified at the point the HTTP
@@ -184,7 +184,7 @@ pub(crate) fn contextualize_operation_error(
 /// Cloud operation outcome sent across the callback boundary.
 pub type CloudOutcome<T> = Result<T, CloudError>;
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 pub(super) fn cloud_outcome_from_result<T>(result: Result<T, MidgeError>) -> CloudOutcome<T> {
     result.map_err(|error| match error {
         MidgeError::NotFound => CloudError::NotFound(format!("{error:?}")),

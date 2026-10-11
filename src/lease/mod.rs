@@ -193,6 +193,7 @@ pub(crate) fn create_lease_with_validity(
     create_lease_with_validity_and_timeout_and_ttl(
         storage,
         &test_lease_root(storage),
+        None,
         clock_skew_tolerance,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         std::time::Duration::from_secs(30),
@@ -200,10 +201,13 @@ pub(crate) fn create_lease_with_validity(
 }
 
 /// Create the primary lease for `storage`. Local and simulated leases keep
-/// their coordination files in the database `root`.
+/// their coordination files in the database `root`; a provider lease keeps
+/// its document in the control store, or in `object_store` when a test
+/// injects one.
 pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
     storage: &Storage,
     root: &Arc<dyn crate::io::Fs>,
+    object_store: Option<Arc<dyn crate::storage::cloud::CloudBackend>>,
     clock_skew_tolerance: std::time::Duration,
     storage_io_timeout: std::time::Duration,
     lease_ttl: std::time::Duration,
@@ -237,10 +241,11 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 bucket: lease_provider.bucket_or_container().to_string(),
                 prefix: lease_prefix.to_string(),
             };
-            let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+            let cloud = crate::storage::providers::build_class_store(
                 lease_provider,
                 lease_prefix,
                 storage_io_timeout,
+                object_store,
             )
             .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
             let lease = Arc::new(

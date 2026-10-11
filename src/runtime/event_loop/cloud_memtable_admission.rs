@@ -210,10 +210,8 @@ mod tests {
         Arc<crate::storage::HybridStorage>,
     )> {
         let directory = tempfile::tempdir()?;
-        let setup = crate::storage::simulated::build_simulated_cloud_stores(
-            directory.path(),
-            Some(256 * 1024),
-        )?;
+        let setup =
+            crate::storage::simulated::host_simulated_cloud(directory.path(), Some(256 * 1024))?;
         setup.hybrid_storage.enable_ephemeral_sst_cache(256 * 1024);
         let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
         let config = crate::runtime::RuntimeConfig {

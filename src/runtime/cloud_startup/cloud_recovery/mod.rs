@@ -36,11 +36,6 @@ enum SstLoss {
     Indeterminate(MidgeError),
 }
 
-fn local_sst_is_definitively_missing(sst_dir: &Path, error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::NotFound
-        && std::fs::metadata(sst_dir).is_ok_and(|metadata| metadata.is_dir())
-}
-
 /// What salvage recovery does with one manifest SST after validating it.
 enum SstDisposition {
     Retain,
@@ -123,32 +118,6 @@ impl CloudStartupRecovery {
             cleaned.insert(file_meta.name.clone());
         }
         Ok(cleaned)
-    }
-
-    /// Validate the authoritative inventory without materializing the local cache.
-    /// SST metadata and data blocks are checked when a reader requests them;
-    /// ordinary startup must not scan or copy the object-store dataset.
-    pub(crate) fn ensure_local_sst_cache_from_cloud(
-        state: &mut RuntimeState,
-        cloud_root: &Path,
-    ) -> MidgeResult<()> {
-        let remote_sst_dir = cloud_root.join("sst");
-        Self::reconcile_manifest_ssts(state, |file| {
-            let remote_path = remote_sst_dir.join(&file.name);
-            std::fs::metadata(&remote_path)
-                .map(|metadata| metadata.len())
-                .map_err(|error| {
-                    let loss = MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is unavailable: {error}",
-                        file.name
-                    ));
-                    if local_sst_is_definitively_missing(&remote_sst_dir, &error) {
-                        SstLoss::Definitive(loss)
-                    } else {
-                        SstLoss::Indeterminate(loss)
-                    }
-                })
-        })
     }
 
     pub(crate) fn hydrate_cloud_metadata(
@@ -347,114 +316,29 @@ impl CloudStartupRecovery {
         .map_err(|error| preserve_timeout(error, "failed to publish cloud metadata"))
     }
 
+    /// Refuse a cloud whose WAL objects have no publication catalog: object
+    /// presence is not authority.
     pub(crate) fn reject_cloud_wal_without_catalog(
-        cloud: &crate::storage::cloud::CloudStorage,
+        store: &dyn crate::storage::inventory::ObjectInventory,
+        scope: Option<&DeadlineScope>,
     ) -> MidgeResult<()> {
-        Self::reject_cloud_wal_without_catalog_within(
-            cloud,
-            &DeadlineScope::new(OperationDeadline::unbounded()),
-        )
-    }
-
-    pub(crate) fn reject_cloud_wal_without_catalog_within(
-        cloud: &crate::storage::cloud::CloudStorage,
-        scope: &DeadlineScope,
-    ) -> MidgeResult<()> {
-        scope.check("cloud WAL authority inventory")?;
-        let io = BlockingCloudIo::within(cloud, scope);
-        if io
-            .head_optional(crate::wal::cloud_catalog::OBJECT_KEY)?
-            .is_some()
-            || io
-                .head_optional(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)?
-                .is_some()
-        {
-            return Ok(());
+        if let Some(scope) = scope {
+            scope.check("cloud WAL authority inventory")?;
         }
-        let untracked = io
-            .list(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)?
+        for key in [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ] {
+            if store.object_size(key, scope)?.is_some() {
+                return Ok(());
+            }
+        }
+        let untracked = store
+            .keys_under(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX, scope)?
             .into_iter()
-            .map(|key| cloud.strip_namespace(&key).to_string())
             .find(|key| crate::wal::parse_segment_id(key).is_some());
         if let Some(key) = untracked {
             return Err(Self::cloud_wal_without_catalog_error(&key));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn reject_simulated_cloud_wal_without_catalog(
-        cloud_wal_dir: &Path,
-    ) -> MidgeResult<()> {
-        let has_catalog_copy = [
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-        ]
-        .into_iter()
-        .any(|key| {
-            let catalog_name = key
-                .strip_prefix(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)
-                .unwrap_or(key);
-            cloud_wal_dir.join(catalog_name).exists()
-        });
-        if has_catalog_copy {
-            return Ok(());
-        }
-        match std::fs::read_dir(cloud_wal_dir) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to inspect simulated cloud WAL directory '{}': {error}",
-                    cloud_wal_dir.display()
-                )))
-            }
-        }
-        let mut pending_dirs = vec![cloud_wal_dir.to_path_buf()];
-        while let Some(dir) = pending_dirs.pop() {
-            let entries = std::fs::read_dir(&dir).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to inspect simulated cloud WAL directory '{}': {error}",
-                    dir.display()
-                ))
-            })?;
-            for entry in entries {
-                let entry = entry.map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to inspect simulated cloud WAL directory '{}': {error}",
-                        dir.display()
-                    ))
-                })?;
-                let file_type = entry.file_type().map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to inspect simulated cloud WAL object '{}': {error}",
-                        entry.path().display()
-                    ))
-                })?;
-                if file_type.is_dir() {
-                    pending_dirs.push(entry.path());
-                    continue;
-                }
-                if !file_type.is_file() {
-                    continue;
-                }
-                let object_path = entry.path();
-                let relative = object_path.strip_prefix(cloud_wal_dir).map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to resolve simulated cloud WAL object '{}': {error}",
-                        object_path.display()
-                    ))
-                })?;
-                let relative = relative
-                    .to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/");
-                let key = format!(
-                    "{}{relative}",
-                    crate::cloud_layout::CloudObjectLayout::WAL_PREFIX
-                );
-                if crate::wal::parse_segment_id(&key).is_some() {
-                    return Err(Self::cloud_wal_without_catalog_error(&key));
-                }
-            }
         }
         Ok(())
     }
@@ -615,24 +499,19 @@ impl CloudStartupRecovery {
         )))
     }
 
-    /// Validate cloud authority using object metadata only. The historical name
-    /// is retained for the startup boundary; this no longer populates a cache.
-    pub(crate) fn ensure_local_sst_cache_from_cloud_storage(
+    /// Check every manifest SST against the object store by size alone.
+    /// SST metadata and data blocks are checked when a reader requests them;
+    /// ordinary startup must not scan or copy the object-store dataset.
+    pub(crate) fn validate_manifest_ssts_in_store(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
+        store: &dyn crate::storage::inventory::ObjectInventory,
     ) -> MidgeResult<()> {
         let scope = state.startup_scope.clone();
         Self::reconcile_manifest_ssts(state, |file| {
             let key = crate::cloud_layout::object_key(&file.name);
-            scope
-                .as_ref()
-                .map_or_else(
-                    || BlockingCloudIo::new(cloud),
-                    |scope| BlockingCloudIo::within(cloud, scope),
-                )
-                .head_optional(&key)
+            store
+                .object_size(&key, scope.as_ref())
                 .map_err(SstLoss::Indeterminate)?
-                .map(|metadata| metadata.size)
                 .ok_or_else(|| {
                     SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
                         "authoritative cloud SST '{}' is missing",
@@ -647,8 +526,7 @@ impl CloudStartupRecovery {
     ///
     /// `object_size` reports the object's size, `Definitive` when it is known
     /// to be gone, or `Indeterminate` when the check itself failed. This is the
-    /// one place that decides which manifest SSTs survive startup; the
-    /// simulated and object-store backends differ only in that probe.
+    /// one place that decides which manifest SSTs survive startup.
     fn reconcile_manifest_ssts(
         state: &mut RuntimeState,
         mut object_size: impl FnMut(&crate::metadata::FileMeta) -> Result<u64, SstLoss>,

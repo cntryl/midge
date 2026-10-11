@@ -229,6 +229,7 @@ impl StartupLease {
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             storage,
             &path.root,
+            opts.injected_object_store(),
             opts.lease_clock_skew_tolerance(),
             opts.storage_io_timeout(),
             opts.lease_ttl(),
@@ -640,20 +641,22 @@ impl RuntimeStorageMaterialization {
         topology: &crate::config::CloudStorageTopology,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<CloudClassStores> {
-        let wal = crate::storage::providers::build_cloud_storage_with_timeout(
+        let wal = crate::storage::providers::build_class_store(
             topology.wal().provider(),
             topology.wal().prefix(),
             opts.storage_io_timeout(),
+            opts.injected_object_store(),
         )?;
         let wal = scope_cloud_store(wal, scope);
         let sst = if topology.sst() == topology.wal() {
             wal.clone()
         } else {
             scope_cloud_store(
-                crate::storage::providers::build_cloud_storage_with_timeout(
+                crate::storage::providers::build_class_store(
                     topology.sst().provider(),
                     topology.sst().prefix(),
                     opts.storage_io_timeout(),
+                    opts.injected_object_store(),
                 )?,
                 scope,
             )
@@ -664,19 +667,16 @@ impl RuntimeStorageMaterialization {
             sst.clone()
         } else {
             scope_cloud_store(
-                crate::storage::providers::build_cloud_storage_with_timeout(
+                crate::storage::providers::build_class_store(
                     topology.control().provider(),
                     topology.control().prefix(),
                     opts.storage_io_timeout(),
+                    opts.injected_object_store(),
                 )?,
                 scope,
             )
         };
-        if let Some(scope) = scope {
-            CloudStartupRecovery::reject_cloud_wal_without_catalog_within(&wal, scope)?;
-        } else {
-            CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal)?;
-        }
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(wal.as_ref(), scope)?;
         Ok(CloudClassStores { wal, sst, metadata })
     }
 
@@ -771,30 +771,32 @@ impl RuntimeStorageMaterialization {
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
+        let store = crate::storage::simulated::SimulatedCloud::locate(
+            storage_path.root.as_ref(),
+            opts.injected_object_store(),
+            opts.storage_io_timeout(),
+        )?
+        .open()?;
         let cloud = crate::storage::simulated::build_simulated_cloud_stores(
-            &storage_path.db_path,
+            Arc::clone(&store),
             opts.simulated_cloud_local_storage_budget_bytes(),
-        )?;
+        );
         cloud.hybrid_storage.enable_ephemeral_sst_cache(
             opts.simulated_cloud_local_storage_budget_bytes()
                 .unwrap_or_else(|| opts.local_storage_budget_bytes()),
         );
-        let sst_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
-            cloud.cloud_root.clone(),
-        )?);
+        let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
         let sst_read_fs: Arc<dyn crate::io::Fs> =
             Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
                 Arc::clone(&storage_path.root),
-                sst_backend,
+                Arc::clone(&backend),
                 opts.storage_io_timeout(),
             ));
         let sst_read_fs = scope.map_or_else(
             || sst_read_fs.clone(),
             |scope| crate::io::scope_fs(sst_read_fs.clone(), scope.clone()),
         );
-        CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(
-            &cloud.recovery_cloud_wal_dir,
-        )?;
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(store.as_ref(), scope)?;
         cloud
             .hybrid_storage
             .configure_maintenance_memory(opts.compaction_memory_pool_size());
@@ -802,13 +804,10 @@ impl RuntimeStorageMaterialization {
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&cloud.hybrid_storage, scope)?;
 
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let wal_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-            crate::storage::filesystem::FileSystem::new(cloud.cloud_root.clone())?,
-        );
         let streaming = super::timing::measure("wal_plan", || {
             build_wal_plan(
                 &storage_path.root,
-                &wal_backend,
+                &backend,
                 &wal_catalog,
                 opts.recovery_policy(),
                 opts.storage_io_timeout(),
@@ -850,7 +849,7 @@ impl RuntimeStorageMaterialization {
         Ok(Self {
             state,
             runtime_config,
-            cloud_root: Some(cloud.cloud_root.clone()),
+            sst_inventory: Some(store as _),
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
@@ -993,7 +992,7 @@ impl RuntimeStorageMaterialization {
         Ok(Self {
             state,
             runtime_config,
-            cloud_root: None,
+            sst_inventory: Some(sst_storage.clone() as _),
             cloud_storage_for_restore: Some(sst_storage),
             cloud_metadata_storage_for_mirror: Some(metadata_storage),
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
@@ -1045,7 +1044,7 @@ impl RuntimeStorageMaterialization {
         Ok(Self {
             state: initialize_startup_state(opts, storage_path, true, scope)?,
             runtime_config,
-            cloud_root: None,
+            sst_inventory: None,
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
             streaming_wal: None,

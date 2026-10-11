@@ -6,9 +6,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Per-request budget for offline object-store reads.
+const OFFLINE_OBJECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Storage-integrity façade for online and offline verification.
 pub struct StorageVerifier {
     runtime_handle: crate::runtime::RuntimeHandle,
+    root: Arc<dyn Fs>,
     db_path: std::path::PathBuf,
     memory_mode: bool,
     cloud_mode: bool,
@@ -17,12 +21,14 @@ pub struct StorageVerifier {
 impl StorageVerifier {
     pub(super) fn new(
         runtime_handle: crate::runtime::RuntimeHandle,
+        root: Arc<dyn Fs>,
         db_path: std::path::PathBuf,
         memory_mode: bool,
         cloud_mode: bool,
     ) -> Self {
         Self {
             runtime_handle,
+            root,
             db_path,
             memory_mode,
             cloud_mode,
@@ -40,6 +46,7 @@ impl StorageVerifier {
 
         verify_storage_online(
             &self.runtime_handle,
+            Arc::clone(&self.root),
             self.db_path.clone(),
             self.cloud_mode,
             timeout,
@@ -64,23 +71,44 @@ impl StorageVerifier {
     pub(super) fn verify_simulated_cloud_path(
         path: &Path,
     ) -> MidgeResult<StorageVerificationReport> {
-        Self::verify_simulated_cloud_wal_catalog(path)?;
-        let cloud_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
-            crate::storage::simulated::simulated_cloud_root(path),
-        )?);
-        let local_backend: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::open_existing(path).map_err(FsError::into_midge)?);
-        let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_backend;
+        let root = super::startup::existing_host_root(path)?;
+        let store = crate::storage::simulated::SimulatedCloud::locate(
+            root.as_ref(),
+            None,
+            OFFLINE_OBJECT_TIMEOUT,
+        )?
+        .open_existing()?
+        .ok_or_else(|| {
+            MidgeError::Corruption("simulated cloud WAL publication catalog is missing".into())
+        })?;
+        let store: Arc<dyn crate::storage::StorageBackend> = store;
+        Self::verify_simulated_cloud_wal_catalog(&store)?;
         let sst_fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            local_backend,
-            cloud_backend,
-            Duration::from_secs(30),
+            Arc::clone(&root),
+            store,
+            OFFLINE_OBJECT_TIMEOUT,
         ));
-        verify_storage_path_with_sst_fs(path, None, Some(&sst_fs), None)
+        verify_storage_root(&root, path, None, Some(&sst_fs), None)
     }
 
-    fn verify_simulated_cloud_wal_catalog(path: &Path) -> MidgeResult<()> {
-        let cloud_root = crate::storage::simulated::simulated_cloud_root(path);
+    /// Read one whole object from an offline store; `None` when absent.
+    fn read_offline_object(
+        store: &Arc<dyn crate::storage::StorageBackend>,
+        key: &str,
+    ) -> MidgeResult<Option<Vec<u8>>> {
+        let object = crate::storage::HybridStorage::read_control_from_backend(
+            store,
+            key,
+            &crate::common::resource_budget::ResourceBudget::new(usize::MAX),
+            OFFLINE_OBJECT_TIMEOUT,
+            &crate::common::OperationDeadline::unbounded(),
+        )?;
+        Ok(object.map(|object| object.bytes().to_vec()))
+    }
+
+    fn verify_simulated_cloud_wal_catalog(
+        store: &Arc<dyn crate::storage::StorageBackend>,
+    ) -> MidgeResult<()> {
         let candidates = [
             crate::wal::cloud_catalog::OBJECT_KEY,
             crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
@@ -88,19 +116,14 @@ impl StorageVerifier {
         let mut decoded_catalog = None;
         let mut saw_catalog = false;
         for key in candidates {
-            let catalog_path = cloud_root.join(key);
-            match std::fs::read(&catalog_path) {
-                Ok(bytes) => {
-                    saw_catalog = true;
-                    if let Ok(catalog) =
-                        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
-                    {
-                        decoded_catalog = Some(catalog);
-                        break;
-                    }
+            if let Some(bytes) = Self::read_offline_object(store, key)? {
+                saw_catalog = true;
+                if let Ok(catalog) =
+                    crate::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
+                {
+                    decoded_catalog = Some(catalog);
+                    break;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(MidgeError::Io(error)),
             }
         }
         let catalog = decoded_catalog.ok_or_else(|| {
@@ -112,12 +135,13 @@ impl StorageVerifier {
             MidgeError::Corruption(detail.to_string())
         })?;
         for segment in catalog.segments.values() {
-            let bytes = std::fs::read(cloud_root.join(&segment.object_key)).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "simulated cloud WAL object '{}' is missing: {error}",
-                    segment.object_key
-                ))
-            })?;
+            let bytes =
+                Self::read_offline_object(store, &segment.object_key)?.ok_or_else(|| {
+                    MidgeError::RecoveryFailed(format!(
+                        "simulated cloud WAL object '{}' is missing",
+                        segment.object_key
+                    ))
+                })?;
             segment
                 .validate_bytes(&bytes)
                 .map_err(MidgeError::Corruption)?;
@@ -243,38 +267,31 @@ pub(super) fn verify_storage_path(
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
 ) -> MidgeResult<StorageVerificationReport> {
-    verify_storage_path_with_sst_fs(db_path, runtime_health, None, None)
+    let root = super::startup::existing_host_root(db_path)?;
+    verify_storage_root(&root, db_path, runtime_health, None, None)
 }
 
-fn verify_storage_path_with_sst_fs(
+/// Verify the database served by `fs`; `db_path` names it in errors.
+fn verify_storage_root(
+    fs: &Arc<dyn Fs>,
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
     sst_fs: Option<&Arc<dyn Fs>>,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<StorageVerificationReport> {
-    let fs: Arc<dyn Fs> = match crate::io::RealFs::open_existing(db_path) {
-        Ok(fs) => Arc::new(fs),
-        // A missing database has no FORMAT marker to validate.
-        Err(error) if !db_path.exists() => {
-            return Err(MidgeError::CompatibilityError(format!(
-                "failed to read FORMAT marker: database path is missing: {error}"
-            )));
-        }
-        Err(error) => return Err(error.into_midge()),
-    };
     crate::metadata::validate_format_marker(fs.as_ref(), db_path)?;
     let manifest =
-        crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
     let intents =
-        crate::runtime::IntentPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
+        crate::runtime::IntentPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
 
     let mut sst_bytes_verified = 0u64;
     let mut data_blocks_verified = 0u64;
     for file_meta in &manifest.files {
         let (sst_bytes, data_blocks) =
-            verify_manifest_sst(sst_fs.unwrap_or(&fs), file_meta, deadline)?;
+            verify_manifest_sst(sst_fs.unwrap_or(fs), file_meta, deadline)?;
         sst_bytes_verified = sst_bytes_verified.saturating_add(sst_bytes);
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
@@ -286,7 +303,7 @@ fn verify_storage_path_with_sst_fs(
         deadline,
     )
     .map_err(|error| verification_stage_error("WAL verification failed", error))?;
-    let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(&fs)
+    let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(fs)
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
 
@@ -470,6 +487,7 @@ impl Drop for VerificationBarrierGuard {
 
 pub(super) fn verify_storage_online(
     runtime_handle: &crate::runtime::RuntimeHandle,
+    root: Arc<dyn Fs>,
     db_path: std::path::PathBuf,
     cloud_mode: bool,
     timeout: Duration,
@@ -492,7 +510,8 @@ pub(super) fn verify_storage_online(
         .name("midge-storage-verification".to_string())
         .spawn(move || {
             crate::failpoints::fail_point!("midge::verification::after_barrier_acquired");
-            let mut result = verify_storage_path_with_sst_fs(
+            let mut result = verify_storage_root(
+                &root,
                 &db_path,
                 Some(runtime_health),
                 sst_fs.as_ref(),
@@ -721,7 +740,8 @@ mod tests {
         let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act
-        let result = super::verify_storage_path_with_sst_fs(&db_path, None, None, Some(&expired));
+        let root = super::super::startup::existing_host_root(&db_path).expect("host root");
+        let result = super::verify_storage_root(&root, &db_path, None, None, Some(&expired));
 
         // Assert
         assert!(
@@ -771,9 +791,9 @@ mod tests {
             std::time::Duration::from_secs(5),
         ));
         // Act
-        let report =
-            super::verify_storage_path_with_sst_fs(&fixture.db_path, None, Some(&fs), None)
-                .expect("verify cloud SST");
+        let root = super::super::startup::existing_host_root(&fixture.db_path).expect("host root");
+        let report = super::verify_storage_root(&root, &fixture.db_path, None, Some(&fs), None)
+            .expect("verify cloud SST");
         // Assert
         assert_eq!(report.sst_files_verified, 1);
         assert!(report.data_blocks_verified > 0);

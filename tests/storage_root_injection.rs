@@ -5,6 +5,7 @@
 use cntryl_midge::__internal::io::{
     Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, RealFs,
 };
+use cntryl_midge::__internal::storage::cloud::MockCloudBackend;
 use cntryl_midge::{Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions};
 use std::sync::Arc;
 
@@ -258,10 +259,89 @@ fn should_report_orphan_residue_when_injected_root_holds_unpublished_sst() {
         .expect("shutdown");
 }
 
+/// Flush and compact through `options`, restart, and return what reads back.
+fn flush_restart_read(options: &OpenOptions) -> Vec<Option<Vec<u8>>> {
+    {
+        let mut engine = Engine::open(options.clone()).expect("open");
+        flush_three_generations(&mut engine, WriteOptions::cloud_strict());
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+    }
+    let mut reopened = Engine::open(options.clone()).expect("reopen");
+    let values = read_compacted(&reopened);
+    reopened
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown reopened");
+    values
+}
+
+/// Kinds of data object the store received: `sst` files and `wal`
+/// segments. Catalogs and other control objects are not counted.
+fn stored_data_objects(store: &MockCloudBackend) -> std::collections::BTreeSet<String> {
+    store
+        .get_uploads()
+        .into_iter()
+        .filter_map(|(key, _)| {
+            std::path::Path::new(&key)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .filter(|extension| matches!(*extension, "sst" | "wal"))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 #[test]
-fn should_reject_injected_filesystem_when_storage_is_cloud_simulated() {
-    // Arrange: cloud working storage is not yet served by the root, so a
-    // partly injected cloud database would split its files across two roots.
+fn should_serve_cloud_simulated_database_when_every_store_is_injected() {
+    // Arrange: no host directory serves this database or its cloud.
+    let named = tempfile::tempdir().expect("named directory");
+    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let store = Arc::new(MockCloudBackend::new());
+    let options = OpenOptions::cloud_simulated(named.path(), "bucket", "injected")
+        .background_compaction(false)
+        .filesystem_for_testing(root)
+        .object_store_for_testing(store.clone())
+        .build()
+        .expect("open options");
+
+    // Act
+    let values = flush_restart_read(&options);
+
+    // Assert
+    assert_eq!(values, expected_compacted());
+    assert_eq!(
+        stored_data_objects(&store),
+        ["sst", "wal"].map(str::to_string).into()
+    );
+    assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn should_keep_simulated_cloud_under_served_root_when_root_is_injected() {
+    // Arrange
+    let named = tempfile::tempdir().expect("named directory");
+    let served = tempfile::tempdir().expect("served directory");
+    let root: Arc<dyn Fs> = Arc::new(RealFs::new(served.path()).expect("served root"));
+    let options = OpenOptions::cloud_simulated(named.path(), "bucket", "served")
+        .background_compaction(false)
+        .filesystem_for_testing(root)
+        .build()
+        .expect("open options");
+
+    // Act
+    let values = flush_restart_read(&options);
+
+    // Assert
+    assert_eq!(values, expected_compacted());
+    assert!(served.path().join("cloud_store/sst").is_dir());
+    assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn should_require_object_store_when_cloud_simulated_root_has_no_host_directory() {
+    // Arrange: the default simulated cloud is a host directory under the
+    // root, which an in-memory root does not have.
     let named = tempfile::tempdir().expect("named directory");
     let root: Arc<dyn Fs> = Arc::new(MockFs::new());
 
@@ -275,6 +355,152 @@ fn should_reject_injected_filesystem_when_storage_is_cloud_simulated() {
         result,
         Err(cntryl_midge::MidgeError::InvalidArgument(_))
     ));
+}
+
+#[test]
+fn should_reject_injected_filesystem_when_storage_is_in_memory() {
+    // Arrange
+    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+
+    // Act
+    let result = OpenOptions::in_memory()
+        .filesystem_for_testing(root)
+        .build();
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn should_reject_restore_when_options_inject_storage() {
+    // Arrange: a restore writes a host directory, which an injected root
+    // would never serve.
+    let named = tempfile::tempdir().expect("named directory");
+    let artifact = tempfile::tempdir().expect("artifact directory");
+    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let options = OpenOptions::local(named.path().join("restored"))
+        .filesystem_for_testing(root)
+        .build()
+        .expect("open options");
+
+    // Act
+    let result = Engine::restore_backup(artifact.path(), options);
+
+    // Assert
+    assert!(
+        matches!(result, Err(cntryl_midge::MidgeError::NotSupported(_))),
+        "{result:?}"
+    );
+    assert!(!named.path().join("restored").exists());
+}
+
+#[test]
+fn should_serve_cloud_database_when_every_store_is_injected() {
+    // Arrange: every class store and the lease document live in the injected
+    // object store; the provider configuration only names them.
+    let named = tempfile::tempdir().expect("named directory");
+    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let store = Arc::new(MockCloudBackend::new());
+    let provider =
+        cntryl_midge::CloudProviderConfig::aws_s3_static("bucket", "us-east-1", "access", "secret");
+    let options = OpenOptions::cloud(
+        named.path(),
+        cntryl_midge::CloudStorageLocation::new(provider, "injected/"),
+    )
+    .background_compaction(false)
+    .filesystem_for_testing(root)
+    .object_store_for_testing(store.clone())
+    .build()
+    .expect("open options");
+
+    // Act
+    let values = flush_restart_read(&options);
+
+    // Assert
+    assert_eq!(values, expected_compacted());
+    assert_eq!(
+        stored_data_objects(&store),
+        ["sst", "wal"].map(str::to_string).into()
+    );
+    assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn should_verify_injected_root_when_verifying_online() {
+    // Arrange
+    let named = tempfile::tempdir().expect("named directory");
+    let served = tempfile::tempdir().expect("served directory");
+    let mut engine = Engine::open(served_options(named.path(), served.path())).expect("open");
+    flush_three_generations(&mut engine, WriteOptions::sync());
+
+    // Act
+    let report = engine
+        .storage_verifier()
+        .verify_storage(std::time::Duration::from_secs(30));
+
+    // Assert
+    let report = report.expect("the served root verifies");
+    assert!(report.sst_files_verified > 0);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
+fn should_back_up_served_root_when_root_is_injected() {
+    // Arrange
+    let named = tempfile::tempdir().expect("named directory");
+    let served = tempfile::tempdir().expect("served directory");
+    let artifacts = tempfile::tempdir().expect("artifact directory");
+    let mut engine = Engine::open(served_options(named.path(), served.path())).expect("open");
+    flush_three_generations(&mut engine, WriteOptions::sync());
+
+    // Act
+    let manifest = engine.backup_to(
+        artifacts.path().join("backup"),
+        std::time::Duration::from_secs(30),
+    );
+
+    // Assert
+    let manifest = manifest.expect("the served root is backed up");
+    assert!(manifest
+        .objects
+        .iter()
+        .any(|object| object.path.starts_with("sst/")));
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown");
+}
+
+#[test]
+fn should_reject_backup_when_root_has_no_host_directory() {
+    // Arrange
+    let named = tempfile::tempdir().expect("named directory");
+    let artifacts = tempfile::tempdir().expect("artifact directory");
+    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let options = OpenOptions::local(named.path())
+        .filesystem_for_testing(root)
+        .build()
+        .expect("open options");
+    let mut engine = Engine::open(options).expect("open");
+
+    // Act
+    let result = engine.backup_to(
+        artifacts.path().join("backup"),
+        std::time::Duration::from_secs(30),
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(cntryl_midge::MidgeError::NotSupported(_))),
+        "{result:?}"
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown");
 }
 
 #[test]

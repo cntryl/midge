@@ -371,7 +371,6 @@ use std::sync::Arc;
 
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
-#[cfg(feature = "cloud-common")]
 use crate::storage::cloud::CloudBackend;
 use crate::storage::cloud::CloudStorage;
 
@@ -541,7 +540,24 @@ pub(crate) fn build_cloud_storage_with_timeout(
     )))
 }
 
-#[cfg(feature = "cloud-common")]
+/// Build the store for one cloud storage class. A test-injected backend
+/// stands in for the configured provider; the prefix still namespaces it.
+pub(crate) fn build_class_store(
+    provider: &CloudProviderConfig,
+    prefix: &str,
+    timeout: std::time::Duration,
+    injected: Option<Arc<dyn CloudBackend>>,
+) -> MidgeResult<Arc<CloudStorage>> {
+    match injected {
+        Some(backend) => Ok(Arc::new(CloudStorage::new_with_timeout(
+            backend,
+            validated_cloud_prefix(prefix)?,
+            timeout,
+        ))),
+        None => build_cloud_storage_with_timeout(provider, prefix, timeout),
+    }
+}
+
 fn validated_cloud_prefix(prefix: &str) -> MidgeResult<String> {
     let prefix = prefix.trim_matches('/');
     for segment in prefix.split('/') {

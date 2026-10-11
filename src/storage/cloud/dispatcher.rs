@@ -21,7 +21,6 @@ impl CloudStorage {
         )
     }
 
-    #[cfg(any(test, feature = "cloud-common"))]
     pub(crate) fn new_with_timeout(
         backend: Arc<dyn CloudBackend>,
         namespace: String,

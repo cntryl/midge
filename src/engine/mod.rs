@@ -96,6 +96,10 @@ pub struct Engine {
     cloud_mode: bool,
     /// True when cloud mode uses the in-process filesystem simulator.
     simulated_cloud_mode: bool,
+    /// Host directory holding every durable file, which a backup captures.
+    /// `None` when the root, or a simulated cloud's store, is not a host
+    /// directory.
+    backup_source: Option<PathBuf>,
     /// Latest committed sequence observed by the engine.
     ///
     /// Sequence numbers are allocated inside the runtime (at WAL append time) and
@@ -197,11 +201,13 @@ impl Engine {
     }
 
     #[cfg(test)]
-    fn ensure_local_sst_cache_from_cloud_storage(
+    fn validate_manifest_ssts_in_store(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
-        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(state, cloud)
+        crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
+            state, cloud,
+        )
     }
 
     #[cfg(test)]
@@ -784,6 +790,7 @@ impl Engine {
     pub fn storage_verifier(&self) -> StorageVerifier {
         StorageVerifier::new(
             self.runtime_handle.clone(),
+            Arc::clone(&self.root),
             self.db_path.clone(),
             self.memory_mode,
             self.cloud_mode,

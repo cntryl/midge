@@ -5,10 +5,8 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
 {
     // Arrange
     let directory = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::build_simulated_cloud_stores(
-        directory.path(),
-        Some(1024 * 1024),
-    )?;
+    let setup =
+        crate::storage::simulated::host_simulated_cloud(directory.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
     state.wal.current_segment_id = 7;
