@@ -250,7 +250,7 @@ impl ActiveWalFixture {
         let mut bytes = Vec::new();
         crate::wal::frame::append_frame(&mut bytes, &payload).unwrap();
         std::fs::write(
-            database.join("wal").join(crate::wal::ACTIVE_FILE_NAME),
+            database.join("wal").join(crate::wal::segment_file_name(1)),
             &bytes,
         )
         .unwrap();
@@ -409,14 +409,14 @@ fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::ACTIVE_FILE_NAME),
+                .join(crate::wal::segment_file_name(1)),
         )
         .unwrap();
         let rotated = fixture
             .directory
             .path()
             .join("database/wal")
-            .join(crate::wal::segment_file_name(1))
+            .join(crate::wal::segment_file_name(2))
             .exists();
 
         // Assert: exact seeded/framed WAL survives the entered authority failure.
@@ -466,14 +466,14 @@ fn should_retain_recovered_active_wal_when_startup_budget_expires_before_authori
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::ACTIVE_FILE_NAME),
+                .join(crate::wal::segment_file_name(1)),
         )
         .unwrap();
         let rotated = fixture
             .directory
             .path()
             .join("database/wal")
-            .join(crate::wal::segment_file_name(1))
+            .join(crate::wal::segment_file_name(2))
             .exists();
 
         // Assert: fail closed and preserve bytes without pretending the read ran.

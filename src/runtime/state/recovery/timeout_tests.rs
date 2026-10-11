@@ -59,7 +59,7 @@ impl File for TimedReadFile<'_> {
         // This is an actual RealFs read whose controlled local caller budget
         // expires before its result is delivered. It is not provider evidence.
         std::thread::sleep(self.delay);
-        if matches!(self.delivery, ReadDelivery::IoBeforeQuarantine) {
+        if matches!(self.delivery, ReadDelivery::IoBeforeQuarantine) && completed == 1 {
             self.evidence.read_failed.store(true, Ordering::Release);
             return Err(FsError::Io(
                 "controlled failure after genuine WAL read".into(),
@@ -394,8 +394,10 @@ fn should_stop_salvage_journal_replay_when_successful_reads_exhaust_shared_budge
 #[test]
 fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_failure() {
     // Arrange: the wrapper forwards a genuine WAL read before an explicitly
-    // injected local Io failure. Its next genuine directory listing times out.
-    // This is recovery error-policy coverage, not a native provider failure.
+    // injected local Io failure, then lets salvage copy the segment aside.
+    // Its next genuine directory listing, the orphan sweep that ends the
+    // set-aside, times out. This is recovery error-policy coverage, not a
+    // native provider failure.
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
@@ -409,14 +411,17 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
     let payload = crate::wal::encoding::encode(&record).unwrap();
     let mut before = Vec::new();
     crate::wal::frame::append_frame(&mut before, &payload).unwrap();
-    let target = crate::wal::ACTIVE_FILE_NAME;
+    let target = "00000000000000000001.wal";
+    assert_eq!(target, crate::wal::segment_file_name(1));
     std::fs::write(wal_dir.join(target), &before).unwrap();
+    crate::wal::ledger_fixture::record_at(directory.path(), &[], 1).unwrap();
     let (fs, evidence) = read_fs(
         &wal_dir,
         target,
         Duration::ZERO,
         ReadDelivery::IoBeforeQuarantine,
     );
+    let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1).unwrap();
 
     // Act: exercise the actual replay and its production salvage boundary.
     let result = RuntimeState::replay_wal_storage_within(
@@ -427,6 +432,7 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         HashMap::new(),
         None,
         fs.as_ref(),
+        &mut history,
     );
 
     // Assert: a secondary timeout retains its type and all source bytes.
@@ -437,10 +443,15 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         matches!(error, MidgeError::Timeout(message) if message == "timed local quarantine inventory")
     );
     assert!(evidence.read_failed.load(Ordering::Acquire));
-    assert!(evidence.completed_lists.load(Ordering::Acquire) >= 2);
-    assert_eq!(evidence.completed_reads.load(Ordering::Acquire), 1);
-    assert_preserved_read(&wal_dir, target, &before, &evidence);
-    assert_eq!(std::fs::read_dir(wal_dir).unwrap().count(), 1);
+    assert!(evidence.completed_lists.load(Ordering::Acquire) >= 1);
+    assert_eq!(std::fs::read(wal_dir.join(target)).unwrap(), before);
+    let aside = std::fs::read_dir(&wal_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().starts_with("salvaged-"))
+        .expect("salvage copies the segment aside before changing history")
+        .path();
+    assert_eq!(std::fs::read(aside.join(target)).unwrap(), before);
 }
 
 /// Forwards to the host, except that every directory listing fails.
@@ -478,26 +489,32 @@ impl Fs for ListingFailsFs {
 
 #[test]
 fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
-    // Arrange: sealed segments 5 and 6 exist, but the directory listing
-    // fails (EACCES, EMFILE or EIO in the field).
+    // Arrange: the ledger records segments 5 and 6, with 6 open, but the
+    // directory listing fails (EACCES, EMFILE or EIO in the field).
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
-    for id in [5_u64, 6] {
-        std::fs::write(wal_dir.join(crate::wal::segment_file_name(id)), b"x").unwrap();
-    }
-    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), b"").unwrap();
-    let wal = ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap());
+    std::fs::write(wal_dir.join(crate::wal::segment_file_name(5)), b"x").unwrap();
+    std::fs::write(wal_dir.join(crate::wal::segment_file_name(6)), b"").unwrap();
+    crate::wal::ledger_fixture::record_at(directory.path(), &[5], 6).unwrap();
+    let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap()));
 
-    // Act
-    let result = RuntimeState::recover_next_segment_id(false, &wal, None);
+    // Act: open the WAL history the way recovery does.
+    let result = crate::runtime::wal_history::WalHistory::open(wal, 1).and_then(|history| {
+        history.sweep_orphans()?;
+        Ok((
+            history.ledger().open_segment(),
+            history.ledger().next_segment_id(),
+        ))
+    });
 
-    // Assert: either the open fails, or the id stays above every present id.
+    // Assert: either the open fails, or history continues in segment 6 and
+    // allocates above every recorded id.
     match result {
         Err(_) => {}
-        Ok(next) => assert!(
-            next > 6,
-            "next segment id regressed to {next} with segments 5 and 6 present"
+        Ok((open, next)) => assert!(
+            open == 6 && next > 6,
+            "segment ids regressed to open {open}, next {next} with segments 5 and 6 recorded"
         ),
     }
 }

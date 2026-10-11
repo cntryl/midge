@@ -1428,17 +1428,54 @@ mod salvage_quarantine_tests {
         frame
     }
 
-    /// `1.wal` writes `k` at sequence 7; `wal.log` writes a different value
-    /// for `k` at the same sequence.
+    /// Sealed segment 1 writes `k` at sequence 7; open segment 2 writes a
+    /// different value for `k` at the same sequence.
     fn conflicting_repeated_sequence(wal_dir: &std::path::Path) {
         write(
             &wal_dir.join(crate::wal::segment_file_name(1)),
             &[frame_with_value(b"k", b"a", 7)],
         );
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(2)),
             &[frame_with_value(b"k", b"b", 7)],
         );
+        record_history(wal_dir, &[1], 2);
+    }
+
+    /// Record `sealed`, then `open`, as the WAL history under `wal_dir`.
+    fn record_history(wal_dir: &std::path::Path, sealed: &[u64], open: u64) {
+        crate::wal::ledger_fixture::record_at(
+            wal_dir.parent().expect("database root"),
+            sealed,
+            open,
+        )
+        .expect("record WAL history");
+    }
+
+    /// Recover the WAL under `wal_dir` the way opening the database does.
+    fn recover(
+        wal_dir: &std::path::Path,
+        policy: crate::config::RecoveryPolicy,
+    ) -> MidgeResult<WalRecoveryState> {
+        RuntimeState::recover_wal_state(
+            false,
+            &crate::io::real::test_root(wal_dir.parent().expect("database root")),
+            wal_dir,
+            policy,
+            &Manifest::default(),
+            HashMap::new(),
+            None,
+        )
+    }
+
+    /// The ledger the recovery left, as `(sealed members, open segment)`.
+    fn history_of(recovered: &WalRecoveryState) -> (Vec<u64>, u64) {
+        let ledger = recovered
+            .history
+            .as_ref()
+            .expect("a file-backed recovery opens the WAL ledger")
+            .ledger();
+        (ledger.sealed().collect(), ledger.open_segment())
     }
 
     #[test]
@@ -1451,14 +1488,7 @@ mod salvage_quarantine_tests {
         conflicting_repeated_sequence(&wal_dir);
 
         // Act
-        let result = RuntimeState::replay_wal(
-            false,
-            &crate::io::real::test_root(directory.path()),
-            &wal_dir,
-            crate::config::RecoveryPolicy::Strict,
-            &Manifest::default(),
-            HashMap::new(),
-        );
+        let result = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
 
         // Assert
         let Err(error) = result else {
@@ -1497,7 +1527,7 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(1)),
             &[
                 frame_with_value(b"k", b"a", 7),
                 frame_with_value(b"k", b"b", 7),
@@ -1505,6 +1535,7 @@ mod salvage_quarantine_tests {
                 frame_with_value(b"y", b"y", 9),
             ],
         );
+        record_history(&wal_dir, &[], 1);
 
         // Act
         let recovered = salvage_replay(&wal_dir);
@@ -1527,8 +1558,9 @@ mod salvage_quarantine_tests {
         file.sync_all().expect("sync wal file");
     }
 
-    /// `3.wal` holds two good frames, then a CRC-corrupt frame, then a good
-    /// one; `4.wal` and `wal.log` hold later sequences salvage never reaches.
+    /// Sealed segment 3 holds two good frames, then a CRC-corrupt frame,
+    /// then a good one; sealed segment 4 and open segment 5 hold later
+    /// sequences salvage never reaches.
     fn corrupt_middle_segment(wal_dir: &std::path::Path) -> u64 {
         let prefix = [frame(b"a", 1), frame(b"b", 2)];
         let mut corrupt = frame(b"c", 3);
@@ -1549,22 +1581,15 @@ mod salvage_quarantine_tests {
             &[frame(b"e", 5)],
         );
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(5)),
             &[frame(b"f", 6)],
         );
+        record_history(wal_dir, &[3, 4], 5);
         prefix_len as u64
     }
 
     fn salvage_replay(wal_dir: &std::path::Path) -> WalRecoveryState {
-        RuntimeState::replay_wal(
-            false,
-            &crate::io::real::test_root(wal_dir.parent().expect("database root")),
-            wal_dir,
-            crate::config::RecoveryPolicy::Salvage,
-            &Manifest::default(),
-            HashMap::new(),
-        )
-        .expect("salvage replay")
+        recover(wal_dir, crate::config::RecoveryPolicy::Salvage).expect("salvage replay")
     }
 
     #[test]
@@ -1591,21 +1616,30 @@ mod salvage_quarantine_tests {
                 .len(),
             prefix_len
         );
+        assert_eq!(
+            history_of(&recovered),
+            (vec![3], 6),
+            "history continues in a new segment after the replayed prefix"
+        );
         assert!(!wal_dir.join(crate::wal::segment_file_name(4)).exists());
-        assert!(!wal_dir.join(crate::wal::ACTIVE_FILE_NAME).exists());
+        assert!(!wal_dir.join(crate::wal::segment_file_name(5)).exists());
         let quarantine = std::fs::read_dir(&wal_dir)
             .expect("read wal dir")
             .filter_map(Result::ok)
             .find(|entry| entry.file_name().to_string_lossy().starts_with("salvaged-"))
             .expect("quarantine directory")
             .path();
-        for name in [
-            crate::wal::segment_file_name(3),
-            crate::wal::segment_file_name(4),
-            crate::wal::ACTIVE_FILE_NAME.to_string(),
-        ] {
+        for id in [3, 4, 5] {
+            let name = crate::wal::segment_file_name(id);
             assert!(quarantine.join(&name).exists(), "{name} must be preserved");
         }
+        assert!(
+            std::fs::metadata(quarantine.join(crate::wal::segment_file_name(3)))
+                .expect("stop segment copy")
+                .len()
+                > prefix_len,
+            "the stop segment copy keeps the bytes salvage cut"
+        );
     }
 
     #[test]
@@ -1615,21 +1649,14 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         corrupt_middle_segment(&wal_dir);
-        salvage_replay(&wal_dir);
+        let (_, open) = history_of(&salvage_replay(&wal_dir));
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(open)),
             &[frame(b"after", 7)],
         );
 
         // Act
-        let reopened = RuntimeState::replay_wal(
-            false,
-            &crate::io::real::test_root(directory.path()),
-            &wal_dir,
-            crate::config::RecoveryPolicy::Strict,
-            &Manifest::default(),
-            HashMap::new(),
-        );
+        let reopened = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
 
         // Assert
         let reopened = reopened.expect("writes after salvage must not sit behind corruption");
