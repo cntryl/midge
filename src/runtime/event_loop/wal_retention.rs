@@ -113,70 +113,59 @@ impl EventLoop {
         let mut bytes_read = 0_u64;
         let mut segments_read = 0_usize;
         for &segment_id in sealed {
-            let retirable = if flushed_floor.is_some_and(|floor| segment_id < floor) {
-                true
-            } else if proofs
+            if flushed_floor.is_some_and(|floor| segment_id < floor) {
+                outcome.retire_below = Some(segment_id + 1);
+                continue;
+            }
+            let still_fails = proofs
                 .get(&segment_id)
-                .is_some_and(|proof| proof.still_fails(&mut fingerprint_of))
-                || (segments_read > 0 && bytes_read >= budget)
-            {
-                false
-            } else {
-                segments_read += 1;
-                let path = crate::wal::segment_key(segment_id);
-                let bytes = match self.read_runtime_file(&path) {
-                    Ok(bytes) => bytes,
+                .is_some_and(|proof| proof.still_fails(&mut fingerprint_of));
+            if still_fails || (segments_read > 0 && bytes_read >= budget) {
+                break;
+            }
+            segments_read += 1;
+            let path = crate::wal::segment_key(segment_id);
+            let bytes = match self.read_runtime_file(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    outcome.anomaly = true;
+                    tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
+                    break;
+                }
+            };
+            bytes_read = bytes_read.saturating_add(bytes.len() as u64);
+            if !bytes.is_empty() {
+                let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes)
+                {
+                    Ok(readback) => readback,
                     Err(error) => {
                         outcome.anomaly = true;
-                        tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
+                        tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
                         break;
                     }
                 };
-                bytes_read = bytes_read.saturating_add(bytes.len() as u64);
-                if bytes.is_empty() {
-                    true
-                } else {
-                    let readback = match crate::wal::cloud_segment::inspect_local_bytes(
-                        &path.0, &bytes,
-                    ) {
-                        Ok(readback) => readback,
-                        Err(error) => {
-                            outcome.anomaly = true;
-                            tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
-                            break;
+                let verifier = match (&mut coverage, identity_cache.take()) {
+                    (Some(built), _) => &*built,
+                    (slot @ None, Some(cache)) => slot.insert(VerifiedManifestWalCoverage::open(
+                        std::sync::Arc::clone(&self.state.fs),
+                        crate::cloud_layout::CloudObjectLayout::SST_PREFIX,
+                        &self.state.manifest,
+                        cache,
+                    )),
+                    (None, None) => unreachable!("the prover is built exactly once"),
+                };
+                if let Some(reason) = verifier.first_uncovered(&readback.data_records) {
+                    match FailedWalProof::remember(reason, &mut fingerprint_of) {
+                        Some(proof) => {
+                            proofs.insert(segment_id, proof);
                         }
-                    };
-                    let verifier = match (&mut coverage, identity_cache.take()) {
-                        (Some(built), _) => &*built,
-                        (slot @ None, Some(cache)) => {
-                            slot.insert(VerifiedManifestWalCoverage::open(
-                                std::sync::Arc::clone(&self.state.fs),
-                                crate::cloud_layout::CloudObjectLayout::SST_PREFIX,
-                                &self.state.manifest,
-                                cache,
-                            ))
-                        }
-                        (None, None) => unreachable!("the prover is built exactly once"),
-                    };
-                    match verifier.first_uncovered(&readback.data_records) {
-                        None => true,
-                        Some(reason) => {
-                            match FailedWalProof::remember(reason, &mut fingerprint_of) {
-                                Some(proof) => {
-                                    proofs.insert(segment_id, proof);
-                                }
-                                // Unverifiable: prove it again next pass.
-                                None => {
-                                    proofs.remove(&segment_id);
-                                }
-                            }
-                            false
+                        // Unverifiable: prove it again next pass.
+                        None => {
+                            proofs.remove(&segment_id);
                         }
                     }
+                    break;
                 }
-            };
-            if !retirable {
-                break;
             }
             outcome.retire_below = Some(segment_id + 1);
         }
