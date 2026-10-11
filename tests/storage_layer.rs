@@ -1518,13 +1518,11 @@ mod compression_compatibility {
 
 mod compatibility_fixtures {
     use cntryl_midge::{
-        Engine, EngineHealth, MidgeError, OpenOptions, Query, RecoveryPolicy, TransactionMode,
-        WriteOptions,
+        Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
-    use xxhash_rust::xxh3::xxh3_64;
 
     fn fixtures_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compatibility")
@@ -1583,25 +1581,6 @@ mod compatibility_fixtures {
             }
             other => panic!("expected CompatibilityError, got: {other:?}"),
         }
-    }
-
-    fn logical_rows_digest(rows: &[(bytes::Bytes, bytes::Bytes)]) -> u64 {
-        let mut canonical = Vec::new();
-        for (key, value) in rows {
-            canonical.extend_from_slice(
-                &u32::try_from(key.len())
-                    .expect("fixture key length fits u32")
-                    .to_le_bytes(),
-            );
-            canonical.extend_from_slice(key);
-            canonical.extend_from_slice(
-                &u32::try_from(value.len())
-                    .expect("fixture value length fits u32")
-                    .to_le_bytes(),
-            );
-            canonical.extend_from_slice(value);
-        }
-        xxh3_64(&canonical)
     }
 
     #[test]
