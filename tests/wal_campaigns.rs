@@ -26,8 +26,8 @@
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
     Commit, CrashDevice, Failure, Fate, Fault, FaultEffect, FaultError, FaultId, FaultOp, History,
-    Key, Logging, Operation, Schedule, SimulatedClock, SimulatedObjectStore, StoreImage, Verdict,
-    Violation,
+    Key, Logging, Operation, RequestId, Schedule, SimulatedClock, SimulatedObjectStore, StoreImage,
+    Verdict, Violation,
 };
 use cntryl_midge::{
     Clock, CloudProviderConfig, CloudStorageLocation, CloudWritePolicy, Engine, OpenOptions,
@@ -54,9 +54,16 @@ const PREFIX: &str = "campaign";
 /// Cloud campaigns seal an asynchronous WAL segment every few writes, so
 /// several segments upload at once.
 const SEAL_EVERY_WRITES: usize = 2;
-/// How many times a faulting store's campaign restarts a process whose
-/// open, or whose reads, the store's faults refused, as an operator would.
+/// How many times a faulting store's campaign restarts a process whose open
+/// the store's faults refused, as an operator would.
 const ATTEMPTS: usize = 8;
+/// How long a store must stay quiet before a settled crash, and the longest
+/// a campaign waits for that.
+const SETTLE_QUIET: Duration = Duration::from_millis(100);
+const SETTLE_LIMIT: Duration = Duration::from_secs(5);
+/// Every simulated store failure answers with this text, so a refused open
+/// it caused can be told from one the engine refused on its own.
+const STORE_FAILURE: &str = "simulated provider failure";
 /// What a faulting store does to WAL and SST uploads and deletes: mostly
 /// answer, else fail before or after the effect, lose the answer, or land
 /// late. Reads stay eager: a refused read only makes an open fail closed.
@@ -179,6 +186,9 @@ enum Op {
     /// Every request the store holds back lands now, including those of
     /// processes that have since crashed.
     LandLate,
+    /// Wait until the store has been quiet for a while: background uploads
+    /// and publications have finished or given up.
+    Settle,
 }
 
 /// `SplitMix64`, so a seed fixes a workload on every platform.
@@ -233,9 +243,9 @@ enum Profile {
     /// best-effort writes, no asynchronous deletes, no process crash before
     /// a power loss.
     CloudControl,
-    /// Mostly asynchronous cloud writes with frequent flushes, so several
-    /// segments upload at once, fresh-cache takeovers and late requests
-    /// landing, against a faulting store.
+    /// Mostly asynchronous cloud writes, flushes, waits for the store to
+    /// settle, fresh-cache takeovers and late requests landing, against a
+    /// faulting store.
     CloudFaults,
 }
 
@@ -316,7 +326,8 @@ impl Profile {
             Self::CloudFaults => match rng.below(16) {
                 0..=6 => put(0, Durability::Buffered),
                 7 => put(0, Durability::Sync),
-                8..=11 => Op::Flush { family: 0 },
+                8..=9 => Op::Flush { family: 0 },
+                10..=11 => Op::Settle,
                 12..=13 => Op::FreshCache,
                 14 => Op::LandLate,
                 _ => Op::CleanRestart,
@@ -340,7 +351,7 @@ impl Profile {
 }
 
 /// What a campaign found.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FindingKind {
     /// Recovered data no allowed history explains.
     Data(Violation),
@@ -360,14 +371,6 @@ impl FindingKind {
     fn resurrects(&self) -> bool {
         matches!(self, Self::Data(violation) if violation.keys.iter().any(|mismatch| {
             mismatch.observed.is_some() && mismatch.allowed == [None]
-        }))
-    }
-
-    /// Whether a write survived that no allowed history keeps: a later
-    /// write outlived an earlier one it should not have.
-    fn keeps_unallowed_write(&self) -> bool {
-        matches!(self, Self::Data(violation) if violation.keys.iter().any(|mismatch| {
-            mismatch.observed.is_some() && !mismatch.allowed.contains(&mismatch.observed)
         }))
     }
 
@@ -465,13 +468,11 @@ struct Image {
     values: u64,
     /// The operations after this point, after the recovery itself.
     remaining: Vec<Op>,
-    /// Whether this point follows a crash, rather than a clean shutdown or
-    /// the start of the workload.
-    crashed: bool,
+    /// How the engine stopped before this point, so a replay recovers and
+    /// judges the same way.
+    stop: Stop,
     /// The lease clock's reading, so a replay never sees a lease record
-    /// stamped in its future. Images without one were stamped by the system
-    /// clock.
-    #[serde(default)]
+    /// stamped in its future.
     lease_clock_millis: u64,
     /// The object store's contents and request counts.
     store: StoreImage,
@@ -504,8 +505,21 @@ struct Config {
     /// The lease TTL, which sets how often renewals interleave with crashes.
     lease_ttl_millis: u64,
     mode: Mode,
-    /// Fail, lose and delay WAL and SST requests by the workload's seed.
-    store_faults: bool,
+    store_faults: StoreFaults,
+}
+
+/// What the object store does to WAL and SST uploads and deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum StoreFaults {
+    None,
+    /// Draw each request's fate from [`STORE_FATES`] by the workload's seed.
+    Seeded,
+    /// The first `attempts` uploads of WAL segment `segment` fail, in every
+    /// writer epoch.
+    FailSegment {
+        segment: u64,
+        attempts: u64,
+    },
 }
 
 impl Default for Config {
@@ -515,7 +529,7 @@ impl Default for Config {
             clear_stale_lease_lock: true,
             lease_ttl_millis: LEASE_TTL_MILLIS,
             mode: Mode::Local,
-            store_faults: false,
+            store_faults: StoreFaults::None,
         }
     }
 }
@@ -540,21 +554,41 @@ impl Config {
 
     /// How the store decides fates for a workload drawn from `seed`.
     fn schedule(self, seed: u64) -> Schedule {
-        if self.store_faults {
-            Schedule::Seeded {
+        match self.store_faults {
+            StoreFaults::None => Schedule::Eager,
+            StoreFaults::Seeded => Schedule::Seeded {
                 seed,
                 fates: STORE_FATES.to_vec(),
                 scope: vec![format!("{PREFIX}/wal/epochs/"), format!("{PREFIX}/sst/")],
                 operations: vec![Operation::Put, Operation::Delete],
-            }
-        } else {
-            Schedule::Eager
+            },
+            StoreFaults::FailSegment { segment, attempts } => Schedule::Scripted(
+                (1..=8u64)
+                    .flat_map(|epoch| {
+                        (0..attempts).map(move |occurrence| {
+                            let key = format!("{PREFIX}/wal/epochs/{epoch:020}/{segment:020}.wal");
+                            (
+                                RequestId {
+                                    operation: Operation::Put,
+                                    key,
+                                    occurrence,
+                                },
+                                Fate::FailBefore(Failure::Server),
+                            )
+                        })
+                    })
+                    .collect(),
+            ),
         }
+    }
+
+    fn faulting(self) -> bool {
+        self.store_faults != StoreFaults::None
     }
 }
 
 /// How the engine stopped before a recovery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Stop {
     Clean,
     ProcessCrash,
@@ -598,7 +632,7 @@ impl Campaign {
             names: BTreeMap::new(),
             values: 0,
             remaining: Vec::new(),
-            crashed: false,
+            stop: Stop::Clean,
             lease_clock_millis: 0,
             store: StoreImage::default(),
             seed,
@@ -697,7 +731,7 @@ impl Campaign {
     }
 
     /// Record a recovery point for replay.
-    fn snapshot(&mut self, remaining: &[Op], crashed: bool) {
+    fn snapshot(&mut self, remaining: &[Op], stop: Stop) {
         let image = Image {
             files: self.device.files(),
             history: self.history.clone(),
@@ -705,7 +739,7 @@ impl Campaign {
             names: self.names(),
             values: self.values,
             remaining: remaining.to_vec(),
-            crashed,
+            stop,
             lease_clock_millis: self.clock.now_millis(),
             store: self.store.image(),
             seed: self.seed,
@@ -741,9 +775,17 @@ impl Campaign {
         }
         let mut opened = self.open(stop);
         let mut attempts = 1;
-        while opened.is_err() && self.config.store_faults && attempts < ATTEMPTS {
-            // The refused process is gone and may have left its lease
-            // behind; the next one takes it over.
+        let mut refused_by_store = false;
+        while let Err(error) = &opened {
+            // A refusal the store's faults caused is retried by a new
+            // process; one it left holding the lease is taken over.
+            let message = error.to_string();
+            refused_by_store |= message.contains(STORE_FAILURE);
+            let retry = message.contains(STORE_FAILURE)
+                || (refused_by_store && matches!(error, cntryl_midge::MidgeError::LeaseHeld(_)));
+            if !self.config.faulting() || !retry || attempts == ATTEMPTS {
+                break;
+            }
             attempts += 1;
             self.view.process_crash();
             self.view = self.store.process();
@@ -755,6 +797,21 @@ impl Campaign {
         self.verify(stop)?;
         self.reused_segment()
             .map_or(Ok(()), |reuse| Err(FindingKind::SegmentReuse(reuse)))
+    }
+
+    /// Wait until the store's trace has stopped growing for
+    /// [`SETTLE_QUIET`], or [`SETTLE_LIMIT`] has passed.
+    fn settle(&self) {
+        let deadline = std::time::Instant::now() + SETTLE_LIMIT;
+        let mut seen = self.store.trace().len();
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(SETTLE_QUIET);
+            let now = self.store.trace().len();
+            if now == seen {
+                return;
+            }
+            seen = now;
+        }
     }
 
     /// Open the engine once, clearing a lease lock #811 resurrected.
@@ -776,25 +833,6 @@ impl Campaign {
         }
     }
 
-    /// Read `key`; a faulting store's refused reads are retried, as reads
-    /// change nothing.
-    fn read(
-        &self,
-        tx: &cntryl_midge::Transaction,
-        key: u8,
-    ) -> Result<Option<Vec<u8>>, FindingKind> {
-        let mut attempts = 1;
-        loop {
-            match tx.get(&[key]) {
-                Ok(value) => return Ok(value.map(|value| value.to_vec())),
-                Err(error) if !self.config.store_faults || attempts == ATTEMPTS => {
-                    return Err(FindingKind::Refused(format!("read: {error}")));
-                }
-                Err(_) => attempts += 1,
-            }
-        }
-    }
-
     /// Read every key the workload can write, in every family recovery
     /// holds, and judge it.
     fn verify(&mut self, stop: Stop) -> Result<(), FindingKind> {
@@ -810,8 +848,11 @@ impl Campaign {
                 .begin_tx(handle.id(), TransactionMode::ReadOnly)
                 .expect("read");
             for key in 0..KEYS {
-                if let Some(value) = self.read(&tx, key)? {
-                    observed.insert((handle.name().to_string(), vec![key]), value);
+                let value = tx
+                    .get(&[key])
+                    .map_err(|error| FindingKind::Refused(format!("read: {error}")))?;
+                if let Some(value) = value {
+                    observed.insert((handle.name().to_string(), vec![key]), value.to_vec());
                 }
             }
         }
@@ -871,12 +912,13 @@ impl Campaign {
             // The fenced process can no longer reach the device or the store.
             drop(self.engine.take());
             if stop == Stop::FreshCache {
-                self.names_before = self.names();
+                // A new host's disk has given no names yet.
+                self.names_before = BTreeMap::new();
                 self.device = CrashDevice::new();
                 self.restored_names = BTreeMap::new();
             }
         }
-        self.snapshot(remaining, stop != Stop::Clean);
+        self.snapshot(remaining, stop);
         self.recover(stop)
     }
 
@@ -917,6 +959,7 @@ impl Campaign {
             Op::LandLate => {
                 let _ = self.store.land_late_effects();
             }
+            Op::Settle => self.settle(),
             Op::FailWalRemoval { nth } => {
                 let fault = self.device.inject(Fault {
                     op: FaultOp::RemoveFile,
@@ -945,7 +988,7 @@ impl Campaign {
         let shutdown = engine.shutdown(Duration::from_secs(10));
         // A faulting store may fail a shutdown's final upload.
         assert!(
-            shutdown.is_ok() || self.config.store_faults,
+            shutdown.is_ok() || self.config.faulting(),
             "final shutdown: {shutdown:?}"
         );
         Ok(())
@@ -954,7 +997,7 @@ impl Campaign {
     /// Run `workload` on a fresh device; return the first finding.
     fn run(seed: u64, workload: &[Op], config: Config) -> Result<(), Box<Finding>> {
         let mut campaign = Self::new(config, seed);
-        campaign.snapshot(workload, false);
+        campaign.snapshot(workload, Stop::Clean);
         campaign.drive(workload, Stop::Clean).map_err(|kind| {
             Box::new(Finding {
                 image: campaign.image_for(&kind),
@@ -969,12 +1012,7 @@ impl Campaign {
     /// Replay an image from its recovery point; return what it finds.
     fn replay(image: &Image) -> Result<(), FindingKind> {
         let mut campaign = Self::from_image(image);
-        let stop = if image.crashed {
-            Stop::PowerLoss
-        } else {
-            Stop::Clean
-        };
-        campaign.drive(&image.remaining, stop)
+        campaign.drive(&image.remaining, image.stop)
     }
 }
 
@@ -988,11 +1026,38 @@ fn campaign(
     let found = seeds
         .map(|seed| (seed, profile.workload(seed, len, config.mode)))
         .find_map(|(seed, workload)| Campaign::run(seed, &workload, config).err())?;
-    Some(shrink(*found, config))
+    let class = found.kind.clone();
+    Some(shrink(*found, config, |smaller| {
+        smaller.kind.same_class(&class)
+    }))
 }
 
-/// Drop operations one at a time while the same class of finding remains.
-fn shrink(mut finding: Finding, config: Config) -> Finding {
+/// Run `profile` over `seeds`; return the first finding `known` does not
+/// explain, shrunk, and how many known findings came before it.
+fn campaign_beyond(
+    profile: Profile,
+    seeds: std::ops::Range<u64>,
+    len: usize,
+    config: Config,
+    known: impl Fn(&Finding) -> bool,
+) -> (Option<Finding>, usize) {
+    let mut known_findings = 0;
+    for seed in seeds {
+        let workload = profile.workload(seed, len, config.mode);
+        match Campaign::run(seed, &workload, config) {
+            Err(finding) if known(&finding) => known_findings += 1,
+            Err(finding) => {
+                let shrunk = shrink(*finding, config, |smaller| !known(smaller));
+                return (Some(shrunk), known_findings);
+            }
+            Ok(()) => {}
+        }
+    }
+    (None, known_findings)
+}
+
+/// Drop operations one at a time while `keep` holds for the smaller finding.
+fn shrink(mut finding: Finding, config: Config, keep: impl Fn(&Finding) -> bool) -> Finding {
     let mut index = 0;
     let mut attempts = 0;
     while index < finding.workload.len() && attempts < 80 {
@@ -1000,7 +1065,7 @@ fn shrink(mut finding: Finding, config: Config) -> Finding {
         let mut candidate = finding.workload.clone();
         candidate.remove(index);
         match Campaign::run(finding.seed, &candidate, config) {
-            Err(smaller) if smaller.kind.same_class(&finding.kind) => finding = *smaller,
+            Err(smaller) if keep(&smaller) => finding = *smaller,
             _ => index += 1,
         }
     }
@@ -1099,8 +1164,19 @@ fn assert_clean(case: &str, finding: Option<Finding>) {
 }
 
 /// Assert `finding` matches `signature`, save its image, and prove the saved
-/// image replays it.
+/// image replays the same class of finding.
 fn assert_reproduced(case: &str, finding: Option<Finding>, signature: impl Fn(&Finding) -> bool) {
+    assert_replays(case, finding, signature, FindingKind::same_class);
+}
+
+/// Assert `finding` matches `signature`, save its image, and prove the saved
+/// image replays a finding `same` accepts.
+fn assert_replays(
+    case: &str,
+    finding: Option<Finding>,
+    signature: impl Fn(&Finding) -> bool,
+    same: impl Fn(&FindingKind, &FindingKind) -> bool,
+) {
     let finding = finding.unwrap_or_else(|| panic!("{case}: the campaign found nothing"));
     assert!(signature(&finding), "{case}: found {finding:#?}");
     let image = saved_and_loaded(case, &finding);
@@ -1108,7 +1184,7 @@ fn assert_reproduced(case: &str, finding: Option<Finding>, signature: impl Fn(&F
     assert!(
         replayed
             .as_ref()
-            .is_err_and(|kind| kind.same_class(&finding.kind)),
+            .is_err_and(|kind| same(kind, &finding.kind)),
         "{case}: the saved image did not reproduce {:?}: {replayed:?}",
         finding.kind
     );
@@ -1352,7 +1428,7 @@ fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
 }
 
 #[test]
-fn should_find_no_violation_when_provider_writes_survive_crashes_and_takeovers() {
+fn should_find_no_violation_when_provider_writes_survive_takeovers() {
     // Arrange: segment-name reuse after restarts is the known
     // `restarted-segment-id`, reported by its own campaign.
     let workloads = control_seeds(16);
@@ -1385,22 +1461,83 @@ fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
     assert_clean("simulated-cloud-control", finding);
 }
 
+/// `out-of-order-publication` (#818): a fresh-cache takeover recovered a
+/// state that WAL commits surviving out of order explain, with every
+/// promised commit kept: a later write survived an earlier one the catalog
+/// skipped. Any WAL hole at a fresh-cache takeover counts; the ledger and
+/// contiguous publication of stage 2 remove them all.
+fn publishes_out_of_order(finding: &Finding) -> bool {
+    let FindingKind::Data(violation) = &finding.kind else {
+        return false;
+    };
+    finding.image.stop == Stop::FreshCache
+        && violation.lost_families.is_empty()
+        && violation.keys.iter().all(|mismatch| {
+            finding
+                .image
+                .history
+                .cloud
+                .allowed_out_of_order(&mismatch.key)
+                .contains(&mismatch.observed)
+        })
+}
+
 #[test]
-fn should_reproduce_out_of_order_publication_when_cloud_uploads_fail() {
-    // Arrange: WAL and SST uploads fail before or after their effect, lose
-    // their answer or land late; `out-of-order-publication` (#818).
+fn should_reproduce_out_of_order_publication_when_a_segment_exhausts_its_uploads() {
+    // Arrange: every upload attempt of segment 1 fails, and segments seal
+    // every two asynchronous writes, so later segments upload past it.
     let config = Config {
         segment_reuse: false,
-        store_faults: true,
+        store_faults: StoreFaults::FailSegment {
+            segment: 1,
+            attempts: 3,
+        },
+        ..Config::cloud(Mode::ProviderCloud)
+    };
+    let mut workload: Vec<Op> = (0..KEYS)
+        .map(|key| Op::Put {
+            family: 0,
+            key,
+            durability: Durability::Buffered,
+        })
+        .collect();
+    workload.extend([Op::Settle, Op::FreshCache]);
+
+    // Act
+    let finding = Campaign::run(0, &workload, config)
+        .err()
+        .map(|finding| *finding);
+
+    // Assert
+    assert_replays(
+        "out-of-order-publication",
+        finding,
+        publishes_out_of_order,
+        |replayed, found| replayed == found,
+    );
+}
+
+#[test]
+fn should_find_only_out_of_order_publication_when_cloud_uploads_fail() {
+    // Arrange: WAL and SST uploads and deletes fail before or after their
+    // effect, lose their answer or land late. `out-of-order-publication`
+    // is known; any other finding is new.
+    let workloads = control_seeds(16);
+    let config = Config {
+        segment_reuse: false,
+        store_faults: StoreFaults::Seeded,
         ..Config::cloud(Mode::ProviderCloud)
     };
 
     // Act
-    let finding = campaign(Profile::CloudFaults, DETECTION_SEEDS, 12, config);
+    let (finding, _known) = campaign_beyond(
+        Profile::CloudFaults,
+        workloads,
+        12,
+        config,
+        publishes_out_of_order,
+    );
 
-    // Assert: after a fresh-cache takeover, a later write survived an
-    // earlier one the catalog skipped.
-    assert_reproduced("out-of-order-publication", finding, |finding| {
-        finding.kind.keeps_unallowed_write() && finding.workload.contains(&Op::FreshCache)
-    });
+    // Assert
+    assert_clean("cloud-faults", finding);
 }

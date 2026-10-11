@@ -126,12 +126,18 @@ asynchronous WAL segment every two writes so several upload at once:
   it is judged against a cloud history that only such takeovers rebase. A
   recovery from a surviving cache still removes the unpromised WAL commits it
   lost from the cloud history.
-- **Faults.** The faulting campaign fails WAL and SST uploads and deletes
+- **Faults.** The faulting control fails WAL and SST uploads and deletes
   before or after their effect, loses their answers, delays them and lands
-  them late, and retries opens the faults refuse, as an operator would. It
-  reproduces `out-of-order-publication` end to end: a segment exhausts its
-  upload retries, the next one is published past it, and a fresh-cache
+  them late, waits for the store to settle before some crashes, and retries
+  opens the store's faults refuse, as an operator would. Any finding other
+  than the known `out-of-order-publication` fails it.
+- **`out-of-order-publication`** is reproduced end to end and
+  deterministically: segment 1 fails every upload attempt, the queue gives it
+  up, segment 2 is published past it, the store settles, and a fresh-cache
   takeover recovers the later writes without the earlier ones.
+- **Images** record how the engine stopped, so a replay judges a fresh-cache
+  takeover against the cloud history, and keep the store's held-back
+  requests, so a replay can land them.
 - **Simulated cloud** keeps its lease and shared metadata in the cache, so a
   fresh cache would lose its whole cloud; it has no fresh-cache takeovers.
 
