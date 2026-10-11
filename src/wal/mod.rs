@@ -34,6 +34,7 @@ mod config;
 pub mod encoding;
 pub mod frame;
 pub(crate) mod fs;
+pub(crate) mod ledger;
 pub mod policy;
 pub(crate) mod publish;
 pub(crate) mod recovery;
