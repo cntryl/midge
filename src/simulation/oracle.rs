@@ -31,6 +31,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod histories;
+pub use histories::{CommitId, Histories, Recovery};
+
 /// A key in one column family.
 pub type Key = (String, Vec<u8>);
 
@@ -214,7 +217,7 @@ impl History {
     /// shows it is then wrongly a violation. An unacknowledged commit kept
     /// below `index` stays optional, so it may still surface later without
     /// one.
-    pub fn forget_wal_from(&mut self, index: usize) {
+    fn forget_wal_from(&mut self, index: usize) {
         let mut kept = Vec::new();
         let mut renumbered = BTreeMap::new();
         for (position, commit) in self.commits.drain(..).enumerate() {
@@ -240,8 +243,7 @@ impl History {
     /// commits apply, and every other one may survive or not on its own. A
     /// recovery these explain but [`Self::check`] rejects has a hole: a
     /// later commit survived an earlier, lost one.
-    #[must_use]
-    pub fn allowed_out_of_order(&self, key: &Key) -> Vec<Option<Vec<u8>>> {
+    fn allowed_out_of_order(&self, key: &Key) -> Vec<Option<Vec<u8>>> {
         let mut allowed = vec![self.base.get(key).cloned()];
         for (index, commit) in self.commits.iter().enumerate() {
             if commit.family != key.0 {
@@ -266,15 +268,8 @@ impl History {
     }
 
     /// How many commits the history holds.
-    #[must_use]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.commits.len()
-    }
-
-    /// Whether the history holds no commits.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.commits.is_empty()
     }
 
     fn status(&self, index: usize, prefix: usize) -> Status {

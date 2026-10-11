@@ -1,7 +1,7 @@
 //! The oracle against the probes that disqualified the earlier draft's
 //! subset semantics (#810 finding 8).
 
-use super::{Commit, History, Key, Logging, Verdict};
+use super::{Commit, Histories, History, Key, Logging, Recovery, Verdict};
 use std::collections::{BTreeMap, BTreeSet};
 
 const FAMILY: &str = "default";
@@ -391,4 +391,95 @@ fn should_not_explain_lost_promise_out_of_order_when_a_synced_commit_is_lost() {
 
     // Assert
     assert_eq!(out_of_order, vec![Some(b"v1".to_vec())]);
+}
+
+#[test]
+fn should_not_promise_a_lost_commit_when_a_fresh_cache_follows_a_surviving_one() {
+    // Arrange: an unpromised put is lost at a surviving-cache recovery, and
+    // a later flush promises only what remained.
+    let mut histories = Histories::new(BTreeMap::new(), families());
+    histories.commit(put("k", "v1"));
+    histories
+        .check(Recovery::SurvivingCache, BTreeMap::new(), families())
+        .expect("losing an unpromised put is allowed");
+    histories.flushed(FAMILY);
+
+    // Act
+    let fresh = histories.check(Recovery::FreshCache, BTreeMap::new(), families());
+
+    // Assert
+    assert_eq!(fresh, Ok(()));
+}
+
+#[test]
+fn should_require_promised_commit_when_a_fresh_cache_loses_it() {
+    // Arrange: a synced put survives the surviving-cache recovery.
+    let mut histories = Histories::new(BTreeMap::new(), families());
+    let synced = histories.commit(put("k", "v1"));
+    histories.synced(synced);
+    histories
+        .check(
+            Recovery::SurvivingCache,
+            observed(&[("k", "v1")]),
+            families(),
+        )
+        .expect("the synced put survives");
+
+    // Act
+    let fresh = histories.check(Recovery::FreshCache, BTreeMap::new(), families());
+
+    // Assert
+    assert!(fresh.is_err(), "{fresh:?}");
+}
+
+#[test]
+fn should_allow_unpromised_served_value_to_vanish_when_a_fresh_cache_takes_over() {
+    // Arrange: a surviving cache serves an unpromised put.
+    let mut histories = Histories::new(BTreeMap::new(), families());
+    histories.commit(put("k", "v1"));
+    histories
+        .check(
+            Recovery::SurvivingCache,
+            observed(&[("k", "v1")]),
+            families(),
+        )
+        .expect("served from the surviving cache");
+
+    // Act
+    let fresh = histories.check(Recovery::FreshCache, BTreeMap::new(), families());
+
+    // Assert
+    assert_eq!(fresh, Ok(()));
+}
+
+#[test]
+fn should_rebase_cloud_history_when_a_fresh_cache_takes_over() {
+    // Arrange: a fresh-cache takeover recovers an unpromised put.
+    let mut histories = Histories::new(BTreeMap::new(), families());
+    histories.commit(put("k", "v1"));
+    histories
+        .check(Recovery::FreshCache, observed(&[("k", "v1")]), families())
+        .expect("the put survived");
+
+    // Act: the next fresh cache must keep what the last one served.
+    let lost = histories.check(Recovery::FreshCache, BTreeMap::new(), families());
+
+    // Assert
+    assert!(lost.is_err(), "{lost:?}");
+}
+
+#[test]
+fn should_explain_hole_when_a_later_put_outlives_an_earlier_one() {
+    // Arrange
+    let mut histories = Histories::new(BTreeMap::new(), families());
+    histories.commit(put("a", "v1"));
+    histories.commit(put("b", "v2"));
+
+    // Act
+    let violation = histories
+        .check(Recovery::FreshCache, observed(&[("b", "v2")]), families())
+        .expect_err("a hole");
+
+    // Assert
+    assert!(histories.explains_out_of_order(&violation));
 }

@@ -102,6 +102,10 @@ fn stable_key(key: &str) -> String {
         .join("/")
 }
 
+/// The text every failed request reports, so a caller can tell a refusal
+/// the store's faults caused from one the engine made on its own.
+pub const FAILURE_MESSAGE: &str = "simulated provider failure";
+
 /// The error class a failed request reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Failure {
@@ -396,7 +400,7 @@ fn read_range(
 /// `failure` reported in the shape of `event`'s answer.
 fn failed(event: CloudEvent, failure: Failure) -> CloudEvent {
     let error = || {
-        let message = "simulated provider failure".to_string();
+        let message = FAILURE_MESSAGE.to_string();
         match failure {
             Failure::Server => CloudError::ServerError(message),
             Failure::Timeout => CloudError::Timeout(message),

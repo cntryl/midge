@@ -205,14 +205,16 @@ pub mod __internal {
     pub mod simulation {
         pub use crate::simulation::clock::SimulatedClock;
         pub use crate::simulation::crash_fs::{
-            CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp,
+            CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultId, FaultOp, Subject,
         };
         #[cfg(feature = "cloud-common")]
         pub use crate::simulation::object_store::{
             Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore, StoreImage,
+            FAILURE_MESSAGE,
         };
         pub use crate::simulation::oracle::{
-            Commit, History, Key, Logging, Mismatch, Verdict, Violation,
+            Commit, CommitId, Histories, History, Key, Logging, Mismatch, Recovery, Verdict,
+            Violation,
         };
     }
     pub mod types {
