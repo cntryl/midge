@@ -297,9 +297,7 @@ mod tests {
     #[test]
     fn should_reject_control_object_before_reading_when_shared_budget_is_exhausted() {
         // Arrange
-        let directory = tempfile::tempdir().unwrap();
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::with_mock()),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -368,10 +366,8 @@ mod ownership_tests {
     #[test]
     fn should_retain_control_upload_charge_after_timeout_until_provider_releases_body() {
         // Arrange
-        let directory = tempfile::tempdir().unwrap();
         let provider = Arc::new(PendingUpload::default());
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -407,10 +403,8 @@ mod ownership_tests {
         // Arrange
         let _guard = crate::failpoints::test_failpoint_guard();
         let _scenario = fail::FailScenario::setup();
-        let directory = tempfile::tempdir().unwrap();
         let provider = Arc::new(PendingUpload::default());
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -451,10 +445,8 @@ mod ownership_tests {
     #[test]
     fn should_not_start_control_upload_when_admission_fails() {
         // Arrange
-        let directory = tempfile::tempdir().unwrap();
         let provider = Arc::new(PendingUpload::default());
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );

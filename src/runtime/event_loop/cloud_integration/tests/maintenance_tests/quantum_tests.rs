@@ -100,11 +100,7 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
         calls: Arc::new(AtomicUsize::new(0)),
         pause: None,
     });
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        el.state.db_path.join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -237,11 +233,7 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
         calls: Arc::new(AtomicUsize::new(0)),
         pause: None,
     });
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        el.state.db_path.join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -359,11 +351,7 @@ fn should_join_owned_wal_prune_read_before_acknowledging_shutdown() -> crate::co
             claimed: std::sync::atomic::AtomicBool::new(false),
         })),
     });
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        el.state.db_path.join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));

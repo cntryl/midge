@@ -2745,7 +2745,7 @@ mod failure_injection {
     fn discard_local_cloud_data_cache(db_path: &Path) {
         // The filesystem simulator keeps metadata authority local. Exercise loss
         // of every data cache while preserving that simulator metadata contract.
-        for name in ["sst", "wal", "hybrid_local", "txn", "cloud_recovery"] {
+        for name in ["sst", "wal", "txn", "cloud_recovery"] {
             let path = db_path.join(name);
             if path.exists() {
                 std::fs::remove_dir_all(path).expect("discard local data cache");
@@ -11331,10 +11331,6 @@ mod hybrid_storage {
         );
 
         assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
-        assert_eq!(
-            count_files_recursive(&temp_dir.path().join("hybrid_local/sst")),
-            0
-        );
         assert!(count_files_recursive(&temp_dir.path().join("cloud_store/sst")) > 0);
     }
 

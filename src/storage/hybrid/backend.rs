@@ -104,18 +104,16 @@ pub struct UploadState {
 
 pub use crate::types::HybridStorageBudgetSnapshot;
 
-/// Hybrid storage combining local filesystem and cloud backends
+/// Cloud object stores coordinated with the local disk budget.
 ///
 /// Managed by a Storage Budget Actor to enforce disk constraints, watermarks,
-/// and coordination between local caching and cloud durability.
+/// and coordination between resident local files and cloud durability.
 ///
 /// `CloudAsync` Durability:
 /// - Tracks pending WAL segment uploads
 /// - Emits `CloudAck` when cloud confirms durability
 /// - Handles retries and failure reporting
 struct ObjectStores {
-    /// Legacy local immutable copies are swept during startup, then this handle is retired.
-    local: parking_lot::RwLock<Option<Arc<dyn StorageBackend>>>,
     sst: Arc<dyn StorageBackend>,
     wal: Arc<dyn StorageBackend>,
     control: Arc<dyn StorageBackend>,
@@ -136,8 +134,8 @@ pub struct HybridStorage {
     counters: crate::telemetry::CounterSink,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
-    /// Runtime SST files are disposable after remote publication. Avoid a
-    /// second full local copy in the raw object backend for these engines.
+    /// Runtime SST files are disposable after remote publication, so the
+    /// resident copy is evicted once its object is published.
     ephemeral_sst_cache: std::sync::atomic::AtomicBool,
     /// Pending WAL segment uploads (`CloudAsync` mode)
     upload_queue: Arc<Mutex<UploadQueue>>,
@@ -181,12 +179,10 @@ impl HybridStorage {
     /// as soon as they occur (in addition to internal bookkeeping), allowing the
     /// runtime to react without polling.
     pub fn new_with_event_sender(
-        local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         external_event_tx: cb::Sender<StorageEvent>,
     ) -> Self {
         Self::with_policy_and_event_sender(
-            local,
             cloud,
             policy::StorageBudgetPolicy::default(),
             Some(external_event_tx),
@@ -195,7 +191,6 @@ impl HybridStorage {
 
     /// Create hybrid storage with independently managed cloud object classes.
     pub(crate) fn new_with_class_stores_and_event_sender(
-        local: Arc<dyn StorageBackend>,
         wal_cloud: Arc<dyn StorageBackend>,
         sst_cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
@@ -203,7 +198,6 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Self {
         Self::with_class_stores_policy_event_sender_and_limits(
-            local,
             wal_cloud,
             sst_cloud,
             control_cloud,
@@ -219,23 +213,20 @@ impl HybridStorage {
     /// Create a new hybrid storage with a custom storage budget policy
     #[cfg(test)]
     pub fn with_policy(
-        local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
     ) -> Self {
-        Self::with_policy_and_event_sender(local, cloud, policy, None)
+        Self::with_policy_and_event_sender(cloud, policy, None)
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_upload_limits(
-        local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
         upload_entries: usize,
         upload_bytes: u64,
     ) -> Self {
         Self::with_policy_event_sender_and_limits(
-            local,
             cloud,
             policy,
             None,
@@ -248,13 +239,11 @@ impl HybridStorage {
     }
 
     pub fn with_policy_and_event_sender(
-        local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
         external_event_tx: Option<cb::Sender<StorageEvent>>,
     ) -> Self {
         Self::with_policy_event_sender_and_limits(
-            local,
             cloud,
             policy,
             external_event_tx,
@@ -263,14 +252,12 @@ impl HybridStorage {
     }
 
     pub(crate) fn with_policy_event_sender_and_limits(
-        local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
         external_event_tx: Option<cb::Sender<StorageEvent>>,
         limits: HybridQueueLimits,
     ) -> Self {
         Self::with_class_stores_policy_event_sender_and_limits(
-            local,
             Arc::clone(&cloud),
             Arc::clone(&cloud),
             cloud,
@@ -281,7 +268,6 @@ impl HybridStorage {
     }
 
     pub(crate) fn with_class_stores_policy_event_sender_and_limits(
-        local: Arc<dyn StorageBackend>,
         wal_cloud: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
@@ -323,7 +309,6 @@ impl HybridStorage {
         Self {
             counters,
             stores: ObjectStores {
-                local: parking_lot::RwLock::new(Some(local)),
                 sst: cloud,
                 wal: wal_cloud,
                 control: control_cloud,
@@ -408,16 +393,6 @@ impl HybridStorage {
                 ))
             })
     }
-    fn local_store_if_active(&self) -> Option<Arc<dyn StorageBackend>> {
-        self.stores.local.read().clone()
-    }
-
-    /// Startup calls this only after legacy local SST sweep and WAL replay.
-    pub(crate) fn retire_legacy_local_store(&self) {
-        debug_assert!(self.ephemeral_sst_cache_enabled());
-        self.stores.local.write().take();
-    }
-
     /// Close upload admission and wait for every accepted WAL upload attempt.
     /// The caller must retain the writer lease until this returns.
     pub(crate) fn shutdown_wal_upload_worker(&self) {
@@ -444,14 +419,6 @@ impl HybridStorage {
 /// a store handle, so the accessors stay behind `cfg(test)`.
 #[cfg(test)]
 impl HybridStorage {
-    pub(crate) fn callback_timeout(&self) -> Duration {
-        self.callback_timeout
-    }
-
-    pub(crate) fn local_store(&self) -> Arc<dyn StorageBackend> {
-        self.local_store_if_active().expect("local store active")
-    }
-
     pub(crate) fn sst_store(&self) -> &Arc<dyn StorageBackend> {
         &self.stores.sst
     }

@@ -89,15 +89,11 @@ mod tests {
         )?;
         crate::metadata::ManifestPersistence::save(db_path, &state.manifest)
             .map_err(MidgeError::Internal)?;
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            db_path.join("hybrid-local"),
-        )?);
         let data_cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             "data-dispatcher".to_string(),
         ));
         let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             data_cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -159,7 +155,6 @@ mod tests {
             Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
         el.cloud_coordinator.hybrid_storage =
             Some(Arc::new(crate::storage::HybridStorage::with_policy(
-                local.clone(),
                 local,
                 crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             )));

@@ -321,11 +321,6 @@ impl EventLoop {
                     tracing::warn!(%error, sst_name = name, "retaining local SST cache after failed eviction");
                 }
             }
-            if let Err(error) =
-                storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))
-            {
-                tracing::warn!(%error, sst_name = name, "retaining secondary SST cache after failed eviction");
-            }
         }
     }
 }

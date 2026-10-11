@@ -121,9 +121,6 @@ impl PublicationFixture {
         let (tx, _rx) = crossbeam::channel::unbounded();
         let hybrid = Arc::new(
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-                Arc::new(crate::storage::filesystem::FileSystem::new(
-                    directory.path().join("local"),
-                )?),
                 cloud.clone(),
                 cloud.clone(),
                 cloud,
@@ -132,7 +129,6 @@ impl PublicationFixture {
             ),
         );
         hybrid.enable_ephemeral_sst_cache(1024 * 1024);
-        hybrid.retire_legacy_local_store();
         let budget = ResourceBudget::new(2 * 1024 * 1024);
         let mut outputs = Vec::new();
         let mut originals = Vec::new();

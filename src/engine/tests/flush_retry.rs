@@ -216,9 +216,6 @@ fn fixture_storage(
     crossbeam::channel::Receiver<StorageEvent>,
 )> {
     let cloud_root = crate::storage::simulated::simulated_cloud_root(directory);
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        directory.join("hybrid_local"),
-    )?);
     let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
         cloud_root.clone(),
     )?);
@@ -231,7 +228,6 @@ fn fixture_storage(
     );
     let storage = Arc::new(
         crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-            local,
             cloud.clone(),
             sst,
             cloud,

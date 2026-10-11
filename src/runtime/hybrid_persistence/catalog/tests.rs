@@ -118,7 +118,6 @@ impl CatalogExpiryFixture {
             delete_submissions: std::sync::atomic::AtomicUsize::new(0),
         });
         let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
@@ -443,12 +442,8 @@ fn wait_prune_completion(storage: &CloudPersistence) -> crate::storage::StorageO
     }
 }
 
-fn successor_storage(
-    root: &std::path::Path,
-    remote: &Arc<dyn crate::storage::StorageBackend>,
-) -> CloudPersistence {
+fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudPersistence {
     let successor = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(root.join("successor")).unwrap()),
         Arc::clone(remote),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -507,7 +502,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     fixture.validity.expire_for_test();
     let remote: Arc<dyn crate::storage::StorageBackend> =
         Arc::new(CloudStorage::new(fixture.provider.clone(), String::new()));
-    let successor = successor_storage(fixture.directory.path(), &remote);
+    let successor = successor_storage(&remote);
     let catalog = successor.fence_cloud_wal_catalog(8).unwrap();
     assert!(strict_recovery(&retained, &remote, &catalog)
         .plan
@@ -566,7 +561,6 @@ fn should_share_catalog_budget_when_maintenance_is_not_yet_configured() {
     let directory = tempfile::tempdir().unwrap();
     let local = Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local.clone(),
         local,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -621,9 +615,7 @@ fn should_preserve_catalog_encoding_when_serialization_is_admitted() {
 #[test]
 fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
     // Arrange
-    let directory = tempfile::tempdir().unwrap();
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
         Arc::new(CloudStorage::with_mock()),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));

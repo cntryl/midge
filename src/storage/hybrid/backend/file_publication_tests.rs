@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
+use crate::storage::StorageBackend;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -26,102 +27,6 @@ fn publish_source(
         },
         budget,
     )
-}
-
-struct PanicLocalBackend;
-
-impl StorageBackend for PanicLocalBackend {
-    fn submit_range_read_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        range: std::ops::Range<u64>,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        let _ = (request, range, callback);
-        panic!("test backend received undeclared range-read capability");
-    }
-
-    fn submit_range_head_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
-    ) {
-        let _ = (request, callback);
-        panic!("ephemeral lookup called the retired local backend");
-    }
-
-    fn submit_metadata_read_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        let _ = (request, callback);
-        panic!("test backend received undeclared metadata-read capability");
-    }
-
-    fn submit_head_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
-    ) {
-        let _ = (request, callback);
-        panic!("test backend received undeclared HEAD capability");
-    }
-
-    fn submit_delete_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
-    ) {
-        let _ = (request, callback);
-        panic!("ephemeral deletion called the retired local backend");
-    }
-
-    fn submit_write_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        data: Vec<u8>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        let _ = (request, data, callback);
-        panic!("ephemeral publication called the retired local backend");
-    }
-}
-
-#[test]
-fn should_not_call_local_backend_when_publishing_with_ephemeral_cache() -> MidgeResult<()> {
-    // Arrange
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("source");
-    let bytes = b"immutable bytes";
-    std::fs::write(&path, bytes)?;
-    let storage = HybridStorage::with_policy(
-        Arc::new(PanicLocalBackend),
-        Arc::new(CloudStorage::new(
-            Arc::new(MockCloudBackend::new()),
-            String::new(),
-        )),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    );
-    storage.enable_ephemeral_sst_cache(1024 * 1024);
-    // Startup has already swept any legacy copy before runtime publication.
-    storage.retire_legacy_local_store();
-    let budget = ResourceBudget::new(2 * 1024 * 1024);
-
-    // Act
-    publish_source(
-        &storage,
-        "sst/retired.sst",
-        directory.path(),
-        bytes,
-        &budget,
-    )?;
-    assert!(storage.local_object_cache_is_absent("sst/retired.sst")?);
-    storage.evict_local_object_cache("sst/retired.sst")?;
-    storage.delete_immutable_object_blocking("sst/retired.sst")?;
-
-    // Assert: the local backend panics on every operation.
-    Ok(())
 }
 
 #[test]
@@ -222,9 +127,6 @@ fn should_reject_admitted_publication_when_readback_bytes_or_identity_changes() 
             injected: AtomicBool::new(false),
         });
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                directory.path().join("local"),
-            )?),
             Arc::new(CloudStorage::new(backend.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -349,7 +251,6 @@ fn should_preserve_timeout_when_admitted_pinned_range_readback_exhausts_deadline
         Arc::new(CloudStorage::new(backend.clone(), String::new()));
     let (tx, _rx) = crossbeam::channel::unbounded();
     let storage = HybridStorage::new_with_class_stores_and_event_sender(
-        Arc::new(PanicLocalBackend),
         cloud.clone(),
         cloud.clone(),
         cloud,
@@ -357,7 +258,6 @@ fn should_preserve_timeout_when_admitted_pinned_range_readback_exhausts_deadline
         Duration::from_millis(100),
     );
     storage.enable_ephemeral_sst_cache(1024 * 1024);
-    storage.retire_legacy_local_store();
     let budget = ResourceBudget::new(2 * 1024 * 1024);
 
     // Act: the real cloud callback adapter expires while the provider owns readback.

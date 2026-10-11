@@ -487,7 +487,6 @@ fn install_checkpoint_output(
                     name,
                 )))
                 .map_err(crate::io::FsError::into_midge)?;
-            storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
             let (sst_bytes, wal_bytes) = local_storage_bytes(state)?;
             storage.reconcile_local_disk_usage(sst_bytes, wal_bytes);
         }
@@ -495,8 +494,7 @@ fn install_checkpoint_output(
     Ok(())
 }
 
-/// Local SST and WAL bytes, counting both the runtime directories and the
-/// hybrid cache below the database root.
+/// Local SST and WAL bytes below the database root.
 pub(super) fn local_storage_bytes(state: &crate::runtime::RuntimeState) -> MidgeResult<(u64, u64)> {
     let bytes = |directory: &str| {
         super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
@@ -505,10 +503,7 @@ pub(super) fn local_storage_bytes(state: &crate::runtime::RuntimeState) -> Midge
             state.startup_scope.as_ref(),
         )
     };
-    Ok((
-        bytes("sst")?.saturating_add(bytes("hybrid_local/sst")?),
-        bytes("wal")?.saturating_add(bytes("hybrid_local/wal")?),
-    ))
+    Ok((bytes(crate::sst::fs::SST_DIR)?, bytes(crate::wal::WAL_DIR)?))
 }
 
 pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {

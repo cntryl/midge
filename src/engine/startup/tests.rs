@@ -452,16 +452,12 @@ impl ProviderMetadataBootstrapFixture {
         let leader_store = lease
             .get_leader_store()
             .expect("provider-backed lease has a leader store");
-        let local_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = std::sync::Arc::new(
-            crate::storage::filesystem::FileSystem::new(local_cache.path().join("hybrid_local"))?,
-        );
         let wal_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = cloud.clone();
         let sst_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = sst_cloud.clone();
         let control_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = cloud.clone();
         let (event_tx, events) = crossbeam::channel::unbounded();
         let hybrid = std::sync::Arc::new(
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-                local_backend,
                 wal_backend,
                 sst_backend,
                 control_backend,

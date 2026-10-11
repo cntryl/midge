@@ -36,7 +36,6 @@ pub(crate) fn build_simulated_cloud_stores(
     let recovery_cloud_wal_dir = cloud_root.join("wal");
     std::fs::create_dir_all(&recovery_cloud_wal_dir)?;
 
-    let local_backend = Arc::new(FileSystem::new(db_path.join("hybrid_local"))?);
     let cloud_backend = Arc::new(FileSystem::new(cloud_root.clone())?);
 
     let (tx, rx) = crossbeam::channel::bounded::<StorageEvent>(
@@ -44,17 +43,12 @@ pub(crate) fn build_simulated_cloud_stores(
     );
     let hybrid_storage = if let Some(budget_bytes) = local_storage_budget_bytes {
         Arc::new(HybridStorage::with_policy_and_event_sender(
-            local_backend,
             cloud_backend,
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(budget_bytes),
             Some(tx),
         ))
     } else {
-        Arc::new(HybridStorage::new_with_event_sender(
-            local_backend,
-            cloud_backend,
-            tx,
-        ))
+        Arc::new(HybridStorage::new_with_event_sender(cloud_backend, tx))
     };
 
     Ok(SimulatedCloudStores {

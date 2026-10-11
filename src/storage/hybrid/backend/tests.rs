@@ -152,13 +152,7 @@ fn assert_real_provider_missing_and_cas_errors(shape: ProviderErrorShape) {
     )
     .expect("build credential-free provider against local response fixture");
     let missing_cloud = Arc::new(CloudStorage::new(missing_backend, String::new()));
-    let missing_dir = tempfile::tempdir().expect("create missing-response local directory");
-    let missing_local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(missing_dir.path().join("local"))
-            .expect("create missing-response local backend"),
-    );
     let missing_storage = HybridStorage::with_policy(
-        missing_local,
         missing_cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
@@ -175,13 +169,7 @@ fn assert_real_provider_missing_and_cas_errors(shape: ProviderErrorShape) {
     )
     .expect("build credential-free provider against local CAS fixture");
     let cas_cloud = Arc::new(CloudStorage::new(cas_backend, String::new()));
-    let cas_dir = tempfile::tempdir().expect("create CAS-response local directory");
-    let cas_local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(cas_dir.path().join("local"))
-            .expect("create CAS-response local backend"),
-    );
     let cas_storage = HybridStorage::with_policy(
-        cas_local,
         cas_cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
@@ -438,11 +426,6 @@ fn should_reject_remote_cas_when_identity_is_stale() {
 #[test]
 fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
     // Arrange
-    let tmp = tempfile::tempdir().expect("create guarded-delete test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let limits = HybridQueueLimits {
         prune_workers: 1,
@@ -451,7 +434,6 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         None,
@@ -485,11 +467,6 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
 #[test]
 fn should_bound_guarded_delete_batch_by_one_callback_budget() {
     // Arrange
-    let tmp = tempfile::tempdir().expect("create bounded guarded-delete batch directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create bounded guarded-delete local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let callback_timeout = Duration::from_millis(100);
     let limits = HybridQueueLimits {
@@ -499,7 +476,6 @@ fn should_bound_guarded_delete_batch_by_one_callback_budget() {
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         None,
@@ -544,18 +520,12 @@ fn should_bound_guarded_delete_batch_by_one_callback_budget() {
 }
 
 fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
-    let tmp = tempfile::tempdir().expect("create hybrid storage test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let mock_cloud = Arc::new(MockCloudBackend::new());
     let cloud = Arc::new(CloudStorage::new(
         mock_cloud.clone(),
         "hybrid-test".to_string(),
     ));
     let storage = HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
@@ -831,14 +801,8 @@ fn should_enforce_internal_storage_event_queue_limits() {
 fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
     // Arrange: a zero-budget caller and a backend that records every submitted
     // callback. Returning Timeout is insufficient if a provider call starts.
-    let tmp = tempfile::tempdir().expect("create expired deadline directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create expired deadline local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let storage = HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
@@ -863,14 +827,8 @@ fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
 #[test]
 fn should_not_submit_conditional_delete_given_expired_deadline() {
     // Arrange
-    let tmp = tempfile::tempdir().expect("create expired delete deadline directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create expired delete deadline local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let storage = HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
@@ -906,18 +864,12 @@ fn should_not_submit_conditional_delete_given_expired_deadline() {
 fn should_not_submit_provider_call_given_configured_callback_timeout_is_zero() {
     // Arrange: the aggregate deadline is live, but configuration allows no
     // time for even the first provider round trip.
-    let tmp = tempfile::tempdir().expect("create zero callback timeout directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create zero callback timeout local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let limits = HybridQueueLimits {
         callback_timeout: Duration::ZERO,
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         None,
@@ -960,18 +912,12 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
     // Reusing the allowance calculated before HEAD would refund that elapsed
     // time and make the proof run well beyond the advertised deadline. The
     // two-second callback budget leaves a full second of scheduler headroom.
-    let tmp = tempfile::tempdir().expect("create deadline proof directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create deadline proof local backend"),
-    );
     let cloud = Arc::new(BudgetConsumingProofBackend::new(Duration::from_millis(300)));
     let limits = HybridQueueLimits {
         callback_timeout: Duration::from_secs(2),
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         None,

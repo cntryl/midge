@@ -170,9 +170,6 @@ fn fixture(
     Manifest,
 ) {
     let directory = tempfile::tempdir().expect("directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(directory.path().join("local")).expect("local"),
-    );
     let backend = Arc::new(LimitedRanges {
         inner: MockCloudBackend::new(),
         allowance: AtomicUsize::new(usize::MAX),
@@ -185,7 +182,6 @@ fn fixture(
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));

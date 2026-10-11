@@ -797,44 +797,14 @@ impl CloudStartupRecovery {
         file: &crate::metadata::FileMeta,
     ) -> MidgeResult<bool> {
         state.check_startup_scope("local salvage SST proof")?;
-        let primary = crate::sst::fs::sst_key(&file.name);
         let retained = Self::local_sst_file_matches_manifest_within(
             &state.fs,
-            &primary,
+            &crate::sst::fs::sst_key(&file.name),
             file,
             state.startup_scope.as_ref(),
         )?;
         state.check_startup_scope("local salvage SST proof")?;
-        if retained {
-            return Ok(true);
-        }
-        let secondary = crate::io::FsPath::new(format!("hybrid_local/sst/{}", file.name));
-        let retained = Self::local_sst_file_matches_manifest_within(
-            &state.fs,
-            &secondary,
-            file,
-            state.startup_scope.as_ref(),
-        )?;
-        state.check_startup_scope("secondary salvage SST proof")?;
-        if !retained {
-            return Ok(false);
-        }
-        // Move the verified secondary into the canonical read path without
-        // allocating another full SST. A failed rename preserves its source.
-        let fs = &state.fs;
-        fs.rename_atomic(&secondary, &primary)
-            .map_err(FsError::into_midge)?;
-        fs.sync_dir(
-            &crate::io::FsPath::new(crate::sst::fs::SST_DIR),
-            crate::io::Durability::Durable,
-        )
-        .map_err(FsError::into_midge)?;
-        fs.sync_dir(
-            &crate::io::FsPath::new("hybrid_local/sst"),
-            crate::io::Durability::Durable,
-        )
-        .map_err(FsError::into_midge)?;
-        Ok(true)
+        Ok(retained)
     }
 
     pub(crate) fn ensure_named_sst_cache_from_cloud_storage(

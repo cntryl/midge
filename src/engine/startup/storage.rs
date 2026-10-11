@@ -866,17 +866,13 @@ impl RuntimeStorageMaterialization {
 
     fn build_hybrid_storage(
         opts: &OpenOptions,
-        storage_path: &StartupStoragePath,
         wal_storage: &Arc<crate::storage::cloud::CloudStorage>,
         sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
         metadata_storage: &Arc<crate::storage::cloud::CloudStorage>,
-    ) -> MidgeResult<(
+    ) -> (
         Arc<crate::storage::HybridStorage>,
         crossbeam::channel::Receiver<crate::storage::StorageEvent>,
-    )> {
-        let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
-            storage_path.db_path.join("hybrid_local"),
-        )?);
+    ) {
         let wal_backend: Arc<dyn crate::storage::StorageBackend> = wal_storage.clone();
         let sst_backend: Arc<dyn crate::storage::StorageBackend> = sst_storage.clone();
         let control_backend: Arc<dyn crate::storage::StorageBackend> = metadata_storage.clone();
@@ -886,7 +882,6 @@ impl RuntimeStorageMaterialization {
         );
         let hybrid_storage = Arc::new(
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-                local_backend,
                 wal_backend,
                 sst_backend,
                 control_backend,
@@ -896,7 +891,7 @@ impl RuntimeStorageMaterialization {
         );
         hybrid_storage.enable_ephemeral_sst_cache(opts.local_storage_budget_bytes());
         hybrid_storage.configure_maintenance_memory(opts.compaction_memory_pool_size());
-        Ok((hybrid_storage, rx))
+        (hybrid_storage, rx)
     }
 
     fn build_provider_sst_read_fs(
@@ -924,13 +919,8 @@ impl RuntimeStorageMaterialization {
         let sst_storage = stores.sst;
         let metadata_storage = stores.metadata;
 
-        let (hybrid_storage, rx) = Self::build_hybrid_storage(
-            opts,
-            storage_path,
-            &wal_storage,
-            &sst_storage,
-            &metadata_storage,
-        )?;
+        let (hybrid_storage, rx) =
+            Self::build_hybrid_storage(opts, &wal_storage, &sst_storage, &metadata_storage);
         if let Some(scope) = scope {
             fence_provider_ddl_within(&hybrid_storage, startup_lease, &scope.deadline())?;
         } else {
@@ -1090,10 +1080,6 @@ mod authority_tests {
         let startup =
             StartupLease::acquire_for_test(lease_object, Some(Arc::clone(&validity))).unwrap();
         let storage = crate::storage::HybridStorage::with_policy(
-            Arc::new(
-                crate::storage::filesystem::FileSystem::new(directory.path().join("local"))
-                    .unwrap(),
-            ),
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );

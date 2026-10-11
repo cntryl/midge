@@ -1104,3 +1104,91 @@ fn should_route_storage_io_through_injected_fs() {
         "remove files that no longer touch the host from HOST_BOUNDARY: {stale_boundary:?}"
     );
 }
+
+/// Code the #808 redesign deleted. Each entry names the issue that removed
+/// it; nothing in the crate, its tests, benches, examples or fuzz targets may
+/// bring it back. Entries are whole identifiers or path segments.
+const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
+    ("hybrid_local", "#827"),
+    ("hybrid-local", "#827"),
+    ("retire_legacy_local_store", "#827"),
+    ("local_store_if_active", "#827"),
+    ("evict_local_object_cache", "#827"),
+    ("local_object_cache_is_absent", "#827"),
+    ("build_with_local_fs", "#816"),
+    ("build_with_local_fs_within", "#816"),
+    ("recovery_staging_fs", "#816"),
+    ("open_with_real_fs", "#814"),
+    ("summarize_with_real_fs", "#814"),
+    ("summarize_with_real_fs_for_compaction", "#814"),
+    ("scan_sst_dir", "#814"),
+    ("relative_anchor", "#814"),
+];
+
+/// Whether `source` holds `token` as a whole identifier, not as part of a
+/// longer one.
+fn mentions_identifier(source: &str, token: &str) -> bool {
+    let is_identifier = |character: char| character.is_alphanumeric() || character == '_';
+    source.match_indices(token).any(|(start, _)| {
+        let before = source[..start].chars().next_back();
+        let after = source[start + token.len()..].chars().next();
+        !before.is_some_and(is_identifier) && !after.is_some_and(is_identifier)
+    })
+}
+
+#[test]
+fn should_match_whole_identifiers_when_scanning_for_deleted_code() {
+    // Arrange
+    let source = "let x = rescan_sst_dirs(); let path = \"hybrid_local/sst\";";
+
+    // Act
+    let partial = mentions_identifier(source, "scan_sst_dir");
+    let segment = mentions_identifier(source, "hybrid_local");
+
+    // Assert
+    assert!(!partial);
+    assert!(segment);
+}
+
+#[test]
+fn should_not_reintroduce_code_deleted_by_wal_redesign() {
+    // Arrange
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pending: Vec<_> = ["src", "tests", "benches", "examples", "fuzz"]
+        .iter()
+        .map(|directory| root.join(directory))
+        .filter(|directory| directory.is_dir())
+        .collect();
+    let mut sources = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("list sources") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                if !path.ends_with("target") {
+                    pending.push(path);
+                }
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !path.ends_with("tests/solid_governance.rs")
+            {
+                sources.push(path);
+            }
+        }
+    }
+
+    // Act
+    let mut reintroduced = Vec::new();
+    for path in sources {
+        let source = std::fs::read_to_string(&path).expect("read source");
+        for (token, issue) in DELETED_BY_WAL_REDESIGN {
+            if mentions_identifier(&source, token) {
+                reintroduced.push(format!(
+                    "{} uses `{token}`, deleted by {issue}",
+                    path.strip_prefix(root).unwrap_or(&path).display()
+                ));
+            }
+        }
+    }
+
+    // Assert
+    assert!(reintroduced.is_empty(), "{reintroduced:#?}");
+}

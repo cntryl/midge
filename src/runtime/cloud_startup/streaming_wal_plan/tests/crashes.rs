@@ -10,15 +10,11 @@ mod crash;
 const CHILD: &str = "runtime::cloud_startup::streaming_wal_plan::tests::crashes::should_abort_salvage_when_child_requested";
 const CHILD_ENV: &str = "MIDGE_SALVAGE_CRASH_CASE";
 
-fn persistence(fixture: &Fixture) -> MidgeResult<CloudPersistence> {
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        fixture.directory.path().join("hybrid"),
-    )?);
-    Ok(CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
+fn persistence(fixture: &Fixture) -> CloudPersistence {
+    CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::clone(&fixture.cloud),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    ))))
+    )))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -44,11 +40,7 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
             .join(crate::wal::cloud_catalog::OBJECT_KEY),
     )?)
     .unwrap();
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        case.root.join("hybrid"),
-    )?);
     let persistence = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         Arc::clone(&cloud),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -118,7 +110,7 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
                     WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
                 let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
                 recovered.plan.commit_set_aside(
-                    &persistence(&fixture)?,
+                    &persistence(&fixture),
                     9,
                     &fixture.catalog,
                     &crate::io::real::test_root(fixture.directory.path().join("local")),
@@ -234,7 +226,7 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
         .unwrap();
         // Act
         let result = recovered.plan.commit_set_aside_with_authority(
-            &persistence(&fixture)?,
+            &persistence(&fixture),
             9,
             &fixture.catalog,
             &crate::io::real::test_root(fixture.directory.path().join("local")),
