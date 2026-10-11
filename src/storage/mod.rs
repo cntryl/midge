@@ -329,13 +329,13 @@ pub enum StorageEvent {
     /// Cloud upload attempt failed - segment NOT durable.
     ///
     /// `HybridStorage` keeps a failed WAL upload queued and retries it with
-    /// backoff until it succeeds, unless `failure_kind` ends it. `exhausted`
-    /// says the attempts a waiting caller is owed are spent, so its waiters
-    /// fail while the retries go on.
+    /// backoff until it succeeds, unless `failure_kind` ends it. `failures`
+    /// counts this upload's failed attempts so far, this one included; the
+    /// runtime decides when its waiters stop waiting.
     CloudFail {
         segment_id: u64,
         error: String,
-        exhausted: bool,
+        failures: u32,
         failure_kind: CloudUploadFailureKind,
     },
     /// Remote WAL pruning completed after the segment became covered by

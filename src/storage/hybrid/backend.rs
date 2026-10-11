@@ -67,6 +67,8 @@ mod uploads;
 use proofs::PruneWorkerRegistry;
 pub(crate) use proofs::{GuardedObjectProof, RemoteObjectProof};
 pub(crate) use queues::HybridQueueLimits;
+#[cfg(test)]
+pub(crate) use queues::WalUploadRetryPolicy;
 use queues::{BoundedEventQueue, UploadQueue};
 
 const MAX_PENDING_WAL_UPLOADS: usize = 1_024;
@@ -79,22 +81,6 @@ const MAX_CONCURRENT_PRUNE_WORKERS: usize = 4;
 const MAX_PENDING_PRUNE_REQUESTS: usize = 64;
 const STORAGE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLOUD_ERROR_BYTES: usize = 4 * 1024;
-/// Failed attempts after which a WAL upload's waiting callers fail. The
-/// upload itself stays queued and keeps retrying.
-const WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS: u32 = 3;
-/// The delay before a failed WAL upload's first retry. It doubles with every
-/// further failure, up to [`WAL_UPLOAD_RETRY_MAX_DELAY`], so a segment that
-/// keeps failing cannot spin. The cap stays short because callers and a
-/// shutdown drain wait on this path: a longer one spends their budget
-/// waiting instead of retrying.
-#[cfg(not(test))]
-const WAL_UPLOAD_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
-#[cfg(test)]
-const WAL_UPLOAD_RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
-#[cfg(not(test))]
-const WAL_UPLOAD_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const WAL_UPLOAD_RETRY_MAX_DELAY: Duration = Duration::from_millis(80);
 
 /// Status of a cloud upload operation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,13 +93,7 @@ pub enum UploadStatus {
     /// The last attempt failed; the next starts at `retry_at`.
     Failed {
         error: String,
-        retries: u32,
         retry_at: Instant,
-    },
-    /// No retry can succeed: the object holds other bytes, or the writer
-    /// lost its authority. The upload leaves the queue.
-    Abandoned {
-        error: String,
     },
 }
 
@@ -126,6 +106,7 @@ pub struct UploadState {
     pub(crate) source: Arc<crate::io::FsLocation>,
     pub status: UploadStatus,
     pub max_sequence: u64,
+    /// Failed attempts so far.
     pub retries: u32,
     size_bytes: u64,
 }
@@ -308,6 +289,7 @@ impl HybridStorage {
         let upload_queue = Arc::new(Mutex::new(UploadQueue::new(
             limits.upload_entries,
             limits.upload_bytes,
+            limits.wal_upload_retry,
         )));
         let terminal_capacity = limits
             .upload_entries

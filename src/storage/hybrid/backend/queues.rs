@@ -4,17 +4,82 @@ use super::{
     Duration, HashMap, Instant, StorageEvent, StorageOutcome, UploadState, UploadStatus, VecDeque,
     MAX_CONCURRENT_PRUNE_WORKERS, MAX_PENDING_PRUNE_REQUESTS, MAX_PENDING_STORAGE_EVENTS,
     MAX_PENDING_STORAGE_EVENT_BYTES, MAX_PENDING_WAL_UPLOADS, MAX_PENDING_WAL_UPLOAD_BYTES,
-    STORAGE_CALLBACK_TIMEOUT, WAL_UPLOAD_RETRY_BASE_DELAY, WAL_UPLOAD_RETRY_MAX_DELAY,
-    WAL_UPLOAD_WORKER_QUEUE_CAPACITY,
+    STORAGE_CALLBACK_TIMEOUT, WAL_UPLOAD_WORKER_QUEUE_CAPACITY,
 };
 
-/// How long a WAL upload that has failed `failures` times waits before its
-/// next attempt: the base delay, doubled per further failure, capped.
-pub(super) fn wal_upload_retry_delay(failures: u32) -> Duration {
-    let doublings = failures.saturating_sub(1).min(16);
-    WAL_UPLOAD_RETRY_BASE_DELAY
-        .saturating_mul(1 << doublings)
-        .min(WAL_UPLOAD_RETRY_MAX_DELAY)
+/// How long a failed WAL upload waits before its next attempt: `base_delay`
+/// after the first failure, doubled per further failure, up to `max_delay`.
+///
+/// A segment that keeps failing therefore cannot spin. The production cap
+/// stays short because callers and a shutdown drain wait on this path: a
+/// longer one spends their budget waiting instead of retrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WalUploadRetryPolicy {
+    pub(crate) base_delay: Duration,
+    pub(crate) max_delay: Duration,
+}
+
+impl WalUploadRetryPolicy {
+    /// The delay before the attempt that follows the `failures`-th failure.
+    pub(crate) fn delay_after(self, failures: u32) -> Duration {
+        let doublings = failures.saturating_sub(1).min(16);
+        self.base_delay
+            .saturating_mul(1 << doublings)
+            .min(self.max_delay)
+    }
+}
+
+impl Default for WalUploadRetryPolicy {
+    fn default() -> Self {
+        Self {
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+        }
+    }
+}
+
+impl UploadState {
+    /// Record a failed attempt; the next one waits out `retry`'s delay.
+    pub(super) fn record_failure(
+        &mut self,
+        error: String,
+        now: Instant,
+        retry: WalUploadRetryPolicy,
+    ) {
+        self.retries = self.retries.saturating_add(1);
+        self.status = UploadStatus::Failed {
+            error,
+            retry_at: now + retry.delay_after(self.retries),
+        };
+    }
+
+    /// Whether an attempt may start now.
+    pub(super) fn is_due(&self, now: Instant) -> bool {
+        match &self.status {
+            UploadStatus::Pending => true,
+            UploadStatus::Failed { retry_at, .. } => now >= *retry_at,
+            UploadStatus::InFlight { .. } | UploadStatus::Completed => false,
+        }
+    }
+
+    /// Whether the upload has left the queue's ownership.
+    pub(super) fn is_finished(&self) -> bool {
+        match &self.status {
+            UploadStatus::Completed => true,
+            UploadStatus::Pending | UploadStatus::InFlight { .. } | UploadStatus::Failed { .. } => {
+                false
+            }
+        }
+    }
+
+    /// How long until this upload next needs a turn of the queue: `poll`
+    /// while it waits to start or to finish, else until its retry is due.
+    pub(super) fn wake(&self, now: Instant, poll: Duration) -> Duration {
+        match &self.status {
+            UploadStatus::Failed { retry_at, .. } => retry_at.saturating_duration_since(now),
+            UploadStatus::Pending | UploadStatus::InFlight { .. } | UploadStatus::Completed => poll,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +92,7 @@ pub(crate) struct HybridQueueLimits {
     pub(crate) prune_workers: usize,
     pub(crate) prune_requests: usize,
     pub(crate) callback_timeout: Duration,
+    pub(crate) wal_upload_retry: WalUploadRetryPolicy,
 }
 
 impl Default for HybridQueueLimits {
@@ -40,6 +106,7 @@ impl Default for HybridQueueLimits {
             prune_workers: MAX_CONCURRENT_PRUNE_WORKERS,
             prune_requests: MAX_PENDING_PRUNE_REQUESTS,
             callback_timeout: STORAGE_CALLBACK_TIMEOUT,
+            wal_upload_retry: WalUploadRetryPolicy::default(),
         }
     }
 }
@@ -51,16 +118,18 @@ pub(super) struct UploadQueue {
     pub(super) max_entries: usize,
     pub(super) max_bytes: u64,
     pub(super) blocked_upload_bytes: Option<u64>,
+    pub(super) retry: WalUploadRetryPolicy,
 }
 
 impl UploadQueue {
-    pub(super) fn new(max_entries: usize, max_bytes: u64) -> Self {
+    pub(super) fn new(max_entries: usize, max_bytes: u64, retry: WalUploadRetryPolicy) -> Self {
         Self {
             entries: VecDeque::new(),
             pending_bytes: 0,
             max_entries,
             max_bytes,
             blocked_upload_bytes: None,
+            retry,
         }
     }
 
@@ -102,24 +171,26 @@ impl UploadQueue {
     pub(super) fn next_turn(&self, now: Instant, poll: Duration) -> Option<Duration> {
         self.entries
             .iter()
-            .map(|upload| match &upload.status {
-                UploadStatus::Failed { retry_at, .. } => retry_at.saturating_duration_since(now),
-                _ => poll,
-            })
+            .map(|upload| upload.wake(now, poll))
             .min()
     }
 
     /// Drop finished uploads. A failed upload stays queued for its retry:
-    /// only success, or a failure no retry can fix, ends it.
+    /// only success, or a failure no retry can fix ([`Self::abandon`]), ends
+    /// it.
     pub(super) fn remove_terminal(&mut self) {
+        self.retain_uploads(|upload| !upload.is_finished());
+    }
+
+    /// End `segment_id`'s upload after a failure no retry can fix.
+    pub(super) fn abandon(&mut self, segment_id: u64) {
+        self.retain_uploads(|upload| upload.segment_id != segment_id);
+    }
+
+    fn retain_uploads(&mut self, keep: impl Fn(&UploadState) -> bool) {
         let mut retained_bytes = 0u64;
         self.entries.retain(|upload| {
-            let retain = match &upload.status {
-                UploadStatus::Completed | UploadStatus::Abandoned { .. } => false,
-                UploadStatus::Pending
-                | UploadStatus::InFlight { .. }
-                | UploadStatus::Failed { .. } => true,
-            };
+            let retain = keep(upload);
             if retain {
                 retained_bytes = retained_bytes.saturating_add(upload.size_bytes);
             }

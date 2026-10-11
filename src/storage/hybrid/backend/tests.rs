@@ -989,7 +989,7 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
         terminal_events.as_slice(),
         [StorageEvent::CloudFail {
             segment_id: failed_segment,
-            exhausted: false,
+            failures: 1,
             failure_kind: crate::storage::CloudUploadFailureKind::Other,
             ..
         }] if *failed_segment == segment_id
@@ -999,20 +999,74 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
 #[test]
 fn should_double_wal_upload_retry_delay_until_its_cap_when_failures_repeat() {
     // Arrange
+    let retry = WalUploadRetryPolicy::default();
     let failures = [1, 2, 3, 4, 5, 6, 40, u32::MAX];
 
     // Act
-    let delays = failures.map(queues::wal_upload_retry_delay);
+    let delays = failures.map(|failures| retry.delay_after(failures));
 
     // Assert
-    assert_eq!(delays[0], WAL_UPLOAD_RETRY_BASE_DELAY);
-    assert_eq!(delays[1], WAL_UPLOAD_RETRY_BASE_DELAY * 2);
-    assert_eq!(delays[2], WAL_UPLOAD_RETRY_BASE_DELAY * 4);
-    assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert!(delays
-        .iter()
-        .all(|delay| *delay <= WAL_UPLOAD_RETRY_MAX_DELAY));
-    assert_eq!(delays[7], WAL_UPLOAD_RETRY_MAX_DELAY);
+    let millis = |millis| Duration::from_millis(millis);
+    assert_eq!(
+        delays,
+        [
+            millis(50),
+            millis(100),
+            millis(200),
+            millis(400),
+            millis(800),
+            millis(1000),
+            millis(1000),
+            millis(1000),
+        ]
+    );
+}
+
+/// A queued upload of segment `segment_id` in `status`, after `retries`
+/// failed attempts.
+fn queued_upload(
+    source: &Arc<crate::io::FsLocation>,
+    segment_id: u64,
+    status: UploadStatus,
+    retries: u32,
+) -> UploadState {
+    UploadState {
+        segment_id,
+        object_key: format!("wal/{segment_id}.wal"),
+        source: Arc::clone(source),
+        status,
+        max_sequence: segment_id,
+        retries,
+        size_bytes: 1,
+    }
+}
+
+#[test]
+fn should_schedule_next_attempt_by_retry_policy_when_an_upload_fails() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create backoff test dir");
+    let source = Arc::new(crate::io::FsLocation::host_file(
+        &tmp.path().join("backoff.wal"),
+    ));
+    let retry = WalUploadRetryPolicy::default();
+    let now = Instant::now();
+    let mut upload = queued_upload(&source, 1, UploadStatus::Pending, 2);
+
+    // Act
+    upload.record_failure("provider unavailable".to_string(), now, retry);
+
+    // Assert
+    assert_eq!(upload.retries, 3);
+    assert_eq!(
+        upload.status,
+        UploadStatus::Failed {
+            error: "provider unavailable".to_string(),
+            retry_at: now + retry.delay_after(3),
+        }
+    );
+    assert!(!upload.is_due(now));
+    assert!(upload.is_due(now + retry.delay_after(3)));
+    assert!(!upload.is_finished());
 }
 
 #[test]
@@ -1024,23 +1078,25 @@ fn should_wait_for_earliest_retry_when_only_failed_uploads_are_queued() {
     ));
     let now = Instant::now();
     let poll = Duration::from_millis(1);
-    let failed = |retry_in: Duration| UploadState {
-        segment_id: 1,
-        object_key: "wal/backoff.wal".to_string(),
-        source: Arc::clone(&source),
-        status: UploadStatus::Failed {
-            error: "provider unavailable".to_string(),
-            retries: 4,
-            retry_at: now + retry_in,
-        },
-        max_sequence: 1,
-        retries: 4,
-        size_bytes: 1,
+    let failed = |segment_id, retry_in: Duration| {
+        queued_upload(
+            &source,
+            segment_id,
+            UploadStatus::Failed {
+                error: "provider unavailable".to_string(),
+                retry_at: now + retry_in,
+            },
+            4,
+        )
     };
-    let mut queue = UploadQueue::new(8, 1024);
-    queue.try_push(failed(Duration::from_millis(300))).unwrap();
-    queue.try_push(failed(Duration::from_millis(200))).unwrap();
-    let empty = UploadQueue::new(8, 1024);
+    let mut queue = UploadQueue::new(8, 1024, WalUploadRetryPolicy::default());
+    queue
+        .try_push(failed(1, Duration::from_millis(300)))
+        .unwrap();
+    queue
+        .try_push(failed(2, Duration::from_millis(200)))
+        .unwrap();
+    let empty = UploadQueue::new(8, 1024, WalUploadRetryPolicy::default());
 
     // Act
     let backed_off = queue.next_turn(now, poll);

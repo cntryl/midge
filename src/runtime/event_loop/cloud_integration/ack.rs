@@ -6,6 +6,11 @@ use crate::common::OperationDeadline;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 
+/// Failed upload attempts a cloud-durability waiter waits through. From then
+/// on every failure fails the waiters it blocks, while the storage queue
+/// keeps retrying the upload.
+const WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS: u32 = 3;
+
 impl EventLoop {
     pub(crate) fn tick_hybrid_storage(&mut self) {
         self.tick_hybrid_storage_with_deadline(None);
@@ -95,10 +100,10 @@ impl EventLoop {
             crate::storage::StorageEvent::CloudFail {
                 segment_id,
                 error,
-                exhausted,
+                failures,
                 failure_kind,
             } => {
-                self.handle_storage_event_cloud_fail(segment_id, &error, exhausted, failure_kind);
+                self.handle_storage_event_cloud_fail(segment_id, &error, failures, failure_kind);
             }
             crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
@@ -138,11 +143,11 @@ impl EventLoop {
         &mut self,
         segment_id: u64,
         error: &str,
-        exhausted: bool,
+        failures: u32,
         failure_kind: crate::storage::CloudUploadFailureKind,
     ) {
         use crate::storage::CloudUploadFailureKind;
-        if !exhausted {
+        if !failure_kind.ends_upload() && failures < WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS {
             tracing::warn!(
                 segment_id,
                 %error,

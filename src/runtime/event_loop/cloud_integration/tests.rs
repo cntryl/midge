@@ -450,7 +450,7 @@ fn should_fail_all_generation_waiters_given_exhausted_cloud_upload_attempts(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "terminal upload failure".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -493,7 +493,7 @@ fn should_preserve_timeout_variant_given_exhausted_cloud_upload_timeouts(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "cloud WAL upload callback timed out".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
     });
 
@@ -531,7 +531,7 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "retryable upload failure".to_string(),
-        exhausted: false,
+        failures: 1,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -5916,7 +5916,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -6166,7 +6166,7 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -6814,7 +6814,7 @@ fn should_ignore_stale_cloud_failure_for_segment_the_runtime_no_longer_owns(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "late storage retry report".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -7817,7 +7817,7 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: second_segment,
         error: "injected later-segment failure".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -9447,7 +9447,7 @@ fn should_leave_retry_with_storage_queue_when_upload_attempts_are_exhausted(
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "provider unavailable".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -9489,7 +9489,7 @@ fn should_fence_writer_when_storage_reports_a_corrupt_upload() -> crate::common:
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "remote object differs from uploaded bytes".to_string(),
-        exhausted: true,
+        failures: 3,
         failure_kind: crate::storage::CloudUploadFailureKind::Corruption,
     });
 

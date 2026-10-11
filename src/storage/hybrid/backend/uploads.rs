@@ -3,7 +3,7 @@
 use super::{
     cb, mpsc, thread, Arc, BoundedEventQueue, Duration, HybridStorage, Instant, JoinHandle, Mutex,
     StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState, UploadStatus,
-    MAX_CLOUD_ERROR_BYTES, WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS,
+    MAX_CLOUD_ERROR_BYTES,
 };
 use crate::storage::CloudUploadFailureKind;
 
@@ -58,6 +58,15 @@ impl HybridStorage {
 
     pub fn is_wal_upload_stalled(&self) -> bool {
         self.upload_queue.lock().is_stalled()
+    }
+
+    /// How long until the upload queue next needs
+    /// [`Self::process_uploads`]: `poll` while an upload waits to start or
+    /// to finish, else until its earliest retry is due, so a segment that
+    /// keeps failing does not keep its caller polling. `None` when nothing
+    /// is queued.
+    pub(crate) fn next_upload_turn(&self, poll: Duration) -> Option<Duration> {
+        self.upload_queue.lock().next_turn(Instant::now(), poll)
     }
 
     /// Queue a local file for bounded remote publication under an explicit
@@ -157,23 +166,17 @@ impl HybridStorage {
                     failure_kind,
                     ..
                 } => {
-                    if let Some(item) = queue
-                        .entries
-                        .iter_mut()
-                        .find(|u| &u.segment_id == segment_id)
-                    {
-                        item.retries = item.retries.saturating_add(1);
-                        item.status = if failure_kind.ends_upload() {
-                            UploadStatus::Abandoned {
-                                error: error.clone(),
-                            }
-                        } else {
-                            UploadStatus::Failed {
-                                error: error.clone(),
-                                retries: item.retries,
-                                retry_at: now + super::queues::wal_upload_retry_delay(item.retries),
-                            }
-                        };
+                    if failure_kind.ends_upload() {
+                        queue.abandon(*segment_id);
+                    } else {
+                        let retry = queue.retry;
+                        if let Some(item) = queue
+                            .entries
+                            .iter_mut()
+                            .find(|u| &u.segment_id == segment_id)
+                        {
+                            item.record_failure(error.clone(), now, retry);
+                        }
                     }
                 }
                 _ => {}
@@ -183,8 +186,8 @@ impl HybridStorage {
         // 3) Schedule any eligible uploads.
         self.schedule_pending_uploads(&mut queue);
 
-        // 4) Garbage-collect finished items: completed, or ended by a failure
-        // no retry can fix. Every other failure stays queued for its retry.
+        // 4) Garbage-collect completed items. A failure no retry can fix left
+        // the queue above; every other failure stays queued for its retry.
         queue.remove_terminal();
 
         drained_events
@@ -197,14 +200,7 @@ impl HybridStorage {
     fn schedule_pending_uploads(&self, queue: &mut UploadQueue) {
         let now = Instant::now();
         for upload in &mut queue.entries {
-            let eligible = match &upload.status {
-                UploadStatus::Pending => true,
-                UploadStatus::Failed { retry_at, .. } => now >= *retry_at,
-                UploadStatus::InFlight { .. }
-                | UploadStatus::Completed
-                | UploadStatus::Abandoned { .. } => false,
-            };
-            if !eligible {
+            if !upload.is_due(now) {
                 continue;
             }
 
@@ -524,8 +520,7 @@ impl HybridStorage {
         StorageEvent::CloudFail {
             segment_id: upload.segment_id,
             error: error.to_string(),
-            exhausted: failure_kind.ends_upload()
-                || upload.retries.saturating_add(1) >= WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS,
+            failures: upload.retries.saturating_add(1),
             failure_kind,
         }
     }
