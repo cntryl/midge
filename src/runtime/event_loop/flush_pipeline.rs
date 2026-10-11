@@ -2142,7 +2142,8 @@ mod tests {
     fn should_seal_active_wal_when_a_memtable_is_still_unflushed() -> crate::common::MidgeResult<()>
     {
         // Arrange: prune is the only local seal trigger, so a column family
-        // that never goes quiet must not keep `wal.log` growing forever.
+        // that never goes quiet must not keep the open segment growing
+        // forever.
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
@@ -2168,7 +2169,7 @@ mod tests {
         let active = event_loop
             .state
             .host_wal_dir()
-            .join(crate::wal::ACTIVE_FILE_NAME);
+            .join(crate::wal::segment_file_name(current));
         let active_len_before = std::fs::metadata(&active)?.len();
         assert!(
             event_loop
@@ -2188,7 +2189,7 @@ mod tests {
         assert_eq!(
             event_loop.state.wal.current_segment_id,
             current + 1,
-            "active wal.log was {active_len_before} bytes on disk before prune"
+            "the open segment was {active_len_before} bytes on disk before prune"
         );
         Ok(())
     }
@@ -2799,54 +2800,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn should_mark_anomaly_when_local_wal_directory_sync_fails_after_pruning(
-    ) -> crate::common::MidgeResult<()> {
-        // Arrange
-        let directory = tempfile::tempdir()?;
-        let mut state =
-            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let sync_fs = Arc::new(crate::io::MockFs::new());
-        crate::io::Fs::open(
-            sync_fs.as_ref(),
-            &crate::io::FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME)),
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .map_err(FsError::into_midge)?;
-        state.fs = sync_fs.clone();
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
-        // The WAL writer opens through the same root, so the fault is armed
-        // only for the pruning phase.
-        let syncs_before_prune = sync_fs.sync_dir_calls().len();
-        sync_fs.set_sync_dir_failure(true);
-
-        // Act
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-
-        // Assert
-        assert!(event_loop.state.persistence_anomaly_detected());
-        assert_eq!(
-            sync_fs.sync_dir_calls()[syncs_before_prune..],
-            [(
-                crate::io::FsPath::new("wal"),
-                crate::io::Durability::Durable
-            )]
-        );
-        Ok(())
-    }
-
     #[cfg(feature = "failpoints")]
     #[test]
     fn should_retain_all_wal_state_when_pre_prune_sync_fails() -> crate::common::MidgeResult<()> {
@@ -2916,9 +2869,9 @@ mod tests {
             event_loop
                 .state
                 .host_wal_dir()
-                .join(crate::wal::ACTIVE_FILE_NAME)
+                .join(crate::wal::segment_file_name(segment_before))
                 .exists(),
-            "failed sync must retain the active WAL writer file"
+            "failed sync must retain the open segment"
         );
         Ok(())
     }

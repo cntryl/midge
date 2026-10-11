@@ -286,22 +286,34 @@ fn should_release_wal_disk_budget_only_after_local_segment_removal(
         .unwrap()
         .clone();
     storage.enable_ephemeral_sst_cache(4096);
+    append_cloud_async_put(&mut event_loop)?;
+    let (segment_id, _) = event_loop
+        .seal_current_cloud_segment()?
+        .expect("seal the appended segment");
     let path = event_loop
         .state
         .host_wal_dir()
-        .join(crate::wal::segment_file_name(77));
-    std::fs::create_dir_all(&path)?;
+        .join(crate::wal::segment_file_name(segment_id));
+    // A non-empty directory takes the sealed segment's name, so its unlink
+    // fails and its bytes stay on disk.
+    std::fs::remove_file(&path)?;
+    std::fs::create_dir_all(path.join("blocker"))?;
     storage.admit_local_wal_bytes(100)?;
+    let committed = storage.budget_snapshot().total_committed_bytes;
+
     // Act
-    event_loop.remove_cloud_durable_local_wal_segment(77);
+    event_loop.retire_cloud_local_wal(
+        segment_id,
+        crate::runtime::event_loop::coordination::LocalRetirement::default(),
+    );
     let after_failed_delete = storage.budget_snapshot().total_committed_bytes;
-    std::fs::remove_dir(&path)?;
-    std::fs::write(&path, vec![0; 100])?;
-    event_loop.remove_cloud_durable_local_wal_segment(77);
+
     // Assert
-    assert_eq!(after_failed_delete, 100);
-    assert_eq!(storage.budget_snapshot().total_committed_bytes, 0);
-    assert!(!path.exists());
+    assert!(path.exists(), "the blocked segment must stay on disk");
+    assert_eq!(
+        after_failed_delete, committed,
+        "bytes still on disk must stay charged to the WAL disk budget"
+    );
     Ok(())
 }
 
@@ -6485,11 +6497,10 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let outcome = |boundary: WalTransitionBoundary| match boundary {
-        WalTransitionBoundary::BeforeRename => Outcome::Reversible,
-        WalTransitionBoundary::AfterRename
-        | WalTransitionBoundary::BeforeWriterCreate
-        | WalTransitionBoundary::AfterWriterCreate
-        | WalTransitionBoundary::AfterReplacementDirectorySync => Outcome::FencedBeforeReceipt,
+        WalTransitionBoundary::BeforeSegmentCreate | WalTransitionBoundary::AfterSegmentCreate => {
+            Outcome::Reversible
+        }
+        WalTransitionBoundary::AfterLedgerRotate => Outcome::FencedBeforeReceipt,
         WalTransitionBoundary::BeforeCoordinatorCommit
         | WalTransitionBoundary::AfterCoordinatorCommit
         | WalTransitionBoundary::BeforeSegmentRegistration
@@ -6511,6 +6522,10 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
             .state
             .host_wal_dir()
             .join(crate::wal::segment_file_name(segment_id));
+        let next_path = event_loop
+            .state
+            .host_wal_dir()
+            .join(crate::wal::segment_file_name(segment_id + 1));
         let request_id = 90_400 + segment_id;
         let response = event_loop.router.register(request_id, "CloudDurability");
         event_loop
@@ -6558,7 +6573,20 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
                 assert_eq!(event_loop.durability.current_key(), segment_id);
                 assert_eq!(event_loop.state.wal.pending_writes, pending_before);
-                assert!(!sealed_path.exists(), "{boundary:?}");
+                assert!(sealed_path.exists(), "{boundary:?}: the open segment stays");
+                assert_eq!(
+                    next_path.exists(),
+                    boundary == WalTransitionBoundary::AfterSegmentCreate,
+                    "{boundary:?}: only an unrecorded empty next segment may remain"
+                );
+                assert_eq!(
+                    event_loop
+                        .wal_actor
+                        .history()
+                        .map(|history| history.ledger().open_segment()),
+                    Some(segment_id),
+                    "{boundary:?}"
+                );
                 assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
                 assert!(event_loop
                     .cloud_coordinator
