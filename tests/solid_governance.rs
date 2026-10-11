@@ -1227,11 +1227,9 @@ const TEST_ONLY_WAL_PATHS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-#[test]
-fn should_find_gated_functions_when_scanning_for_shadowed_wal_paths() {
-    // Arrange: a planted shadow, as a free function and as a method, beside
-    // production code and a test module.
-    let source = r#"
+/// A planted shadow, as a free function and as a method, beside production
+/// code and a test module.
+const PLANTED_SHADOWS: &str = r#"
 pub(crate) fn retire_segments() {}
 #[cfg(test)]
 pub(crate) fn retire_segments_for_test() { let _ = "}"; }
@@ -1246,6 +1244,11 @@ mod tests {
     fn replay_helper() {}
 }
 "#;
+
+#[test]
+fn should_find_gated_functions_when_scanning_for_shadowed_wal_paths() {
+    // Arrange
+    let source = PLANTED_SHADOWS;
 
     // Act
     let functions = source_scan::test_only_functions(source);

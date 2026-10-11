@@ -23,7 +23,7 @@ names the stage whose pull request turns a case GREEN:
 
 | Stage | Scope | Issues |
 |---|---|---|
-| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #837 (fixture re-targeting, campaign budgets), #835 (cloud campaigns, lease control) |
+| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #837 (fixture re-targeting, campaign budgets), #835 (lease control), #838 (cloud campaigns) |
 | 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818 |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |
