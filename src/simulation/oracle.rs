@@ -203,6 +203,44 @@ impl History {
         }
     }
 
+    /// Recovery kept only the WAL commits before `index`: unpromised ones
+    /// from it on are gone from the WAL, so no later promise covers them and
+    /// none may survive. Promised commits survived anyway, and commits that
+    /// bypassed the WAL are kept.
+    pub fn forget_wal_from(&mut self, index: usize) {
+        let mut kept = Vec::new();
+        let mut renumbered = BTreeMap::new();
+        for (position, commit) in self.commits.drain(..).enumerate() {
+            if position < index
+                || commit.logging == Logging::Unlogged
+                || self.required.contains(&position)
+            {
+                renumbered.insert(position, kept.len());
+                kept.push(commit);
+            }
+        }
+        self.commits = kept;
+        let renumber = |set: &BTreeSet<usize>| -> BTreeSet<usize> {
+            set.iter()
+                .filter_map(|position| renumbered.get(position).copied())
+                .collect()
+        };
+        self.required = renumber(&self.required);
+        self.prefix_floor = renumber(&self.prefix_floor);
+    }
+
+    /// How many commits the history holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.commits.len()
+    }
+
+    /// Whether the history holds no commits.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.commits.is_empty()
+    }
+
     fn status(&self, index: usize, prefix: usize) -> Status {
         let commit = &self.commits[index];
         if self.required.contains(&index) {

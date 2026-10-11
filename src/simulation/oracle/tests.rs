@@ -262,3 +262,65 @@ fn should_round_trip_through_json_when_history_is_saved() {
     );
     assert_eq!(decoded.keys(), history.keys());
 }
+
+#[test]
+fn should_not_promise_forgotten_commits_when_a_later_flush_completes() {
+    // Arrange: an unpromised put is lost at a recovery that kept nothing.
+    let mut history = history();
+    history.commit(put("k", "v1"));
+    history.forget_wal_from(0);
+
+    // Act
+    history.flushed(FAMILY);
+    let verdict = history.check(&BTreeMap::new(), &families());
+
+    // Assert
+    assert_eq!(verdict, Verdict::Consistent { prefix: 0 });
+}
+
+#[test]
+fn should_reject_forgotten_commit_when_it_survives_anyway() {
+    // Arrange
+    let mut history = history();
+    history.commit(put("k", "v1"));
+    history.forget_wal_from(0);
+
+    // Act
+    let verdict = history.check(&observed(&[("k", "v1")]), &families());
+
+    // Assert
+    assert!(matches!(verdict, Verdict::Violation(_)), "{verdict:?}");
+}
+
+#[test]
+fn should_keep_promises_on_kept_commits_when_later_ones_are_forgotten() {
+    // Arrange: a synced put survives a recovery that lost the put after it.
+    let mut history = history();
+    let synced = history.commit(put("a", "v1"));
+    history.synced(synced);
+    history.commit(put("b", "v2"));
+    history.forget_wal_from(1);
+
+    // Act
+    let verdict = history.check(&BTreeMap::new(), &families());
+
+    // Assert
+    assert!(matches!(verdict, Verdict::Violation(_)), "{verdict:?}");
+    assert_eq!(history.len(), 1);
+}
+
+#[test]
+fn should_keep_promised_commits_when_forgetting_after_the_prefix() {
+    // Arrange: a flushed put survives even though the WAL kept nothing.
+    let mut history = history();
+    history.commit(put("k", "v1"));
+    history.flushed(FAMILY);
+    history.forget_wal_from(0);
+
+    // Act
+    let verdict = history.check(&observed(&[("k", "v1")]), &families());
+
+    // Assert
+    assert_eq!(verdict, Verdict::Consistent { prefix: 0 });
+    assert_eq!(history.len(), 1);
+}
