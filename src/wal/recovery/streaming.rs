@@ -744,16 +744,12 @@ impl ReplayState<'_> {
                     valid_bytes,
                     "wal replay stopped at corrupt verified-prefix boundary"
                 );
-                let unreplayed_paths: Vec<FsPath> = paths[index + 1..]
-                    .iter()
-                    .map(|file| file.path.clone())
-                    .collect();
                 let mut max_unreplayed_sequence = None;
-                for path in &unreplayed_paths {
+                for unreplayed in &paths[index + 1..] {
                     max_unreplayed_sequence =
                         max_unreplayed_sequence.max(max_verified_sequence_from_offset(
                             storage,
-                            path,
+                            &unreplayed.path,
                             self.limits,
                             0,
                             self.options,
@@ -775,7 +771,6 @@ impl ReplayState<'_> {
                 self.stats.salvage_stop = Some(WalSalvageStop {
                     path: path.path.clone(),
                     valid_bytes,
-                    unreplayed_paths,
                     max_unreplayed_sequence,
                 });
                 Ok(())

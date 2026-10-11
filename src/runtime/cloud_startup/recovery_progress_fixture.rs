@@ -224,8 +224,14 @@ fn wal_fixture(
     observations.set_phase("planner")?;
     let local_root: Arc<dyn Fs> =
         Arc::new(crate::io::RealFs::new(local).map_err(FsError::into_midge)?);
+    let first_open = wal.catalog.segments.keys().max().map_or(1, |last| last + 1);
+    let history = crate::runtime::wal_history::WalHistory::open(
+        crate::io::subdirectory(Arc::clone(&local_root), crate::wal::WAL_DIR),
+        first_open,
+    )?;
     let recovered = StreamingCloudWalRecovery::build(
         &local_root,
+        history.ledger(),
         remote,
         &wal.catalog,
         RecoveryPolicy::Strict,
@@ -599,12 +605,18 @@ fn verify_rows(
     (verified, mismatches)
 }
 
+/// Bytes and files staged in `wal/`: everything but the ledger and empty
+/// files, such as a new ledger's open segment.
 fn local_wal_state(local: &Path) -> MidgeResult<(u64, u64)> {
     let mut bytes = 0_u64;
     let mut files = 0_u64;
     for entry in std::fs::read_dir(local.join("wal"))? {
-        let metadata = entry?.metadata()?;
-        if metadata.is_file() {
+        let entry = entry?;
+        if entry.file_name() == crate::wal::ledger_store::LEDGER_FILE {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        if metadata.is_file() && metadata.len() > 0 {
             files += 1;
             bytes = bytes.saturating_add(metadata.len());
         }

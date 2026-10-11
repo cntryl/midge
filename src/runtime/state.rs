@@ -145,13 +145,13 @@ pub struct WalState {
     /// Manifest SSTs whose identity a local prune proof has already checked
     /// by reading them in full, so later passes do not reread them (#548).
     pub(crate) proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities,
-    /// The last sealed local WAL segment a prune pass read for a proof. The
-    /// next pass starts after it, so a bounded pass cannot starve later
-    /// segments (#548). In memory only.
-    pub(crate) local_prune_cursor: u64,
     /// WAL bytes appended by this process, across segments. In memory only:
     /// it measures how much local WAL a family's memtable pins (#552).
     pub(crate) appended_bytes: u64,
+    /// The segment ledger recovery opened (#842), until the event loop hands
+    /// it to the WAL actor, which owns it from then on. `None` in memory
+    /// mode, where nothing is persisted.
+    pub(crate) history: Option<crate::runtime::wal_history::WalHistory>,
 }
 
 impl Default for WalState {
@@ -163,8 +163,8 @@ impl Default for WalState {
             local_segment_proofs: HashMap::new(),
             proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities::default(
             ),
-            local_prune_cursor: 0,
             appended_bytes: 0,
+            history: None,
         }
     }
 }
@@ -457,7 +457,9 @@ struct RecoveryLoadState {
 struct WalRecoveryState {
     column_families: HashMap<u32, ColumnFamilyState>,
     recovered_sequence: u64,
-    next_segment_id: u64,
+    /// The segment the writer appends to next.
+    open_segment: u64,
+    history: Option<crate::runtime::wal_history::WalHistory>,
     records_replayed: u64,
     bytes_replayed: u64,
     opened_in_salvage_mode: bool,

@@ -5,8 +5,6 @@
 //! `engine::startup` wires these decisions into engine startup; the coverage
 //! rule they rely on is the shared one in `runtime::hybrid_persistence`.
 
-use crate::io::FsError;
-
 pub(crate) mod cloud_io;
 mod cloud_recovery;
 #[cfg(feature = "internal-testing")]
@@ -76,56 +74,59 @@ pub(crate) struct CloudWalRecoveryPlan {
     /// open (the catalog's persisted floor), so new writes never reuse one.
     /// Zero when nothing was ever set aside.
     pub(crate) max_unreplayed_sequence: u64,
-    /// Local WAL files at or past the hole, including `wal.log`. Salvage
-    /// renames them aside only after the floor covering them is durable.
-    pub(crate) set_aside_local_paths: Vec<std::path::PathBuf>,
+    /// The first ledger member salvage drops; every later one goes too, the
+    /// open member included. Dropped only after the floor covering them is
+    /// durable.
+    pub(crate) set_aside_from: Option<crate::wal::ledger::SegmentId>,
 }
 
 impl CloudWalRecoveryPlan {
+    /// Drop ledger member `from` and every later one.
+    pub(crate) fn set_aside(&mut self, from: crate::wal::ledger::SegmentId) {
+        self.set_aside_from = Some(
+            self.set_aside_from
+                .map_or(from, |current| current.min(from)),
+        );
+    }
+
     /// Makes a salvage set-aside durable, in the one order that survives a
     /// crash between any two steps:
     ///
-    /// 1. Persist the sequence floor. Until the local files are renamed, the
-    ///    next open finds the same hole and recomputes it anyway.
-    /// 2. Rename the local files aside. After this they no longer parse as
-    ///    segments, so only the persisted floor remembers their sequences.
+    /// 1. Persist the sequence floor. Until the ledger drops the local
+    ///    members, the next open finds the same hole and recomputes it anyway.
+    /// 2. Drop the local members from the ledger, opening a new segment past
+    ///    every cataloged one (`next_remote_id`). After this only the
+    ///    persisted floor remembers their sequences.
     /// 3. Retire the cataloged segments. Retiring before step 2 would let the
-    ///    next open replay local copies past the hole.
+    ///    next open replay local members past the hole.
     #[cfg(all(test, feature = "failpoints"))]
     pub(crate) fn commit_set_aside(
         &self,
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
         writer_epoch: u64,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        root: &std::sync::Arc<dyn crate::io::Fs>,
+        history: &mut crate::runtime::wal_history::WalHistory,
+        next_remote_id: crate::wal::ledger::SegmentId,
     ) -> crate::common::MidgeResult<()> {
-        self.commit_set_aside_with_authority(persistence, writer_epoch, catalog, root, &|| Ok(()))
-    }
-
-    pub(crate) fn commit_set_aside_with_authority(
-        &self,
-        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
-        writer_epoch: u64,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        root: &std::sync::Arc<dyn crate::io::Fs>,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-    ) -> crate::common::MidgeResult<()> {
-        self.commit_set_aside_with_authority_within(
+        self.commit_set_aside_within(
             persistence,
             writer_epoch,
             catalog,
-            root,
-            validate,
+            history,
+            next_remote_id,
+            &|| Ok(()),
             &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
         )
     }
 
-    pub(crate) fn commit_set_aside_with_authority_within(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_set_aside_within(
         &self,
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
         writer_epoch: u64,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        root: &std::sync::Arc<dyn crate::io::Fs>,
+        history: &mut crate::runtime::wal_history::WalHistory,
+        next_remote_id: crate::wal::ledger::SegmentId,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
         scope: &crate::common::DeadlineScope,
     ) -> crate::common::MidgeResult<()> {
@@ -145,7 +146,13 @@ impl CloudWalRecoveryPlan {
         }
         crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
         validate()?;
-        self.set_aside_local_wal_with_authority_within(root, validate, scope)?;
+        if let Some(from) = self.set_aside_from {
+            scope.check("local WAL salvage set-aside")?;
+            history.set_aside(
+                crate::runtime::wal_history::SetAside::From(from),
+                next_remote_id,
+            )?;
+        }
         crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
         validate()?;
         if !self.unreplayed_segments.is_empty() {
@@ -157,61 +164,6 @@ impl CloudWalRecoveryPlan {
             )?;
         }
         validate()
-    }
-
-    /// Renames the local WAL files salvage stopped short of and syncs `wal/`.
-    #[cfg(test)]
-    pub(crate) fn set_aside_local_wal(
-        &self,
-        root: &std::sync::Arc<dyn crate::io::Fs>,
-    ) -> crate::common::MidgeResult<()> {
-        self.set_aside_local_wal_with_authority(root, &|| Ok(()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_aside_local_wal_with_authority(
-        &self,
-        root: &std::sync::Arc<dyn crate::io::Fs>,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-    ) -> crate::common::MidgeResult<()> {
-        self.set_aside_local_wal_with_authority_within(
-            root,
-            validate,
-            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
-        )
-    }
-
-    pub(crate) fn set_aside_local_wal_with_authority_within(
-        &self,
-        root: &std::sync::Arc<dyn crate::io::Fs>,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-        scope: &crate::common::DeadlineScope,
-    ) -> crate::common::MidgeResult<()> {
-        scope.check("local WAL salvage set-aside")?;
-        let fs = crate::io::scope_fs(std::sync::Arc::clone(root), scope.clone());
-        let mut renamed = false;
-        for path in &self.set_aside_local_paths {
-            scope.check("local WAL salvage rename")?;
-            let path = streaming_wal_plan::local_path(path)?;
-            if fs.exists(&path).map_err(FsError::into_midge)? {
-                CloudStartupRecovery::quarantine_local_wal_alias_with_authority(
-                    fs.as_ref(),
-                    &path,
-                    validate,
-                )?;
-                renamed = true;
-                crate::failpoints::fail_point!("midge::recovery::after_salvage_quarantine_rename");
-            }
-        }
-        if renamed {
-            validate()?;
-            fs.sync_dir(
-                &crate::io::FsPath::new("wal"),
-                crate::io::Durability::Durable,
-            )
-            .map_err(FsError::into_midge)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn remote_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {

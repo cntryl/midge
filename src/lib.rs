@@ -222,7 +222,7 @@ pub mod __internal {
     }
     pub mod wal {
         pub use crate::wal::{
-            cloud_segment_object_key, parse_segment_id, segment_file_name, WalOpKind, WalRecord,
+            parse_segment_id, segment_file_name, segment_object_key, WalOpKind, WalRecord,
         };
         pub mod encoding {
             pub use crate::wal::encoding::{decode, decode_view, encode, encode_into};

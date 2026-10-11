@@ -24,9 +24,45 @@ pub(crate) struct CloudWalUploadTracker {
     /// here; `HybridStorage` retries it itself.
     upload_retry: crate::runtime::retry_schedule::RetrySchedule,
     pub(super) prune_inflight: HashSet<u64>,
+    /// Sealed segments whose local copies may go, with what each releases
+    /// once it falls below the ledger's log start (#842).
+    pub(super) local_retirement: BTreeMap<u64, LocalRetirement>,
+}
+
+/// What a segment's local retirement releases.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalRetirement {
+    /// Its cloud-durable obligation in the transition protocol.
+    pub(crate) cloud_durable: bool,
+    /// Its tombstone GC pin, once the catalog pruned it.
+    pub(crate) gc_pin: bool,
+}
+
+impl LocalRetirement {
+    pub(crate) const CLOUD_DURABLE: Self = Self {
+        cloud_durable: true,
+        gc_pin: false,
+    };
+    pub(crate) const GC_PIN: Self = Self {
+        cloud_durable: false,
+        gc_pin: true,
+    };
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            cloud_durable: self.cloud_durable || other.cloud_durable,
+            gc_pin: self.gc_pin || other.gc_pin,
+        }
+    }
 }
 
 impl CloudWalUploadTracker {
+    /// Queue `segment_id`'s local copy for retirement, releasing `release`.
+    pub(super) fn queue_local_retirement(&mut self, segment_id: u64, release: LocalRetirement) {
+        let entry = self.local_retirement.entry(segment_id).or_default();
+        *entry = entry.merge(release);
+    }
+
     pub(super) fn new(acked_segments: BTreeMap<u64, u64>) -> Self {
         Self {
             acked_segments,
@@ -36,6 +72,7 @@ impl CloudWalUploadTracker {
                 CLOUD_WAL_RUNTIME_RETRY_DELAY,
             ),
             prune_inflight: HashSet::new(),
+            local_retirement: BTreeMap::new(),
         }
     }
 

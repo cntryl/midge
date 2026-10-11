@@ -3,11 +3,12 @@ use crate::io::{staging, Fs, FsError, FsPath};
 use std::path::Path;
 use std::sync::Arc;
 
-pub const CURRENT_FORMAT_VERSION: u32 = 4;
-/// Oldest on-disk format this build opens. Version 4 changed only the
-/// manifest key-bound encoding (#546), which still decodes version 3
-/// manifests, so a writable open upgrades a version 3 marker in place.
-const MIN_SUPPORTED_FORMAT_VERSION: u32 = 3;
+/// Version 5 names WAL history by the segment ledger (`wal/LEDGER`, #842)
+/// instead of a directory listing and an active `wal.log`.
+pub const CURRENT_FORMAT_VERSION: u32 = 5;
+/// Oldest on-disk format this build opens. Older databases are rejected, not
+/// upgraded: their WAL has no ledger.
+const MIN_SUPPORTED_FORMAT_VERSION: u32 = CURRENT_FORMAT_VERSION;
 const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
 const FORMAT_PREFIX: &str = "midge-format-version=";
@@ -29,12 +30,7 @@ pub fn ensure_or_create_format_marker(fs: &Arc<dyn Fs>, db_path: &Path) -> Midge
         .exists(&FsPath::new(FORMAT_FILE))
         .map_err(FsError::into_midge)?
     {
-        // Upgrade before this process writes any newer-format metadata, so
-        // an older build refuses the database instead of misreading it.
-        if validate_format_marker(fs.as_ref(), db_path)? < CURRENT_FORMAT_VERSION {
-            publish_current_marker(fs)?;
-        }
-        return Ok(CURRENT_FORMAT_VERSION);
+        return validate_format_marker(fs.as_ref(), db_path);
     }
 
     if has_persisted_state_without_format_marker(fs.as_ref())? {
@@ -48,7 +44,7 @@ pub fn ensure_or_create_format_marker(fs: &Arc<dyn Fs>, db_path: &Path) -> Midge
     Ok(CURRENT_FORMAT_VERSION)
 }
 
-/// Durably publish the current format marker, replacing any older one.
+/// Durably publish the current format marker for a new database.
 fn publish_current_marker(fs: &Arc<dyn Fs>) -> MidgeResult<()> {
     staging::stage_bytes_with_hook(
         fs,
@@ -223,22 +219,21 @@ mod tests {
     }
 
     #[test]
-    fn should_upgrade_version_three_marker_when_opening_writable_database() {
-        // Arrange: version 4 only changed the manifest key-bound encoding,
-        // which still decodes version 3 manifests (#546).
+    fn should_reject_version_four_marker_without_writing_when_opening() {
+        // Arrange: version 4 databases have no WAL ledger (#842).
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             temp_dir.path().join(FORMAT_FILE),
-            format!("{FORMAT_PREFIX}3\n"),
+            format!("{FORMAT_PREFIX}4\n"),
         )
-        .expect("write version 3 marker");
+        .expect("write version 4 marker");
 
         // Act
-        let version = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
-            .expect("open v3");
+        let error = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
+            .expect_err("version 4 is unsupported");
 
         // Assert
-        assert_eq!(version, 4);
+        assert!(matches!(error, MidgeError::CompatibilityError(_)));
         assert_eq!(
             std::fs::read_to_string(temp_dir.path().join(FORMAT_FILE)).expect("read marker"),
             format!("{FORMAT_PREFIX}4\n")
@@ -246,29 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn should_accept_version_three_marker_without_writing_when_validating() {
-        // Arrange: read-only paths such as verification must not mutate disk.
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(
-            temp_dir.path().join(FORMAT_FILE),
-            format!("{FORMAT_PREFIX}3\n"),
-        )
-        .expect("write version 3 marker");
-
-        // Act
-        let version = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
-            .expect("validate v3");
-
-        // Assert
-        assert_eq!(version, 3);
-        assert_eq!(
-            std::fs::read_to_string(temp_dir.path().join(FORMAT_FILE)).expect("read marker"),
-            format!("{FORMAT_PREFIX}3\n")
-        );
-    }
-
-    #[test]
-    fn should_reject_open_given_format_version_older_than_three() {
+    fn should_reject_open_given_format_version_older_than_five() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(

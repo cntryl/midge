@@ -42,9 +42,6 @@ pub(crate) mod recovery;
 pub(crate) mod traits;
 pub mod types;
 
-/// Active WAL filename. This file is mutable and is never uploaded as-is.
-pub const ACTIVE_FILE_NAME: &str = "wal.log";
-
 /// Pad sealed WAL segment names to the full `u64` width so filesystem and
 /// object-store listings sort in the same order as segment ids.
 pub const WAL_SEGMENT_ID_WIDTH: usize = 20;
@@ -74,21 +71,7 @@ pub fn segment_object_key(segment_id: u64, writer_epoch: u64) -> String {
     )
 }
 
-/// Alias for callers that operate specifically on cloud WAL objects.
-#[cfg(test)]
-#[must_use]
-pub fn cloud_segment_file_name(segment_id: u64) -> String {
-    segment_file_name(segment_id)
-}
-
-/// Backward-compatible alias for callers that operate specifically on cloud WAL
-/// objects.
-#[must_use]
-pub fn cloud_segment_object_key(segment_id: u64, writer_epoch: u64) -> String {
-    segment_object_key(segment_id, writer_epoch)
-}
-
-/// Parse a WAL segment id from a cloud key, staged filename, or legacy name.
+/// Parse a WAL segment id from a cloud key or a segment filename.
 #[must_use]
 pub fn parse_segment_id(name: &str) -> Option<u64> {
     let file_name = name.strip_prefix("wal/").unwrap_or(name);
@@ -103,13 +86,8 @@ pub fn parse_segment_id(name: &str) -> Option<u64> {
             .and_then(|segment_id| segment_id.parse::<u64>().ok());
     }
 
-    if let Some(segment_str) = file_name.strip_suffix(".wal") {
-        return segment_str.parse::<u64>().ok();
-    }
-
     file_name
-        .strip_prefix("wal_")
-        .and_then(|segment_str| segment_str.strip_suffix(".log"))
+        .strip_suffix(".wal")
         .and_then(|segment_str| segment_str.parse::<u64>().ok())
 }
 
@@ -148,10 +126,7 @@ mod tests {
             object_key,
             "wal/epochs/00000000000000000007/00000000000000000042.wal"
         );
-        assert_eq!(
-            cloud_segment_object_key(segment_id, writer_epoch),
-            object_key
-        );
+        assert_eq!(segment_object_key(segment_id, writer_epoch), object_key);
     }
 
     #[test]

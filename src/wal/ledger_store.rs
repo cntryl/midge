@@ -151,6 +151,11 @@ impl LedgerStore {
         })
     }
 
+    /// The ledger as persisted.
+    pub(crate) fn ledger(&self) -> &WalLedger {
+        &self.ledger
+    }
+
     /// Append one edit frame and sync (durable when this returns).
     ///
     /// An edit that does not apply to the ledger is refused, as corruption,

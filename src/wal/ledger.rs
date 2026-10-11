@@ -251,6 +251,8 @@ impl WalLedger {
     }
 
     /// The holder identity `Genesis` recorded; empty when uninitialized.
+    /// Ownership (#820) reads it; until then only tests do.
+    #[cfg(test)]
     pub(crate) fn holder(&self) -> &str {
         &self.holder
     }

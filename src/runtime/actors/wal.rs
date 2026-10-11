@@ -253,6 +253,9 @@ pub struct WalActor {
     leader_holder_id: String,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
+    /// The segment ledger (#842): which WAL files are history. Rotation and
+    /// retirement change it only through this actor. `None` in memory mode.
+    history: Option<crate::runtime::wal_history::WalHistory>,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -610,8 +613,17 @@ impl WalActor {
         } else {
             Arc::new(crate::io::RealFs::new(wal_dir).map_err(FsError::into_midge)?)
         };
+        let history = if memory_mode {
+            None
+        } else {
+            Some(crate::runtime::wal_history::WalHistory::open(
+                Arc::clone(&fs),
+                1,
+            )?)
+        };
         Self::open(
             fs,
+            history,
             durability_policy,
             batch_config,
             memory_mode,
@@ -620,9 +632,12 @@ impl WalActor {
         )
     }
 
-    /// Open the WAL actor over `wal`, the database's WAL directory view.
-    pub fn open(
+    /// Open the WAL actor over `wal`, the database's WAL directory view,
+    /// appending to the open segment of `history`, which a file-backed WAL
+    /// needs.
+    pub(crate) fn open(
         wal: Arc<dyn Fs>,
+        history: Option<crate::runtime::wal_history::WalHistory>,
         durability_policy: DurabilityPolicy,
         batch_config: BatchConfig,
         memory_mode: bool,
@@ -630,15 +645,18 @@ impl WalActor {
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
         let counters = crate::telemetry::CounterSink::default();
-        let io = if memory_mode {
-            WalIoState::Memory
+        let (io, history) = if memory_mode {
+            (WalIoState::Memory, None)
         } else {
+            let history = history.ok_or_else(|| {
+                MidgeError::Internal("a file-backed WAL needs its segment ledger".to_string())
+            })?;
             let fs = wal;
             let factory = FsWalFactoryIo::new(Arc::clone(&fs))
                 .with_io_timeout(storage_io_timeout)
                 .with_counters(counters.clone());
-            let writer = factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?;
-            WalIoState::Open { fs, writer }
+            let writer = factory.open_segment(history.ledger().open_segment())?;
+            (WalIoState::Open { fs, writer }, Some(history))
         };
 
         let actor = Self {
@@ -662,6 +680,7 @@ impl WalActor {
             leader_store: None,
             leader_holder_id: String::new(),
             max_replayable_txn_bytes: None,
+            history,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -845,6 +864,16 @@ impl WalActor {
 
     pub(crate) fn current_segment_max_sequence(&self) -> u64 {
         self.segment_max_sequence
+    }
+
+    /// The segment ledger; `None` in memory mode.
+    pub(crate) fn history(&self) -> Option<&crate::runtime::wal_history::WalHistory> {
+        self.history.as_ref()
+    }
+
+    /// The segment ledger, to retire WAL through; `None` in memory mode.
+    pub(crate) fn history_mut(&mut self) -> Option<&mut crate::runtime::wal_history::WalHistory> {
+        self.history.as_mut()
     }
 
     #[cfg(test)]

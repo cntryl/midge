@@ -975,7 +975,7 @@ fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
     let orphan_path = cloud_wal_dir
         .join("epochs")
         .join("00000000000000000007")
-        .join(crate::wal::cloud_segment_file_name(1));
+        .join(crate::wal::segment_file_name(1));
     std::fs::create_dir_all(orphan_path.parent().expect("epoch WAL parent"))
         .expect("create epoch WAL directory");
     std::fs::write(orphan_path, cloud_wal_test_bytes(1, 7, b"untracked"))

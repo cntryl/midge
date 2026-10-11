@@ -139,11 +139,7 @@ impl CatalogExpiryFixture {
         let publication_path = directory.path().join("second.wal");
         std::fs::write(&publication_path, &second_wal).unwrap();
         storage
-            .compare_exchange_remote_object(
-                &crate::wal::cloud_segment_object_key(2, 7),
-                None,
-                second_wal,
-            )
+            .compare_exchange_remote_object(&crate::wal::segment_object_key(2, 7), None, second_wal)
             .unwrap();
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
         catalog
@@ -635,7 +631,7 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
                     max_sequence: segment_id + 1,
                     size_bytes: 1,
                     content_crc32c: 0,
-                    object_key: crate::wal::cloud_segment_object_key(segment_id, 7),
+                    object_key: crate::wal::segment_object_key(segment_id, 7),
                 }],
             )
             .unwrap();

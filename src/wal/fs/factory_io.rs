@@ -47,6 +47,30 @@ impl FsWalFactoryIo {
         self
     }
 
+    /// A writer appending to segment `id`, which the segment ledger already
+    /// records: a missing file is corruption, never recreated empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the segment is missing or the writer cannot be
+    /// created.
+    pub(crate) fn open_segment(
+        &self,
+        id: crate::wal::ledger::SegmentId,
+    ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
+        let name = crate::wal::segment_file_name(id);
+        if !self
+            .fs
+            .exists(&crate::io::FsPath::new(&name))
+            .map_err(crate::io::FsError::into_midge)?
+        {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "WAL segment {name} is in the WAL ledger but missing"
+            )));
+        }
+        self.create_writer(&name)
+    }
+
     /// Create a new WAL writer using the `io::Fs` backend
     ///
     /// # Errors

@@ -1439,7 +1439,7 @@ fn remote_wal_path_for_test(el: &EventLoop, segment_id: u64) -> PathBuf {
     el.state
         .db_path
         .join("cloud_store")
-        .join(crate::wal::cloud_segment_object_key(
+        .join(crate::wal::segment_object_key(
             segment_id,
             el.state.writer_epoch,
         ))
@@ -5137,7 +5137,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     )?;
     let segment_id = 82;
     let max_sequence = 82;
-    let wal_key = crate::wal::cloud_segment_object_key(segment_id, el.state.writer_epoch);
+    let wal_key = crate::wal::segment_object_key(segment_id, el.state.writer_epoch);
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create blocked WAL prune cloud backend"),
@@ -5292,7 +5292,7 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
     )?;
     let segment_id = 83;
     let max_sequence = 83;
-    let wal_key = crate::wal::cloud_segment_object_key(segment_id, el.state.writer_epoch);
+    let wal_key = crate::wal::segment_object_key(segment_id, el.state.writer_epoch);
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create failed WAL prune cloud backend"),

@@ -267,6 +267,7 @@ impl EventLoop {
         )?;
         let mut wal_actor = WalActor::open(
             crate::io::subdirectory(Arc::clone(&state.fs), "wal"),
+            state.wal.history.take(),
             config.wal_durability_policy,
             config.wal_batch_config,
             memory_mode,
@@ -501,9 +502,7 @@ impl EventLoop {
             check_startup_scope(startup_scope, "recovered durable cloud WAL")?;
             self.wal_transition.note_cloud_durable(segment_id)?;
             self.durability.retire_cloud_segment(segment_id);
-            if self.remove_cloud_durable_local_wal_segment(segment_id) {
-                self.wal_transition.retire_cloud_durable(segment_id)?;
-            }
+            self.retire_cloud_local_wal(segment_id, coordination::LocalRetirement::CLOUD_DURABLE);
         }
 
         for (&segment_id, segment) in local_segments {

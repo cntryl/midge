@@ -1557,9 +1557,7 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
 
     // Assert
     assert!(
-        wal_dir
-            .join(crate::wal::cloud_segment_file_name(1))
-            .exists(),
+        wal_dir.join(crate::wal::segment_file_name(1)).exists(),
         "rotated WAL segments should use the canonical lex-sortable segment name"
     );
     assert!(

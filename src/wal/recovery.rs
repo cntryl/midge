@@ -249,8 +249,6 @@ pub(crate) struct WalSalvageStop {
     pub(crate) path: FsPath,
     /// Verified prefix of `path` that replay applied.
     pub(crate) valid_bytes: u64,
-    /// Files after `path` in replay order, never replayed.
-    pub(crate) unreplayed_paths: Vec<FsPath>,
     /// Highest verified sequence in the unreplayed files and, for a decoded
     /// record failure, in the readable remainder of the stop file.
     pub(crate) max_unreplayed_sequence: Option<u64>,

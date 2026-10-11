@@ -506,7 +506,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     let remote_segment = db_path
         .join("cloud_store")
-        .join(crate::wal::cloud_segment_object_key(2, 0));
+        .join(crate::wal::segment_object_key(2, 0));
     std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
         .expect("create remote WAL directory");
     std::fs::write(remote_segment, segment_bytes).expect("publish resumed WAL segment");
