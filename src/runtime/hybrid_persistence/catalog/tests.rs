@@ -146,7 +146,9 @@ impl CatalogExpiryFixture {
             )
             .unwrap();
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-        catalog.publish(7, segment.clone()).unwrap();
+        catalog
+            .append_run(7, std::slice::from_ref(&segment))
+            .unwrap();
         let bytes = catalog.encode().unwrap();
         let primary_before = match schedule {
             "missing-primary" => None,
@@ -622,16 +624,16 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
     for segment_id in 0..128 {
         catalog
-            .publish(
+            .append_run(
                 7,
-                PublishedWalSegment {
+                &[PublishedWalSegment {
                     segment_id,
                     writer_epoch: 7,
                     max_sequence: segment_id + 1,
                     size_bytes: 1,
                     content_crc32c: 0,
                     object_key: crate::wal::cloud_segment_object_key(segment_id, 7),
-                },
+                }],
             )
             .unwrap();
     }

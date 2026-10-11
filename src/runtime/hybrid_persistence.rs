@@ -25,6 +25,63 @@ use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::AdmittedCatalog;
 use catalog::{commit_catalog_within, load_and_repair_catalog_within};
 
+/// Why a WAL upload could not be verified or published (#841).
+#[derive(Debug)]
+pub(crate) enum PublicationError {
+    /// The object under `segment_id`'s key holds other bytes than the
+    /// sealed segment. Objects are never overwritten, so no retry can fix it.
+    Mismatch { segment_id: u64, detail: String },
+    /// The catalog refuses the run: publishing it would break the catalog's
+    /// order or identity. No retry can fix it.
+    Refused(crate::wal::publish::Refusal),
+    /// Another writer epoch owns the catalog.
+    Fenced(MidgeError),
+    /// A failure a later attempt may not repeat: I/O, a timeout, a lost
+    /// compare-and-swap race, memory pressure.
+    Retriable(MidgeError),
+}
+
+impl std::fmt::Display for PublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mismatch { detail, .. } => f.write_str(detail),
+            Self::Refused(refusal) => write!(f, "cloud WAL publication refused: {refusal}"),
+            Self::Fenced(error) | Self::Retriable(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl From<MidgeError> for PublicationError {
+    fn from(error: MidgeError) -> Self {
+        match error {
+            error @ MidgeError::Fenced(_) => Self::Fenced(error),
+            error => Self::Retriable(error),
+        }
+    }
+}
+
+impl From<crate::wal::publish::Refusal> for PublicationError {
+    fn from(refusal: crate::wal::publish::Refusal) -> Self {
+        match refusal {
+            crate::wal::publish::Refusal::EpochMismatch { .. } => {
+                Self::Fenced(MidgeError::Fenced(refusal.to_string()))
+            }
+            refusal => Self::Refused(refusal),
+        }
+    }
+}
+
+impl From<PublicationError> for MidgeError {
+    /// The engine error a caller waiting on the upload sees.
+    fn from(error: PublicationError) -> Self {
+        match error {
+            PublicationError::Mismatch { detail, .. } => MidgeError::Corruption(detail),
+            PublicationError::Refused(refusal) => refusal.into(),
+            PublicationError::Fenced(error) | PublicationError::Retriable(error) => error,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneProgress(Arc<parking_lot::Mutex<streaming_prune::Progress>>);
 
@@ -673,23 +730,6 @@ impl CloudPersistence {
         Ok(())
     }
 
-    /// Verify one segment's upload and publish it: [`Self::verify_uploaded_wal_segment`],
-    /// then [`Self::publish_wal_segments`] for it alone. Runtime publication
-    /// selects a contiguous run first; tests publish one segment directly.
-    #[cfg(test)]
-    pub(crate) fn publish_remote_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        source: &crate::io::FsLocation,
-        fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        let upload =
-            self.verify_uploaded_wal_segment(segment_id, expected_max_sequence, source, deadline)?;
-        self.publish_wal_segments(&[upload], fencing_epoch, deadline)
-    }
-
     /// Prove that the remote object for the sealed segment at `source` holds
     /// exactly its local bytes, and describe it for publication.
     ///
@@ -700,15 +740,15 @@ impl CloudPersistence {
     ///
     /// # Errors
     ///
-    /// Returns [`MidgeError::Corruption`] when the object holds other bytes:
-    /// objects are immutable, so it is never overwritten.
+    /// Returns [`PublicationError::Mismatch`] when the object holds other
+    /// bytes: objects are immutable, so it is never overwritten.
     pub(crate) fn verify_uploaded_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
         source: &crate::io::FsLocation,
         deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<PublishedWalSegment> {
+    ) -> Result<PublishedWalSegment, PublicationError> {
         let local_bytes = source.read_all().map_err(|error| {
             let error = error.into_io();
             MidgeError::Io(std::io::Error::new(
@@ -732,10 +772,13 @@ impl CloudPersistence {
         );
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
-            return Err(MidgeError::Corruption(format!(
-                "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
-                local_readback.writer_epoch
-            )));
+            return Err(PublicationError::Mismatch {
+                segment_id,
+                detail: format!(
+                    "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
+                    local_readback.writer_epoch
+                ),
+            });
         }
         Ok(entry)
     }
@@ -744,50 +787,30 @@ impl CloudPersistence {
     /// compare-and-swap.
     ///
     /// The caller selects `run` as the contiguous uploads its writer owes the
-    /// catalog ([`crate::wal::publish::uploaded_run`]); here each segment the
-    /// catalog lacks must land past its head
-    /// ([`crate::wal::publish::additions`]). Segments it already publishes
-    /// identically add nothing.
+    /// catalog ([`crate::wal::publish::uploaded_run`]); the catalog appends
+    /// it past its head ([`WalPublicationCatalog::append_run`]). Segments it
+    /// already publishes identically add nothing.
     ///
     /// # Errors
     ///
-    /// Returns [`MidgeError::Fenced`] when another writer epoch owns the
-    /// catalog, [`MidgeError::Corruption`] when the catalog publishes another
-    /// object for one of these segments, and an internal error for a run
-    /// that would not extend the catalog in order.
+    /// Returns [`PublicationError::Fenced`] when another writer epoch owns
+    /// the catalog, [`PublicationError::Refused`] when the run would break
+    /// the catalog's order or identity, and [`PublicationError::Retriable`]
+    /// for a failure a later attempt may not repeat.
     pub(crate) fn publish_wal_segments(
         &self,
         run: &[PublishedWalSegment],
         fencing_epoch: u64,
         deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
+    ) -> Result<(), PublicationError> {
         let _catalog_mutation =
             self.lock_wal_catalog_mutation_within(deadline, "cloud WAL publication")?;
         let authority = load_and_repair_catalog_within(self, deadline)?.ok_or_else(|| {
             MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
         })?;
         let mut catalog = authority.catalog;
-        if catalog.fencing_epoch != fencing_epoch {
-            return Err(MidgeError::Fenced(format!(
-                "cloud WAL catalog mutation requires fencing epoch {}, writer epoch {fencing_epoch} rejected",
-                catalog.fencing_epoch
-            )));
-        }
-        let additions = crate::wal::publish::additions(&catalog.segments, run).map_err(
-            |refusal| match refusal {
-                crate::wal::publish::Refusal::Conflict { .. } => {
-                    MidgeError::Corruption(refusal.to_string())
-                }
-                _ => MidgeError::Internal(refusal.to_string()),
-            },
-        )?;
-        if additions.is_empty() {
+        if !catalog.append_run(fencing_epoch, run)? {
             return Ok(());
-        }
-        for segment in additions {
-            catalog
-                .publish(fencing_epoch, segment)
-                .map_err(MidgeError::Internal)?;
         }
         let publication = commit_catalog_within(self, Some(&authority.primary), &catalog, deadline);
         match publication {
@@ -801,21 +824,21 @@ impl CloudPersistence {
                     })?
                     .catalog;
                 if winning_catalog.fencing_epoch > fencing_epoch {
-                    return Err(MidgeError::Fenced(format!(
+                    return Err(PublicationError::Fenced(MidgeError::Fenced(format!(
                         "cloud WAL catalog advanced to fencing epoch {}, writer epoch {fencing_epoch} rejected during publication",
                         winning_catalog.fencing_epoch
-                    )));
+                    ))));
                 }
-                Err(contextualize_cloud_error(
+                Err(PublicationError::Retriable(contextualize_cloud_error(
                     MidgeError::Busy(conflict),
                     "cloud WAL catalog publication failed",
-                ))
+                )))
             }
-            Err(error @ MidgeError::Fenced(_)) => Err(error),
-            Err(error) => Err(contextualize_cloud_error(
+            Err(error @ MidgeError::Fenced(_)) => Err(PublicationError::Fenced(error)),
+            Err(error) => Err(PublicationError::Retriable(contextualize_cloud_error(
                 error,
                 "cloud WAL catalog publication failed",
-            )),
+            ))),
         }
     }
 
@@ -970,12 +993,15 @@ fn validate_remote_wal(
     storage: &HybridStorage,
     entry: &PublishedWalSegment,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<ValidatedWalObject> {
+) -> Result<ValidatedWalObject, PublicationError> {
     let proof = storage.remote_object_proof_within(&entry.object_key, deadline)?;
     // The object exists but holds other bytes than the segment it names.
     entry
         .validate_bytes(proof.bytes())
-        .map_err(MidgeError::Corruption)?;
+        .map_err(|detail| PublicationError::Mismatch {
+            segment_id: entry.segment_id,
+            detail,
+        })?;
     Ok(ValidatedWalObject { proof })
 }
 

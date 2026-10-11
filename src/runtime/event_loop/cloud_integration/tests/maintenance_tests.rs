@@ -116,11 +116,7 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
         4
     );
     drain_prune_completion_for_test(&mut el);
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked_segments
-        .contains_key(&81));
+    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
     el.schedule_next_flush_worker();
     assert!(el.flush_actor.is_inflight());
     complete_flush(&mut el);

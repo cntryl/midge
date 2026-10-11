@@ -178,7 +178,7 @@ impl EventLoop {
                 .hybrid_storage
                 .as_ref()
                 .map_or(0, |storage| storage.pending_upload_count()),
-            wal_segments_acked = self.cloud_coordinator.cloud_wal.acked_segments.len(),
+            wal_segments_acked = self.cloud_coordinator.cloud_wal.acked().len(),
             wal_prunes_inflight = self.cloud_coordinator.cloud_wal.prune_inflight.len(),
             wal_preflight_worker_owned = self.cloud_coordinator.cloud_wal_prune_worker.is_some(),
             "Runtime shutdown started"

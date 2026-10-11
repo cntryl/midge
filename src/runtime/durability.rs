@@ -298,7 +298,7 @@ impl DurabilityCoordinator {
     pub fn contiguous_acked_cloud_segments(
         &self,
         acked_segments: &BTreeMap<u64, u64>,
-    ) -> Result<Vec<(u64, u64)>, String> {
+    ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
         let mut owed: Vec<crate::wal::publish::OwedSegment> = self
             .inflight
             .iter()
@@ -309,12 +309,6 @@ impl DurabilityCoordinator {
             .collect();
         owed.sort_unstable_by_key(|segment| segment.segment_id);
         crate::wal::publish::uploaded_run(&owed, acked_segments)
-            .map(|run| {
-                run.into_iter()
-                    .map(|segment| (segment.segment_id, segment.max_sequence))
-                    .collect()
-            })
-            .map_err(|refusal| refusal.to_string())
     }
 
     /// Retire a cloud segment only after its frontier and waiter commit has
@@ -331,10 +325,10 @@ impl DurabilityCoordinator {
     pub fn take_contiguous_acked_cloud_segments(
         &mut self,
         acked_segments: &BTreeMap<u64, u64>,
-    ) -> Result<Vec<(u64, u64)>, String> {
+    ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
         let ready = self.contiguous_acked_cloud_segments(acked_segments)?;
-        for (segment_id, _) in &ready {
-            self.inflight.remove(segment_id);
+        for segment in &ready {
+            self.inflight.remove(&segment.segment_id);
         }
         Ok(ready)
     }
@@ -469,7 +463,19 @@ mod tests {
 
         // Assert
         assert_eq!(blocked.len(), 0);
-        assert_eq!(ready, vec![(1, 10), (2, 20)]);
+        assert_eq!(
+            ready,
+            vec![
+                crate::wal::publish::OwedSegment {
+                    segment_id: 1,
+                    max_sequence: 10,
+                },
+                crate::wal::publish::OwedSegment {
+                    segment_id: 2,
+                    max_sequence: 20,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -483,7 +489,14 @@ mod tests {
         let result = coordinator.take_contiguous_acked_cloud_segments(&acknowledgements);
 
         // Assert
-        assert!(matches!(result, Err(message) if message.contains("does not match")));
+        assert_eq!(
+            result,
+            Err(crate::wal::publish::Refusal::SequenceMismatch {
+                segment_id: 7,
+                sealed: 70,
+                uploaded: 71,
+            })
+        );
         assert_eq!(coordinator.cloud_segment_max_sequence(7), Some(70));
     }
 

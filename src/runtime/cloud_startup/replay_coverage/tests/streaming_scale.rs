@@ -169,7 +169,10 @@ impl ScaleFixture {
         );
         publication.validate_bytes(&bytes).expect("real sealed WAL");
         self.save_object(&publication.object_key, bytes)?;
-        assert!(self.catalog.publish(CATALOG_EPOCH, publication).unwrap());
+        assert!(self
+            .catalog
+            .append_run(CATALOG_EPOCH, &[publication])
+            .unwrap());
         self.save_object(
             OBJECT_KEY,
             self.catalog.encode().expect("validated catalog"),

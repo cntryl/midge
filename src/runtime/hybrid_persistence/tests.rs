@@ -40,6 +40,21 @@ mod retirement_lifetime;
 /// keeps exactly the entry points it calls - the batched
 /// `prune_cloud_wal_segments_within` and nothing narrower.
 impl CloudPersistence {
+    /// Verify one segment's upload and publish it alone: the two production
+    /// calls the runtime makes, without its contiguous selection.
+    pub(crate) fn publish_remote_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        source: &crate::io::FsLocation,
+        fencing_epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
+        let upload =
+            self.verify_uploaded_wal_segment(segment_id, expected_max_sequence, source, deadline)?;
+        Ok(self.publish_wal_segments(&[upload], fencing_epoch, deadline)?)
+    }
+
     pub(crate) fn verify_remote_wal_segment(
         &self,
         segment_id: u64,
@@ -1252,7 +1267,7 @@ fn write_authoritative_cloud_wal(
         crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
             .expect("decode test WAL catalog");
     catalog
-        .publish(2, publication.clone())
+        .append_run(2, std::slice::from_ref(&publication))
         .expect("publish test WAL authority");
     storage
         .compare_exchange_remote_object(
@@ -3051,7 +3066,7 @@ fn should_hold_failed_wal_upload_until_its_retry_delay_passes() {
     // Assert
     assert_eq!(write_attempts.load(Ordering::SeqCst), 1);
     assert!(
-        turn.is_some_and(|turn| turn > hour - Duration::from_secs(60)),
+        turn.is_some_and(|turn| turn > Duration::from_mins(59)),
         "a backed-off upload must not keep its caller polling: {turn:?}"
     );
 }

@@ -488,13 +488,16 @@ impl EventLoop {
 
         let initially_durable = self
             .durability
-            .contiguous_acked_cloud_segments(&self.cloud_coordinator.cloud_wal.acked_segments)
-            .map_err(crate::common::MidgeError::RecoveryFailed)?;
+            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acked())
+            .map_err(|refusal| crate::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
-        if let Some((_, max_sequence)) = initially_durable.last() {
-            self.state.wal.frontiers.advance_cloud_to(*max_sequence);
+        if let Some(durable) = initially_durable.last() {
+            self.state
+                .wal
+                .frontiers
+                .advance_cloud_to(durable.max_sequence);
         }
-        for (segment_id, _) in initially_durable {
+        for crate::wal::publish::OwedSegment { segment_id, .. } in initially_durable {
             check_startup_scope(startup_scope, "recovered durable cloud WAL")?;
             self.wal_transition.note_cloud_durable(segment_id)?;
             self.durability.retire_cloud_segment(segment_id);

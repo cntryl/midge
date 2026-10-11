@@ -39,6 +39,21 @@ pub(crate) enum Refusal {
     /// The catalog already publishes a later segment, so adding this one
     /// would publish out of order.
     BehindHead { segment_id: u64, head: u64 },
+    /// Another writer epoch owns the catalog.
+    EpochMismatch { catalog: u64, writer: u64 },
+}
+
+impl Refusal {
+    /// The segment the refusal is about, if it is about one.
+    pub(crate) fn segment_id(&self) -> Option<u64> {
+        match self {
+            Self::Unordered { next, .. } => Some(*next),
+            Self::SequenceMismatch { segment_id, .. }
+            | Self::Conflict { segment_id }
+            | Self::BehindHead { segment_id, .. } => Some(*segment_id),
+            Self::EpochMismatch { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Refusal {
@@ -64,6 +79,26 @@ impl std::fmt::Display for Refusal {
                 f,
                 "cloud WAL segment {segment_id} cannot be published behind catalog head {head}"
             ),
+            Self::EpochMismatch { catalog, writer } => write!(
+                f,
+                "cloud WAL catalog mutation requires fencing epoch {catalog}, writer epoch {writer} rejected"
+            ),
+        }
+    }
+}
+
+impl From<Refusal> for crate::common::MidgeError {
+    /// A refusal no retry can fix: the catalog contradicts the writer, the
+    /// writer's own bookkeeping is inconsistent, or the writer is fenced.
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Conflict { .. } | Refusal::BehindHead { .. } => {
+                Self::Corruption(format!("cloud WAL publication refused: {refusal}"))
+            }
+            Refusal::Unordered { .. } | Refusal::SequenceMismatch { .. } => {
+                Self::Internal(format!("cloud WAL publication refused: {refusal}"))
+            }
+            Refusal::EpochMismatch { .. } => Self::Fenced(refusal.to_string()),
         }
     }
 }

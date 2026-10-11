@@ -5,7 +5,7 @@ fn populated_catalog() -> WalPublicationCatalog {
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
     for segment_id in 1..=4096 {
         let segment = PublishedWalSegment::from_validated_bytes(segment_id, segment_id, 7, b"wal");
-        catalog.publish(7, segment).unwrap();
+        catalog.append_run(7, &[segment]).unwrap();
     }
     catalog.raise_sequence_floor(7, 123).unwrap();
     catalog

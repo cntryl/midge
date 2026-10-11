@@ -179,11 +179,20 @@ pub struct CompactionState {
 /// Cloud sync state
 #[derive(Default)]
 pub struct CloudState {
-    /// SSTs pending upload
+    /// WAL objects queued for upload
     pub pending_uploads: Vec<String>,
     /// Last checkpoint sequence uploaded to cloud
     #[cfg(test)]
     pub last_cloud_checkpoint_seq: u64,
+}
+
+impl CloudState {
+    /// Stop tracking `segment_id`'s WAL object as queued for upload.
+    pub fn forget_pending_upload(&mut self, segment_id: u64) {
+        self.pending_uploads.retain(|item| {
+            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+        });
+    }
 }
 
 /// Snapshot pinning state

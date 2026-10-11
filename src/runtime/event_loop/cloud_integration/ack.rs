@@ -3,8 +3,8 @@
 use super::super::durability_sync::CompletionSource;
 use super::super::EventLoop;
 use crate::common::OperationDeadline;
-use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use crate::wal::publish::OwedSegment;
 
 /// Failed upload attempts a cloud-durability waiter waits through. From then
 /// on every failure fails the waiters it blocks, while the storage queue
@@ -172,7 +172,7 @@ impl EventLoop {
             )),
         };
         if !failure_kind.ends_upload() {
-            self.handle_cloud_upload_failure(segment_id, &error, false);
+            self.fail_cloud_upload_waiters(segment_id, &error);
         } else if self.owns_cloud_upload(segment_id) {
             self.fence_cloud_upload(segment_id, &error);
         } else {
@@ -184,7 +184,7 @@ impl EventLoop {
         }
     }
 
-    fn defer_cloud_ack_for_memory(
+    pub(super) fn defer_cloud_ack_for_memory(
         &mut self,
         segment_id: u64,
         max_sequence: u64,
@@ -218,174 +218,14 @@ impl EventLoop {
         false
     }
 
-    fn handle_storage_event_cloud_ack(
+    /// Advance the cloud durability frontier through `ready_segments`, the
+    /// published contiguous run ending at `durable`, and complete its waiters.
+    pub(super) fn commit_contiguous_cloud_ack(
         &mut self,
-        segment_id: u64,
-        max_sequence: u64,
-        attempt_deadline: Option<&OperationDeadline>,
+        ready_segments: &[OwedSegment],
+        durable: OwedSegment,
     ) {
-        let deadline = attempt_deadline
-            .copied()
-            .unwrap_or_else(|| self.cloud_ack_deadline(segment_id));
-        if let Err(error) = self.validate_runtime_writer_lease_within(&deadline) {
-            self.handle_cloud_upload_failure(
-                segment_id,
-                &Self::cloud_ack_error(
-                    "writer lease validation failed before cloud WAL acknowledgement",
-                    error,
-                ),
-                true,
-            );
-            return;
-        }
-        // A verified readback only records the segment as uploaded. The
-        // catalog publishes it once every earlier segment is uploaded too.
-        let upload = match self.verify_uploaded_wal_segment(segment_id, max_sequence, &deadline) {
-            Ok(upload) => upload,
-            Err(error) => {
-                if self.defer_cloud_ack_for_memory(segment_id, max_sequence, &error, &deadline) {
-                    return;
-                }
-                if matches!(error, crate::common::MidgeError::Corruption(_)) {
-                    self.fence_cloud_upload(segment_id, &error);
-                    return;
-                }
-                self.handle_cloud_upload_failure(
-                    segment_id,
-                    &Self::cloud_ack_error("cloud WAL readback validation failed", error),
-                    true,
-                );
-                return;
-            }
-        };
-
-        self.state.cloud.pending_uploads.retain(|item| {
-            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
-        });
-        if let Err(error) = self.wal_transition.note_acknowledged(segment_id) {
-            if self.state.wal.frontiers.cloud_durable() >= max_sequence {
-                tracing::debug!(segment_id, "ignored duplicate cloud WAL acknowledgement");
-                return;
-            }
-            self.handle_cloud_upload_failure(segment_id, &error, true);
-            return;
-        }
-        self.cloud_coordinator.cloud_wal.record_upload(upload);
-
-        let ready_segments = match self
-            .durability
-            .contiguous_acked_cloud_segments(&self.cloud_coordinator.cloud_wal.acked_segments)
-        {
-            Ok(ready_segments) => ready_segments,
-            Err(error) => {
-                self.handle_cloud_upload_failure(
-                    segment_id,
-                    &crate::common::MidgeError::Internal(error),
-                    true,
-                );
-                return;
-            }
-        };
-
-        let Some((durable_segment_id, durable_max_sequence)) = ready_segments.last().copied()
-        else {
-            tracing::debug!(
-                segment_id,
-                max_sequence,
-                "CloudAck buffered behind an earlier unacked WAL segment"
-            );
-            return;
-        };
-
-        if !self.publish_contiguous_cloud_uploads(segment_id, &ready_segments, &deadline) {
-            return;
-        }
-        self.commit_contiguous_cloud_ack(&ready_segments, durable_segment_id, durable_max_sequence);
-    }
-
-    /// Publish the uploads of `ready_segments`, the contiguous run of
-    /// acknowledged segments past the published frontier, in one catalog
-    /// compare-and-swap. Returns whether the whole run is published.
-    ///
-    /// A failure withdraws the run's first upload, or the acknowledged
-    /// `segment_id` when the run needed none, for a fresh upload and
-    /// readback, so no later publication can pass it in the meantime.
-    fn publish_contiguous_cloud_uploads(
-        &mut self,
-        segment_id: u64,
-        ready_segments: &[(u64, u64)],
-        deadline: &OperationDeadline,
-    ) -> bool {
-        let run = self
-            .cloud_coordinator
-            .cloud_wal
-            .unpublished_uploads(ready_segments);
-        let failed_segment = run.first().map_or(segment_id, |upload| upload.segment_id);
-        if let Some(first_upload) = run.first() {
-            let first_max_sequence = first_upload.max_sequence;
-            if let Err(error) = self.publish_cloud_wal_run(&run, deadline) {
-                // Withdraw the upload before deferring it, so no other
-                // acknowledgement publishes it while its retry is queued.
-                self.cloud_coordinator
-                    .cloud_wal
-                    .forget_upload(failed_segment);
-                if self.defer_cloud_ack_for_memory(
-                    failed_segment,
-                    first_max_sequence,
-                    &error,
-                    deadline,
-                ) {
-                    return false;
-                }
-                if matches!(error, crate::common::MidgeError::Corruption(_)) {
-                    self.fence_cloud_upload(failed_segment, &error);
-                    return false;
-                }
-                self.handle_cloud_upload_failure(
-                    failed_segment,
-                    &Self::cloud_ack_error("cloud WAL catalog publication failed", error),
-                    true,
-                );
-                return false;
-            }
-        }
-        if let Err(error) = self.validate_runtime_writer_lease_within(deadline) {
-            self.handle_cloud_upload_failure(
-                failed_segment,
-                &Self::cloud_ack_error(
-                    "writer lease validation failed after cloud WAL publication",
-                    error,
-                ),
-                true,
-            );
-            return false;
-        }
-        self.cloud_coordinator
-            .cloud_wal
-            .mark_published(ready_segments);
-        true
-    }
-
-    /// An uploaded object holds other bytes than the segment it names, or
-    /// the catalog publishes another object for it. Objects are immutable
-    /// and never overwritten, so no retry can publish this segment or any
-    /// after it: fence the writer.
-    fn fence_cloud_upload(&mut self, segment_id: u64, error: &crate::common::MidgeError) {
-        self.cloud_coordinator.cloud_wal.forget_upload(segment_id);
-        self.state.cloud.pending_uploads.retain(|item| {
-            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
-        });
-        self.fence_wal_transition(error, Some(segment_id));
-        tracing::error!(segment_id, %error, "cloud WAL upload cannot be published; writer fenced");
-    }
-
-    fn commit_contiguous_cloud_ack(
-        &mut self,
-        ready_segments: &[(u64, u64)],
-        durable_segment_id: u64,
-        durable_max_sequence: u64,
-    ) {
-        if let Err(error) = self.wal_transition.begin_ack(durable_segment_id) {
+        if let Err(error) = self.wal_transition.begin_ack(durable.segment_id) {
             self.fence_cloud_ack_transition(ready_segments, &error);
             return;
         }
@@ -397,9 +237,9 @@ impl EventLoop {
         self.state
             .wal
             .frontiers
-            .advance_cloud_to(durable_max_sequence);
+            .advance_cloud_to(durable.max_sequence);
         tracing::debug!(
-            segment_id = durable_segment_id,
+            segment_id = durable.segment_id,
             cloud_durable_seq = self.state.wal.frontiers.cloud_durable(),
             "Cloud upload complete"
         );
@@ -412,22 +252,22 @@ impl EventLoop {
             self.fence_cloud_ack_transition(ready_segments, &error);
             return;
         }
-        for (seg_id, _) in ready_segments {
-            let waiters = self.durability.complete_waiters_at(*seg_id);
+        for segment in ready_segments {
+            let waiters = self.durability.complete_waiters_at(segment.segment_id);
             self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
-            if let Err(error) = self.wal_transition.note_cloud_durable(*seg_id) {
+            if let Err(error) = self.wal_transition.note_cloud_durable(segment.segment_id) {
                 self.fence_cloud_ack_transition(ready_segments, &error);
                 return;
             }
         }
 
-        if let Err(error) = self.wal_transition.finish_ack(durable_segment_id) {
+        if let Err(error) = self.wal_transition.finish_ack(durable.segment_id) {
             self.fence_cloud_ack_transition(ready_segments, &error);
             return;
         }
 
-        for (seg_id, _) in ready_segments {
-            if let Some(enqueued_at) = self.durability.retire_cloud_segment(*seg_id) {
+        for segment in ready_segments {
+            if let Some(enqueued_at) = self.durability.retire_cloud_segment(segment.segment_id) {
                 self.state.diagnostics.record(|m| {
                     m.record_cloud_async_wal_ack_latency_us(Self::elapsed_micros_to_u64(
                         enqueued_at.elapsed(),
@@ -438,7 +278,7 @@ impl EventLoop {
 
         let ready_ids: Vec<u64> = ready_segments
             .iter()
-            .map(|(segment_id, _)| *segment_id)
+            .map(|segment| segment.segment_id)
             .collect();
         if self.verification_barrier.is_active() {
             // Verification replays the local WAL and reads the SSTs, so hold
@@ -479,10 +319,10 @@ impl EventLoop {
 
     fn fence_cloud_ack_transition(
         &mut self,
-        ready_segments: &[(u64, u64)],
+        ready_segments: &[OwedSegment],
         error: &crate::common::MidgeError,
     ) {
-        let first_segment = ready_segments.first().map(|(segment_id, _)| *segment_id);
+        let first_segment = ready_segments.first().map(|segment| segment.segment_id);
         // Fencing fails every queued waiter exactly once; nothing keyed at or
         // after the uncommitted segments can complete without a restart.
         self.fence_wal_transition(error, first_segment);
@@ -511,10 +351,7 @@ impl EventLoop {
         self.background_compaction_schedule.mark_due();
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
-                self.cloud_coordinator
-                    .cloud_wal
-                    .acked_segments
-                    .remove(&segment_id);
+                self.cloud_coordinator.cloud_wal.retire_pruned(segment_id);
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {
@@ -522,10 +359,7 @@ impl EventLoop {
                 // deletion is attempted. A failed delete is therefore a safe
                 // storage leak, not a recovery obligation that may be retried
                 // through a now-absent catalog entry.
-                self.cloud_coordinator
-                    .cloud_wal
-                    .acked_segments
-                    .remove(&segment_id);
+                self.cloud_coordinator.cloud_wal.retire_pruned(segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
@@ -566,46 +400,7 @@ impl EventLoop {
         )
     }
 
-    fn cloud_persistence(&self) -> crate::common::MidgeResult<CloudPersistence> {
-        self.cloud_coordinator
-            .hybrid_storage
-            .as_ref()
-            .map(|storage| CloudPersistence::new(std::sync::Arc::clone(storage)))
-            .ok_or_else(|| {
-                crate::common::MidgeError::Internal(
-                    "CloudAck received without HybridStorage".to_string(),
-                )
-            })
-    }
-
-    fn verify_uploaded_wal_segment(
-        &self,
-        segment_id: u64,
-        max_sequence: u64,
-        deadline: &OperationDeadline,
-    ) -> crate::common::MidgeResult<crate::wal::cloud_catalog::PublishedWalSegment> {
-        let source = crate::io::FsLocation::new(
-            std::sync::Arc::clone(&self.state.fs),
-            crate::wal::segment_key(segment_id),
-        );
-        self.cloud_persistence()?.verify_uploaded_wal_segment(
-            segment_id,
-            max_sequence,
-            &source,
-            deadline,
-        )
-    }
-
-    fn publish_cloud_wal_run(
-        &self,
-        run: &[crate::wal::cloud_catalog::PublishedWalSegment],
-        deadline: &OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        self.cloud_persistence()?
-            .publish_wal_segments(run, self.state.writer_epoch, deadline)
-    }
-
-    fn cloud_ack_error(
+    pub(super) fn cloud_ack_error(
         context: &str,
         error: crate::common::MidgeError,
     ) -> crate::common::MidgeError {
@@ -624,7 +419,7 @@ impl EventLoop {
     /// caller still waits on it. A segment retired after cloud durability
     /// was proven is neither, so a late storage event about it must not
     /// mutate ownership, frontier, or waiter state it does not cover.
-    fn owns_cloud_upload(&self, segment_id: u64) -> bool {
+    pub(super) fn owns_cloud_upload(&self, segment_id: u64) -> bool {
         self.wal_transition.owns_segment(segment_id)
             || self
                 .durability
@@ -636,16 +431,13 @@ impl EventLoop {
                 .is_empty()
     }
 
-    /// Fail the waiters a segment's upload failure blocks.
-    ///
-    /// With `requeue_publication`, the segment's completed upload failed
-    /// readback or publication, so the runtime backlog uploads it again.
-    /// Without it, the storage queue still owns the upload and keeps retrying.
-    fn handle_cloud_upload_failure(
+    /// A completed upload of `segment_id` failed its readback, publication
+    /// or lease check: withdraw it, fail the waiters it blocks, and hand it
+    /// to the runtime backlog for a fresh upload.
+    pub(super) fn requeue_failed_cloud_upload(
         &mut self,
         segment_id: u64,
         error: &crate::common::MidgeError,
-        requeue_publication: bool,
     ) {
         if !self.owns_cloud_upload(segment_id) {
             tracing::warn!(
@@ -655,63 +447,66 @@ impl EventLoop {
             );
             return;
         }
-        if requeue_publication {
-            self.state.cloud.pending_uploads.retain(|item| {
-                crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
-            });
-        }
-        self.state.mark_persistence_anomaly();
+        self.state.cloud.forget_pending_upload(segment_id);
         self.cloud_coordinator.cloud_wal.forget_upload(segment_id);
-
-        // Keep the segment in the inflight frontier and preserve its request
-        // identities. The accepted local WAL remains owned for callerless
-        // retry, so invalidating those identities would let a client retry
-        // create a second mutation that could also become durable.
-        let failed_max_sequence = self.durability.cloud_segment_max_sequence(segment_id);
-
-        // Let WAL actor handle its internal failure handling and drop pending writes.
-        tracing::error!(segment_id, error = %error, "Cloud upload failed");
-
-        // A failure at this segment blocks its own and every later cloud
-        // durability generation, but an earlier sealed generation can still
-        // close independently when its acknowledgement arrives. Fail them
-        // with the causal storage error before any ownership repair below can
-        // fence with a less specific one.
-        let waiters = self.durability.drain_waiters_at_or_after(segment_id);
-        self.fail_durability_waiters(waiters, error);
-
+        self.fail_blocked_waiters(segment_id, error);
         if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
             self.fence_wal_transition(&registration_error, Some(segment_id));
             tracing::error!(%registration_error, segment_id, "cloud WAL failure could not preserve transition ownership");
         }
 
-        if requeue_publication {
-            if let Some(max_seq) = failed_max_sequence {
-                let local_path = crate::wal::segment_key(segment_id);
-                if matches!(self.state.fs.exists(&local_path), Ok(true)) {
-                    self.cloud_coordinator
-                        .cloud_wal
-                        .upload_backlog
-                        .insert(segment_id, max_seq);
-                    self.cloud_coordinator.cloud_wal.defer_upload_retry();
-                } else {
-                    tracing::error!(
-                        segment_id,
-                        path = local_path.0,
-                        "could not requeue failed cloud WAL publication because its local segment is missing"
-                    );
-                }
-            } else {
-                tracing::error!(
-                    segment_id,
-                    "could not requeue failed cloud WAL publication because its inflight sequence maximum is unknown"
-                );
-            }
+        // Keep the segment in the inflight frontier and preserve its request
+        // identities. The accepted local WAL remains owned for callerless
+        // retry, so invalidating those identities would let a client retry
+        // create a second mutation that could also become durable. A later
+        // ACK may already be buffered, but it cannot advance the frontier
+        // until this segment is uploaded and verified again.
+        let Some(max_sequence) = self.durability.cloud_segment_max_sequence(segment_id) else {
+            tracing::error!(
+                segment_id,
+                "could not requeue failed cloud WAL publication because its inflight sequence maximum is unknown"
+            );
+            return;
+        };
+        let local_path = crate::wal::segment_key(segment_id);
+        if matches!(self.state.fs.exists(&local_path), Ok(true)) {
+            self.cloud_coordinator
+                .cloud_wal
+                .upload_backlog
+                .insert(segment_id, max_sequence);
+            self.cloud_coordinator.cloud_wal.defer_upload_retry();
+        } else {
+            tracing::error!(
+                segment_id,
+                path = local_path.0,
+                "could not requeue failed cloud WAL publication because its local segment is missing"
+            );
         }
+    }
 
-        // Keep all inflight segments. A later ACK may already be buffered, but
-        // it cannot advance the frontier until this failed segment is retried
-        // successfully.
+    /// A storage-owned upload of `segment_id` spent the attempts its waiters
+    /// are owed. Fail them; the storage queue keeps the upload and retries it.
+    fn fail_cloud_upload_waiters(&mut self, segment_id: u64, error: &crate::common::MidgeError) {
+        if !self.owns_cloud_upload(segment_id) {
+            tracing::warn!(
+                segment_id,
+                %error,
+                "ignored cloud WAL failure for a segment the runtime no longer owns"
+            );
+            return;
+        }
+        self.fail_blocked_waiters(segment_id, error);
+    }
+
+    /// Fail the waiters a failure at `segment_id` blocks: its own, and those
+    /// of every later cloud durability generation. An earlier sealed
+    /// generation can still close independently when its acknowledgement
+    /// arrives.
+    fn fail_blocked_waiters(&mut self, segment_id: u64, error: &crate::common::MidgeError) {
+        self.state.mark_persistence_anomaly();
+        tracing::error!(segment_id, error = %error, "Cloud upload failed");
+        let waiters = self.durability.drain_waiters_at_or_after(segment_id);
+        self.fail_durability_waiters(waiters, error);
     }
 }
 

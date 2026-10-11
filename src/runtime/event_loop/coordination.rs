@@ -11,7 +11,7 @@ const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
 pub(crate) struct CloudWalUploadTracker {
     /// Acknowledged segments, each with the last sequence it holds: verified
     /// uploads, and segments recovery found published.
-    pub(super) acked_segments: BTreeMap<u64, u64>,
+    acked_segments: BTreeMap<u64, u64>,
     /// The verified uploads among `acked_segments` the catalog does not
     /// publish yet, each as publication adds it. An upload waits here until
     /// every earlier segment is uploaded too, so they publish as one
@@ -39,6 +39,17 @@ impl CloudWalUploadTracker {
         }
     }
 
+    /// Acknowledged segments, each with the last sequence it holds.
+    pub(super) fn acked(&self) -> &BTreeMap<u64, u64> {
+        &self.acked_segments
+    }
+
+    /// Acknowledge `segment_id` as published, as recovery would.
+    #[cfg(test)]
+    pub(super) fn acknowledge_for_test(&mut self, segment_id: u64, max_sequence: u64) {
+        self.acked_segments.insert(segment_id, max_sequence);
+    }
+
     /// Acknowledge a verified upload. It is not published yet.
     pub(super) fn record_upload(&mut self, upload: crate::wal::cloud_catalog::PublishedWalSegment) {
         self.acked_segments
@@ -53,22 +64,27 @@ impl CloudWalUploadTracker {
         self.uploaded.remove(&segment_id);
     }
 
+    /// The catalog no longer publishes `segment_id`: pruning retired it.
+    pub(super) fn retire_pruned(&mut self, segment_id: u64) {
+        self.acked_segments.remove(&segment_id);
+    }
+
     /// What publishing `run`, a contiguous run of acknowledged segments,
     /// adds: its verified uploads, oldest first. Segments recovery found
     /// published add nothing.
     pub(super) fn unpublished_uploads(
         &self,
-        run: &[(u64, u64)],
+        run: &[crate::wal::publish::OwedSegment],
     ) -> Vec<crate::wal::cloud_catalog::PublishedWalSegment> {
         run.iter()
-            .filter_map(|(segment_id, _)| self.uploaded.get(segment_id).cloned())
+            .filter_map(|segment| self.uploaded.get(&segment.segment_id).cloned())
             .collect()
     }
 
     /// The catalog now publishes `run`.
-    pub(super) fn mark_published(&mut self, run: &[(u64, u64)]) {
-        for (segment_id, _) in run {
-            self.uploaded.remove(segment_id);
+    pub(super) fn mark_published(&mut self, run: &[crate::wal::publish::OwedSegment]) {
+        for segment in run {
+            self.uploaded.remove(&segment.segment_id);
         }
     }
 
@@ -371,7 +387,7 @@ mod tests {
         tracker.upload_backlog.insert(4, 52);
 
         // Assert
-        assert_eq!(tracker.acked_segments.get(&3), Some(&41));
+        assert_eq!(tracker.acked().get(&3), Some(&41));
         assert!(tracker.has_pending_uploads());
     }
 

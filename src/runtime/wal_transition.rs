@@ -118,7 +118,9 @@ enum SegmentObligationState {
     Sealed,
     /// The segment is owned by the upload backlog or inflight frontier.
     Queued,
-    /// Cloud storage acknowledged the upload; the frontier has not moved yet.
+    /// A readback verified the upload. The catalog may not publish it yet,
+    /// because an earlier segment is not uploaded, or may publish it while
+    /// the frontier has not moved yet.
     Acknowledged,
     /// The cloud durability frontier covers the segment.
     CloudDurable,

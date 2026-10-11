@@ -448,8 +448,8 @@ fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<Fixtu
     std::fs::write(remote_path, &bytes)?;
     let mut catalog = WalPublicationCatalog::empty(9).map_err(MidgeError::Internal)?;
     catalog
-        .publish(9, publication)
-        .map_err(MidgeError::Internal)?;
+        .append_run(9, &[publication])
+        .map_err(MidgeError::from)?;
     Ok(FixtureWal {
         records,
         bytes,
