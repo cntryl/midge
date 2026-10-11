@@ -52,8 +52,11 @@
 //!   → runtime::hybrid_persistence maps the WAL object key
 //!   → HybridStorage::enqueue_object_upload()
 //!   → [Pending] → [InProgress] → [Completed]
+//!     (a failed attempt waits in [Failed] and retries with backoff)
 //!   → CloudStorage (upload via CloudExecutor)
 //!   → StorageEvent::CloudAck(segment_id)
+//!   → runtime records the upload, then publishes the contiguous run
+//!     of uploads past the catalog head (`wal::publish`)
 //!   → cloud durability frontier advance
 //! ```
 //!
@@ -94,7 +97,7 @@ pub use hybrid::backend::HybridStorage;
 //   3. Runtime owns WAL/SST/manifest meaning. HybridStorage owns:
 //        - raw local and remote object I/O
 //        - bounded cloud upload
-//        - retry on failure
+//        - retry on failure, with backoff, until the upload succeeds
 //        - disk watermark backpressure
 //        - emitting StorageEvent::CloudAck(segment_id)
 //
