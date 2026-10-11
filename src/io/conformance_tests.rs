@@ -97,8 +97,11 @@ fn should_list_only_immediate_children_when_listing_directory() {
 #[test]
 fn should_report_not_found_when_listing_missing_directory() {
     for_each_backend(|backend, fs| {
+        // Arrange
+        let missing = FsPath::new("never-created");
+
         // Act
-        let result = fs.list_dir(&FsPath::new("never-created"));
+        let result = fs.list_dir(&missing);
 
         // Assert
         assert!(
