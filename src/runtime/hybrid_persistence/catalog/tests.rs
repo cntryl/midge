@@ -381,13 +381,23 @@ fn should_preserve_catalog_when_validity_expires_during_provider_read() {
     }
 }
 
+/// Plans strict recovery as cloud startup does, over a cache whose WAL
+/// ledger starts past every cataloged segment.
 fn strict_recovery(
     root: &std::path::Path,
     remote: &Arc<dyn crate::storage::StorageBackend>,
     catalog: &WalPublicationCatalog,
 ) -> crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery {
+    let wal: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(root.join("wal")).unwrap());
+    let first_open = catalog
+        .segments
+        .keys()
+        .next_back()
+        .map_or(1, |last| last + 1);
+    let history = crate::runtime::wal_history::WalHistory::open(wal, first_open).unwrap();
     crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
         &crate::io::real::test_root(root),
+        history.ledger(),
         remote,
         catalog,
         crate::config::RecoveryPolicy::Strict,
