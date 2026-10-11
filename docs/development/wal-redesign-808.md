@@ -19,15 +19,15 @@ open. Existing production storage and lease protocols are unchanged.
 The redesign lands as serial pull requests. `fixing_pr_stage` in the registry
 names the stage whose pull request turns a case GREEN:
 
-| Stage | Scope |
-|---|---|
-| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator |
-| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication |
-| 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs |
-| 4 | Ownership, lineage and storage-enforced fencing |
-| 5 | One salvage rule |
-| 6 | Typed commit outcomes, admission envelope, one transaction rule |
-| 7 | Invariant catalog and durability contract |
+| Stage | Scope | Issues |
+|---|---|---|
+| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816; simulator #817 |
+| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818 |
+| 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
+| 4 | Ownership, lineage and storage-enforced fencing | #820 |
+| 5 | One salvage rule | #821 |
+| 6 | Typed commit outcomes, admission envelope, one transaction rule | #822 |
+| 7 | Invariant catalog and durability contract | #823 |
 
 Decisions that refine the #808 target design:
 
