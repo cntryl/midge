@@ -210,6 +210,9 @@ pub mod __internal {
         pub use crate::simulation::object_store::{
             Fate, Operation, RequestId, Schedule, SimulatedObjectStore,
         };
+        pub use crate::simulation::oracle::{
+            Commit, History, Key, Logging, Mismatch, Verdict, Violation,
+        };
     }
     pub mod types {
         pub use crate::types::{EntryType, KeyState};

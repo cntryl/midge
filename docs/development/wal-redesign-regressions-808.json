@@ -182,6 +182,15 @@
       "test": "should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail",
       "baseline": "red",
       "failure_marker": "strict open refused a torn unsynced WAL tail"
+    },
+    {
+      "id": "recovered-tail-not-durable",
+      "fixing_pr_stage": 2,
+      "target": "wal_campaigns",
+      "source": "tests/wal_campaigns.rs",
+      "test": "should_keep_recovered_tail_when_power_is_lost_after_a_process_crash",
+      "baseline": "red",
+      "failure_marker": "recovered WAL tail was served, then lost after power loss"
     }
   ]
 }

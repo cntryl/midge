@@ -5,3 +5,4 @@
 pub(crate) mod crash_fs;
 #[cfg(any(test, feature = "cloud-common"))]
 pub(crate) mod object_store;
+pub(crate) mod oracle;
