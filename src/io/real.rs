@@ -235,7 +235,7 @@ impl Fs for RealFs {
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         let full = self.full_path(path)?;
         let entries = fs::read_dir(&full)
-            .map_err(|e| io_err("read_dir", &full, &e))?
+            .map_err(|error| file_op_err("read_dir", &full, &error))?
             .map(|entry| {
                 let entry = entry.map_err(|e| io_err("read_dir_entry", &full, &e))?;
                 let name = entry.file_name().to_string_lossy().to_string();

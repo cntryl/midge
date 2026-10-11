@@ -209,11 +209,7 @@ fn merge_local_sources(
         scope,
     } = *context;
     scope.check("local WAL source discovery")?;
-    let paths = CloudStartupRecovery::collect_local_wal_paths(
-        local.as_ref(),
-        policy,
-        &mut plan.opened_in_salvage_mode,
-    )?;
+    let paths = CloudStartupRecovery::collect_local_wal_paths(local.as_ref())?;
     let Some((segments, active)) = paths else {
         return Ok(LocalSources {
             active: None,

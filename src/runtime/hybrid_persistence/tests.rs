@@ -1222,12 +1222,30 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
             HybridQueueLimits::default(),
         ),
     ));
-    let wal_path = tmp.path().join("segment.wal");
-    std::fs::write(&wal_path, valid_wal_bytes(17)).expect("write WAL segment");
+    // The sealed segment exists only in an in-memory root: the upload must
+    // read it through the root, not from a host path.
+    let wal_bytes = valid_wal_bytes(17);
+    let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    crate::io::Fs::open(
+        root.as_ref(),
+        &crate::wal::segment_key(17),
+        crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadWrite,
+            create: true,
+            create_new: true,
+            truncate: false,
+        },
+    )
+    .and_then(|mut file| file.append(Bytes::from(wal_bytes.clone())))
+    .expect("write WAL segment");
 
     // Act
     storage
-        .enqueue_wal_segment(&crate::io::FsLocation::host_file(&wal_path), 17, 17)
+        .enqueue_wal_segment(
+            &crate::io::FsLocation::new(root, crate::wal::segment_key(17)),
+            17,
+            17,
+        )
         .expect("enqueue WAL segment");
     storage.process_uploads();
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1247,12 +1265,12 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
         .expect("publish control object");
 
     // Assert
-    let wal_size = std::fs::metadata(&wal_path)
-        .expect("read WAL segment metadata")
-        .len();
     assert_eq!(
         wal_mock.get_uploads(),
-        vec![(crate::wal::cloud_segment::object_key(17, 1), wal_size)]
+        vec![(
+            crate::wal::cloud_segment::object_key(17, 1),
+            wal_bytes.len() as u64
+        )]
     );
     assert_eq!(
         sst_mock

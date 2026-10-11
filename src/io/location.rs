@@ -42,8 +42,13 @@ impl std::fmt::Debug for FsLocation {
     }
 }
 
+/// The host path when the filesystem has one, so messages name the database;
+/// otherwise the key.
 impl std::fmt::Display for FsLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.path.0)
+        match self.fs.host_addressing() {
+            Some(addressing) => write!(f, "{}", addressing.root.join(&self.path.0).display()),
+            None => f.write_str(&self.path.0),
+        }
     }
 }

@@ -95,6 +95,20 @@ fn should_list_only_immediate_children_when_listing_directory() {
 }
 
 #[test]
+fn should_report_not_found_when_listing_missing_directory() {
+    for_each_backend(|backend, fs| {
+        // Act
+        let result = fs.list_dir(&FsPath::new("never-created"));
+
+        // Assert
+        assert!(
+            matches!(result, Err(FsError::NotFound(_))),
+            "{backend}: {result:?}"
+        );
+    });
+}
+
+#[test]
 fn should_not_remove_prefix_sibling_when_removing_directory() {
     for_each_backend(|backend, fs| {
         // Arrange

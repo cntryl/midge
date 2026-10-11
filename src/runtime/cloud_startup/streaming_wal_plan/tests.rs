@@ -59,6 +59,18 @@ impl Fixture {
         Ok(())
     }
 
+    /// The root-relative path planning reports for a host file under `local/`.
+    fn key(&self, host: &Path) -> PathBuf {
+        host.strip_prefix(self.directory.path().join("local"))
+            .expect("host file lies under the local root")
+            .to_path_buf()
+    }
+
+    /// The host file behind a root-relative path.
+    fn host(&self, key: &Path) -> PathBuf {
+        self.directory.path().join("local").join(key)
+    }
+
     fn local(&self, name: &str, bytes: &[u8]) -> MidgeResult<PathBuf> {
         let path = self.directory.path().join("local/wal").join(name);
         std::fs::write(&path, bytes)?;
@@ -1074,7 +1086,10 @@ fn should_stage_stale_active_wal_until_sequence_floor_is_durable() -> MidgeResul
         active.exists(),
         "planning must preserve the only durable sequence evidence"
     );
-    assert_eq!(recovered.plan.set_aside_local_paths, vec![active]);
+    assert_eq!(
+        recovered.plan.set_aside_local_paths,
+        vec![fixture.key(&active)]
+    );
     assert!(recovered.plan.active_wal.is_none());
     Ok(())
 }
@@ -1112,8 +1127,8 @@ fn should_combine_quarantine_plans_when_sealed_and_active_epochs_regress() -> Mi
         .collect();
     assert_eq!(paths.len(), 3);
     assert_eq!(recovered.plan.set_aside_local_paths.len(), paths.len());
-    assert!(paths.contains(&active));
-    assert!(paths.iter().all(|path| path.exists()));
+    assert!(paths.contains(&fixture.key(&active)));
+    assert!(paths.iter().all(|path| fixture.host(path).exists()));
     Ok(())
 }
 
@@ -1159,7 +1174,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(recovered.plan.remote_segments.keys().copied().collect::<Vec<_>>(), (1..=u64::try_from(first_hole).unwrap()).collect::<Vec<_>>());
         let set_aside = first_hole < epochs.len() || active_epoch < *epochs.iter().max().unwrap();
         proptest::prop_assert_eq!(recovered.plan.max_unreplayed_sequence, if set_aside { active_sequence } else { 0 });
-        proptest::prop_assert!(recovered.plan.set_aside_local_paths.iter().all(|path| path.exists()));
+        proptest::prop_assert!(recovered.plan.set_aside_local_paths.iter().all(|path| fixture.host(path).exists()));
     }
 }
 

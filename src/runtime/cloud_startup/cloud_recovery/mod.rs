@@ -474,20 +474,17 @@ impl CloudStartupRecovery {
     }
 
     /// Local WAL files under the root's `wal/`, as root-relative paths.
+    ///
+    /// A directory that exists but cannot be listed fails the open under
+    /// every policy: it may hold acknowledged writes that never reached the
+    /// cloud, so planning as if it held none would drop them.
     pub(crate) fn collect_local_wal_paths(
         fs: &dyn crate::io::Fs,
-        recovery_policy: RecoveryPolicy,
-        opened_in_salvage_mode: &mut bool,
     ) -> MidgeResult<Option<LocalWalPaths>> {
         let entries = match fs.list_dir(&crate::io::FsPath::new(crate::wal::WAL_DIR)) {
             Ok(entries) => entries,
             Err(FsError::NotFound(_)) => return Ok(None),
             Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
-            Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                tracing::warn!(%error, "could not list intact local WAL during salvage open");
-                *opened_in_salvage_mode = true;
-                return Ok(None);
-            }
             Err(error) => {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "failed to list intact local WAL directory '{}': {error}",

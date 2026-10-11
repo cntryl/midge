@@ -69,7 +69,9 @@ impl HybridStorage {
         source: crate::io::FsLocation,
         frontier: u64,
     ) -> crate::common::MidgeResult<()> {
-        let size_bytes = source.len().map_err(crate::io::FsError::into_midge)?;
+        let size_bytes = source
+            .len()
+            .map_err(|error| crate::common::MidgeError::Io(error.into_io()))?;
         let upload_state = UploadState {
             segment_id: request_id,
             object_key,
@@ -468,7 +470,7 @@ impl HybridStorage {
         upload
             .source
             .read_all()
-            .map(|bytes| bytes.to_vec())
+            .map(Vec::from)
             .map_err(|error| format!("read {}: {error}", upload.source))
     }
 

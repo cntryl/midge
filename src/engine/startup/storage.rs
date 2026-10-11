@@ -176,7 +176,7 @@ fn require_empty_local_cache_for_cloud_bootstrap(
         let entries = path
             .root
             .list_dir(&crate::io::FsPath::new(directory.as_str()))
-            .map_err(crate::io::FsError::into_midge)?;
+            .map_err(|error| MidgeError::Io(error.into_io()))?;
         for entry in entries {
             check_startup_scope(scope, "bootstrap cache entry")?;
             let child = if directory.is_empty() {
@@ -1116,5 +1116,63 @@ mod authority_tests {
             .remote_object_proof_optional(registry_key)
             .unwrap()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_cache_tests {
+    use super::*;
+    use crate::io::{Fs, FsPath};
+
+    fn cache(files: &[&str], directories: &[&str]) -> StartupStoragePath {
+        let root = Arc::new(crate::io::MockFs::new());
+        for directory in directories {
+            root.create_dir_all(&FsPath::new(*directory)).unwrap();
+        }
+        for file in files {
+            root.open(
+                &FsPath::new(*file),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .and_then(|mut handle| handle.append(bytes::Bytes::from_static(b"state")))
+            .unwrap();
+        }
+        StartupStoragePath {
+            db_path: std::path::PathBuf::from("named-cache"),
+            memory_mode: false,
+            root,
+        }
+    }
+
+    #[test]
+    fn should_accept_bootstrap_when_cache_root_holds_only_empty_directories() {
+        // Arrange
+        let path = cache(&[], &["wal", "sst/nested"]);
+
+        // Act
+        let result = require_empty_local_cache_for_cloud_bootstrap(&path, None);
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn should_refuse_bootstrap_when_cache_root_holds_nested_file() {
+        // Arrange
+        let path = cache(&["sst/nested/000001.sst"], &["wal"]);
+
+        // Act
+        let result = require_empty_local_cache_for_cloud_bootstrap(&path, None);
+
+        // Assert
+        assert!(
+            matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("000001.sst")),
+            "{result:?}"
+        );
     }
 }

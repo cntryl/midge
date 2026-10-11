@@ -548,16 +548,16 @@ impl RuntimeState {
 }
 
 impl RuntimeState {
-    /// The host directory behind the root's `sst/`, for tests that place or
-    /// inspect SST files directly. The runtime itself addresses SSTs only by
-    /// root-relative paths through `fs`.
     /// The host directory behind the root's `wal/`, for tests that place or
-    /// inspect WAL files directly.
+    /// inspect WAL files directly. The runtime itself addresses them only by
+    /// root-relative keys through `fs`.
     #[cfg(test)]
     pub(crate) fn host_wal_dir(&self) -> PathBuf {
         self.db_path.join(crate::wal::WAL_DIR)
     }
 
+    /// The host directory behind the root's `sst/`, for tests that place or
+    /// inspect SST files directly.
     #[cfg(test)]
     pub(crate) fn host_sst_dir(&self) -> PathBuf {
         self.db_path.join(crate::sst::fs::SST_DIR)
