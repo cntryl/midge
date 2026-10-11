@@ -786,6 +786,11 @@ impl OpenOptionsBuilder {
                 "an injected object store serves cloud databases only".to_string(),
             ));
         }
+        if self.filesystem.is_some() && matches!(self.storage, Storage::InMemory) {
+            return Err(MidgeError::InvalidArgument(
+                "an in-memory database has no root to inject".to_string(),
+            ));
+        }
         let hostless_root = self
             .filesystem
             .as_ref()

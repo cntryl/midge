@@ -187,6 +187,12 @@ impl Engine {
         artifact: impl AsRef<Path>,
         options: OpenOptions,
     ) -> MidgeResult<BackupManifest> {
+        if options.injected_filesystem().is_some() || options.injected_object_store().is_some() {
+            return Err(MidgeError::NotSupported(
+                "restore writes a host directory, which injected storage would not serve"
+                    .to_string(),
+            ));
+        }
         let artifact = fs::canonicalize(artifact.as_ref())?;
         let manifest = validate_backup(&artifact)?;
         let storage = options.storage().clone();

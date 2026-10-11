@@ -3503,10 +3503,10 @@
         },
         {
           "path": "src/runtime/cloud_startup/cloud_recovery/mod.rs",
-          "line": 371,
-          "symbol": "reject_cloud_wal_without_catalog_within",
+          "line": 321,
+          "symbol": "reject_cloud_wal_without_catalog",
           "kind": "function",
-          "marker": "pub(crate) fn reject_cloud_wal_without_catalog_within("
+          "marker": "pub(crate) fn reject_cloud_wal_without_catalog("
         }
       ],
       "tests": [

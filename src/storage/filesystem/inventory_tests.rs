@@ -1,7 +1,28 @@
 //! Startup inventory of the host-directory object store.
 
-use super::FileSystem;
+use super::{object_is_definitively_missing, FileSystem};
 use crate::storage::inventory::ObjectInventory;
+
+#[test]
+fn should_treat_missing_child_as_indeterminate_when_classifying_under_a_file(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: Unix reports this path as ENOTDIR before the classifier runs,
+    // so exercise the classifier directly on every platform.
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("sst"), b"blocked parent")?;
+    let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+    // Act
+    let under_file =
+        object_is_definitively_missing(&temp.path().join("sst").join("1.sst"), &not_found);
+    let under_missing =
+        object_is_definitively_missing(&temp.path().join("absent").join("1.sst"), &not_found);
+
+    // Assert
+    assert!(!under_file);
+    assert!(!under_missing);
+    Ok(())
+}
 
 #[test]
 fn should_treat_missing_child_as_indeterminate_when_parent_is_a_file(

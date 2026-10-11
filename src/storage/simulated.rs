@@ -70,7 +70,9 @@ impl SimulatedCloud {
     pub(crate) fn open(&self) -> MidgeResult<Arc<dyn ObjectStore>> {
         Ok(match self {
             Self::Host(path) => {
-                std::fs::create_dir_all(path.join(crate::wal::WAL_DIR))?;
+                std::fs::create_dir_all(path.join(
+                    crate::cloud_layout::CloudObjectLayout::WAL_PREFIX.trim_end_matches('/'),
+                ))?;
                 Arc::new(FileSystem::new(path)?)
             }
             Self::Injected(store) => Arc::clone(store) as Arc<dyn ObjectStore>,
@@ -134,4 +136,26 @@ pub(crate) fn host_simulated_cloud(
         store,
         local_storage_budget_bytes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_fail_simulated_cloud_open_when_wal_dir_cannot_be_created(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a regular file where the WAL directory must go.
+        let temp = tempfile::tempdir()?;
+        let cloud_root = simulated_cloud_root(temp.path());
+        std::fs::create_dir_all(&cloud_root)?;
+        std::fs::write(cloud_root.join("wal"), b"not a directory")?;
+
+        // Act
+        let result = SimulatedCloud::Host(cloud_root).open();
+
+        // Assert
+        assert!(result.is_err());
+        Ok(())
+    }
 }

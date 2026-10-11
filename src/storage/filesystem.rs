@@ -700,11 +700,16 @@ impl crate::storage::inventory::ObjectInventory for FileSystem {
             .full_path(directory)
             .map_err(|error| Self::inventory_error("resolve", Path::new(directory), error))?;
         let mut keys = Vec::new();
-        let mut pending = vec![start];
+        let mut pending = vec![start.clone()];
         while let Some(directory) = pending.pop() {
             let entries = match fs::read_dir(&directory) {
                 Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                // Only an absent prefix directory lists as definitively empty.
+                Err(error)
+                    if directory == start && object_is_definitively_missing(&start, &error) =>
+                {
+                    continue;
+                }
                 Err(error) => return Err(Self::inventory_error("list", &directory, error)),
             };
             for entry in entries {
