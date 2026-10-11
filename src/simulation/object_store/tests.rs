@@ -182,6 +182,7 @@ fn should_replay_same_fates_when_submissions_interleave() {
             Fate::Late,
         ],
         scope: Vec::new(),
+        operations: Vec::new(),
     };
     let first = SimulatedObjectStore::new(schedule());
     let second = SimulatedObjectStore::new(schedule());
@@ -444,6 +445,7 @@ fn should_leave_requests_outside_scope_eager_when_schedule_is_scoped() {
         seed: 5,
         fates: vec![Fate::FailBefore(Failure::Server)],
         scope: vec!["wal/".into()],
+        operations: Vec::new(),
     });
 
     // Act
@@ -528,4 +530,63 @@ fn should_land_crashed_process_late_effect_when_landed_after_the_crash() {
     // Assert
     assert_eq!(landed, 1);
     assert_eq!(store.object("k").as_deref(), Some(b"zombie".as_slice()));
+}
+
+#[test]
+fn should_resume_store_state_when_restored_from_an_image() {
+    // Arrange: the second put of `k` is the one the schedule fails.
+    let fates = [(
+        id(Operation::Put, "k", 1),
+        Fate::FailBefore(Failure::Server),
+    )];
+    let store = scripted(&fates);
+    let _ = put(&store, "k", b"first", &[]).recv_timeout(ANSWER_WAIT);
+    let image = store.image();
+
+    // Act
+    let restored = SimulatedObjectStore::from_image(
+        Schedule::Scripted(fates.iter().cloned().collect()),
+        &image,
+    );
+    let second = put(&restored, "k", b"second", &[]).recv_timeout(ANSWER_WAIT);
+
+    // Assert
+    assert_eq!(class(&second.expect("second answer")), "server-error");
+    assert_eq!(restored.object("k").as_deref(), Some(b"first".as_slice()));
+}
+
+#[test]
+fn should_leave_other_operations_eager_when_schedule_names_operations() {
+    // Arrange: only WAL uploads are adversarial; reads of them are not.
+    let store = SimulatedObjectStore::new(Schedule::Seeded {
+        seed: 5,
+        fates: vec![Fate::FailBefore(Failure::Server)],
+        scope: vec!["wal/".into()],
+        operations: vec![Operation::Put],
+    });
+
+    // Act
+    let upload = put(&store, "wal/1.wal", b"segment", &[]);
+    let read = head(&store, "wal/1.wal");
+
+    // Assert
+    assert_eq!(answered(&upload), "server-error");
+    assert!(matches!(read, Err(CloudError::NotFound(_))), "{read:?}");
+}
+
+#[test]
+fn should_land_held_back_put_when_restored_from_an_image() {
+    // Arrange: a put held back when the image is taken.
+    let fates = [(id(Operation::Put, "k", 0), Fate::Late)];
+    let store = scripted(&fates);
+    let _ = put(&store, "k", b"held", &[]).recv_timeout(ANSWER_WAIT);
+    let image = store.image();
+
+    // Act
+    let restored = SimulatedObjectStore::from_image(Schedule::Eager, &image);
+    let landed = restored.land_late_effects();
+
+    // Assert
+    assert_eq!(landed, 1);
+    assert_eq!(restored.object("k").as_deref(), Some(b"held".as_slice()));
 }

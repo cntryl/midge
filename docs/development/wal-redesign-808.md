@@ -113,6 +113,34 @@ the next epoch through the normal path (#835). A crashed process reaches
 neither its device nor the object store again, so it cannot release its lease
 or write after its crash; requests it had in flight can still land late.
 
+Cloud campaigns (#838) run the same harness against simulated-cloud and
+provider engines whose objects live in a simulated object store, sealing an
+asynchronous WAL segment every two writes so several upload at once:
+
+- **Promises.** `cloud_strict` writes, clean shutdowns and, in provider mode,
+  completed flushes are cloud-durable. `cloud_async` writes are promised
+  nothing until one of those covers them.
+- **Two histories.** A recovery from a surviving cache is judged as locally:
+  the engine may not lose what it has served. A takeover by a process with a
+  fresh cache, in provider mode only, keeps just what the cloud promised, so
+  it is judged against a cloud history that only such takeovers rebase. A
+  recovery from a surviving cache still removes the unpromised WAL commits it
+  lost from the cloud history.
+- **Faults.** The faulting control fails WAL and SST uploads and deletes
+  before or after their effect, loses their answers, delays them and lands
+  them late, waits for the store to settle before some crashes, and retries
+  opens the store's faults refuse, as an operator would. Any finding other
+  than the known `out-of-order-publication` fails it.
+- **`out-of-order-publication`** is reproduced end to end and
+  deterministically: segment 1 fails every upload attempt, the queue gives it
+  up, segment 2 is published past it, the store settles, and a fresh-cache
+  takeover recovers the later writes without the earlier ones.
+- **Images** record how the engine stopped, so a replay judges a fresh-cache
+  takeover against the cloud history, and keep the store's held-back
+  requests, so a replay can land them.
+- **Simulated cloud** keeps its lease and shared metadata in the cache, so a
+  fresh cache would lose its whole cloud; it has no fresh-cache takeovers.
+
 A finding is saved as a crash image below `MIDGE_CAMPAIGN_IMAGES`, and both
 workflows upload those images as artifacts. To run the nightly budget, then
 replay a saved image:
