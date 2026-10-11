@@ -448,7 +448,7 @@ Uncovered boundary: These prove object existence is insufficient and catalog ide
 
 Composed native regression: [should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Late native upload completion after real takeover leaves the predecessor cloud frontier unchanged. A deliberate early-frontier mutation is rejected by the fixture. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
-Production: [src/storage/hybrid/backend/uploads.rs:372](../../src/storage/hybrid/backend/uploads.rs#L372) `process_wal_upload`; [src/runtime/hybrid_persistence.rs:671](../../src/runtime/hybrid_persistence.rs#L671) `publish_remote_wal_segment`; [src/runtime/frontiers.rs:58](../../src/runtime/frontiers.rs#L58) `advance_cloud_to`.
+Production: [src/storage/hybrid/backend/uploads.rs:399](../../src/storage/hybrid/backend/uploads.rs#L399) `process_wal_upload`; [src/runtime/hybrid_persistence.rs:671](../../src/runtime/hybrid_persistence.rs#L671) `publish_remote_wal_segment`; [src/runtime/frontiers.rs:58](../../src/runtime/frontiers.rs#L58) `advance_cloud_to`.
 
 Exact evidence and assertion markers:
 
@@ -655,7 +655,7 @@ Uncovered boundary: Before-publication rejection can be unapplied; once a write 
 
 ## RES-3
 
-Production: [src/runtime/event_loop/write_batch.rs:71](../../src/runtime/event_loop/write_batch.rs#L71) `ensure_l0_write_admission`; [src/runtime/actors/wal/transaction.rs:458](../../src/runtime/actors/wal/transaction.rs#L458) `append_prepared_transaction_batches`; [src/storage/hybrid/backend/uploads.rs:372](../../src/storage/hybrid/backend/uploads.rs#L372) `process_wal_upload`; [benches/bench_support/checkpoint_commit.rs:45](../../benches/bench_support/checkpoint_commit.rs#L45) `commit_with_backpressure`; [benches/tier4_system_checkpoint_write_amplification.rs:415](../../benches/tier4_system_checkpoint_write_amplification.rs#L415) `run_ingestion`.
+Production: [src/runtime/event_loop/write_batch.rs:71](../../src/runtime/event_loop/write_batch.rs#L71) `ensure_l0_write_admission`; [src/runtime/actors/wal/transaction.rs:458](../../src/runtime/actors/wal/transaction.rs#L458) `append_prepared_transaction_batches`; [src/storage/hybrid/backend/uploads.rs:399](../../src/storage/hybrid/backend/uploads.rs#L399) `process_wal_upload`; [benches/bench_support/checkpoint_commit.rs:45](../../benches/bench_support/checkpoint_commit.rs#L45) `commit_with_backpressure`; [benches/tier4_system_checkpoint_write_amplification.rs:415](../../benches/tier4_system_checkpoint_write_amplification.rs#L415) `run_ingestion`.
 
 Exact evidence and assertion markers:
 
@@ -676,12 +676,12 @@ Uncovered boundary: These are bounded no-space/stall schedules, not a guarantee 
 
 ## RES-4
 
-Production: [src/runtime/retry_schedule.rs:38](../../src/runtime/retry_schedule.rs#L38) `RetrySchedule::defer`; [src/runtime/event_loop/cloud_maintenance.rs:78](../../src/runtime/event_loop/cloud_maintenance.rs#L78) `schedule_cloud_maintenance`; [src/storage/hybrid/backend/uploads.rs:372](../../src/storage/hybrid/backend/uploads.rs#L372) `process_wal_upload`.
+Production: [src/runtime/retry_schedule.rs:38](../../src/runtime/retry_schedule.rs#L38) `RetrySchedule::defer`; [src/runtime/event_loop/cloud_maintenance.rs:78](../../src/runtime/event_loop/cloud_maintenance.rs#L78) `schedule_cloud_maintenance`; [src/storage/hybrid/backend/uploads.rs:399](../../src/storage/hybrid/backend/uploads.rs#L399) `process_wal_upload`.
 
 Exact evidence and assertion markers:
 
 - [src/runtime/retry_schedule.rs:93](../../src/runtime/retry_schedule.rs#L93) `should_wake_when_retry_deadline_arrives`: Controlled clock leaves deferred retry not ready with 1s remaining; advancing original clock gives ready and zero remaining. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 101, 102, 106, 107.
-- [src/runtime/hybrid_persistence/tests.rs:2999](../../src/runtime/hybrid_persistence/tests.rs#L2999) `should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted`: Actual queued valid local WAL with always-failing storage makes exactly three write attempts, two retryable failures then one terminal failure, and pending count drains. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 3042, 3047, 3056.
+- [src/runtime/hybrid_persistence/tests.rs:2951](../../src/runtime/hybrid_persistence/tests.rs#L2951) `should_keep_retrying_failed_wal_upload_with_backoff_when_every_attempt_fails`: Actual queued valid local WAL with always-failing storage keeps retrying past three attempts with backoff, two retryable failures then every later one failing waiters, and the upload stays queued with its next turn backed off. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2977, 2984, 2994, 2999.
 
 Preconditions: Backoff unit uses a controllable clock; actual upload-worker test uses an intentionally failing StorageBackend and finite polling/worker progression.
 

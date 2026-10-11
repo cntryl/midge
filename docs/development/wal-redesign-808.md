@@ -24,7 +24,7 @@ names the stage whose pull request turns a case GREEN:
 | Stage | Scope | Issues |
 |---|---|---|
 | 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #837 (fixture re-targeting, campaign budgets), #835 (lease control), #838 (cloud campaigns) |
-| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818 |
+| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818; #841 (contiguous publication, upload retries) |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |
 | 5 | One salvage rule | #821 |
@@ -41,7 +41,14 @@ Decisions that refine the #808 target design:
   behind a retained one.
 - There is no `control_through` frontier: column-family DDL is recorded only in
   the manifest, never in the WAL.
-- Contiguous catalog publication lands with the ledger in stage 2.
+- Contiguous catalog publication lands first in stage 2 (#841). A verified
+  readback only marks a segment uploaded; the pure `wal::publish` selects the
+  longest contiguous run of uploads past the catalog head, and one catalog CAS
+  publishes it in order. A remote object or catalog entry with other bytes is
+  typed corruption that fences the writer, never an overwrite. A failed WAL
+  upload stays queued and retries with capped exponential backoff until it
+  succeeds or the writer is fenced; after three failures each further failure
+  fails the waiting callers while the retries go on. The queue is WAL-only.
 - Rotation does not pre-open the next segment, because the next header links
   the previous segment's final digest.
 
@@ -129,12 +136,16 @@ asynchronous WAL segment every two writes so several upload at once:
 - **Faults.** The faulting control fails WAL and SST uploads and deletes
   before or after their effect, loses their answers, delays them and lands
   them late, waits for the store to settle before some crashes, and retries
-  opens the store's faults refuse, as an operator would. Any finding other
-  than the known `out-of-order-publication` fails it.
-- **`out-of-order-publication`** is reproduced end to end and
-  deterministically: segment 1 fails every upload attempt, the queue gives it
-  up, segment 2 is published past it, the store settles, and a fresh-cache
-  takeover recovers the later writes without the earlier ones.
+  opens the store's faults refuse, as an operator would. Any finding fails
+  it: since #841 it no longer tolerates WAL holes at fresh-cache takeovers.
+- **Upload attempts.** A deterministic control fails segment 1's first three
+  upload attempts while later segments upload past it, lets the store settle,
+  then takes over with a fresh cache. Before #841 this reproduced
+  `out-of-order-publication`: the upload queue dropped segment 1 after three
+  attempts, segment 2 was published past it before the runtime re-admitted
+  segment 1, and the takeover recovered the later writes without the earlier
+  ones. Publication now waits for a contiguous run and the upload
+  keeps retrying, so the control must find nothing.
 - **Images** record how the engine stopped, so a replay judges a fresh-cache
   takeover against the cloud history, and keep the store's held-back
   requests, so a replay can land them.

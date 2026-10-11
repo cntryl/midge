@@ -3587,7 +3587,7 @@
       "production": [
         {
           "path": "src/storage/hybrid/backend/uploads.rs",
-          "line": 372,
+          "line": 399,
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
@@ -5151,7 +5151,7 @@
         },
         {
           "path": "src/storage/hybrid/backend/uploads.rs",
-          "line": 372,
+          "line": 399,
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
@@ -5533,7 +5533,7 @@
         },
         {
           "path": "src/storage/hybrid/backend/uploads.rs",
-          "line": 372,
+          "line": 399,
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
@@ -5567,22 +5567,26 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2999,
-          "symbol": "should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted",
-          "claim": "Actual queued valid local WAL with always-failing storage makes exactly three write attempts, two retryable failures then one terminal failure, and pending count drains.",
+          "line": 2951,
+          "symbol": "should_keep_retrying_failed_wal_upload_with_backoff_when_every_attempt_fails",
+          "claim": "Actual queued valid local WAL with always-failing storage keeps retrying past three attempts with backoff, two retryable failures then every later one failing waiters, and the upload stays queued with its next turn backed off.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 3042,
+              "line": 2977,
+              "marker": "assert!("
+            },
+            {
+              "line": 2984,
               "marker": "assert_eq!("
             },
             {
-              "line": 3047,
+              "line": 2994,
               "marker": "assert_eq!("
             },
             {
-              "line": 3056,
-              "marker": "assert_eq!("
+              "line": 2999,
+              "marker": "assert!("
             }
           ]
         }

@@ -289,11 +289,11 @@ stateDiagram-v2
     Sealed --> PendingUpload: enqueue_wal_segment
     PendingUpload --> InProgress: process_uploads
     InProgress --> UploadedOrphan: immutable upload and exact byte readback
-    UploadedOrphan --> CatalogPublished: CloudAck lets runtime publish catalog under lease
+    UploadedOrphan --> CatalogPublished: every earlier segment uploaded, runtime publishes the contiguous run under lease
     CatalogPublished --> CloudDurable: durable frontier advances
-    InProgress --> Retry: upload failure below retry budget
+    InProgress --> Retry: upload failure, retried with capped backoff
     Retry --> InProgress
-    InProgress --> Failed: retry budget exhausted
+    InProgress --> Failed: remote object holds other bytes, or writer fenced
     CloudDurable --> Acked: complete waiting commit
     Failed --> FailedEvent: CloudFail
     Acked --> [*]
