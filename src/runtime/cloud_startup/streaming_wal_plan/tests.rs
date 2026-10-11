@@ -1463,3 +1463,64 @@ fn should_preserve_sequence_floor_when_salvage_is_interrupted_before_authority_c
     );
     Ok(())
 }
+
+#[test]
+fn should_continue_past_successor_history_when_clean_cache_fails_back() -> MidgeResult<()> {
+    // Arrange: this cache published segment 1 and shut down cleanly with an
+    // empty open segment 2; a successor then published 2 and 3.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    fixture.publish(2, 2, 8, &framed_wal(2, 8, b"two"))?;
+    fixture.publish(3, 3, 8, &framed_wal(3, 8, b"three"))?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert: replay is the catalog's history, and this cache's history
+    // continues past it.
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(!recovered.plan.opened_in_salvage_mode);
+    assert_eq!(fixture.history()?.ledger().open_segment(), 4);
+    Ok(())
+}
+
+#[test]
+fn should_refuse_cache_with_unpublished_wal_when_successor_published_past_it() -> MidgeResult<()> {
+    // Arrange: as above, but this cache's open segment holds a record the
+    // catalog never received.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.active(&framed_wal(2, 7, b"stale"))?;
+    drop(fixture.history()?);
+    fixture.publish(2, 2, 8, &framed_wal(2, 8, b"two"))?;
+    fixture.publish(3, 3, 8, &framed_wal(3, 8, b"three"))?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Salvage);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::RecoveryFailed(_))),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(
+        std::fs::read(fixture.segment(2))?,
+        framed_wal(2, 7, b"stale")
+    );
+    Ok(())
+}

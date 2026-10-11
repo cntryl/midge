@@ -85,14 +85,9 @@ impl StreamingCloudWalRecovery {
         scope.check("cloud WAL planning")?;
         let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
         let next_remote_id = next_segment_id(catalog.segments.keys().copied().max())?;
-        if ledger.open_segment() < next_remote_id {
-            // This ledger's own seals are recorded before they upload, so only
-            // another writer publishes at or past its open segment: this cache
-            // is behind the cloud, and its tail is not history.
-            return Err(MidgeError::RecoveryFailed(format!(
-                "the local WAL ledger's open segment {} is below the cloud catalog's next segment {next_remote_id}: another writer published past this cache",
-                ledger.open_segment()
-            )));
+        let failed_back = ledger.open_segment() < next_remote_id;
+        if failed_back {
+            ensure_nothing_unpublished(local.as_ref(), ledger, catalog, next_remote_id)?;
         }
         let mut replay_fs = StreamingWalFs::new(read_window)?;
         let mut plan = CloudWalRecoveryPlan {
@@ -104,6 +99,10 @@ impl StreamingCloudWalRecovery {
             max_unreplayed_sequence: catalog.sequence_floor,
             set_aside_from: None,
         };
+        if failed_back {
+            // History continues past the catalog, in a new segment.
+            plan.set_aside(ledger.open_segment());
+        }
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
         for (segment_id, publication) in &catalog.segments {
@@ -279,8 +278,51 @@ fn merge_local_sources(
             plan.local_segments.insert(segment_id, segment);
         }
     }
-    let active = active_local_source(local, ledger.open_segment(), policy, limits, plan)?;
+    let open = ledger.open_segment();
+    let active = if plan.set_aside_from.is_some_and(|from| from <= open) {
+        None
+    } else {
+        active_local_source(local, open, policy, limits, plan)?
+    };
     Ok(LocalSources { active, skipped })
+}
+
+/// A ledger whose open segment is below the catalog's next id belongs to a
+/// cache another writer succeeded: this ledger records each seal before it
+/// uploads, so only another writer publishes at or past its open segment.
+/// The cache may rejoin only when it holds nothing the catalog lacks: its
+/// open segment is empty, and every sealed member is cataloged or below the
+/// catalog's oldest segment (retired, so covered by SSTs). Telling a stale
+/// unpublished tail from the successor's needs ownership (#820), so any
+/// other cache is refused rather than replayed.
+fn ensure_nothing_unpublished(
+    local: &dyn Fs,
+    ledger: &WalLedger,
+    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    next_remote_id: SegmentId,
+) -> MidgeResult<()> {
+    let open = ledger.open_segment();
+    let open_bytes = match local.metadata(&crate::wal::segment_key(open)) {
+        Ok(metadata) => Some(metadata.len),
+        Err(FsError::NotFound(_)) => None,
+        Err(error) => return Err(error.into_midge()),
+    };
+    let oldest = catalog
+        .segments
+        .keys()
+        .next()
+        .copied()
+        .unwrap_or(next_remote_id);
+    let unpublished: Vec<SegmentId> = ledger
+        .sealed()
+        .filter(|id| *id >= oldest && !catalog.segments.contains_key(id))
+        .collect();
+    if open_bytes == Some(0) && unpublished.is_empty() {
+        return Ok(());
+    }
+    Err(MidgeError::RecoveryFailed(format!(
+        "the local WAL ledger's open segment {open} is below the cloud catalog's next segment {next_remote_id}: another writer published past this cache, which holds WAL the catalog lacks (open segment bytes {open_bytes:?}, unpublished sealed segments {unpublished:?})"
+    )))
 }
 
 fn validate_publication_identity(
