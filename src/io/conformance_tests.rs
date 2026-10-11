@@ -19,13 +19,25 @@ const READ_ONLY: OpenOptions = OpenOptions {
     truncate: false,
 };
 
-/// Run `check` against a fresh `RealFs` rooted in a tempdir and a fresh
-/// `MockFs`, labelling failures with the backend name.
+/// Run `check` against a fresh `RealFs` rooted in a tempdir, a fresh `MockFs`
+/// and a fresh `CrashFs`, labelling failures with the backend name.
 fn for_each_backend(check: impl Fn(&str, &dyn Fs)) {
     let temp_dir = tempfile::tempdir().expect("create tempdir");
     let real = RealFs::new(temp_dir.path()).expect("create RealFs");
     check("RealFs", &real);
     check("MockFs", &MockFs::new());
+    check(
+        "CrashFs",
+        &crate::simulation::crash_fs::CrashDevice::new().fs(),
+    );
+}
+
+/// Run `check` against the backends that model `RealFs` error classes and
+/// lengths exactly. `MockFs` is knowingly lenient where these tests probe.
+fn for_each_faithful_backend(check: impl Fn(&str, &dyn Fs)) {
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let real = RealFs::new(temp_dir.path()).expect("create RealFs");
+    check("RealFs", &real);
     check(
         "CrashFs",
         &crate::simulation::crash_fs::CrashDevice::new().fs(),
@@ -194,5 +206,74 @@ fn should_report_directories_as_existing_when_created_or_holding_files() {
             listed.is_empty(),
             "{backend}: an empty directory lists nothing"
         );
+    });
+}
+
+#[test]
+fn should_create_missing_parents_when_opening_with_create() {
+    for_each_backend(|backend, fs| {
+        // Arrange
+        let path = FsPath::new("wal/epoch/1.wal");
+
+        // Act
+        let opened = fs.open(&path, CREATE).map(|_| ());
+
+        // Assert
+        assert!(opened.is_ok(), "{backend}: {opened:?}");
+        assert!(
+            fs.exists(&FsPath::new("wal/epoch")).expect("probe parent"),
+            "{backend}"
+        );
+    });
+}
+
+/// `RealFs` reports a missing rename source as `Io`, unlike its other
+/// operations; #832 tracks moving both faithful backends to `NotFound`.
+#[test]
+fn should_report_io_when_renaming_missing_source() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        let from = FsPath::new("missing");
+
+        // Act
+        let result = fs.rename_atomic(&from, &FsPath::new("target"));
+
+        // Assert
+        assert!(
+            matches!(result, Err(FsError::Io(_))),
+            "{backend}: {result:?}"
+        );
+    });
+}
+
+#[test]
+fn should_report_io_when_syncing_missing_directory() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        let path = FsPath::new("missing");
+
+        // Act
+        let result = fs.sync_dir(&path, super::traits::Durability::Durable);
+
+        // Assert
+        assert!(
+            matches!(result, Err(FsError::Io(_))),
+            "{backend}: {result:?}"
+        );
+    });
+}
+
+#[test]
+fn should_keep_length_when_writing_nothing_past_end() {
+    for_each_faithful_backend(|backend, fs| {
+        // Arrange
+        let path = FsPath::new("empty.bin");
+        let mut file = fs.open(&path, CREATE).expect("create file");
+
+        // Act
+        file.write_at(10, Bytes::new()).expect("write nothing");
+
+        // Assert
+        assert_eq!(file.len().expect("file length"), 0, "{backend}");
     });
 }

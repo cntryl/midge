@@ -1,25 +1,37 @@
 //! A crash-aware filesystem that models a journaling filesystem on one device
-//! (#817), qualified against the review of the earlier draft (#810).
+//! (#817), qualified against the reviews of the earlier draft (#810).
 //!
-//! The running process sees *live* state. A successful file `sync` makes the
-//! file's dirty pages and its length durable, and `sync_dir` makes a
-//! directory's entries durable. A process crash keeps live state, as the page
-//! cache does, without making anything more durable. A power loss settles
-//! every unsynced effect independently, at the granularity real filesystems
-//! expose:
+//! The running process sees *live* state, as the page cache does. What a
+//! power loss leaves is decided from logs of the operations not yet durable,
+//! so every outcome is a state the device could really hold:
 //!
-//! - data: the length is the durable or the live length, and each dirty page
-//!   keeps its new or its old content, where old content beyond the durable
-//!   length is zero;
-//! - namespace: each changed directory entry keeps its durable or its live
-//!   target, except that a moved inode (a rename) moves atomically, and
-//!   syncing either directory of a move commits both sides.
+//! - **Namespace.** Directory operations form one ordered log, as a metadata
+//!   journal does. A power loss keeps a prefix of it, so the surviving
+//!   namespace is always one the process actually saw. `sync_dir` commits the
+//!   log through the last operation touching that directory; `create_dir_all`
+//!   and the creation of missing parents commit their parents, as `RealFs`
+//!   does. A file `sync` commits no directory entry (POSIX), so a missing
+//!   directory sync stays observable.
+//! - **Data.** Each file logs its writes and truncates since its last
+//!   successful `sync`. A power loss keeps the length the file had after
+//!   some prefix of them, or a page boundary inside a growing write, as
+//!   partial writeback leaves. Each dirty page independently keeps any of its
+//!   versions, except versions a committed truncate freed or that an
+//!   uncommitted truncate had not yet reallocated. Bytes past a version's end
+//!   are zero.
+//! - **Faults.** Rules fail the nth matching call with `RealFs`'s error
+//!   classes, before or after the effect. A failing file sync drops its dirty
+//!   pages: they stay visible in the page cache but never reach the device,
+//!   and a later sync reports success, as a kernel does after a writeback
+//!   error.
+//! - **Processes.** A process crash keeps every live effect without making
+//!   anything more durable. Each process works through a view bound to its
+//!   generation, so a crashed process's late calls fail and never land.
 //!
-//! Every choice is a function of the seed and a stable identity (a path and a
-//! page), so an unrelated file never shifts a saved seed. Faults return real
-//! error classes either before or after their effect. A failing file sync
-//! drops its dirty pages, so a later sync can succeed over lost data, as a
-//! kernel does after a writeback error.
+//! Choices are seeded per decision and named by stable identities (the path
+//! that created a file, numbered on reuse), so an unrelated file never
+//! shifts another file's choices. The namespace prefix is one global choice,
+//! so any new directory operation can move it.
 
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions};
@@ -27,85 +39,352 @@ use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Granularity at which unsynced file data persists or is lost.
+/// Granularity at which unsynced file data reaches the device.
 pub(crate) const PAGE_BYTES: usize = 4096;
 
 type Inode = u64;
 const ROOT: Inode = 0;
 
-#[derive(Clone, Default)]
-struct Directory {
-    live: BTreeMap<String, Inode>,
-    durable: BTreeMap<String, Inode>,
+#[derive(Clone)]
+enum DataOp {
+    Write { offset: usize, bytes: Bytes },
+    Truncate { len: usize },
 }
 
-#[derive(Clone, Default)]
+impl DataOp {
+    fn apply(&self, image: &mut Vec<u8>) {
+        match self {
+            Self::Write { offset, bytes } => {
+                let end = offset + bytes.len();
+                if image.len() < end {
+                    image.resize(end, 0);
+                }
+                image[*offset..end].copy_from_slice(bytes);
+            }
+            Self::Truncate { len } => image.resize(*len, 0),
+        }
+    }
+
+    fn apply_len(&self, len: &mut usize) {
+        match self {
+            Self::Write { offset, bytes } => *len = (*len).max(offset + bytes.len()),
+            Self::Truncate { len: target } => *len = *target,
+        }
+    }
+
+    /// Pages whose content this operation changes, given the length before.
+    fn pages(&self, before: usize) -> Vec<usize> {
+        match self {
+            Self::Write { offset, bytes } => {
+                (offset / PAGE_BYTES..=(offset + bytes.len() - 1) / PAGE_BYTES).collect()
+            }
+            Self::Truncate { len } if *len < before => {
+                (len / PAGE_BYTES..=(before - 1) / PAGE_BYTES).collect()
+            }
+            Self::Truncate { .. } => Vec::new(),
+        }
+    }
+
+    fn is_truncate(&self) -> bool {
+        matches!(self, Self::Truncate { .. })
+    }
+}
+
+/// A length a power loss can leave: `len`, with the first `applied`
+/// pending operations committed.
+#[derive(Clone, Copy)]
+struct Cut {
+    len: usize,
+    applied: usize,
+}
+
+#[derive(Clone)]
 struct Data {
+    /// The path that created the file, numbered when that path is reused.
+    identity: String,
+    /// What reads see.
     live: Vec<u8>,
+    /// The device image after the last successful sync.
     durable: Vec<u8>,
-    /// Pages whose live content has not reached the durable image.
-    dirty: BTreeSet<usize>,
+    /// Writes and truncates since then, in order.
+    ops: Vec<DataOp>,
 }
 
 impl Data {
-    fn mark_dirty(&mut self, start: usize, end: usize) {
-        if start < end {
-            self.dirty
-                .extend(start / PAGE_BYTES..=(end - 1) / PAGE_BYTES);
+    fn new(identity: String) -> Self {
+        Self {
+            identity,
+            live: Vec::new(),
+            durable: Vec::new(),
+            ops: Vec::new(),
         }
     }
 
-    /// Persist every dirty page and the live length.
-    fn sync(&mut self) {
-        let mut durable = std::mem::take(&mut self.durable);
-        durable.resize(self.live.len(), 0);
-        for &page in &self.dirty {
-            copy_page(&mut durable, &self.live, page);
-        }
-        self.durable = durable;
-        self.dirty.clear();
+    fn push(&mut self, op: DataOp) {
+        op.apply(&mut self.live);
+        self.ops.push(op);
     }
 
-    /// The image a power loss leaves, given its choices.
-    fn settle(&self, keep_length: bool, keep_page: impl Fn(usize) -> bool) -> Vec<u8> {
-        let len = if keep_length {
-            self.live.len()
-        } else {
-            self.durable.len()
-        };
+    /// The device image after the first `count` pending operations.
+    fn version(&self, count: usize) -> Vec<u8> {
         let mut image = self.durable.clone();
-        image.resize(len, 0);
-        for &page in &self.dirty {
-            if page * PAGE_BYTES < len && keep_page(page) {
-                copy_page(&mut image, &self.live, page);
-            }
+        for op in &self.ops[..count] {
+            op.apply(&mut image);
         }
         image
     }
 
-    /// Dirty pages that can still affect the file after a power loss.
-    fn relevant_pages(&self) -> impl Iterator<Item = usize> + '_ {
-        let bound = self.live.len().max(self.durable.len());
-        self.dirty
+    /// Persist every pending operation.
+    fn sync(&mut self) {
+        self.durable = self.version(self.ops.len());
+        self.ops.clear();
+    }
+
+    /// A writeback error: pending writes never reach the device, but the
+    /// lengths they set and the truncates still can.
+    fn drop_writeback(&mut self) {
+        let mut image = self.durable.clone();
+        for op in &mut self.ops {
+            if let DataOp::Write { offset, bytes } = op {
+                let end = *offset + bytes.len();
+                if image.len() < end {
+                    image.resize(end, 0);
+                }
+                *bytes = Bytes::copy_from_slice(&image[*offset..end]);
+            }
+            op.apply(&mut image);
+        }
+    }
+
+    /// Lengths a power loss can leave, in operation order.
+    fn cuts(&self) -> Vec<Cut> {
+        let mut len = self.durable.len();
+        let mut cuts = vec![Cut { len, applied: 0 }];
+        for (index, op) in self.ops.iter().enumerate() {
+            let mut next = len;
+            op.apply_len(&mut next);
+            if !op.is_truncate() && next > len {
+                // Partial writeback advances the length a page at a time.
+                let mut boundary = (len / PAGE_BYTES + 1) * PAGE_BYTES;
+                while boundary < next {
+                    cuts.push(Cut {
+                        len: boundary,
+                        applied: index,
+                    });
+                    boundary += PAGE_BYTES;
+                }
+            }
+            cuts.push(Cut {
+                len: next,
+                applied: index + 1,
+            });
+            len = next;
+        }
+        cuts
+    }
+
+    /// For every page a pending operation changes: the operations that
+    /// change it (1-based), after the durable version 0.
+    fn page_versions(&self) -> BTreeMap<usize, Vec<usize>> {
+        let mut versions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut len = self.durable.len();
+        for (index, op) in self.ops.iter().enumerate() {
+            for page in op.pages(len) {
+                versions
+                    .entry(page)
+                    .or_insert_with(|| vec![0])
+                    .push(index + 1);
+            }
+            op.apply_len(&mut len);
+        }
+        versions
+    }
+
+    /// Versions of `page` among `versions` the device can hold under `cut`:
+    /// not older than a committed truncate that freed the page, and not
+    /// newer than an uncommitted truncate that had not reallocated it.
+    fn eligible(&self, cut: Cut, page: usize, versions: &[usize]) -> Vec<usize> {
+        let mut freed_by = Vec::new();
+        let mut len = self.durable.len();
+        for (index, op) in self.ops.iter().enumerate() {
+            if op.is_truncate() && op.pages(len).contains(&page) {
+                freed_by.push(index + 1);
+            }
+            op.apply_len(&mut len);
+        }
+        let low = freed_by
             .iter()
             .copied()
-            .filter(move |page| page * PAGE_BYTES < bound)
+            .filter(|version| *version <= cut.applied)
+            .max()
+            .unwrap_or(0);
+        let high = freed_by
+            .iter()
+            .copied()
+            .find(|version| *version > cut.applied)
+            .unwrap_or(usize::MAX);
+        versions
+            .iter()
+            .copied()
+            .filter(|version| (low..high).contains(version))
+            .collect()
+    }
+
+    /// The image a power loss leaves, given its choices. A page choice
+    /// outside the eligible versions settles on the nearest eligible one.
+    fn settle(&self, cut: Cut, choose_page: impl Fn(usize) -> usize) -> Vec<u8> {
+        let mut chosen: BTreeMap<usize, usize> = BTreeMap::new();
+        for (page, versions) in self.page_versions() {
+            if page * PAGE_BYTES >= cut.len {
+                continue;
+            }
+            let wanted = versions[choose_page(page).min(versions.len() - 1)];
+            let eligible = self.eligible(cut, page, &versions);
+            let version = eligible
+                .iter()
+                .copied()
+                .filter(|version| *version <= wanted)
+                .max()
+                .or_else(|| eligible.first().copied())
+                .unwrap_or(0);
+            chosen.insert(page, version);
+        }
+        let images: BTreeMap<usize, Vec<u8>> = chosen
+            .values()
+            .copied()
+            .chain([0])
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|version| (version, self.version(version)))
+            .collect();
+        let mut image = vec![0; cut.len];
+        for page in 0..cut.len.div_ceil(PAGE_BYTES) {
+            let source = &images[chosen.get(&page).unwrap_or(&0)];
+            let start = page * PAGE_BYTES;
+            let end = (start + PAGE_BYTES).min(cut.len).min(source.len());
+            if start < end {
+                image[start..end].copy_from_slice(&source[start..end]);
+            }
+        }
+        image
     }
 }
 
-/// Copy `page` of `source` into `target`, within both lengths.
-fn copy_page(target: &mut [u8], source: &[u8], page: usize) {
-    let start = page * PAGE_BYTES;
-    let end = (start + PAGE_BYTES).min(target.len()).min(source.len());
-    if start < end {
-        target[start..end].copy_from_slice(&source[start..end]);
-    }
+#[derive(Clone, Default)]
+struct Directory {
+    identity: String,
+    live: BTreeMap<String, Inode>,
+    durable: BTreeMap<String, Inode>,
 }
 
 #[derive(Clone)]
 enum Node {
     Directory(Directory),
     Data(Data),
+}
+
+impl Node {
+    fn identity(&self) -> &str {
+        match self {
+            Self::Directory(directory) => &directory.identity,
+            Self::Data(data) => &data.identity,
+        }
+    }
+}
+
+/// The live or durable entries of `directory`, if it is one.
+fn entries_of(
+    nodes: &mut BTreeMap<Inode, Node>,
+    directory: Inode,
+    durable: bool,
+) -> Option<&mut BTreeMap<String, Inode>> {
+    match nodes.get_mut(&directory) {
+        Some(Node::Directory(directory)) => Some(if durable {
+            &mut directory.durable
+        } else {
+            &mut directory.live
+        }),
+        _ => None,
+    }
+}
+
+/// One directory operation not yet durable.
+#[derive(Clone)]
+enum NamespaceOp {
+    /// `name` in `directory` now names `inode`; `replaced` was there before.
+    Link {
+        directory: Inode,
+        name: String,
+        inode: Inode,
+        replaced: Option<Inode>,
+    },
+    Unlink {
+        directory: Inode,
+        name: String,
+        inode: Inode,
+    },
+    /// One atomic move; `replaced` was at the destination before.
+    Rename {
+        from: (Inode, String),
+        to: (Inode, String),
+        inode: Inode,
+        replaced: Option<Inode>,
+    },
+}
+
+impl NamespaceOp {
+    fn touches(&self, inode: Inode) -> bool {
+        match self {
+            Self::Link { directory, .. } | Self::Unlink { directory, .. } => *directory == inode,
+            Self::Rename { from, to, .. } => from.0 == inode || to.0 == inode,
+        }
+    }
+
+    fn inodes(&self) -> impl Iterator<Item = Inode> {
+        let (inode, replaced) = match self {
+            Self::Link {
+                inode, replaced, ..
+            }
+            | Self::Rename {
+                inode, replaced, ..
+            } => (*inode, *replaced),
+            Self::Unlink { inode, .. } => (*inode, None),
+        };
+        std::iter::once(inode).chain(replaced)
+    }
+
+    /// Apply this operation to the live or the durable entries.
+    fn apply(&self, nodes: &mut BTreeMap<Inode, Node>, durable: bool) {
+        match self {
+            Self::Link {
+                directory,
+                name,
+                inode,
+                ..
+            } => {
+                if let Some(entries) = entries_of(nodes, *directory, durable) {
+                    entries.insert(name.clone(), *inode);
+                }
+            }
+            Self::Unlink {
+                directory, name, ..
+            } => {
+                if let Some(entries) = entries_of(nodes, *directory, durable) {
+                    entries.remove(name);
+                }
+            }
+            Self::Rename {
+                from, to, inode, ..
+            } => {
+                if let Some(entries) = entries_of(nodes, from.0, durable) {
+                    entries.remove(&from.1);
+                }
+                if let Some(entries) = entries_of(nodes, to.0, durable) {
+                    entries.insert(to.1.clone(), *inode);
+                }
+            }
+        }
+    }
 }
 
 /// Operation a fault rule matches.
@@ -121,6 +400,8 @@ pub enum FaultOp {
     Rename,
     RemoveFile,
     RemoveDirAll,
+    /// `exists`, `metadata` and a handle's `len`.
+    Stat,
 }
 
 /// Whether the faulted operation took effect before its error was returned.
@@ -139,11 +420,12 @@ pub enum FaultError {
     NoSpace,
 }
 
-/// One injected failure: the `nth` call of `op` at or below `path` fails.
+/// One injected failure: the `nth` call of `op` naming `path`, or a path
+/// below it, fails.
 #[derive(Debug, Clone)]
 pub struct Fault {
     pub op: FaultOp,
-    /// Calls on this path or below it match; the empty path matches all.
+    /// Matched as whole path segments; the empty path matches every call.
     pub path: String,
     /// The matching call that fails, counting from 1.
     pub nth: u64,
@@ -162,64 +444,62 @@ struct FaultRule {
     fired: bool,
 }
 
-/// One independent choice a power loss makes.
+/// What one power-loss choice decides.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Decision {
-    /// The directory entries take their live targets, together, rather than
-    /// their durable ones.
-    Entries { entries: Vec<String> },
-    /// The file keeps its live length rather than its durable length.
+pub enum Subject {
+    /// How many pending directory operations persist, in order.
+    Namespace,
+    /// Which pending length the file keeps.
     Length { file: String },
-    /// The dirty page keeps its new content rather than its old content.
+    /// Which version of the page persists.
     Page { file: String, page: usize },
+}
+
+/// One choice a power loss makes, among `options` alternatives.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Decision {
+    pub subject: Subject,
+    pub options: usize,
 }
 
 #[derive(Clone)]
 struct State {
     nodes: BTreeMap<Inode, Node>,
+    /// Directory operations not yet durable, in the order they happened.
+    pending: Vec<NamespaceOp>,
     /// Open handles per (process generation, inode).
     handles: BTreeMap<(u64, Inode), usize>,
     next_inode: Inode,
     generation: u64,
     faults: Vec<FaultRule>,
+    /// How many inodes each path has created, numbering identities.
+    created: BTreeMap<String, u64>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             nodes: BTreeMap::from([(ROOT, Node::Directory(Directory::default()))]),
+            pending: Vec::new(),
             handles: BTreeMap::new(),
             next_inode: ROOT + 1,
             generation: 0,
             faults: Vec::new(),
+            created: BTreeMap::new(),
         }
     }
 }
 
-/// A changed directory entry: (directory inode, name).
-type Entry = (Inode, String);
-
-/// Union-find root of `index`, compressing the path.
-fn group_root(group_of: &mut [usize], mut index: usize) -> usize {
-    while group_of[index] != index {
-        group_of[index] = group_of[group_of[index]];
-        index = group_of[index];
-    }
-    index
+fn normalized(path: &str) -> &str {
+    path.trim_matches('/')
 }
 
-/// The decision for one group of changed entries, named by stable paths.
-fn entries_decision(names: &BTreeMap<Inode, String>, group: &[Entry]) -> Decision {
-    let mut entries: Vec<String> = group
-        .iter()
-        .map(|(directory, name)| match names.get(directory) {
-            Some(base) if !base.is_empty() => format!("{base}/{name}"),
-            Some(_) => name.clone(),
-            None => format!("#{directory}/{name}"),
-        })
-        .collect();
-    entries.sort();
-    Decision::Entries { entries }
+fn within(path: &str, scope: &str) -> bool {
+    scope.is_empty()
+        || path == scope
+        || path
+            .strip_prefix(scope)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 impl State {
@@ -230,10 +510,10 @@ impl State {
         }
     }
 
-    fn directory_mut(&mut self, inode: Inode) -> FsResult<&mut Directory> {
-        match self.nodes.get_mut(&inode) {
-            Some(Node::Directory(directory)) => Ok(directory),
-            _ => Err(FsError::Io("path component is not a directory".into())),
+    fn data(&self, inode: Inode) -> FsResult<&Data> {
+        match self.nodes.get(&inode) {
+            Some(Node::Data(data)) => Ok(data),
+            _ => Err(FsError::NotFound("file inode was reclaimed".into())),
         }
     }
 
@@ -265,6 +545,26 @@ impl State {
         Ok((parent, name.clone()))
     }
 
+    fn is_directory(&self, inode: Inode) -> bool {
+        matches!(self.nodes.get(&inode), Some(Node::Directory(_)))
+    }
+
+    /// A stable identity for a new inode at `name` in `parent`: the path
+    /// that creates it, numbered when that path creates again.
+    fn identity(&mut self, parent: Inode, name: &str) -> String {
+        let base = match self.nodes.get(&parent).map(Node::identity) {
+            Some("") | None => name.to_string(),
+            Some(parent) => format!("{parent}/{name}"),
+        };
+        let count = self.created.entry(base.clone()).or_default();
+        *count += 1;
+        if *count == 1 {
+            base
+        } else {
+            format!("{base}@{count}")
+        }
+    }
+
     fn allocate(&mut self, node: Node) -> Inode {
         let inode = self.next_inode;
         self.next_inode += 1;
@@ -272,191 +572,127 @@ impl State {
         inode
     }
 
-    fn is_directory(&self, inode: Inode) -> bool {
-        matches!(self.nodes.get(&inode), Some(Node::Directory(_)))
+    /// Apply a directory operation to the live namespace and log it.
+    fn record(&mut self, op: NamespaceOp) {
+        op.apply(&mut self.nodes, false);
+        self.pending.push(op);
     }
 
-    /// Inodes reachable from the root through live or durable entries.
-    fn reachable(&self) -> BTreeSet<Inode> {
-        let mut seen = BTreeSet::new();
-        let mut pending = vec![ROOT];
-        while let Some(inode) = pending.pop() {
-            if !seen.insert(inode) {
-                continue;
-            }
-            if let Some(Node::Directory(directory)) = self.nodes.get(&inode) {
-                pending.extend(directory.live.values().chain(directory.durable.values()));
-            }
-        }
-        seen
+    fn link(&mut self, directory: Inode, name: &str, inode: Inode) -> FsResult<()> {
+        let replaced = self.directory(directory)?.live.get(name).copied();
+        self.record(NamespaceOp::Link {
+            directory,
+            name: name.to_string(),
+            inode,
+            replaced,
+        });
+        Ok(())
     }
 
-    /// A stable name for every reachable inode: its first durable path, else
-    /// its first live path.
-    fn identities(&self) -> BTreeMap<Inode, String> {
-        let mut names = BTreeMap::from([(ROOT, String::new())]);
-        for durable in [true, false] {
-            let mut pending = vec![ROOT];
-            while let Some(inode) = pending.pop() {
-                let Some(Node::Directory(directory)) = self.nodes.get(&inode) else {
-                    continue;
-                };
-                let base = names.get(&inode).cloned().unwrap_or_default();
-                let entries = if durable {
-                    &directory.durable
-                } else {
-                    &directory.live
-                };
-                for (name, child) in entries.iter().rev() {
-                    if !names.contains_key(child) {
-                        let path = if base.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{base}/{name}")
-                        };
-                        names.insert(*child, path);
-                        pending.push(*child);
-                    }
-                }
-            }
-        }
-        names
+    fn unlink(&mut self, directory: Inode, name: &str) -> FsResult<()> {
+        let inode = self
+            .directory(directory)?
+            .live
+            .get(name)
+            .copied()
+            .ok_or_else(|| FsError::NotFound(name.to_string()))?;
+        self.record(NamespaceOp::Unlink {
+            directory,
+            name: name.to_string(),
+            inode,
+        });
+        Ok(())
     }
 
-    /// Changed entries grouped so that every entry naming the same inode
-    /// settles together: a rename is one group, a create or unlink is alone.
-    fn changed_groups(&self) -> Vec<Vec<Entry>> {
-        let mut changed: Vec<(Entry, Option<Inode>, Option<Inode>)> = Vec::new();
-        for inode in self.reachable() {
-            let Some(Node::Directory(directory)) = self.nodes.get(&inode) else {
-                continue;
-            };
-            let names: BTreeSet<&String> = directory
-                .live
-                .keys()
-                .chain(directory.durable.keys())
-                .collect();
-            for name in names {
-                let live = directory.live.get(name).copied();
-                let durable = directory.durable.get(name).copied();
-                if live != durable {
-                    changed.push(((inode, name.clone()), live, durable));
-                }
-            }
-        }
-        let mut group_of: Vec<usize> = (0..changed.len()).collect();
-        let mut owner: BTreeMap<Inode, usize> = BTreeMap::new();
-        for (index, (_, live, durable)) in changed.iter().enumerate() {
-            for target in live.iter().chain(durable.iter()) {
-                if let Some(&other) = owner.get(target) {
-                    let (left, right) = (
-                        group_root(&mut group_of, index),
-                        group_root(&mut group_of, other),
-                    );
-                    group_of[left] = right;
-                } else {
-                    owner.insert(*target, index);
-                }
-            }
-        }
-        let mut groups: BTreeMap<usize, Vec<Entry>> = BTreeMap::new();
-        for (index, (entry, _, _)) in changed.into_iter().enumerate() {
-            let group = group_root(&mut group_of, index);
-            groups.entry(group).or_default().push(entry);
-        }
-        groups.into_values().collect()
+    fn rename(&mut self, from: (Inode, String), to: (Inode, String), inode: Inode) -> FsResult<()> {
+        let replaced = self.directory(to.0)?.live.get(&to.1).copied();
+        self.record(NamespaceOp::Rename {
+            from,
+            to,
+            inode,
+            replaced,
+        });
+        Ok(())
     }
 
-    /// Make every entry in `group` durable at its live target.
-    fn commit_group(&mut self, group: &[Entry]) {
-        for (directory, name) in group {
-            if let Ok(directory) = self.directory_mut(*directory) {
-                match directory.live.get(name).copied() {
-                    Some(target) => directory.durable.insert(name.clone(), target),
-                    None => directory.durable.remove(name),
-                };
-            }
+    /// Make the first `count` pending directory operations durable.
+    fn commit(&mut self, count: usize) {
+        let committed: Vec<NamespaceOp> = self.pending.drain(..count).collect();
+        for op in committed {
+            op.apply(&mut self.nodes, true);
         }
+        self.reclaim();
     }
 
-    /// A directory sync: commit its entries and the other side of every move
-    /// they take part in, as a journal commit does.
+    /// A directory sync: the log is committed through its last operation on
+    /// that directory, as a journal commit is.
     fn commit_directory(&mut self, inode: Inode) {
-        for group in self.changed_groups() {
-            if group.iter().any(|(directory, _)| *directory == inode) {
-                self.commit_group(&group);
-            }
+        if let Some(last) = self.pending.iter().rposition(|op| op.touches(inode)) {
+            self.commit(last + 1);
         }
     }
 
     fn decisions(&self) -> Vec<Decision> {
-        let names = self.identities();
-        let mut decisions: Vec<Decision> = self
-            .changed_groups()
-            .iter()
-            .map(|group| entries_decision(&names, group))
-            .collect();
-        for (inode, node) in &self.nodes {
-            let (Node::Data(data), Some(file)) = (node, names.get(inode)) else {
+        let mut decisions = Vec::new();
+        if !self.pending.is_empty() {
+            decisions.push(Decision {
+                subject: Subject::Namespace,
+                options: self.pending.len() + 1,
+            });
+        }
+        for node in self.nodes.values() {
+            let Node::Data(data) = node else {
                 continue;
             };
-            if data.live.len() != data.durable.len() {
-                decisions.push(Decision::Length { file: file.clone() });
+            if data.ops.is_empty() {
+                continue;
             }
-            decisions.extend(data.relevant_pages().map(|page| Decision::Page {
-                file: file.clone(),
-                page,
-            }));
+            let cuts = data.cuts();
+            if cuts.len() > 1 {
+                decisions.push(Decision {
+                    subject: Subject::Length {
+                        file: data.identity.clone(),
+                    },
+                    options: cuts.len(),
+                });
+            }
+            for (page, versions) in data.page_versions() {
+                decisions.push(Decision {
+                    subject: Subject::Page {
+                        file: data.identity.clone(),
+                        page,
+                    },
+                    options: versions.len(),
+                });
+            }
         }
         decisions.sort();
         decisions
     }
 
-    fn power_loss(&mut self, choose: &mut dyn FnMut(&Decision) -> bool) {
-        let names = self.identities();
-        let choices: BTreeMap<Decision, bool> = self
-            .decisions()
-            .into_iter()
-            .map(|decision| {
-                let keep = choose(&decision);
-                (decision, keep)
-            })
-            .collect();
-        for group in self.changed_groups() {
-            if choices
-                .get(&entries_decision(&names, &group))
-                .copied()
-                .unwrap_or(false)
-            {
-                self.commit_group(&group);
-            }
-        }
-        for (inode, node) in &mut self.nodes {
+    fn power_loss(&mut self, choices: &BTreeMap<Subject, usize>) {
+        let choice = |subject: &Subject| choices.get(subject).copied().unwrap_or(0);
+        let prefix = choice(&Subject::Namespace).min(self.pending.len());
+        self.commit(prefix);
+        self.pending.clear();
+        for node in self.nodes.values_mut() {
             match node {
                 Node::Directory(directory) => directory.live.clone_from(&directory.durable),
                 Node::Data(data) => {
-                    let Some(file) = names.get(inode) else {
-                        data.durable = data.settle(false, |_| false);
-                        data.live.clone_from(&data.durable);
-                        data.dirty.clear();
-                        continue;
-                    };
-                    let keep_length = choices
-                        .get(&Decision::Length { file: file.clone() })
-                        .copied()
-                        .unwrap_or(false);
-                    let image = data.settle(keep_length, |page| {
-                        choices
-                            .get(&Decision::Page {
-                                file: file.clone(),
-                                page,
-                            })
-                            .copied()
-                            .unwrap_or(false)
+                    let cuts = data.cuts();
+                    let length = choice(&Subject::Length {
+                        file: data.identity.clone(),
+                    });
+                    let cut = cuts[length.min(cuts.len() - 1)];
+                    let image = data.settle(cut, |page| {
+                        choice(&Subject::Page {
+                            file: data.identity.clone(),
+                            page,
+                        })
                     });
                     data.live.clone_from(&image);
                     data.durable = image;
-                    data.dirty.clear();
+                    data.ops.clear();
                 }
             }
         }
@@ -470,40 +706,110 @@ impl State {
         self.reclaim();
     }
 
-    /// Free inodes no live or durable name and no open handle refers to.
+    /// Free inodes that no live or durable name, no pending directory
+    /// operation and no open handle can reach.
     fn reclaim(&mut self) {
-        let mut retained = self.reachable();
-        retained.extend(self.handles.keys().map(|&(_, inode)| inode));
+        let mut retained = BTreeSet::new();
+        let mut reaching: Vec<Inode> = std::iter::once(ROOT)
+            .chain(self.pending.iter().flat_map(NamespaceOp::inodes))
+            .chain(self.handles.keys().map(|&(_, inode)| inode))
+            .collect();
+        while let Some(inode) = reaching.pop() {
+            if !retained.insert(inode) {
+                continue;
+            }
+            if let Some(Node::Directory(directory)) = self.nodes.get(&inode) {
+                reaching.extend(directory.live.values().chain(directory.durable.values()));
+            }
+        }
         self.nodes.retain(|inode, _| retained.contains(inode));
     }
 
-    /// Count a call against the fault rules; the first rule it completes
-    /// fires.
-    fn fault(&mut self, op: FaultOp, path: &str) -> Option<(FaultEffect, FsError)> {
-        for rule in &mut self.faults {
-            let scope = rule.fault.path.as_str();
+    /// Count a call against every matching rule; return the first rule it
+    /// completes.
+    fn fault(&mut self, op: FaultOp, paths: &[&str]) -> Option<(usize, FaultEffect, FsError)> {
+        let mut first = None;
+        for (index, rule) in self.faults.iter_mut().enumerate() {
+            let scope = normalized(&rule.fault.path);
             let matches = rule.fault.op == op
                 && !rule.fired
-                && (scope.is_empty()
-                    || path == scope
-                    || path
-                        .strip_prefix(scope)
-                        .is_some_and(|rest| rest.starts_with('/')));
+                && paths.iter().any(|path| within(normalized(path), scope));
             if !matches {
                 continue;
             }
             rule.seen += 1;
             if rule.seen == rule.fault.nth {
                 rule.fired = true;
-                let message = format!("injected {op:?} fault at '{path}'");
-                let error = match rule.fault.error {
-                    FaultError::Io => FsError::Io(message),
-                    FaultError::NoSpace => FsError::NoSpace(message),
-                };
-                return Some((rule.fault.effect, error));
+                if first.is_none() {
+                    let message = format!("injected {op:?} fault at {paths:?}");
+                    let error = match rule.fault.error {
+                        FaultError::Io => FsError::Io(message),
+                        FaultError::NoSpace => FsError::NoSpace(message),
+                    };
+                    first = Some((index, rule.fault.effect, error));
+                }
             }
         }
-        None
+        first
+    }
+
+    /// Run `apply` under any fault the call triggers. An `After` fault whose
+    /// operation fails on its own does not count as fired.
+    fn faulted<T>(
+        &mut self,
+        op: FaultOp,
+        paths: &[&str],
+        apply: impl FnOnce(&mut Self) -> FsResult<T>,
+    ) -> FsResult<T> {
+        match self.fault(op, paths) {
+            Some((_, FaultEffect::Before, error)) => Err(error),
+            Some((rule, FaultEffect::After, error)) => match apply(self) {
+                Ok(_) => Err(error),
+                Err(own) => {
+                    self.faults[rule].fired = false;
+                    Err(own)
+                }
+            },
+            None => apply(self),
+        }
+    }
+
+    /// Create every missing directory on `parts`, durably, as `RealFs` does.
+    fn create_dirs(&mut self, parts: &[String]) -> FsResult<()> {
+        let mut inode = ROOT;
+        for part in parts {
+            let existing = self.directory(inode)?.live.get(part).copied();
+            inode = if let Some(existing) = existing {
+                self.directory(existing)?;
+                existing
+            } else {
+                let identity = self.identity(inode, part);
+                let created = self.allocate(Node::Directory(Directory {
+                    identity,
+                    ..Directory::default()
+                }));
+                self.link(inode, part, created)?;
+                self.commit_directory(inode);
+                created
+            };
+        }
+        Ok(())
+    }
+
+    fn unlink_tree(&mut self, directory: Inode) -> FsResult<()> {
+        let children: Vec<(String, Inode)> = self
+            .directory(directory)?
+            .live
+            .iter()
+            .map(|(name, inode)| (name.clone(), *inode))
+            .collect();
+        for (name, child) in children {
+            if self.is_directory(child) {
+                self.unlink_tree(child)?;
+            }
+            self.unlink(directory, &name)?;
+        }
+        Ok(())
     }
 }
 
@@ -556,7 +862,7 @@ impl CrashDevice {
         FaultId(state.faults.len() - 1)
     }
 
-    /// Whether the fault has fired.
+    /// Whether the fault fired and its call returned the injected error.
     #[must_use]
     pub fn fired(&self, fault: FaultId) -> bool {
         self.lock()
@@ -572,34 +878,50 @@ impl CrashDevice {
         self.lock().end_process();
     }
 
-    /// The independent choices the next power loss will make.
+    /// The choices the next power loss will make.
     #[must_use]
     pub fn decisions(&self) -> Vec<Decision> {
         self.lock().decisions()
     }
 
-    /// Power is lost; each unsynced effect is kept or lost by `seed`.
+    /// Power is lost; each choice is drawn from `seed` and its subject.
     pub fn power_loss(&self, seed: u64) {
         self.power_loss_with(|decision| seeded_choice(seed, decision));
     }
 
-    /// Power is lost; `choose` says whether each unsynced effect is kept.
-    pub fn power_loss_with(&self, mut choose: impl FnMut(&Decision) -> bool) {
-        self.lock().power_loss(&mut choose);
+    /// Power is lost; `choose` picks each decision's alternative, below its
+    /// `options`. `choose` runs without the device lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the device changes while `choose` runs.
+    pub fn power_loss_with(&self, mut choose: impl FnMut(&Decision) -> usize) {
+        let decisions = self.decisions();
+        let choices: BTreeMap<Subject, usize> = decisions
+            .iter()
+            .map(|decision| (decision.subject.clone(), choose(decision)))
+            .collect();
+        let mut state = self.lock();
+        assert!(
+            state.decisions() == decisions,
+            "the device changed while power-loss choices were made"
+        );
+        state.power_loss(&choices);
     }
 }
 
-/// A seeded choice that depends only on the decision's own identity.
-fn seeded_choice(seed: u64, decision: &Decision) -> bool {
+/// A seeded choice that depends only on the decision's subject.
+fn seeded_choice(seed: u64, decision: &Decision) -> usize {
     // FNV-1a over a stable rendering, then SplitMix64 finalization.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ seed;
-    for byte in format!("{decision:?}").bytes() {
+    for byte in format!("{:?}", decision.subject).bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    (hash ^ (hash >> 31)) & 1 == 1
+    hash ^= hash >> 31;
+    usize::try_from(hash % decision.options as u64).expect("a choice fits usize")
 }
 
 /// One process's view of a [`CrashDevice`]. After the process crashes, every
@@ -636,36 +958,39 @@ impl CrashFs {
     fn open_file(&self, path: &FsPath, opts: OpenOptions) -> FsResult<CrashFile> {
         let parts = Self::parts(path)?;
         let mut state = self.state()?;
-        let fault = state.fault(FaultOp::Open, &path.0);
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        let (parent, name) = state.parent(&parts)?;
-        let inode = match state.directory(parent)?.live.get(&name).copied() {
-            Some(_) if opts.create_new => return Err(FsError::AlreadyExists(path.0.clone())),
-            Some(inode) if state.is_directory(inode) => {
-                return Err(FsError::Io(format!("is a directory: {}", path.0)))
+        let inode = state.faulted(FaultOp::Open, &[&path.0], |state| {
+            if opts.create || opts.create_new {
+                if let Some((_, parents)) = parts.split_last() {
+                    // `RealFs` creates missing parents durably.
+                    state.create_dirs(parents)?;
+                }
             }
-            Some(inode) => inode,
-            None if opts.create || opts.create_new => {
-                let inode = state.allocate(Node::Data(Data::default()));
-                state.directory_mut(parent)?.live.insert(name, inode);
-                inode
+            let (parent, name) = state.parent(&parts)?;
+            let inode = match state.directory(parent)?.live.get(&name).copied() {
+                Some(_) if opts.create_new => return Err(FsError::AlreadyExists(path.0.clone())),
+                Some(inode) if state.is_directory(inode) => {
+                    return Err(FsError::Io(format!("is a directory: {}", path.0)))
+                }
+                Some(inode) => inode,
+                None if opts.create || opts.create_new => {
+                    let identity = state.identity(parent, &name);
+                    let inode = state.allocate(Node::Data(Data::new(identity)));
+                    state.link(parent, &name, inode)?;
+                    inode
+                }
+                None => return Err(FsError::NotFound(path.0.clone())),
+            };
+            if opts.truncate {
+                if opts.mode != OpenMode::ReadWrite {
+                    return Err(FsError::Io("cannot truncate a read-only handle".into()));
+                }
+                let data = state.data_mut(inode)?;
+                if !data.live.is_empty() {
+                    data.push(DataOp::Truncate { len: 0 });
+                }
             }
-            None => return Err(FsError::NotFound(path.0.clone())),
-        };
-        if opts.truncate {
-            if opts.mode != OpenMode::ReadWrite {
-                return Err(FsError::Io("cannot truncate a read-only handle".into()));
-            }
-            let data = state.data_mut(inode)?;
-            let old = data.live.len();
-            data.live.clear();
-            data.mark_dirty(0, old);
-        }
-        if let Some((_, error)) = fault {
-            return Err(error);
-        }
+            Ok(inode)
+        })?;
         let generation = state.generation;
         *state.handles.entry((generation, inode)).or_default() += 1;
         Ok(CrashFile {
@@ -674,43 +999,6 @@ impl CrashFs {
             inode,
             writable: opts.mode == OpenMode::ReadWrite,
         })
-    }
-
-    fn unlink_tree(state: &mut State, directory: Inode) -> FsResult<()> {
-        let children: Vec<(String, Inode)> = state
-            .directory(directory)?
-            .live
-            .iter()
-            .map(|(name, inode)| (name.clone(), *inode))
-            .collect();
-        for (name, child) in children {
-            if state.is_directory(child) {
-                Self::unlink_tree(state, child)?;
-            }
-            state.directory_mut(directory)?.live.remove(&name);
-        }
-        Ok(())
-    }
-
-    /// Create every missing directory on `parts`, durably, as `RealFs` does.
-    fn create_dirs(state: &mut State, parts: &[String]) -> FsResult<()> {
-        let mut inode = ROOT;
-        for part in parts {
-            let existing = state.directory(inode)?.live.get(part).copied();
-            inode = if let Some(existing) = existing {
-                state.directory(existing)?;
-                existing
-            } else {
-                let created = state.allocate(Node::Directory(Directory::default()));
-                state
-                    .directory_mut(inode)?
-                    .live
-                    .insert(part.clone(), created);
-                state.commit_directory(inode);
-                created
-            };
-        }
-        Ok(())
     }
 }
 
@@ -731,148 +1019,135 @@ impl Fs for CrashFs {
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         let parts = Self::parts(path)?;
-        let mut state = self.state()?;
-        let fault = state.fault(FaultOp::RemoveFile, &path.0);
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        let inode = state.lookup(&parts)?;
-        if state.is_directory(inode) {
-            return Err(FsError::Io(format!("is a directory: {}", path.0)));
-        }
-        let (parent, name) = state.parent(&parts)?;
-        state.directory_mut(parent)?.live.remove(&name);
-        state.reclaim();
-        fault.map_or(Ok(()), |(_, error)| Err(error))
+        self.state()?
+            .faulted(FaultOp::RemoveFile, &[&path.0], |state| {
+                let inode = state.lookup(&parts)?;
+                if state.is_directory(inode) {
+                    return Err(FsError::Io(format!("is a directory: {}", path.0)));
+                }
+                let (parent, name) = state.parent(&parts)?;
+                state.unlink(parent, &name)
+            })
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
         let parts = Self::parts(path)?;
-        match self.state()?.lookup(&parts) {
-            Ok(_) => Ok(true),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(error) => Err(error),
-        }
+        self.state()?.faulted(FaultOp::Stat, &[&path.0], |state| {
+            match state.lookup(&parts) {
+                Ok(_) => Ok(true),
+                Err(FsError::NotFound(_)) => Ok(false),
+                Err(error) => Err(error),
+            }
+        })
     }
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         let parts = Self::parts(path)?;
-        let state = self.state()?;
-        let inode = state.lookup(&parts)?;
-        Ok(match state.nodes.get(&inode) {
-            Some(Node::Data(data)) => Metadata {
-                len: data.live.len() as u64,
-                is_dir: false,
-            },
-            _ => Metadata {
-                len: 0,
-                is_dir: true,
-            },
+        self.state()?.faulted(FaultOp::Stat, &[&path.0], |state| {
+            let inode = state.lookup(&parts)?;
+            Ok(match state.nodes.get(&inode) {
+                Some(Node::Data(data)) => Metadata {
+                    len: data.live.len() as u64,
+                    is_dir: false,
+                },
+                _ => Metadata {
+                    len: 0,
+                    is_dir: true,
+                },
+            })
         })
     }
 
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let parts = Self::parts(path)?;
-        let mut state = self.state()?;
-        let fault = state.fault(FaultOp::CreateDirAll, &path.0);
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        Self::create_dirs(&mut state, &parts)?;
-        fault.map_or(Ok(()), |(_, error)| Err(error))
+        self.state()?
+            .faulted(FaultOp::CreateDirAll, &[&path.0], |state| {
+                state.create_dirs(&parts)
+            })
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         let parts = Self::parts(path)?;
-        let mut state = self.state()?;
-        if let Some((_, error)) = state.fault(FaultOp::ListDir, &path.0) {
-            return Err(error);
-        }
-        let inode = state.lookup(&parts)?;
-        let directory = state.directory(inode)?;
-        Ok(directory
-            .live
-            .iter()
-            .map(|(name, child)| DirEntry {
-                name: name.clone(),
-                is_dir: state.is_directory(*child),
+        self.state()?
+            .faulted(FaultOp::ListDir, &[&path.0], |state| {
+                let inode = state.lookup(&parts)?;
+                let directory = state.directory(inode)?;
+                Ok(directory
+                    .live
+                    .iter()
+                    .map(|(name, child)| DirEntry {
+                        name: name.clone(),
+                        is_dir: state.is_directory(*child),
+                    })
+                    .collect())
             })
-            .collect())
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let parts = Self::parts(path)?;
-        let mut state = self.state()?;
-        let fault = state.fault(FaultOp::RemoveDirAll, &path.0);
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        let inode = state.lookup(&parts)?;
-        state.directory(inode)?;
-        let (parent, name) = state.parent(&parts)?;
-        // Real deletion unlinks entry by entry, so each removal settles on
-        // its own at a power loss.
-        Self::unlink_tree(&mut state, inode)?;
-        state.directory_mut(parent)?.live.remove(&name);
-        state.reclaim();
-        fault.map_or(Ok(()), |(_, error)| Err(error))
+        self.state()?
+            .faulted(FaultOp::RemoveDirAll, &[&path.0], |state| {
+                let inode = state.lookup(&parts)?;
+                state.directory(inode)?;
+                let (parent, name) = state.parent(&parts)?;
+                // Real deletion unlinks entry by entry, in order.
+                state.unlink_tree(inode)?;
+                state.unlink(parent, &name)
+            })
     }
 
     fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
         let parts = Self::parts(path)?;
-        let mut state = self.state()?;
-        let fault = state.fault(FaultOp::SyncDir, &path.0);
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        let inode = state.lookup(&parts)?;
-        state.directory(inode)?;
-        if dur == Durability::Durable {
-            state.commit_directory(inode);
-            state.reclaim();
-        }
-        fault.map_or(Ok(()), |(_, error)| Err(error))
+        self.state()?
+            .faulted(FaultOp::SyncDir, &[&path.0], |state| {
+                // `RealFs` opens the directory first, so a missing one is `Io`.
+                let inode = state
+                    .lookup(&parts)
+                    .and_then(|inode| state.directory(inode).map(|_| inode))
+                    .map_err(|error| FsError::Io(format!("open_dir {}: {error}", path.0)))?;
+                if dur == Durability::Durable {
+                    state.commit_directory(inode);
+                }
+                Ok(())
+            })
     }
 
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
         let from_parts = Self::parts(from)?;
         let to_parts = Self::parts(to)?;
-        let mut state = self.state()?;
-        let fault = state
-            .fault(FaultOp::Rename, &from.0)
-            .or_else(|| state.fault(FaultOp::Rename, &to.0));
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        let inode = state.lookup(&from_parts)?;
-        if from_parts == to_parts {
-            return fault.map_or(Ok(()), |(_, error)| Err(error));
-        }
-        if to_parts.starts_with(&from_parts) {
-            return Err(FsError::Io("cannot move a directory inside itself".into()));
-        }
-        // `RealFs` creates the destination's parent durably first.
-        if let Some((_, parents)) = to_parts.split_last() {
-            Self::create_dirs(&mut state, parents)?;
-        }
-        let (from_parent, from_name) = state.parent(&from_parts)?;
-        let (to_parent, to_name) = state.parent(&to_parts)?;
-        if let Some(&target) = state.directory(to_parent)?.live.get(&to_name) {
-            let source_is_dir = state.is_directory(inode);
-            let target_is_dir = state.is_directory(target);
-            if source_is_dir != target_is_dir
-                || (target_is_dir && !state.directory(target)?.live.is_empty())
-            {
-                return Err(FsError::Io(format!(
-                    "cannot replace '{}' with '{}'",
-                    to.0, from.0
-                )));
-            }
-        }
-        state.directory_mut(from_parent)?.live.remove(&from_name);
-        state.directory_mut(to_parent)?.live.insert(to_name, inode);
-        state.reclaim();
-        fault.map_or(Ok(()), |(_, error)| Err(error))
+        self.state()?
+            .faulted(FaultOp::Rename, &[&from.0, &to.0], |state| {
+                // `RealFs` creates the destination's parent durably first.
+                if let Some((_, parents)) = to_parts.split_last() {
+                    state.create_dirs(parents)?;
+                }
+                // `RealFs` reports every rename failure as `Io`.
+                let failed = |error: FsError| FsError::Io(format!("rename {}: {error}", to.0));
+                let inode = state.lookup(&from_parts).map_err(failed)?;
+                if from_parts == to_parts {
+                    return Ok(());
+                }
+                if to_parts.starts_with(&from_parts) {
+                    return Err(failed(FsError::Io(
+                        "cannot move a directory inside itself".into(),
+                    )));
+                }
+                let (from_parent, from_name) = state.parent(&from_parts).map_err(failed)?;
+                let (to_parent, to_name) = state.parent(&to_parts).map_err(failed)?;
+                if let Some(&target) = state.directory(to_parent)?.live.get(&to_name) {
+                    let source_is_dir = state.is_directory(inode);
+                    let target_is_dir = state.is_directory(target);
+                    if source_is_dir != target_is_dir
+                        || (target_is_dir && !state.directory(target)?.live.is_empty())
+                    {
+                        return Err(failed(FsError::Io(format!(
+                            "cannot replace it with {}",
+                            from.0
+                        ))));
+                    }
+                }
+                state.rename((from_parent, from_name), (to_parent, to_name), inode)
+            })
     }
 }
 
@@ -884,17 +1159,18 @@ struct CrashFile {
 }
 
 impl CrashFile {
-    fn write(&self, apply: impl FnOnce(&mut Data) -> FsResult<()>) -> FsResult<()> {
-        let mut state = self.fs.state()?;
-        let fault = state.fault(FaultOp::Write, &self.path);
-        if let Some((FaultEffect::Before, error)) = fault {
-            return Err(error);
-        }
-        if !self.writable {
-            return Err(FsError::Io("cannot write a read-only handle".into()));
-        }
-        apply(state.data_mut(self.inode)?)?;
-        fault.map_or(Ok(()), |(_, error)| Err(error))
+    fn write(&self, op: DataOp) -> FsResult<()> {
+        let inode = self.inode;
+        let writable = self.writable;
+        self.fs
+            .state()?
+            .faulted(FaultOp::Write, &[&self.path], |state| {
+                if !writable {
+                    return Err(FsError::Io("cannot write a read-only handle".into()));
+                }
+                state.data_mut(inode)?.push(op);
+                Ok(())
+            })
     }
 }
 
@@ -910,54 +1186,49 @@ fn checked_range(offset: u64, len: u64) -> FsResult<(usize, usize)> {
 impl File for CrashFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let (start, end) = checked_range(offset, len)?;
-        let mut state = self.fs.state()?;
-        if let Some((_, error)) = state.fault(FaultOp::Read, &self.path) {
-            return Err(error);
-        }
-        let data = state.data_mut(self.inode)?;
-        data.live
-            .get(start..end)
-            .map(Bytes::copy_from_slice)
-            .ok_or_else(|| FsError::Io(format!("short read of '{}'", self.path)))
+        let inode = self.inode;
+        let path = &self.path;
+        self.fs.state()?.faulted(FaultOp::Read, &[path], |state| {
+            state
+                .data(inode)?
+                .live
+                .get(start..end)
+                .map(Bytes::copy_from_slice)
+                .ok_or_else(|| FsError::Io(format!("short read of '{path}'")))
+        })
     }
 
     fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
-        let (start, end) = checked_range(offset, bytes.len() as u64)?;
-        self.write(|data| {
-            if data.live.len() < end {
-                data.live.resize(end, 0);
-            }
-            data.live[start..end].copy_from_slice(&bytes);
-            data.mark_dirty(start, end);
-            Ok(())
+        let (start, _) = checked_range(offset, bytes.len() as u64)?;
+        if bytes.is_empty() {
+            // `pwrite` of nothing changes nothing, not even the length.
+            return Ok(());
+        }
+        self.write(DataOp::Write {
+            offset: start,
+            bytes,
         })
     }
 
     fn truncate(&mut self, len: u64) -> FsResult<()> {
         let (_, len) = checked_range(0, len)?;
-        self.write(|data| {
-            let old = data.live.len();
-            data.live.resize(len, 0);
-            data.mark_dirty(old.min(len), old.max(len));
-            Ok(())
-        })
+        self.write(DataOp::Truncate { len })
     }
 
     fn append(&mut self, bytes: Bytes) -> FsResult<u64> {
-        let mut offset = 0;
-        self.write(|data| {
-            offset = data.live.len();
-            checked_range(offset as u64, bytes.len() as u64)?;
-            data.live.extend_from_slice(&bytes);
-            data.mark_dirty(offset, offset + bytes.len());
-            Ok(())
-        })?;
-        Ok(offset as u64)
+        let offset = self.len()?;
+        checked_range(offset, bytes.len() as u64)?;
+        self.write_at(offset, bytes)?;
+        Ok(offset)
     }
 
     fn len(&self) -> FsResult<u64> {
-        let mut state = self.fs.state()?;
-        Ok(state.data_mut(self.inode)?.live.len() as u64)
+        let inode = self.inode;
+        self.fs
+            .state()?
+            .faulted(FaultOp::Stat, &[&self.path], |state| {
+                Ok(state.data(inode)?.live.len() as u64)
+            })
     }
 
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
@@ -965,22 +1236,20 @@ impl File for CrashFile {
         if dur == Durability::Unsafe {
             return Ok(());
         }
-        let fault = state.fault(FaultOp::Sync, &self.path);
         // A read-only descriptor can still synchronize its inode.
-        let data = state.data_mut(self.inode)?;
-        match fault {
-            Some((FaultEffect::Before, error)) => {
+        match state.fault(FaultOp::Sync, &[&self.path]) {
+            Some((_, FaultEffect::Before, error)) => {
                 // After a writeback error the kernel marks the pages clean
                 // without writing them; a later sync reports success.
-                data.dirty.clear();
+                state.data_mut(self.inode)?.drop_writeback();
                 Err(error)
             }
-            Some((FaultEffect::After, error)) => {
-                data.sync();
+            Some((_, FaultEffect::After, error)) => {
+                state.data_mut(self.inode)?.sync();
                 Err(error)
             }
             None => {
-                data.sync();
+                state.data_mut(self.inode)?.sync();
                 Ok(())
             }
         }
@@ -989,6 +1258,7 @@ impl File for CrashFile {
 
 impl Drop for CrashFile {
     fn drop(&mut self) {
+        // Unlinked inodes are freed at the next commit or crash.
         let mut state = self.fs.device.lock();
         let key = (self.fs.generation, self.inode);
         if let Some(count) = state.handles.get_mut(&key) {
@@ -997,7 +1267,6 @@ impl Drop for CrashFile {
                 state.handles.remove(&key);
             }
         }
-        state.reclaim();
     }
 }
 

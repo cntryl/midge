@@ -645,68 +645,78 @@ const LEASE_TTL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[test]
 fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
-    for seed in 0..8_u64 {
-        // Arrange: a local engine whose every file lives on a simulated device.
-        let named = tempfile::tempdir().expect("named directory");
-        let device = CrashDevice::new();
-        let options = |device: &CrashDevice| {
-            let root: Arc<dyn Fs> = Arc::new(device.fs());
-            OpenOptions::local(named.path())
-                .background_compaction(false)
-                .lease_ttl(LEASE_TTL)
-                .lease_clock_skew_tolerance(std::time::Duration::ZERO)
-                .filesystem_for_testing(root)
-                .build()
-                .expect("open options")
-        };
-        let engine = Engine::open(options(&device)).expect("open");
-        let default = engine.get_column_family("default").expect("default family");
+    // Arrange: a local engine whose every file lives on a simulated device
+    // makes a synced commit, then a buffered one, and its process dies.
+    let named = tempfile::tempdir().expect("named directory");
+    let device = CrashDevice::new();
+    let options = |device: &CrashDevice| {
+        let root: Arc<dyn Fs> = Arc::new(device.fs());
+        OpenOptions::local(named.path())
+            .background_compaction(false)
+            .lease_ttl(LEASE_TTL)
+            .lease_clock_skew_tolerance(std::time::Duration::ZERO)
+            .filesystem_for_testing(root)
+            .build()
+            .expect("open options")
+    };
+    let engine = Engine::open(options(&device)).expect("open");
+    let default = engine.get_column_family("default").expect("default family");
+    for (key, value, write) in [
+        (&b"synced"[..], &b"value"[..], WriteOptions::sync()),
+        (&b"buffered"[..], &b"tail"[..], WriteOptions::buffered()),
+    ] {
         let mut tx = engine
             .begin_tx(default.id(), TransactionMode::ReadWrite)
             .expect("begin");
-        tx.put(b"key".to_vec(), seed.to_be_bytes().to_vec(), None)
-            .expect("put");
-        tx.commit(WriteOptions::sync()).expect("commit");
-        let mut tx = engine
-            .begin_tx(default.id(), TransactionMode::ReadWrite)
-            .expect("begin");
-        tx.put(b"buffered".to_vec(), b"tail".to_vec(), None)
-            .expect("put");
-        tx.commit(WriteOptions::buffered())
-            .expect("buffered commit");
-        let undecided = device.decisions();
+        tx.put(key.to_vec(), value.to_vec(), None).expect("put");
+        tx.commit(write).expect("commit");
+    }
+    device.process_crash();
+    drop(engine);
+    // A restarted process takes the dead one's lease over once it is stale.
+    std::thread::sleep(LEASE_TTL * 3);
+    let decisions = device.decisions();
+    let outcomes: usize = decisions.iter().map(|decision| decision.options).product();
+    assert!((2..=256).contains(&outcomes), "{decisions:?}");
 
-        // Act: power is lost while the engine runs; the dead process can no
-        // longer reach the device, so its shutdown changes nothing. A
-        // restarted process takes the lease over once it is stale.
-        device.power_loss(seed);
-        drop(engine);
-        std::thread::sleep(LEASE_TTL * 3);
-        let reopened = Engine::open(options(&device)).expect("reopen");
-        let default = reopened
-            .get_column_family("default")
-            .expect("default family");
+    // Act: recover from every state a power loss can leave.
+    let mut tails = std::collections::BTreeSet::new();
+    for mut index in 0..outcomes {
+        let choices: Vec<usize> = decisions
+            .iter()
+            .map(|decision| {
+                let choice = index % decision.options;
+                index /= decision.options;
+                choice
+            })
+            .collect();
+        let fork = device.fork();
+        fork.power_loss_with(|decision| {
+            choices[decisions
+                .iter()
+                .position(|known| known == decision)
+                .expect("decision is enumerated")]
+        });
+        let mut reopened = Engine::open(options(&fork)).expect("reopen");
         let tx = reopened
             .begin_tx(default.id(), TransactionMode::ReadOnly)
             .expect("read");
-        let synced = tx.get(b"key").expect("get synced");
-        let buffered = tx.get(b"buffered").expect("get buffered");
+        let synced = tx.get(b"synced").expect("get synced");
+        tails.insert(tx.get(b"buffered").expect("get buffered"));
+        drop(tx);
+        reopened
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
 
-        // Assert: the buffered tail was undecided, and whatever part of it
-        // survived, recovery keeps the synced commit and never invents bytes.
-        assert!(
-            !undecided.is_empty(),
-            "seed {seed}: nothing was left unsynced"
-        );
-        assert_eq!(
-            synced.as_deref(),
-            Some(&seed.to_be_bytes()[..]),
-            "seed {seed}"
-        );
-        assert!(
-            buffered.is_none() || buffered.as_deref() == Some(&b"tail"[..]),
-            "seed {seed}: {buffered:?}"
-        );
-        assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+        // Assert: every outcome keeps the synced commit.
+        assert_eq!(synced.as_deref(), Some(&b"value"[..]), "{choices:?}");
     }
+
+    // Assert: the tail is lost in some outcomes and intact in others, never
+    // invented or torn into a different value.
+    assert_eq!(
+        tails,
+        std::collections::BTreeSet::from([None, Some(b"tail".to_vec().into())])
+    );
+    assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
 }
