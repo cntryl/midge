@@ -748,8 +748,12 @@ mod tests {
             let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
             crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");
         }
-        std::fs::write(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME), wal)
-            .expect("write WAL");
+        std::fs::write(
+            db_path.join("wal").join(crate::wal::segment_file_name(1)),
+            wal,
+        )
+        .expect("write WAL");
+        crate::wal::ledger_fixture::record_at(&db_path, &[], 1).expect("record WAL history");
         let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act

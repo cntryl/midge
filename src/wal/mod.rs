@@ -35,6 +35,8 @@ pub mod encoding;
 pub mod frame;
 pub(crate) mod fs;
 pub(crate) mod ledger;
+#[cfg(test)]
+pub(crate) mod ledger_fixture;
 pub(crate) mod ledger_store;
 pub mod policy;
 pub(crate) mod publish;
@@ -158,6 +160,6 @@ mod tests {
             parse_segment_id("wal/epochs/00000000000000000007/00000000000000000099.wal"),
             Some(99)
         );
-        assert_eq!(parse_segment_id("wal_000123.log"), Some(123));
+        assert_eq!(parse_segment_id("wal_000123.log"), None);
     }
 }

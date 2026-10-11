@@ -94,13 +94,14 @@ impl Fs for BoundedFs {
     }
 }
 
-fn fixture(files: &[(&str, Vec<u8>)], max_read: usize) -> BoundedFs {
+/// Segments `files` under `wal/`, by id, behind a read-size bound.
+fn fixture(files: &[(u64, Vec<u8>)], max_read: usize) -> BoundedFs {
     let inner = MockFs::new();
     inner.create_dir_all(&FsPath::new("wal")).unwrap();
-    for (name, bytes) in files {
+    for (id, bytes) in files {
         inner
             .open(
-                &FsPath::new(format!("wal/{name}")),
+                &crate::wal::segment_key(*id),
                 OpenOptions {
                     mode: crate::io::OpenMode::ReadWrite,
                     create: true,
@@ -154,7 +155,7 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
         .flat_map(|seq| encode(&put(format!("key-{seq:04}"), seq, 1)))
         .collect();
     assert!(bytes.len() > 10 * limits().max_memtable_encoded_bytes);
-    let storage = fixture(&[("1.wal", bytes)], limits().max_frame_bytes);
+    let storage = fixture(&[(1, bytes)], limits().max_frame_bytes);
     let mut memtables = HashMap::new();
     let mut checkpoint_count = 0;
     let mut recovered_entries = 0;
@@ -162,7 +163,7 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -212,13 +213,13 @@ fn should_read_many_local_wal_frames_with_one_window_per_file_pass() {
     let bytes = (1..=2000)
         .flat_map(|seq| encode(&put(format!("key-{seq:04}"), seq, 1)))
         .collect();
-    let storage = fixture(&[("1.wal", bytes)], 1024 * 1024);
+    let storage = fixture(&[(1, bytes)], 1024 * 1024);
     let mut memtables = HashMap::new();
 
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -254,7 +255,7 @@ fn should_read_large_frame_directly_when_payload_exceeds_read_ahead_window() {
         1,
         1,
     );
-    let storage = fixture(&[("1.wal", encode(&record))], 3 * 1024 * 1024);
+    let storage = fixture(&[(1, encode(&record))], 3 * 1024 * 1024);
     let replay_limits = StreamingReplayLimits {
         max_frame_bytes: 3 * 1024 * 1024,
         max_pending_txn_bytes: 8 * 1024 * 1024,
@@ -266,7 +267,7 @@ fn should_read_large_frame_directly_when_payload_exceeds_read_ahead_window() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -298,7 +299,7 @@ fn should_checkpoint_only_complete_split_transactions() {
     records.push(commit);
     records.push(put("after", 8, 1));
     let bytes = records.iter().flat_map(encode).collect();
-    let storage = fixture(&[("1.wal", bytes)], 1024);
+    let storage = fixture(&[(1, bytes)], 1024);
     let mut memtables = HashMap::new();
     let config = StreamingReplayLimits {
         max_memtable_encoded_bytes: 18 * 1024,
@@ -310,7 +311,7 @@ fn should_checkpoint_only_complete_split_transactions() {
     // Act
     replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -355,7 +356,7 @@ fn should_reject_atomic_batch_before_checkpoint_when_transaction_exceeds_encoded
         1,
     );
     outer.txn_id = Some(1);
-    let storage = fixture(&[("1.wal", encode(&outer))], 4096);
+    let storage = fixture(&[(1, encode(&outer))], 4096);
     let config = StreamingReplayLimits {
         max_frame_bytes: 4096,
         max_memtable_encoded_bytes: 18 * 1024,
@@ -367,7 +368,7 @@ fn should_reject_atomic_batch_before_checkpoint_when_transaction_exceeds_encoded
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -395,7 +396,7 @@ fn should_bound_uncommitted_split_transaction_buffers() {
         op.txn_id = Some(1);
         bytes.extend(encode(&op));
     }
-    let storage = fixture(&[("1.wal", bytes)], 1024);
+    let storage = fixture(&[(1, bytes)], 1024);
     let mut memtables = HashMap::new();
     let config = StreamingReplayLimits {
         max_pending_txn_bytes: 2048,
@@ -405,7 +406,7 @@ fn should_bound_uncommitted_split_transaction_buffers() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -428,13 +429,13 @@ fn should_preserve_epoch_ordinals_when_duplicate_rotation_frames_are_rescanned()
         encode(&put("stale", 2, 1)),
     ]
     .concat();
-    let storage = fixture(&[("1.wal", duplicate), ("wal.log", active)], 1024);
+    let storage = fixture(&[(1, duplicate), (2, active)], 1024);
     let mut memtables = HashMap::new();
 
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], Some(2)),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -462,13 +463,13 @@ fn should_fail_closed_when_corrupt_length_hides_verified_active_suffix() {
     let mut bytes = [first, middle, last].concat();
     let bad_len = u32::try_from(bytes.len()).unwrap();
     bytes[offset..offset + 4].copy_from_slice(&bad_len.to_le_bytes());
-    let storage = fixture(&[("wal.log", bytes)], 1024);
+    let storage = fixture(&[(1, bytes)], 1024);
     let mut memtables = HashMap::new();
 
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[], Some(1)),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -493,13 +494,13 @@ fn should_tolerate_only_verified_active_prefix_when_final_frame_is_torn() {
     let mut torn = encode(&put("torn", 2, 1));
     torn.truncate(torn.len() - 20);
     bytes.extend(torn);
-    let storage = fixture(&[("wal.log", bytes)], 1024);
+    let storage = fixture(&[(1, bytes)], 1024);
     let mut memtables = HashMap::new();
 
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[], Some(1)),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -522,13 +523,13 @@ fn should_reject_compressed_record_before_expanding_beyond_replay_budget() {
     record.value = Some(Bytes::from(vec![b'x'; 128 * 1024]));
     let encoded = encode(&record);
     assert!(encoded.len() < 1024);
-    let storage = fixture(&[("1.wal", encoded)], 1024);
+    let storage = fixture(&[(1, encoded)], 1024);
     let mut memtables = HashMap::new();
 
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -554,14 +555,14 @@ fn should_reject_mixed_epoch_or_invalid_batch_in_sealed_stream_inspector() {
     );
     invalid_batch.txn_id = Some(1);
     for bytes in [mixed, encode(&invalid_batch), Vec::new()] {
-        let storage = fixture(&[("1.wal", bytes)], 1024);
+        let storage = fixture(&[(1, bytes)], 1024);
         let mut read_ns = 0;
-        let file = open_wal_replay_file(&storage, &FsPath::new("wal/1.wal"), &mut read_ns)
+        let file = open_wal_replay_file(&storage, &crate::wal::segment_key(1), &mut read_ns)
             .unwrap()
             .unwrap();
 
         // Act
-        let result = inspect_sealed_wal_file(&*file, &FsPath::new("wal/1.wal"), limits());
+        let result = inspect_sealed_wal_file(&*file, &crate::wal::segment_key(1), limits());
 
         // Assert
         assert!(matches!(result, Err(MidgeError::Corruption(_))));
@@ -574,13 +575,13 @@ fn should_ignore_fenced_overlap_when_prior_epoch_uses_same_key_and_sequence() {
     let old = encode(&put("same-key", 7, 1));
     let mut fresh = put("same-key", 7, 2);
     fresh.value = Some(Bytes::from_static(b"fresh"));
-    let storage = fixture(&[("1.wal", old), ("2.wal", encode(&fresh))], 1024);
+    let storage = fixture(&[(1, old), (2, encode(&fresh))], 1024);
     let mut memtables = HashMap::new();
 
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1, 2], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -606,10 +607,7 @@ fn should_reject_conflicting_point_after_its_memtable_was_checkpointed() {
     let mut duplicate = put("key-1", 1, 1);
     duplicate.value = Some(Bytes::from_static(b"conflicting"));
     records.push(duplicate);
-    let storage = fixture(
-        &[("1.wal", records.iter().flat_map(encode).collect())],
-        1024,
-    );
+    let storage = fixture(&[(1, records.iter().flat_map(encode).collect())], 1024);
     let mut memtables = HashMap::new();
     let mut checkpoints = 0;
     let config = StreamingReplayLimits {
@@ -620,7 +618,7 @@ fn should_reject_conflicting_point_after_its_memtable_was_checkpointed() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -660,7 +658,7 @@ fn should_reject_conflicting_transaction_batch_after_checkpoint() {
         bytes.extend(encode(&put(format!("middle-{seq}"), seq, 1)));
     }
     bytes.extend(encode(&make_batch(b"conflicting")));
-    let storage = fixture(&[("1.wal", bytes)], 1024);
+    let storage = fixture(&[(1, bytes)], 1024);
     let mut memtables = HashMap::new();
     let mut checkpoints = 0;
     let config = StreamingReplayLimits {
@@ -671,7 +669,7 @@ fn should_reject_conflicting_transaction_batch_after_checkpoint() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -708,7 +706,7 @@ fn should_recover_atomic_batch_above_soft_checkpoint_target_within_hard_capacity
     outer.txn_id = Some(2);
     let mut bytes = encode(&put("seed", 1, 1));
     bytes.extend(encode(&outer));
-    let storage = fixture(&[("1.wal", bytes)], 32 * 1024);
+    let storage = fixture(&[(1, bytes)], 32 * 1024);
     let config = StreamingReplayLimits {
         max_frame_bytes: 32 * 1024,
         max_pending_txn_bytes: 64 * 1024,
@@ -721,7 +719,7 @@ fn should_recover_atomic_batch_above_soft_checkpoint_target_within_hard_capacity
     // Act
     replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -750,8 +748,8 @@ fn should_visit_only_validated_wal_records_before_corrupt_tail() {
     // Arrange
     let mut bytes = encode(&put("first", 1, 1));
     bytes.extend_from_slice(&[0xff; 8]);
-    let storage = fixture(&[("1.wal", bytes)], limits().max_frame_bytes);
-    let path = FsPath::new("wal/1.wal");
+    let storage = fixture(&[(1, bytes)], limits().max_frame_bytes);
+    let path = crate::wal::segment_key(1);
     let file = storage
         .open(
             &path,
@@ -782,8 +780,8 @@ fn should_stop_streamed_wal_inspection_when_record_visitor_rejects() {
     let bytes = (1..=3)
         .flat_map(|sequence| encode(&put("key", sequence, 1)))
         .collect();
-    let storage = fixture(&[("1.wal", bytes)], limits().max_frame_bytes);
-    let path = FsPath::new("wal/1.wal");
+    let storage = fixture(&[(1, bytes)], limits().max_frame_bytes);
+    let path = crate::wal::segment_key(1);
     let file = storage
         .open(
             &path,
@@ -824,7 +822,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
         .map(|seq| put(format!("next-{seq}"), seq, 2))
         .flat_map(|record| encode(&record))
         .collect();
-    let storage = fixture(&[("1.wal", epoch_one), ("2.wal", epoch_two)], 1024);
+    let storage = fixture(&[(1, epoch_one), (2, epoch_two)], 1024);
     let mut memtables = HashMap::new();
     let mut checkpoints = 0;
     let mut recovered = std::collections::BTreeSet::new();
@@ -832,7 +830,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &segments(&storage),
+        &segments(&[1, 2], None),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -861,7 +859,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     assert_eq!(recovered.len(), 397);
 }
 
-/// The WAL files `storage` holds under `wal/`.
-fn segments(storage: &dyn crate::io::Fs) -> ReplaySegments {
-    crate::wal::recovery::fixture::segments(storage, &FsPath::new("wal"))
+/// Replay `sealed` segments under `wal/` in order, then `open`.
+fn segments(sealed: &[u64], open: Option<u64>) -> ReplaySegments {
+    crate::wal::recovery::fixture::segments(&FsPath::new("wal"), sealed, open)
 }

@@ -92,15 +92,15 @@ impl FsWalFactoryIo {
 mod tests {
 
     #[test]
-    fn should_sync_wal_directory_when_creating_initial_active_wal() {
+    fn should_sync_wal_directory_when_creating_a_wal_segment_writer() {
         // Arrange
         let mock = std::sync::Arc::new(crate::io::MockFs::new());
         let factory = FsWalFactoryIo::new(mock.clone());
 
         // Act
         let _writer = factory
-            .create_writer(crate::wal::ACTIVE_FILE_NAME)
-            .expect("create active WAL");
+            .create_writer(&crate::wal::segment_file_name(1))
+            .expect("create WAL segment writer");
 
         // Assert
         assert!(
@@ -108,7 +108,7 @@ mod tests {
                 .iter()
                 .any(|(path, durability)| path.0 == "."
                     && *durability == crate::io::Durability::Durable),
-            "creating wal.log must make its directory entry durable"
+            "creating a WAL segment must make its directory entry durable"
         );
     }
 
@@ -121,7 +121,7 @@ mod tests {
         let factory = FsWalFactoryIo::new(fs);
 
         // Act
-        let writer = factory.create_writer("wal.log")?;
+        let writer = factory.create_writer(&crate::wal::segment_file_name(1))?;
 
         // Assert
         assert_eq!(writer.current_pos(), 0);
