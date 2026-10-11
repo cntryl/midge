@@ -478,12 +478,14 @@ fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudP
 
 #[test]
 fn should_preserve_republished_wal_when_predecessor_validity_expires_before_delete() {
-    // Arrange: retain the valid local seal, as a failed unlink does.
+    // Arrange: retain the valid local seal, as a cache whose ledger has not
+    // retired it yet does.
     let fixture = CatalogExpiryFixture::new("gc-republication");
     let retained = fixture.directory.path().join("retained");
     std::fs::create_dir_all(retained.join("wal")).unwrap();
     let seal = retained.join("wal").join(crate::wal::segment_file_name(1));
     std::fs::write(&seal, framed_wal_bytes(1)).unwrap();
+    crate::runtime::wal_history_fixture::record_at(&retained, &[1], 2).unwrap();
     let target = fixture.candidate.validated.proof.clone();
     let retired = super::super::retire_covered_wal_catalog_prefix_within(
         &fixture.storage,
@@ -539,7 +541,13 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .remote_object_proof(&fixture.segment.object_key)
         .unwrap();
     assert!(republished.metadata().same_version(target.metadata()));
-    std::fs::remove_file(&seal).unwrap();
+    let wal: Arc<dyn crate::io::Fs> =
+        Arc::new(crate::io::RealFs::new(retained.join("wal")).unwrap());
+    crate::runtime::wal_history::WalHistory::open(wal, 1)
+        .unwrap()
+        .retire_below(2)
+        .unwrap();
+    assert!(!seal.exists());
     release_tx.send(()).unwrap();
     let completion = wait_prune_completion(&fixture.storage);
 

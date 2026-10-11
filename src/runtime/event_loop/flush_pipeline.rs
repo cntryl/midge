@@ -1634,12 +1634,26 @@ mod tests {
     }
 
     #[test]
-    fn should_stop_removing_local_wal_when_lease_is_lost_during_prune(
-    ) -> crate::common::MidgeResult<()> {
+    fn should_retire_no_local_wal_when_lease_is_lost_during_prune() -> crate::common::MidgeResult<()>
+    {
         // Arrange: three flushed sealed segments, and a lease that stays
-        // valid for the pass preamble and one removal only.
+        // valid for the pass preamble only.
         let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let mut state =
+            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let wal_dir = state.host_wal_dir().clone();
+        for segment_id in 1..=3 {
+            std::fs::write(
+                wal_dir.join(crate::wal::segment_file_name(segment_id)),
+                b"x",
+            )?;
+        }
+        crate::runtime::event_loop::tests::record_wal_history(
+            &mut state,
+            directory.path(),
+            &[1, 2, 3],
+            4,
+        );
         let router = Arc::new(crate::runtime::ResponseRouter::new());
         let mut event_loop = EventLoop::new(
             state,
@@ -1648,31 +1662,30 @@ mod tests {
             crate::runtime::RuntimeConfig::default(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        let wal_dir = event_loop.state.host_wal_dir().clone();
-        for segment_id in 1..=3 {
-            std::fs::write(
-                wal_dir.join(crate::wal::segment_file_name(segment_id)),
-                b"x",
-            )?;
-        }
-        event_loop.state.wal.current_segment_id = 4;
         event_loop.fencing.leader_store = Some(Arc::new(ExpiringLeaderStore {
             epoch: event_loop.fencing.writer_epoch,
-            valid_reads: std::sync::atomic::AtomicUsize::new(2),
+            valid_reads: std::sync::atomic::AtomicUsize::new(1),
         }));
         event_loop.fencing.leader_holder_id = Some("writer".to_string());
 
         // Act
         event_loop.prune_local_wal_segments_covered_by_manifest();
 
-        // Assert: the first removal ran under a valid lease; after the loss
-        // nothing else is deleted.
+        // Assert: the lease is checked again right before the ledger retires
+        // anything, so after the loss nothing is retired or deleted.
         let exists = |segment_id| {
             wal_dir
                 .join(crate::wal::segment_file_name(segment_id))
                 .exists()
         };
-        assert_eq!((exists(1), exists(2), exists(3)), (false, true, true));
+        assert_eq!((exists(1), exists(2), exists(3)), (true, true, true));
+        assert_eq!(
+            event_loop
+                .wal_actor
+                .history()
+                .map(|history| history.ledger().log_start()),
+            Some(1)
+        );
         Ok(())
     }
 
@@ -2316,19 +2329,13 @@ mod tests {
     }
 
     #[test]
-    fn should_mark_anomaly_when_invalid_wal_segment_follows_an_uncovered_one(
+    fn should_mark_anomaly_when_invalid_wal_segment_follows_a_retirable_one(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: segment 1 is valid but uncovered; segment 2 is corrupt.
+        // Arrange: segment 1 lies below the recovery floor; segment 2, where
+        // the unflushed memtable started, is corrupt.
         let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
+        let mut state =
+            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let record = crate::wal::WalRecord::new(
             crate::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
@@ -2338,23 +2345,37 @@ mod tests {
         );
         let mut frame = Vec::new();
         crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
-        let wal_dir = event_loop.state.host_wal_dir().clone();
+        let wal_dir = state.host_wal_dir().clone();
         std::fs::write(wal_dir.join(crate::wal::segment_file_name(1)), frame)?;
         std::fs::write(
             wal_dir.join(crate::wal::segment_file_name(2)),
             b"not a WAL segment",
         )?;
-        event_loop.state.wal.current_segment_id = 3;
+        crate::runtime::event_loop::tests::record_wal_history(
+            &mut state,
+            directory.path(),
+            &[1, 2],
+            3,
+        );
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
         let cf = event_loop.state.get_cf_mut(0).expect("default family");
         cf.memtable
             .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
-        cf.active_memtable_started_in_segment = 1;
+        cf.active_memtable_started_in_segment = 2;
 
         // Act
         event_loop.prune_local_wal_segments_covered_by_manifest();
 
-        // Assert
+        // Assert: the leading retirable segment goes, the invalid one stays.
         assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(!wal_dir.join(crate::wal::segment_file_name(1)).exists());
         assert!(wal_dir.join(crate::wal::segment_file_name(2)).exists());
         Ok(())
     }
@@ -2366,15 +2387,8 @@ mod tests {
         // cannot be read. That says nothing about coverage, so the failed
         // proof must not be remembered.
         let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
+        let mut state =
+            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let record = crate::wal::WalRecord::new(
             crate::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
@@ -2385,11 +2399,22 @@ mod tests {
         let mut frame = Vec::new();
         crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
         std::fs::write(
-            event_loop
-                .state
-                .host_wal_dir()
-                .join(crate::wal::segment_file_name(1)),
+            state.host_wal_dir().join(crate::wal::segment_file_name(1)),
             frame,
+        )?;
+        crate::runtime::event_loop::tests::record_wal_history(
+            &mut state,
+            directory.path(),
+            &[1],
+            2,
+        );
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         event_loop
             .state
@@ -2406,7 +2431,6 @@ mod tests {
                 key_bounds_complete: true,
                 ..Default::default()
             });
-        event_loop.state.wal.current_segment_id = 2;
         let cf = event_loop.state.get_cf_mut(0).expect("default family");
         cf.memtable
             .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 6, None)?;
@@ -2427,21 +2451,13 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn should_not_reprove_uncovered_wal_segments_until_their_column_family_changes(
-    ) -> crate::common::MidgeResult<()> {
-        // Arrange: three sealed segments above the recovery floor, none
-        // covered by an SST of their column family (0).
-        let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
+    /// A local event loop whose ledger holds sealed segments 1 to 3, each
+    /// with one put of `key-{id}` at sequence `id`, and an unflushed memtable
+    /// that started in segment 1, so every sealed segment needs a proof.
+    fn local_event_loop_with_unflushed_sealed_segments(
+        directory: &std::path::Path,
+    ) -> crate::common::MidgeResult<EventLoop> {
+        let mut state = crate::runtime::state::RuntimeState::new(directory.to_path_buf(), false);
         for segment_id in 1..=3 {
             let record = crate::wal::WalRecord::new(
                 crate::wal::WalOpKind::Put,
@@ -2450,22 +2466,80 @@ mod tests {
                 segment_id,
                 1,
             );
-            let payload = crate::wal::encoding::encode(&record)?;
             let mut frame = Vec::new();
-            crate::wal::frame::append_frame(&mut frame, &payload)?;
+            crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
             std::fs::write(
-                event_loop
-                    .state
+                state
                     .host_wal_dir()
                     .join(crate::wal::segment_file_name(segment_id)),
                 frame,
             )?;
         }
-        event_loop.state.wal.current_segment_id = 4;
+        crate::runtime::event_loop::tests::record_wal_history(&mut state, directory, &[1, 2, 3], 4);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
         let cf = event_loop.state.get_cf_mut(0).expect("default family");
         cf.memtable
             .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
         cf.active_memtable_started_in_segment = 1;
+        Ok(event_loop)
+    }
+
+    /// Publish a family-0 SST holding `key-{n}` at sequence `n` for each `n`
+    /// in `sequences`, which covers those segments' records exactly.
+    fn publish_covering_sst(
+        event_loop: &mut EventLoop,
+        sequences: std::ops::RangeInclusive<u64>,
+    ) -> crate::common::MidgeResult<()> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create()?;
+        for sequence in sequences.clone() {
+            writer.add_with_meta(
+                format!("key-{sequence}").as_bytes(),
+                Some(b"value"),
+                sequence,
+                crate::types::EntryType::Put,
+                None,
+            )?;
+        }
+        let bytes = writer.finish_bytes()?;
+        let name = crate::cloud_layout::file_name(0, 0, 1);
+        std::fs::create_dir_all(event_loop.state.host_sst_dir())?;
+        std::fs::write(event_loop.state.host_sst_dir().join(&name), &bytes)?;
+        event_loop
+            .state
+            .manifest
+            .add_file(crate::metadata::FileMeta {
+                name,
+                cf_id: 0,
+                size_bytes: bytes.len() as u64,
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                smallest_key: Some(format!("key-{}", sequences.start()).into_bytes()),
+                largest_key: Some(format!("key-{}", sequences.end()).into_bytes()),
+                smallest_seq: Some(*sequences.start()),
+                largest_seq: Some(*sequences.end()),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_reprove_uncovered_wal_segments_until_their_column_family_changes(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: sealed segments above the recovery floor, none covered by
+        // an SST of their column family (0). Only a prefix retires, so the
+        // uncovered head segment holds the others back.
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_with_unflushed_sealed_segments(directory.path())?;
         RUNTIME_FILE_READS.with(|reads| reads.set(0));
 
         // Act
@@ -2485,9 +2559,9 @@ mod tests {
         event_loop.prune_local_wal_segments_covered_by_manifest();
         let changed_pass = RUNTIME_FILE_READS.with(std::cell::Cell::get);
 
-        // Assert: every segment is considered, none is re-read until family
+        // Assert: the head segment is proven once, not re-read until family
         // 0's SSTs change, and nothing uncovered is removed.
-        assert_eq!((first_pass, unchanged_pass, changed_pass), (3, 0, 3));
+        assert_eq!((first_pass, unchanged_pass, changed_pass), (1, 0, 1));
         for segment_id in 1..=3 {
             assert!(event_loop
                 .state
@@ -2500,41 +2574,11 @@ mod tests {
 
     #[test]
     fn should_bound_local_wal_proof_reads_per_prune_pass() -> crate::common::MidgeResult<()> {
-        // Arrange: three sealed, uncovered segments above the recovery floor
-        // and a proof budget smaller than one segment.
+        // Arrange: three sealed segments above the recovery floor, each
+        // covered by an SST, and a proof budget smaller than one segment.
         let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
-        for segment_id in 1..=3 {
-            let record = crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
-                bytes::Bytes::from(format!("key-{segment_id}")),
-                Some(bytes::Bytes::from_static(b"value")),
-                segment_id,
-                1,
-            );
-            let mut frame = Vec::new();
-            crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
-            std::fs::write(
-                event_loop
-                    .state
-                    .host_wal_dir()
-                    .join(crate::wal::segment_file_name(segment_id)),
-                frame,
-            )?;
-        }
-        event_loop.state.wal.current_segment_id = 4;
-        let cf = event_loop.state.get_cf_mut(0).expect("default family");
-        cf.memtable
-            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
-        cf.active_memtable_started_in_segment = 1;
+        let mut event_loop = local_event_loop_with_unflushed_sealed_segments(directory.path())?;
+        publish_covering_sst(&mut event_loop, 1..=3)?;
         LOCAL_WAL_PROOF_BYTE_BUDGET.with(|budget| budget.set(Some(1)));
         RUNTIME_FILE_READS.with(|reads| reads.set(0));
 
@@ -2546,11 +2590,18 @@ mod tests {
         }
         LOCAL_WAL_PROOF_BYTE_BUDGET.with(|budget| budget.set(None));
 
-        // Assert: each pass reads one segment and the next pass resumes after
-        // it, so every segment is proven once and nothing uncovered is removed.
+        // Assert: each pass proves one segment and retires it, so the next
+        // pass starts at the following one and every segment is read once.
         assert_eq!(reads_per_pass, vec![1, 1, 1, 0]);
+        assert_eq!(
+            event_loop
+                .wal_actor
+                .history()
+                .map(|history| history.ledger().log_start()),
+            Some(4)
+        );
         for segment_id in 1..=3 {
-            assert!(event_loop
+            assert!(!event_loop
                 .state
                 .host_wal_dir()
                 .join(crate::wal::segment_file_name(segment_id))

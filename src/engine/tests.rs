@@ -943,31 +943,6 @@ fn should_reject_legacy_segment_only_cloud_wal_without_catalog() {
 }
 
 #[test]
-fn should_reject_legacy_segment_only_simulated_cloud_wal_without_catalog() {
-    // Arrange
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
-    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
-    std::fs::write(cloud_wal_dir.join("wal_000001.log"), b"legacy")
-        .expect("write legacy WAL alias");
-    let store = crate::storage::filesystem::FileSystem::new(temp_dir.path().join("cloud_store"))
-        .expect("simulated cloud store");
-
-    // Act
-    let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
-            &store, None,
-        );
-
-    // Assert
-    assert!(matches!(
-        result,
-        Err(crate::common::MidgeError::RecoveryFailed(message))
-            if message.contains("publication catalog format v1")
-    ));
-}
-
-#[test]
 fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
@@ -1171,13 +1146,14 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
 
 #[test]
 fn should_not_commit_manifest_when_format_marker_upload_fails_under_salvage() {
-    // Arrange: a local FORMAT 4 upgrade must reach cloud before its manifest.
+    // Arrange: a local FORMAT marker newer than the cloud copy must reach
+    // cloud before its manifest.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     crate::metadata::ensure_or_create_format_marker(
         &crate::io::real::test_root(temp_dir.path()),
         temp_dir.path(),
     )
-    .expect("create FORMAT 4 marker");
+    .expect("create the current FORMAT marker");
     crate::metadata::ManifestPersistence::save(
         temp_dir.path(),
         &crate::metadata::Manifest::default(),
