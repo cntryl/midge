@@ -95,35 +95,52 @@ fn should_initialize_stats_with_zeros_when_created() {
 
 #[test]
 fn should_open_each_wal_file_once_per_recovery_pass() {
-    // Arrange
-    let directory = TempDir::new().expect("create WAL recovery directory");
-    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    // Arrange: a WAL segment on a crash device, whose open faults count the
+    // opens of that segment.
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let storage = device.fs();
     let wal_dir = FsPath::new("wal");
     storage
         .create_dir_all(&wal_dir)
         .expect("create WAL directory");
-    let wal_path = directory
-        .path()
-        .join("wal")
-        .join(crate::wal::segment_file_name(1));
+    let segment = FsPath::new(format!("wal/{}", crate::wal::segment_file_name(1)));
     let bytes = (1..=128)
         .map(|sequence| encode_frame(&put_record(b"key", sequence, 1)))
         .collect::<Vec<_>>()
         .concat();
-    std::fs::write(wal_path, bytes).expect("write WAL fixture");
-    let mut memtables = HashMap::new();
-    reset_wal_replay_file_open_count();
+    let mut file = storage
+        .open(
+            &segment,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        )
+        .expect("create WAL fixture");
+    file.append(bytes::Bytes::from(bytes))
+        .expect("write WAL fixture");
+    drop(file);
+    let open_fault = |nth| crate::simulation::crash_fs::Fault {
+        op: crate::simulation::crash_fs::FaultOp::Open,
+        path: segment.0.clone(),
+        nth,
+        effect: crate::simulation::crash_fs::FaultEffect::Before,
+        error: crate::simulation::crash_fs::FaultError::Io,
+    };
 
-    // Act
-    replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
-        .expect("replay WAL fixture");
+    // Act: the second open fails; then a third open would have failed.
+    let second = device.inject(open_fault(2));
+    let failed = replay_listed(&storage, &wal_dir, &mut HashMap::new());
+    device.disarm_faults();
+    let third = device.inject(open_fault(3));
+    let replayed = replay_listed(&storage, &wal_dir, &mut HashMap::new());
 
-    // Assert
-    assert_eq!(
-        wal_replay_file_open_count(),
-        2,
-        "epoch discovery and record replay should each open the WAL once"
-    );
+    // Assert: epoch discovery and record replay each open the WAL once.
+    assert!(device.fired(second) && failed.is_err());
+    assert!(!device.fired(third), "replay opened the WAL a third time");
+    assert_eq!(replayed.expect("replay").record_count, 128);
 }
 
 #[test]
@@ -153,7 +170,7 @@ fn should_return_empty_stats_when_wal_directory_missing() {
     let non_existent = FsPath::new("midge_nonexistent_wal_dir_12345");
 
     // Act
-    let stats = replay_wal(&storage, &non_existent, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &non_existent, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 0);
@@ -185,7 +202,7 @@ fn should_recover_put_record_key_value_when_replaying_wal() {
 
     // Act
     let mut memtables = HashMap::new();
-    let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let _stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     let recovered_memtable = &memtables[&0];
@@ -218,7 +235,7 @@ fn should_increment_record_count_when_replaying_put() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert!(stats.record_count > 0);
@@ -249,7 +266,7 @@ fn should_track_max_sequence_from_put_record() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.max_sequence, Some(1));
@@ -289,7 +306,7 @@ fn should_recover_delete_operation_when_replaying_wal() {
 
     // Act
     let mut memtables = HashMap::new();
-    let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let _stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     let recovered_memtable = &memtables[&0];
@@ -331,7 +348,7 @@ fn should_count_put_records() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 2);
@@ -374,7 +391,7 @@ fn should_separate_records_by_column_family_when_recovering() {
 
     // Act
     let mut memtables = HashMap::new();
-    let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let _stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(memtables.len(), 2);
@@ -417,7 +434,7 @@ fn should_recover_both_column_families_with_correct_data() {
 
     // Act
     let mut memtables = HashMap::new();
-    let _stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let _stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert!(memtables[&0].get(b"key0").unwrap().is_some());
@@ -461,7 +478,7 @@ fn should_count_records_across_multiple_column_families() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert: record_count aggregates across every column family, and each
     // record still lands in its own CF's memtable rather than being merged
@@ -522,7 +539,7 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert: sequence-gap ordering must not affect either the frontier or
     // the record count (previously covered separately by a near-identical
@@ -548,7 +565,7 @@ fn should_return_empty_stats_when_no_records() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 0);
@@ -596,7 +613,7 @@ fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     let recovered_memtable = &memtables[&0];
@@ -643,7 +660,7 @@ fn should_track_bytes_accounting_correctly() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     // Should account for key (6) + value (8) = 14 bytes minimum
@@ -690,7 +707,7 @@ fn should_handle_delete_range_operations() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 2);
@@ -741,7 +758,7 @@ fn should_handle_transaction_markers() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 3);
@@ -793,7 +810,7 @@ fn should_apply_txn_batch_atomically_during_recovery() {
     }
 
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Act
     // Assert
@@ -840,9 +857,10 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
 
     // Act
     let mut memtables = HashMap::new();
+    let segments = crate::runtime::wal_history::listed_segments(&storage, &wal_dir).unwrap();
     let stats = replay_wal_with_manifest_filter_within(
         &storage,
-        &wal_dir,
+        &segments,
         &mut memtables,
         ReplayPolicy::Strict,
         &should_apply,
@@ -894,7 +912,7 @@ fn should_recover_only_committed_transaction_given_split_wal_records_when_commit
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 2);
@@ -957,7 +975,7 @@ fn should_isolate_reused_transaction_id_by_writer_epoch() {
 
     // Act
     let mut memtables = HashMap::new();
-    replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     let recovered = &memtables[&0];
@@ -1009,7 +1027,7 @@ fn should_replay_committed_split_transaction_from_spool() {
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, operation_count + 2);
@@ -1074,7 +1092,7 @@ fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
     std::fs::write(&wal_path, &bytes[..bytes.len() - 3]).unwrap();
 
     let mut memtables = HashMap::new();
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &wal_dir,
         &mut memtables,
@@ -1119,7 +1137,7 @@ fn should_reject_corrupt_final_active_wal_frame_given_complete_frame_header_when
     let mut memtables = HashMap::new();
 
     // Act
-    let err = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+    let err = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
         .unwrap_err();
 
     // Assert
@@ -1169,7 +1187,7 @@ fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() 
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &wal_dir,
         &mut memtables,
@@ -1224,7 +1242,7 @@ fn should_salvage_valid_prefix_on_truncated_tail_frame() {
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &wal_dir,
         &mut memtables,
@@ -1264,7 +1282,7 @@ fn should_fail_strict_recovery_given_corruption_in_a_sealed_wal_segment() {
     let mut memtables = HashMap::new();
 
     // Act
-    let error = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+    let error = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
         .unwrap_err();
 
     // Assert
@@ -1303,7 +1321,7 @@ fn should_salvage_verified_prefix_given_corruption_in_a_sealed_wal_segment_when_
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &wal_dir,
         &mut memtables,
@@ -1345,8 +1363,8 @@ fn should_ignore_only_incomplete_final_active_wal_tail_given_truncated_frame_whe
     let mut memtables = HashMap::new();
 
     // Act
-    let stats =
-        replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict).unwrap();
+    let stats = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .unwrap();
 
     // Assert
     assert!(!stats.had_corruption);
@@ -1382,8 +1400,8 @@ fn should_report_verified_prefix_without_modifying_file_when_tolerating_active_w
     let mut memtables = HashMap::new();
 
     // Act
-    let stats =
-        replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict).unwrap();
+    let stats = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .unwrap();
 
     // Assert
     assert_eq!(
@@ -1415,8 +1433,8 @@ fn should_not_report_tolerated_tail_when_active_wal_is_complete() {
     let mut memtables = HashMap::new();
 
     // Act
-    let stats =
-        replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict).unwrap();
+    let stats = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .unwrap();
 
     // Assert
     assert_eq!(stats.tolerated_active_tail, None);
@@ -1436,7 +1454,7 @@ fn should_fail_strict_recovery_given_corrupted_length_before_valid_active_wal_su
     let mut memtables = HashMap::new();
 
     // Act
-    let error = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+    let error = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
         .expect_err("strict recovery must reject a length field that hides a valid WAL suffix");
 
     // Assert
@@ -1461,7 +1479,7 @@ fn should_mark_corruption_when_salvaging_corrupted_length_before_valid_active_su
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &wal_dir,
         &mut memtables,
@@ -1493,7 +1511,7 @@ fn should_tolerate_zero_filled_final_active_wal_tail_given_strict_recovery() {
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+    let stats = replay_listed_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
         .expect("strict recovery must accept an unwritten zero-filled active WAL tail");
 
     // Assert
@@ -1542,7 +1560,7 @@ fn should_skip_stale_writer_epoch_records_given_interleaved_epochs_when_replayin
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.max_epoch_seen, 2);
@@ -1587,7 +1605,7 @@ fn should_skip_stale_writer_epoch_records_seen_before_fresh_epoch() {
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.max_epoch_seen, 2);
@@ -1644,7 +1662,7 @@ fn should_skip_lower_epoch_record_when_seen_after_fresh_epoch_with_lower_sequenc
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.max_epoch_seen, 2);
@@ -1687,7 +1705,7 @@ fn should_preserve_fencing_ordinal_when_duplicate_frame_is_skipped_across_wal_fi
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.max_epoch_seen, 2);
@@ -1723,7 +1741,7 @@ fn should_replay_distinct_records_that_share_a_key_across_wal_files() {
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+    let stats = replay_listed(&storage, &wal_dir, &mut memtables).unwrap();
 
     // Assert
     assert_eq!(stats.record_count, 2, "both writes must be replayed");
@@ -1785,18 +1803,19 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     .expect("write WAL fixture");
     let storage = RealFs::new(dir.path()).expect("open fs");
 
-    let replay =
-        match validate_wal_with_policy(&storage, &FsPath::new("wal"), ReplayPolicy::Strict, None) {
-            Ok(stats) => WalkerVerdict::Accepted {
-                newest_epoch: stats.max_epoch_seen,
-                max_sequence: stats.max_sequence.unwrap_or(0),
-                valid_bytes: stats
-                    .tolerated_active_tail
-                    .as_ref()
-                    .map_or(bytes.len() as u64, |tail| tail.valid_bytes),
-            },
-            Err(_) => WalkerVerdict::Rejected,
-        };
+    let segments =
+        crate::runtime::wal_history::listed_segments(&storage, &FsPath::new("wal")).unwrap();
+    let replay = match validate_wal_with_policy(&storage, &segments, ReplayPolicy::Strict, None) {
+        Ok(stats) => WalkerVerdict::Accepted {
+            newest_epoch: stats.max_epoch_seen,
+            max_sequence: stats.max_sequence.unwrap_or(0),
+            valid_bytes: stats
+                .tolerated_active_tail
+                .as_ref()
+                .map_or(bytes.len() as u64, |tail| tail.valid_bytes),
+        },
+        Err(_) => WalkerVerdict::Rejected,
+    };
 
     let path = FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME));
     let file = storage
@@ -1951,7 +1970,7 @@ fn should_keep_dedup_index_empty_when_local_wal_is_strictly_increasing() {
     streaming::reset_duplicate_rescans();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &FsPath::new("wal"),
         &mut memtables,
@@ -1982,7 +2001,7 @@ fn should_rescan_only_overlapping_records_when_segments_repeat_after_rotation() 
     streaming::reset_duplicate_rescans();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &FsPath::new("wal"),
         &mut memtables,
@@ -2014,7 +2033,7 @@ fn should_not_rescan_fresh_records_when_a_stale_record_carries_a_higher_sequence
     streaming::reset_duplicate_rescans();
 
     // Act
-    let stats = replay_wal_with_policy(
+    let stats = replay_listed_with_policy(
         &storage,
         &FsPath::new("wal"),
         &mut memtables,
@@ -2049,7 +2068,7 @@ fn should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_
     let mut memtables = HashMap::new();
 
     // Act
-    let result = replay_wal(&storage, &FsPath::new("wal"), &mut memtables);
+    let result = replay_listed(&storage, &FsPath::new("wal"), &mut memtables);
 
     // Assert: either replay refuses the inverted layout, or it keeps the
     // acknowledged epoch-1 writes. It must not drop them silently.
@@ -2069,4 +2088,31 @@ fn should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_
             );
         }
     }
+}
+
+/// Replay what `storage` holds under `wal_dir` through local recovery's
+/// production path, applying every record.
+fn replay_listed_with_policy(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    policy: ReplayPolicy,
+) -> MidgeResult<RecoveryStats> {
+    let segments = crate::runtime::wal_history::listed_segments(storage, wal_dir)?;
+    replay_wal_with_manifest_filter_within(
+        storage,
+        &segments,
+        memtables,
+        policy,
+        &|_| Ok(true),
+        None,
+    )
+}
+
+fn replay_listed(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+) -> MidgeResult<RecoveryStats> {
+    replay_listed_with_policy(storage, wal_dir, memtables, ReplayPolicy::Strict)
 }

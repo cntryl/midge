@@ -628,14 +628,18 @@ impl RuntimeState {
                 .as_ref()
                 .is_some_and(|coverage| coverage.covers_wal_record(record))),
         };
-        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter_within(
-            storage,
-            &crate::io::FsPath::new(""),
-            &mut recovery_memtables,
-            replay_policy,
-            &should_apply,
-            scope,
-        ) {
+        let segments =
+            crate::runtime::wal_history::listed_segments(storage, &crate::io::FsPath::new(""));
+        let stats = match segments.and_then(|segments| {
+            crate::wal::recovery::replay_wal_with_manifest_filter_within(
+                storage,
+                &segments,
+                &mut recovery_memtables,
+                replay_policy,
+                &should_apply,
+                scope,
+            )
+        }) {
             Ok(stats) => stats,
             Err(error) => {
                 return Self::handle_local_wal_replay_failure(

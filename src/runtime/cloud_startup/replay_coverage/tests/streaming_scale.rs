@@ -367,9 +367,12 @@ fn should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_
 
     // Act: the actual planner validated the sealed bytes; replay uses bounded atomic apply.
     let started = Instant::now();
+    let segments =
+        crate::runtime::wal_history::listed_segments(recovered.fs.as_ref(), &FsPath::new("wal"))
+            .expect("list WAL");
     let stats = replay_wal_with_options(
         recovered.fs.as_ref(),
-        &FsPath::new("wal"),
+        &segments,
         &mut memtables,
         ReplayPolicy::Strict,
         None,

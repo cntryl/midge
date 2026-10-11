@@ -1201,26 +1201,6 @@ const TEST_ONLY_WAL_PATHS: &[(&str, &str, &str)] = &[
         "loads metadata from a host directory for cloud replay tests; stage 2 plans cloud replay",
     ),
     (
-        "src/wal/recovery.rs",
-        "replay_wal",
-        "replays a directory without the manifest filter; stage 2 replaces directory replay",
-    ),
-    (
-        "src/wal/recovery.rs",
-        "replay_wal_with_policy",
-        "replays a directory without the manifest filter; stage 2 replaces directory replay",
-    ),
-    (
-        "src/wal/recovery.rs",
-        "reset_wal_replay_file_open_count",
-        "instrumentation for directory replay, which stage 2 replaces",
-    ),
-    (
-        "src/wal/recovery.rs",
-        "wal_replay_file_open_count",
-        "instrumentation for directory replay, which stage 2 replaces",
-    ),
-    (
         "src/wal/recovery/streaming.rs",
         "replay_wal_with_checkpoint",
         "bounded replay through the infallible filter slot; stage 3 deletes the slot",
@@ -1330,6 +1310,10 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("create_replay_spool", "#837"),
     ("inject_spool_create_io", "#837"),
     ("spool_create_io_injected", "#837"),
+    ("collect_replay_paths", "#848"),
+    ("replay_wal_with_policy", "#848"),
+    ("wal_replay_file_open_count", "#848"),
+    ("reset_wal_replay_file_open_count", "#848"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

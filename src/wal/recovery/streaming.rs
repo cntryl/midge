@@ -1,9 +1,9 @@
 //! Cloud replay with bounded reads, transaction buffers, and checkpointable memtables.
 
 use super::{
-    apply_record, collect_replay_paths, open_wal_replay_file, replay_error_action, EpochPolicy,
-    NextWalFrame, RecoveryStats, ReplayErrorAction, ReplayFailure, ReplayFile, ReplayPolicy,
-    ToleratedActiveTail, WalSalvageStop, WriterEpochFrontiers,
+    apply_record, open_wal_replay_file, replay_error_action, EpochPolicy, NextWalFrame,
+    RecoveryStats, ReplayErrorAction, ReplayFailure, ReplayFile, ReplayPolicy, ToleratedActiveTail,
+    WalSalvageStop, WriterEpochFrontiers,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
@@ -259,7 +259,7 @@ struct ReplayState<'a> {
 #[cfg(test)]
 pub(crate) fn replay_wal_with_checkpoint(
     storage: &dyn Fs,
-    wal_dir: &FsPath,
+    segments: &[ReplayFile],
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
     should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
@@ -268,7 +268,7 @@ pub(crate) fn replay_wal_with_checkpoint(
 ) -> MidgeResult<RecoveryStats> {
     replay_wal_with_options(
         storage,
-        wal_dir,
+        segments,
         memtables,
         replay_policy,
         should_apply,
@@ -282,7 +282,7 @@ pub(crate) fn replay_wal_with_checkpoint(
 #[allow(clippy::too_many_arguments)] // Each input is a distinct replay contract.
 pub(crate) fn replay_wal_with_options(
     storage: &dyn Fs,
-    wal_dir: &FsPath,
+    segments: &[ReplayFile],
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
     should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
@@ -298,10 +298,8 @@ pub(crate) fn replay_wal_with_options(
         ));
     }
     let started = std::time::Instant::now();
-    let paths = collect_replay_paths(storage, wal_dir)?;
-    options.check()?;
     let (frontiers, had_corruption) =
-        discover_frontiers(storage, &paths, replay_policy, limits, options)?;
+        discover_frontiers(storage, segments, replay_policy, limits, options)?;
     let mut state = ReplayState {
         stats: RecoveryStats {
             max_epoch_seen: frontiers.max_epoch_seen(),
@@ -320,12 +318,12 @@ pub(crate) fn replay_wal_with_options(
             "replay_decision",
         ),
     };
-    replay_paths(storage, &paths, replay_policy, &frontiers, &mut state)?;
+    replay_paths(storage, segments, replay_policy, &frontiers, &mut state)?;
     options.check()?;
     state.operation_progress.finish();
     state.stats.total_replay_ns = started.elapsed().as_nanos();
     tracing::info!(
-        dir = %wal_dir,
+        segments = segments.len(),
         records = state.stats.record_count,
         bytes = state.stats.bytes,
         max_sequence = ?state.stats.max_sequence,

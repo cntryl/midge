@@ -554,9 +554,10 @@ fn replay_fixture(
         }
         !covered
     };
+    let segments = crate::runtime::wal_history::listed_segments(fs, &FsPath::new("wal"))?;
     replay_wal_with_options(
         fs,
-        &FsPath::new("wal"),
+        &segments,
         memtables,
         ReplayPolicy::Strict,
         Some(&should_apply),

@@ -115,9 +115,11 @@ impl CloudReplay {
         )?;
         let mut memtables = HashMap::new();
         let mut names = names::Names::new(self.limits);
+        let segments =
+            crate::runtime::wal_history::listed_segments(self.fs.as_ref(), &FsPath::new("wal"))?;
         let replay_result = replay_wal_with_options(
             self.fs.as_ref(),
-            &FsPath::new("wal"),
+            &segments,
             &mut memtables,
             policy,
             None,
