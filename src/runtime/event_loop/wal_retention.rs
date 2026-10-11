@@ -49,10 +49,10 @@ impl EventLoop {
         if !self.seal_active_wal_for_prune() {
             return;
         }
-        let Some(history) = self.wal_actor.history() else {
+        let Some(ledger) = self.wal_actor.ledger() else {
             return;
         };
-        let sealed: Vec<u64> = history.ledger().sealed().collect();
+        let sealed: Vec<u64> = ledger.sealed().collect();
         // Memtables flush in FIFO order per column family, so a segment below
         // the oldest unflushed memtable's first segment holds only data that
         // is already in published SSTs, including deletes, which the
@@ -190,14 +190,28 @@ impl EventLoop {
             tracing::warn!(%error, "stopped local WAL pruning after lease validation failed");
             return;
         }
-        let Some(history) = self.wal_actor.history_mut() else {
-            return;
-        };
-        match history.retire_below(to) {
-            Ok(retired) => tracing::debug!(?retired, "retired local WAL segments"),
+        self.retire_wal_below_or_retain(to);
+    }
+
+    /// Retire every WAL segment below `to`, or retain the WAL and record the
+    /// anomaly when the ledger cannot. A file left behind is an anomaly too:
+    /// it holds disk space until the next open sweeps it.
+    pub(super) fn retire_wal_below_or_retain(
+        &mut self,
+        to: u64,
+    ) -> Option<crate::runtime::wal_history::RetiredWal> {
+        match self.wal_actor.retire_wal_below(to) {
+            Ok(retired) => {
+                if !retired.left.is_empty() {
+                    self.state.mark_persistence_anomaly();
+                }
+                tracing::debug!(?retired, "retired WAL segments");
+                Some(retired)
+            }
             Err(error) => {
                 self.state.mark_persistence_anomaly();
-                tracing::warn!(%error, to, "retaining local WAL because the ledger could not retire it");
+                tracing::warn!(%error, to, "retaining WAL because the ledger could not retire it");
+                None
             }
         }
     }

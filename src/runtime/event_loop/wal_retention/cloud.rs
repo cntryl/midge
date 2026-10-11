@@ -329,89 +329,58 @@ impl EventLoop {
     /// run of queued segments (#842). A segment still needed locally holds
     /// every later one: only a prefix of the ledger retires. Each retired
     /// segment then releases its runtime obligations.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transition protocol's refusal to release an obligation;
+    /// the caller fences. A ledger that cannot retire only retains WAL.
     pub(in crate::runtime::event_loop) fn retire_cloud_local_wal(
         &mut self,
         segment_id: u64,
         release: crate::runtime::event_loop::coordination::LocalRetirement,
-    ) {
+    ) -> crate::common::MidgeResult<()> {
         self.cloud_coordinator
             .cloud_wal
-            .queue_local_retirement(segment_id, release);
-        let retired = self.advance_cloud_local_wal_prefix();
-        for (segment_id, release) in retired {
-            if release.cloud_durable {
-                if let Err(error) = self.wal_transition.retire_cloud_durable(segment_id) {
-                    self.fence_wal_transition(&error, Some(segment_id));
-                    tracing::error!(%error, segment_id, "cloud WAL obligation retirement fenced");
-                    return;
+            .local_retirement
+            .queue(segment_id, release);
+        if let Some(to) = self.wal_actor.ledger().map(|ledger| {
+            (
+                self.cloud_coordinator
+                    .cloud_wal
+                    .local_retirement
+                    .retire_point(ledger),
+                ledger.log_start(),
+            )
+        }) {
+            let (to, log_start) = to;
+            if to > log_start {
+                crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
+                if let Some(retired) = self.retire_wal_below_or_retain(to) {
+                    if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
+                        storage.release_local_wal_bytes(retired.removed_bytes());
+                    }
                 }
+            }
+        }
+        // Memory mode keeps no local copies, so everything queued is retired.
+        let log_start = self
+            .wal_actor
+            .ledger()
+            .map_or(u64::MAX, crate::wal::ledger::WalLedger::log_start);
+        let released = self
+            .cloud_coordinator
+            .cloud_wal
+            .local_retirement
+            .drain_below(log_start);
+        for (segment_id, release) in released {
+            if release.cloud_durable {
+                self.wal_transition.retire_cloud_durable(segment_id)?;
             }
             if release.gc_pin {
                 self.wal_transition.retire_gc_pin(segment_id);
             }
         }
-    }
-
-    /// Advance the ledger's log start over the queued segments at its head
-    /// and return every queued segment now below it.
-    fn advance_cloud_local_wal_prefix(
-        &mut self,
-    ) -> Vec<(
-        u64,
-        crate::runtime::event_loop::coordination::LocalRetirement,
-    )> {
-        let queued = &self.cloud_coordinator.cloud_wal.local_retirement;
-        let Some(history) = self.wal_actor.history() else {
-            // Memory mode keeps no local copies.
-            return std::mem::take(&mut self.cloud_coordinator.cloud_wal.local_retirement)
-                .into_iter()
-                .collect();
-        };
-        let ledger = history.ledger();
-        let to = ledger
-            .sealed()
-            .find(|segment_id| !queued.contains_key(segment_id))
-            .unwrap_or_else(|| ledger.open_segment());
-        if to > ledger.log_start() {
-            let sizes: Vec<u64> = ledger
-                .members()
-                .take_while(|segment_id| *segment_id < to)
-                .filter_map(|segment_id| {
-                    self.state
-                        .fs
-                        .metadata(&crate::wal::segment_key(segment_id))
-                        .ok()
-                        .map(|metadata| metadata.len)
-                })
-                .collect();
-            crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
-            let retired = self
-                .wal_actor
-                .history_mut()
-                .map(|history| history.retire_below(to));
-            match retired {
-                Some(Ok(_)) => {
-                    if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
-                        for bytes in sizes {
-                            storage.release_local_wal_bytes(bytes);
-                        }
-                    }
-                }
-                Some(Err(error)) => {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(%error, to, "retaining cloud-durable local WAL because the ledger could not retire it");
-                }
-                None => {}
-            }
-        }
-        let log_start = self
-            .wal_actor
-            .history()
-            .map_or(u64::MAX, |history| history.ledger().log_start());
-        let queued = &mut self.cloud_coordinator.cloud_wal.local_retirement;
-        let mut below = queued.split_off(&log_start);
-        std::mem::swap(queued, &mut below);
-        below.into_iter().collect()
+        Ok(())
     }
 }
 

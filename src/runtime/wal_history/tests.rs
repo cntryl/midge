@@ -214,7 +214,8 @@ fn should_keep_retired_segment_out_of_history_when_its_unlink_fails() {
 
     // Assert
     assert!(device.fired(fault));
-    assert_eq!(retired, vec![1, 2]);
+    assert_eq!(retired.left, vec![1]);
+    assert_eq!(retired.removed, vec![(2, 9)]);
     assert_eq!(members(&reopened), vec![3, 4]);
     assert!(!device.files().contains_key(&key(1)));
 }
@@ -372,6 +373,6 @@ fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
     for id in 1..=4 {
         assert!(kept.contains_key(&key(id)), "segment {id} removed");
     }
-    assert_eq!(retried.expect("retire after healing"), vec![1]);
+    assert_eq!(retried.expect("retire after healing").removed, vec![(1, 9)]);
     assert_eq!(members(&history), vec![2, 3, 4]);
 }

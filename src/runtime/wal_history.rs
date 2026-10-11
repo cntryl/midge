@@ -154,26 +154,39 @@ impl WalHistory {
 
     /// Retire every member below `to`: make the new log start durable, then
     /// remove their files. A file that cannot be removed is an orphan
-    /// nothing reads, which the next open sweeps. Returns the retired ids.
+    /// nothing reads, which the next open sweeps.
     ///
     /// # Errors
     ///
     /// Returns an error, removing nothing, if the ledger refuses or cannot
     /// record the new log start.
-    pub(crate) fn retire_below(&mut self, to: SegmentId) -> MidgeResult<Vec<SegmentId>> {
-        let retired: Vec<SegmentId> = self.ledger().members().take_while(|id| *id < to).collect();
+    pub(crate) fn retire_below(&mut self, to: SegmentId) -> MidgeResult<RetiredWal> {
+        let members: Vec<(SegmentId, u64)> = self
+            .ledger()
+            .members()
+            .take_while(|id| *id < to)
+            .map(|id| {
+                let name = FsPath::new(crate::wal::segment_file_name(id));
+                let bytes = self.wal.metadata(&name).map_or(0, |metadata| metadata.len);
+                (id, bytes)
+            })
+            .collect();
         self.commit(&LedgerEdit::AdvanceLogStart { to })?;
-        for id in &retired {
+        let mut retired = RetiredWal::default();
+        for (id, bytes) in members {
             match self
                 .wal
-                .remove_file(&FsPath::new(crate::wal::segment_file_name(*id)))
+                .remove_file(&FsPath::new(crate::wal::segment_file_name(id)))
             {
-                Ok(()) | Err(FsError::NotFound(_)) => {}
-                Err(error) => tracing::warn!(
-                    segment_id = id,
-                    %error,
-                    "left a retired WAL segment for the next open to sweep"
-                ),
+                Ok(()) | Err(FsError::NotFound(_)) => retired.removed.push((id, bytes)),
+                Err(error) => {
+                    tracing::warn!(
+                        segment_id = id,
+                        %error,
+                        "left a retired WAL segment for the next open to sweep"
+                    );
+                    retired.left.push(id);
+                }
             }
         }
         Ok(retired)
@@ -223,6 +236,24 @@ impl WalHistory {
             "set aside WAL that salvage recovery did not replay"
         );
         Ok(())
+    }
+}
+
+/// What one retirement did. Every segment in it is out of history.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct RetiredWal {
+    /// Segments whose files are gone, with the bytes each held.
+    pub(crate) removed: Vec<(SegmentId, u64)>,
+    /// Segments whose files could not be removed; the next open sweeps them.
+    pub(crate) left: Vec<SegmentId>,
+}
+
+impl RetiredWal {
+    /// Bytes the removed files held.
+    pub(crate) fn removed_bytes(&self) -> u64 {
+        self.removed
+            .iter()
+            .fold(0, |total, (_, bytes)| total.saturating_add(*bytes))
     }
 }
 

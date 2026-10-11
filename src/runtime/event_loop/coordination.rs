@@ -24,9 +24,41 @@ pub(crate) struct CloudWalUploadTracker {
     /// here; `HybridStorage` retries it itself.
     upload_retry: crate::runtime::retry_schedule::RetrySchedule,
     pub(super) prune_inflight: HashSet<u64>,
-    /// Sealed segments whose local copies may go, with what each releases
-    /// once it falls below the ledger's log start (#842).
-    pub(super) local_retirement: BTreeMap<u64, LocalRetirement>,
+    /// Sealed segments whose local copies may go (#842).
+    pub(super) local_retirement: LocalRetirementQueue,
+}
+
+/// Sealed segments whose local copies may go, with what each releases once
+/// it falls below the ledger's log start. Only a prefix of the ledger
+/// retires, so a queued segment can wait for an earlier one.
+#[derive(Debug, Default)]
+pub(crate) struct LocalRetirementQueue {
+    queued: BTreeMap<u64, LocalRetirement>,
+}
+
+impl LocalRetirementQueue {
+    /// Queue `segment_id`, adding `release` to what it already releases.
+    pub(crate) fn queue(&mut self, segment_id: u64, release: LocalRetirement) {
+        let entry = self.queued.entry(segment_id).or_default();
+        *entry = entry.merge(release);
+    }
+
+    /// One past the leading run of `ledger`'s sealed members that are
+    /// queued: the log start that run retires to.
+    pub(crate) fn retire_point(&self, ledger: &crate::wal::ledger::WalLedger) -> u64 {
+        ledger
+            .sealed()
+            .find(|segment_id| !self.queued.contains_key(segment_id))
+            .unwrap_or_else(|| ledger.open_segment())
+    }
+
+    /// Remove and return every queued segment below `log_start`.
+    pub(crate) fn drain_below(&mut self, log_start: u64) -> Vec<(u64, LocalRetirement)> {
+        let kept = self.queued.split_off(&log_start);
+        std::mem::replace(&mut self.queued, kept)
+            .into_iter()
+            .collect()
+    }
 }
 
 /// What a segment's local retirement releases.
@@ -57,12 +89,6 @@ impl LocalRetirement {
 }
 
 impl CloudWalUploadTracker {
-    /// Queue `segment_id`'s local copy for retirement, releasing `release`.
-    pub(super) fn queue_local_retirement(&mut self, segment_id: u64, release: LocalRetirement) {
-        let entry = self.local_retirement.entry(segment_id).or_default();
-        *entry = entry.merge(release);
-    }
-
     pub(super) fn new(acked_segments: BTreeMap<u64, u64>) -> Self {
         Self {
             acked_segments,
@@ -72,7 +98,7 @@ impl CloudWalUploadTracker {
                 CLOUD_WAL_RUNTIME_RETRY_DELAY,
             ),
             prune_inflight: HashSet::new(),
-            local_retirement: BTreeMap::new(),
+            local_retirement: LocalRetirementQueue::default(),
         }
     }
 

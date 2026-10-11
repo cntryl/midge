@@ -477,7 +477,8 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     std::fs::write(&local_segment, &segment_bytes).expect("write recovered local WAL segment");
     let wal: Arc<dyn crate::io::Fs> =
         Arc::new(crate::io::RealFs::new(&wal_dir).expect("open the WAL directory"));
-    crate::runtime::wal_history::fixture::replace(&wal, &[2, 3], 4).expect("record the WAL history");
+    crate::runtime::wal_history::fixture::replace(&wal, &[2, 3], 4)
+        .expect("record the WAL history");
 
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;

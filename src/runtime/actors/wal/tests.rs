@@ -688,9 +688,7 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
     assert!(wal_actor.is_fenced());
     assert_eq!(state.wal.current_segment_id, segment_id);
     assert_eq!(
-        wal_actor
-            .history()
-            .map(|history| history.ledger().open_segment()),
+        wal_actor.ledger().map(|ledger| ledger.open_segment()),
         Some(segment_id)
     );
     assert!(wal_dir
@@ -1609,9 +1607,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
         assert!(wal_dir
             .join(crate::wal::segment_file_name(segment_id))
             .exists());
-        let ledger_open = wal_actor
-            .history()
-            .map(|history| history.ledger().open_segment());
+        let ledger_open = wal_actor.ledger().map(|ledger| ledger.open_segment());
         if boundary == WalTransitionBoundary::AfterLedgerRotate {
             assert!(wal_actor.is_fenced());
             assert!(state.persistence_anomaly_detected());
@@ -1776,9 +1772,7 @@ fn should_fence_rotation_before_overwriting_a_next_segment_that_holds_data() -> 
     assert_eq!(std::fs::read(next_path)?, b"existing-segment-data");
     assert_eq!(state.wal.current_segment_id, segment_id);
     assert_eq!(
-        wal_actor
-            .history()
-            .map(|history| history.ledger().open_segment()),
+        wal_actor.ledger().map(|ledger| ledger.open_segment()),
         Some(segment_id)
     );
     assert!(wal_actor.is_fenced());
@@ -1802,9 +1796,7 @@ fn should_keep_rotation_retryable_when_next_segment_directory_sync_fails() -> Mi
     let error = wal_actor
         .rotate(&mut state, &ticket)
         .expect_err("directory sync failure must interrupt rotation");
-    let ledger_open = wal_actor
-        .history()
-        .map(|history| history.ledger().open_segment());
+    let ledger_open = wal_actor.ledger().map(|ledger| ledger.open_segment());
     mock.set_sync_dir_failure(false);
     let retried = wal_actor.rotate(&mut state, &ticket);
 
@@ -1908,9 +1900,7 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
         .exists(&FsPath::new(crate::wal::segment_file_name(7)))
         .map_err(FsError::into_midge)?);
     assert_eq!(
-        wal_actor
-            .history()
-            .map(|history| history.ledger().open_segment()),
+        wal_actor.ledger().map(|ledger| ledger.open_segment()),
         Some(8),
         "the ledger already sealed segment 7"
     );

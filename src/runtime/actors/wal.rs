@@ -867,12 +867,39 @@ impl WalActor {
     }
 
     /// The segment ledger; `None` in memory mode.
-    pub(crate) fn history(&self) -> Option<&crate::runtime::wal_history::WalHistory> {
-        self.history.as_ref()
+    pub(crate) fn ledger(&self) -> Option<&crate::wal::ledger::WalLedger> {
+        self.history
+            .as_ref()
+            .map(crate::runtime::wal_history::WalHistory::ledger)
     }
 
-    /// The segment ledger, to retire WAL through; `None` in memory mode.
-    pub(crate) fn history_mut(&mut self) -> Option<&mut crate::runtime::wal_history::WalHistory> {
+    /// Retire every WAL segment below `to` through the ledger. Memory mode
+    /// keeps no segments and retires nothing.
+    ///
+    /// # Errors
+    ///
+    /// Refuses while the actor is fenced: a fenced writer changes no
+    /// history. Otherwise returns the ledger's error, having removed nothing.
+    pub(crate) fn retire_wal_below(
+        &mut self,
+        to: crate::wal::ledger::SegmentId,
+    ) -> MidgeResult<crate::runtime::wal_history::RetiredWal> {
+        if self.is_fenced() {
+            return Err(self
+                .io_error()
+                .unwrap_or_else(|| MidgeError::RecoveryFailed("the WAL is fenced".to_string())));
+        }
+        match self.history.as_mut() {
+            Some(history) => history.retire_below(to),
+            None => Ok(crate::runtime::wal_history::RetiredWal::default()),
+        }
+    }
+
+    /// The segment ledger itself, for tests that stage a history.
+    #[cfg(test)]
+    pub(crate) fn history_for_test(
+        &mut self,
+    ) -> Option<&mut crate::runtime::wal_history::WalHistory> {
         self.history.as_mut()
     }
 

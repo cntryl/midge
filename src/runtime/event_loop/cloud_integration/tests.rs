@@ -305,7 +305,7 @@ fn should_release_wal_disk_budget_only_after_local_segment_removal(
     event_loop.retire_cloud_local_wal(
         segment_id,
         crate::runtime::event_loop::coordination::LocalRetirement::default(),
-    );
+    )?;
     let after_failed_delete = storage.budget_snapshot().total_committed_bytes;
 
     // Assert
@@ -1520,7 +1520,7 @@ fn publish_remote_wal_bytes_for_test(
 fn seal_ledger_through_for_test(el: &mut EventLoop, segment_id: u64) {
     crate::runtime::wal_history::fixture::seal_through(
         el.wal_actor
-            .history_mut()
+            .history_for_test()
             .expect("a file-backed WAL has a segment ledger"),
         segment_id,
     )
@@ -6596,8 +6596,8 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 assert_eq!(
                     event_loop
                         .wal_actor
-                        .history()
-                        .map(|history| history.ledger().open_segment()),
+                        .ledger()
+                        .map(|ledger| ledger.open_segment()),
                     Some(segment_id),
                     "{boundary:?}"
                 );

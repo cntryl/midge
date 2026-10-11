@@ -301,11 +301,12 @@ impl EventLoop {
         ready_segment_ids: &[u64],
     ) {
         for ready_segment_id in ready_segment_ids {
-            self.retire_cloud_local_wal(
+            if let Err(error) = self.retire_cloud_local_wal(
                 *ready_segment_id,
                 crate::runtime::event_loop::coordination::LocalRetirement::CLOUD_DURABLE,
-            );
-            if self.wal_actor.is_fenced() {
+            ) {
+                self.fence_wal_transition(&error, Some(*ready_segment_id));
+                tracing::error!(%error, segment_id = *ready_segment_id, "cloud WAL obligation retirement fenced");
                 return;
             }
         }
@@ -345,10 +346,13 @@ impl EventLoop {
         }
         // Catalog retirement does not stop startup replaying a local member,
         // so its tombstone GC pin holds until the ledger retires it.
-        self.retire_cloud_local_wal(
+        if let Err(error) = self.retire_cloud_local_wal(
             segment_id,
             crate::runtime::event_loop::coordination::LocalRetirement::GC_PIN,
-        );
+        ) {
+            self.fence_wal_transition(&error, Some(segment_id));
+            tracing::error!(%error, segment_id, "cloud WAL obligation retirement fenced");
+        }
         self.background_compaction_schedule.mark_due();
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
@@ -473,8 +477,8 @@ impl EventLoop {
         // Only a ledger member's file is history worth uploading again.
         let member = self
             .wal_actor
-            .history()
-            .is_some_and(|history| history.ledger().is_member(segment_id));
+            .ledger()
+            .is_some_and(|ledger| ledger.is_member(segment_id));
         if member && matches!(self.state.fs.exists(&local_path), Ok(true)) {
             self.cloud_coordinator
                 .cloud_wal

@@ -1682,8 +1682,8 @@ mod tests {
         assert_eq!(
             event_loop
                 .wal_actor
-                .history()
-                .map(|history| history.ledger().log_start()),
+                .ledger()
+                .map(|ledger| ledger.log_start()),
             Some(1)
         );
         Ok(())
@@ -2596,8 +2596,8 @@ mod tests {
         assert_eq!(
             event_loop
                 .wal_actor
-                .history()
-                .map(|history| history.ledger().log_start()),
+                .ledger()
+                .map(|ledger| ledger.log_start()),
             Some(4)
         );
         for segment_id in 1..=3 {
