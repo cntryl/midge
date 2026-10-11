@@ -350,3 +350,42 @@ pub fn bulk_put(
     }
     Ok(())
 }
+
+/// Segment files in the local WAL directory of the database at `db_path`,
+/// ordered by id. `wal/LEDGER` and anything else that is not a segment is
+/// left out.
+pub fn wal_segment_files(db_path: &std::path::Path) -> Vec<(u64, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(db_path.join("wal")) else {
+        return Vec::new();
+    };
+    let mut segments: Vec<(u64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            Some((
+                cntryl_midge::__internal::wal::parse_segment_id(&name)?,
+                entry.path(),
+            ))
+        })
+        .collect();
+    segments.sort();
+    segments
+}
+
+/// The open WAL segment of the local database at `db_path`: its newest
+/// segment file, which is the segment ledger's open segment unless a crash
+/// left an unrecorded one past it.
+pub fn open_wal_segment(db_path: &std::path::Path) -> PathBuf {
+    wal_segment_files(db_path)
+        .pop()
+        .expect("a local database has an open WAL segment")
+        .1
+}
+
+/// The WAL segment a new local database at `db_path` appends to first.
+pub fn first_wal_segment(db_path: &std::path::Path) -> PathBuf {
+    db_path
+        .join("wal")
+        .join(cntryl_midge::__internal::wal::segment_file_name(1))
+}

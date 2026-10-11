@@ -34,6 +34,8 @@ mod durability_wal {
     // WAL RECOVERY TESTS
     // ============================================================================
 
+    /// Sealed WAL segment files: every segment but the newest, which is the
+    /// open one.
     fn sealed_wal_segments(db_path: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(db_path.join("wal"))
             .expect("read wal dir")
@@ -42,6 +44,7 @@ mod durability_wal {
             .filter(|name| cntryl_midge::__internal::wal::parse_segment_id(name).is_some())
             .collect();
         names.sort();
+        names.pop();
         names
     }
 
@@ -386,7 +389,7 @@ mod durability_wal {
         }
 
         // Truncate a few trailing bytes so only the final commit's frame is incomplete.
-        truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
+        truncate_last_bytes(&open_wal_segment(db_path), 3);
 
         // Act: reopen with default options (default recovery policy is Strict).
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
@@ -448,7 +451,7 @@ mod durability_wal {
 
         // Cut well into the last frame's payload, simulating a write that was torn
         // mid-value rather than merely missing its trailing CRC bytes.
-        truncate_last_bytes(&db_path.join("wal").join("wal.log"), 20);
+        truncate_last_bytes(&open_wal_segment(db_path), 20);
 
         // Act
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
@@ -483,7 +486,7 @@ mod durability_wal {
         // the OS page cache are removed directly, and the loss is asserted concretely.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let wal_path = db_path.join("wal").join("wal.log");
+        let wal_path = first_wal_segment(db_path);
 
         let len_before_unsynced_write = {
             let mut engine =
@@ -555,7 +558,7 @@ mod durability_wal {
         // records that precede the corruption rather than merely open successfully.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let wal_path = db_path.join("wal").join("wal.log");
+        let wal_path = first_wal_segment(db_path);
 
         let offset_of_second_frame = {
             let mut engine =
@@ -698,7 +701,7 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
+        truncate_last_bytes(&open_wal_segment(db_path), 3);
 
         // Act
         let reopened = Engine::open(
@@ -726,7 +729,7 @@ mod durability_wal {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let wal_log = db_path.join("wal").join("wal.log");
+        let wal_log = first_wal_segment(db_path);
 
         {
             let mut engine =
@@ -823,7 +826,7 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        corrupt_byte(&db_path.join("wal").join("wal.log"), 4);
+        corrupt_byte(&open_wal_segment(db_path), 4);
 
         // Act
         let Err(strict_error) = Engine::open(
@@ -886,7 +889,7 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        append_partial_frame_bytes(&db_path.join("wal").join("wal.log"));
+        append_partial_frame_bytes(&open_wal_segment(db_path));
 
         // Act
         let reopened = Engine::open(
@@ -1959,8 +1962,8 @@ mod durability_atomicity {
         seed.put(b"z-anchor".to_vec(), b"z".to_vec(), None)
             .expect("put upper anchor");
         seed.commit(WriteOptions::sync()).expect("commit seed");
-        let retained_wal = std::fs::read(directory.path().join("wal/wal.log"))
-            .expect("capture retained WAL bytes");
+        let retained_wal =
+            std::fs::read(open_wal_segment(directory.path())).expect("capture retained WAL bytes");
         engine.flush_cf(&cf).expect("flush seed values");
 
         let mut delete = engine
@@ -1970,7 +1973,7 @@ mod durability_atomicity {
         delete
             .commit(WriteOptions::sync())
             .expect("commit durable delete");
-        let retained_delete_wal = std::fs::read(directory.path().join("wal/wal.log"))
+        let retained_delete_wal = std::fs::read(open_wal_segment(directory.path()))
             .expect("capture retained delete WAL bytes");
         engine.flush_cf(&cf).expect("flush delete tombstone");
         for index in 0..2 {
@@ -1999,20 +2002,14 @@ mod durability_atomicity {
             .shutdown(std::time::Duration::from_secs(5))
             .expect("shutdown database");
 
-        // Act: model conservative WAL retention of an already-flushed prefix.
-        // Retention is prefix-closed (a segment is retired only with every
-        // older one), so a retained seed segment implies the later delete
-        // segment is retained too. The manifest already incorporates both.
-        std::fs::write(
-            directory.path().join("wal/00000000000000000000.wal"),
-            retained_wal,
-        )
-        .expect("restore retained WAL segment");
-        std::fs::write(
-            directory.path().join("wal/00000000000000000001.wal"),
-            retained_delete_wal,
-        )
-        .expect("restore retained delete WAL segment");
+        // Act: model WAL that still holds records the manifest already
+        // covers. Recovery always replays the open segment, so put the seed
+        // and the delete records there, oldest first.
+        let open_segment = open_wal_segment(directory.path());
+        let mut replayed = retained_wal;
+        replayed.extend(retained_delete_wal);
+        replayed.extend(std::fs::read(&open_segment).expect("read open WAL segment"));
+        std::fs::write(&open_segment, replayed).expect("restore covered WAL records");
         let reopened = Engine::open(options()).expect("reopen database");
         let cf = reopened
             .get_column_family("default")
@@ -2631,7 +2628,10 @@ mod concurrent_commit_durability {
 }
 
 mod recovery_policy_api {
-    use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy};
+    use cntryl_midge::{
+        Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode,
+        WriteOptions,
+    };
     use std::fs;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -2644,16 +2644,49 @@ mod recovery_policy_api {
             .expect("shutdown initialized engine");
     }
 
+    /// Leave the database with a sealed WAL segment that recovery replays:
+    /// an unflushed write in a second column family holds segment 1 after a
+    /// flush of the default family seals it. Returns that segment's path.
+    fn initialize_with_sealed_wal_segment(db_path: &std::path::Path) -> std::path::PathBuf {
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("initialize engine");
+        let retained = engine
+            .create_column_family("retained")
+            .expect("create retaining column family");
+        let default = engine
+            .get_column_family("default")
+            .expect("default column family");
+        for cf in [&retained, &default] {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin write");
+            tx.put(b"key".to_vec(), b"value".to_vec(), None)
+                .expect("stage write");
+            tx.commit(WriteOptions::sync()).expect("commit write");
+        }
+        engine.flush_cf(&default).expect("flush default family");
+        engine
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown initialized engine");
+        let sealed = db_path
+            .join("wal")
+            .join(cntryl_midge::__internal::wal::segment_file_name(1));
+        assert!(
+            sealed.exists()
+                && db_path
+                    .join("wal")
+                    .join(cntryl_midge::__internal::wal::segment_file_name(2))
+                    .exists(),
+            "the flush must seal segment 1 and the retaining family must hold it"
+        );
+        sealed
+    }
+
     fn write_corrupt_wal(db_path: &std::path::Path) {
-        let wal_dir = db_path.join("wal");
-        fs::create_dir_all(&wal_dir).expect("create wal dir");
         // A sealed segment is not allowed to hide an incomplete/corrupt prefix;
-        // the active `wal.log` tail is intentionally tolerated by strict replay.
-        fs::write(
-            wal_dir.join(cntryl_midge::__internal::wal::segment_file_name(1)),
-            b"\x01\x02\x03",
-        )
-        .expect("write corrupt wal");
+        // the open segment's tail is intentionally tolerated by strict replay.
+        let sealed = initialize_with_sealed_wal_segment(db_path);
+        fs::write(sealed, b"\x01\x02\x03").expect("write corrupt wal");
     }
 
     #[test]
@@ -2844,7 +2877,6 @@ mod recovery_policy_api {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        initialize_format_marker(db_path);
         write_corrupt_wal(db_path);
 
         // Act
@@ -2873,7 +2905,6 @@ mod recovery_policy_api {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        initialize_format_marker(db_path);
         write_corrupt_wal(db_path);
 
         // Act

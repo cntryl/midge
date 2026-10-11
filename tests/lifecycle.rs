@@ -2445,12 +2445,20 @@ mod local_wal_retention {
         tx.get(key).expect("get").map(|value| value.to_vec())
     }
 
+    /// Sealed WAL segments on disk: every segment but the newest, which is
+    /// the open one.
     fn sealed_segments(path: &Path) -> usize {
         std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name() != "wal.log")
+            .filter(|entry| {
+                cntryl_midge::__internal::wal::parse_segment_id(
+                    &entry.file_name().to_string_lossy(),
+                )
+                .is_some()
+            })
             .count()
+            .saturating_sub(1)
     }
 
     /// Copies a live database directory as a crash image, leaving out the
@@ -2659,6 +2667,8 @@ mod local_wal_retention {
 
     // ---- audit V1 (LT-A) ----
 
+    /// Ids of the sealed WAL segments on disk: every segment but the
+    /// newest, which is the open one.
     fn wal_segment_ids(path: &Path) -> Vec<u64> {
         let mut ids: Vec<u64> = std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
@@ -2669,6 +2679,7 @@ mod local_wal_retention {
             })
             .collect();
         ids.sort_unstable();
+        ids.pop();
         ids
     }
 
@@ -2689,8 +2700,10 @@ mod local_wal_retention {
     }
 
     #[cfg(feature = "internal-testing")]
+    /// Ids of the sealed WAL segments on `device`: every segment but the
+    /// newest, which is the open one.
     fn device_segment_ids(device: &CrashDevice) -> Vec<u64> {
-        device
+        let mut ids: Vec<u64> = device
             .files()
             .keys()
             .filter_map(|path| {
@@ -2699,7 +2712,10 @@ mod local_wal_retention {
                     .parse::<u64>()
                     .ok()
             })
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids.pop();
+        ids
     }
 
     /// LT-A, removal-failure variant. Segment 1 holds `put k`; segment 2 holds
