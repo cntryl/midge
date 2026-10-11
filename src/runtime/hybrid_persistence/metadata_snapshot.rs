@@ -4,13 +4,13 @@ use super::{
     Arc, CloudMetadataPruneGuard, CloudStorage, CloudWalPruneProgress, GuardedObjectProof,
     HybridStorage, Manifest, MidgeError, MidgeResult, StorageBackend,
 };
-use crate::io::FsError;
+use crate::io::stream::FileReader;
+use crate::io::{File, FsError, FsPath, OpenMode, OpenOptions};
 use std::io::Read as _;
 
 #[derive(Clone)]
 pub(crate) struct CloudMetadataPruneSnapshot {
     cloud: Arc<CloudStorage>,
-    db_path: std::path::PathBuf,
     fs: Arc<dyn crate::io::traits::Fs>,
     metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     budget: crate::common::resource_budget::ResourceBudget,
@@ -21,14 +21,12 @@ pub(crate) struct CloudMetadataPruneSnapshot {
 impl CloudMetadataPruneSnapshot {
     pub(crate) fn new(
         cloud: Arc<CloudStorage>,
-        db_path: std::path::PathBuf,
         fs: Arc<dyn crate::io::traits::Fs>,
         budget: crate::common::resource_budget::ResourceBudget,
         metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> Self {
         Self {
             cloud,
-            db_path,
             fs,
             budget,
             metadata_publication_lock,
@@ -85,13 +83,13 @@ impl CloudMetadataPruneSnapshot {
         // keeps these local files stable through authority retirement.
         let mut encoded_bytes = 0usize;
         for name in crate::metadata::files::CLOUD_MIRRORED {
-            match std::fs::metadata(self.db_path.join(name)) {
+            match self.fs.metadata(&FsPath::new(*name)) {
                 Ok(metadata) => {
                     encoded_bytes = encoded_bytes
-                        .saturating_add(usize::try_from(metadata.len()).unwrap_or(usize::MAX));
+                        .saturating_add(usize::try_from(metadata.len).unwrap_or(usize::MAX));
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => return Err(error.into_midge()),
             }
         }
         let mut cached = self.progress.0.lock().snapshot(&self.budget);
@@ -163,6 +161,24 @@ impl CloudMetadataPruneSnapshot {
         };
         operation(Arc::new(manifest), guard)
     }
+    /// The local copy of a mirrored metadata file, if it exists.
+    fn open_local(&self, file_name: &str) -> MidgeResult<Option<FileReader<Box<dyn File>>>> {
+        let opened = self.fs.open_persistent_handle(
+            &FsPath::new(file_name),
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        );
+        match opened {
+            Ok(file) => Ok(Some(FileReader::new(file)?)),
+            Err(FsError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error.into_midge()),
+        }
+    }
+
     fn verify_objects(
         &self,
         deadline: &crate::common::OperationDeadline,
@@ -184,12 +200,7 @@ impl CloudMetadataPruneSnapshot {
         let mut objects = Vec::with_capacity(crate::metadata::files::CLOUD_MIRRORED.len());
         let mut has_manifest_base = false;
         for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let local_path = self.db_path.join(file_name);
-            let local = match std::fs::File::open(&local_path) {
-                Ok(file) => Some(file),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error.into()),
-            };
+            let local = self.open_local(file_name)?;
             let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let proof = HybridStorage::read_control_from_backend(
                 &backend,
@@ -234,7 +245,7 @@ impl CloudMetadataPruneSnapshot {
             objects.push(GuardedObjectProof::range_identity(
                 Arc::clone(&backend),
                 key,
-                proof.metadata().clone(),
+                proof.object_metadata().clone(),
             ));
         }
 
@@ -272,12 +283,7 @@ impl CloudMetadataPruneSnapshot {
         let mut objects = Vec::with_capacity(generation.objects.len());
         let mut has_manifest_base = false;
         for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let local_path = self.db_path.join(file_name);
-            let local = match std::fs::File::open(&local_path) {
-                Ok(file) => Some(file),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error.into()),
-            };
+            let local = self.open_local(file_name)?;
             let committed = generation
                 .objects
                 .iter()
@@ -329,7 +335,7 @@ impl CloudMetadataPruneSnapshot {
             objects.push(GuardedObjectProof::range_identity(
                 Arc::clone(&backend),
                 key.clone(),
-                proof.metadata().clone(),
+                proof.object_metadata().clone(),
             ));
         }
         if !has_manifest_base {
@@ -608,7 +614,6 @@ mod tests {
                 Arc::new(crate::storage::cloud::MockCloudBackend::new()),
                 String::new(),
             )),
-            directory.path().to_path_buf(),
             Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap()),
             crate::common::resource_budget::ResourceBudget::new(charge + 128 * 1024),
             crate::runtime::MetadataPublicationLock::default(),
@@ -858,7 +863,9 @@ mod tests {
 
     fn mirror(snapshot: &CloudMetadataPruneSnapshot) {
         for name in crate::metadata::files::CLOUD_MIRRORED {
-            if let Ok(bytes) = std::fs::read(snapshot.db_path.join(name)) {
+            if let Ok(bytes) = crate::io::read_all(snapshot.fs.as_ref(), &FsPath::new(*name))
+                .map(|bytes| bytes.to_vec())
+            {
                 let (tx, rx) = std::sync::mpsc::channel();
                 snapshot.cloud.submit_put(
                     &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
@@ -888,7 +895,6 @@ mod tests {
                 Arc::new(crate::storage::cloud::MockCloudBackend::new()),
                 "first-control-dispatcher".into(),
             )),
-            directory.path().to_path_buf(),
             Arc::clone(&fs),
             crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
             lock.clone(),
@@ -898,7 +904,6 @@ mod tests {
                 Arc::new(crate::storage::cloud::MockCloudBackend::new()),
                 "second-control-dispatcher".into(),
             )),
-            directory.path().to_path_buf(),
             fs,
             crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
             lock,
@@ -937,9 +942,9 @@ mod tests {
     #[test]
     fn should_replace_retained_snapshot_when_verified_metadata_identity_changes() {
         // Arrange
-        let (_directory, snapshot, mut manifest) = fixture();
+        let (directory, snapshot, mut manifest) = fixture();
         manifest.next_sst_seqs.insert(0, 2);
-        crate::metadata::ManifestPersistence::save(&snapshot.db_path, &manifest).unwrap();
+        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
         mirror(&snapshot);
 
         // Act
@@ -959,9 +964,9 @@ mod tests {
     #[test]
     fn should_release_retained_snapshot_when_local_and_remote_metadata_diverge() {
         // Arrange
-        let (_directory, snapshot, mut manifest) = fixture();
+        let (directory, snapshot, mut manifest) = fixture();
         manifest.next_sst_seqs.insert(0, 2);
-        crate::metadata::ManifestPersistence::save(&snapshot.db_path, &manifest).unwrap();
+        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
 
         // Act
         let result = snapshot

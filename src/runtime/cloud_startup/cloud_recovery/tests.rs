@@ -113,8 +113,7 @@ fn should_retain_invalid_restored_sst_when_staging_filesystem_cannot_discard_it(
     // Arrange: salvage restores bytes that satisfy the name-only proof but
     // are not an SST, and the staging filesystem refuses to delete them.
     let temp = tempfile::tempdir()?;
-    let mut state =
-        RuntimeState::try_new(temp.path().to_path_buf(), false, RecoveryPolicy::Salvage)?;
+    let mut state = RuntimeState::try_new(temp.path(), false, RecoveryPolicy::Salvage)?;
     state.fs = Arc::new(RemoveRefusingFs {
         inner: crate::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
     });

@@ -509,22 +509,25 @@ fn validate_sst_object_bytes(
 }
 
 impl CloudPersistence {
+    /// Validate the local segment at `source` and queue it for upload.
     pub(crate) fn enqueue_wal_segment(
         &self,
+        source: &crate::io::FsLocation,
         segment_id: u64,
-        local_path: &Path,
         max_sequence: u64,
     ) -> MidgeResult<String> {
-        let bytes = std::fs::read(local_path).map_err(MidgeError::Io)?;
+        let bytes = source
+            .read_all()
+            .map_err(|error| MidgeError::Io(error.into_io()))?;
         let readback = crate::wal::cloud_segment::validate_bytes_with_coverage(
-            &local_path.display().to_string(),
+            &source.to_string(),
             &bytes,
             max_sequence,
         )
         .map_err(MidgeError::Corruption)?;
         let object_key =
             crate::wal::cloud_segment::object_key(segment_id, readback.validation.writer_epoch);
-        self.enqueue_object_upload(segment_id, object_key.clone(), local_path, max_sequence)?;
+        self.enqueue_object_upload(segment_id, object_key.clone(), source.clone(), max_sequence)?;
         Ok(object_key)
     }
 
@@ -674,21 +677,21 @@ impl CloudPersistence {
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
-        local_path: &Path,
+        source: &crate::io::FsLocation,
         fencing_epoch: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
-        let local_bytes = std::fs::read(local_path).map_err(|error| {
+        let local_bytes = source.read_all().map_err(|error| {
+            let error = error.into_io();
             MidgeError::Io(std::io::Error::new(
                 error.kind(),
                 format!(
-                    "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
-                    local_path.display()
+                    "failed to read local WAL segment '{source}' before cloud acknowledgement: {error}"
                 ),
             ))
         })?;
         let local_readback = crate::wal::cloud_segment::validate_bytes(
-            &local_path.display().to_string(),
+            &source.to_string(),
             &local_bytes,
             expected_max_sequence,
         )

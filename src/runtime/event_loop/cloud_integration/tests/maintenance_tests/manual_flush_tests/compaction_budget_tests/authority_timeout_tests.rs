@@ -47,6 +47,7 @@ impl RecoveryInputs {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             self.authority.as_ref(),
+            &crate::io::real::test_root(&self.db_path),
             &self.db_path,
             crate::config::RecoveryPolicy::Strict,
         )?;

@@ -97,15 +97,9 @@ impl CloudWalRecoveryPlan {
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
         writer_epoch: u64,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &std::path::Path,
+        root: &std::sync::Arc<dyn crate::io::Fs>,
     ) -> crate::common::MidgeResult<()> {
-        self.commit_set_aside_with_authority(
-            persistence,
-            writer_epoch,
-            catalog,
-            db_path,
-            &|| Ok(()),
-        )
+        self.commit_set_aside_with_authority(persistence, writer_epoch, catalog, root, &|| Ok(()))
     }
 
     pub(crate) fn commit_set_aside_with_authority(
@@ -113,14 +107,14 @@ impl CloudWalRecoveryPlan {
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
         writer_epoch: u64,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &std::path::Path,
+        root: &std::sync::Arc<dyn crate::io::Fs>,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
         self.commit_set_aside_with_authority_within(
             persistence,
             writer_epoch,
             catalog,
-            db_path,
+            root,
             validate,
             &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
         )
@@ -131,7 +125,7 @@ impl CloudWalRecoveryPlan {
         persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
         writer_epoch: u64,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &std::path::Path,
+        root: &std::sync::Arc<dyn crate::io::Fs>,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
         scope: &crate::common::DeadlineScope,
     ) -> crate::common::MidgeResult<()> {
@@ -151,7 +145,7 @@ impl CloudWalRecoveryPlan {
         }
         crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
         validate()?;
-        self.set_aside_local_wal_with_authority_within(db_path, validate, scope)?;
+        self.set_aside_local_wal_with_authority_within(root, validate, scope)?;
         crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
         validate()?;
         if !self.unreplayed_segments.is_empty() {
@@ -169,19 +163,19 @@ impl CloudWalRecoveryPlan {
     #[cfg(test)]
     pub(crate) fn set_aside_local_wal(
         &self,
-        db_path: &std::path::Path,
+        root: &std::sync::Arc<dyn crate::io::Fs>,
     ) -> crate::common::MidgeResult<()> {
-        self.set_aside_local_wal_with_authority(db_path, &|| Ok(()))
+        self.set_aside_local_wal_with_authority(root, &|| Ok(()))
     }
 
     #[cfg(test)]
     pub(crate) fn set_aside_local_wal_with_authority(
         &self,
-        db_path: &std::path::Path,
+        root: &std::sync::Arc<dyn crate::io::Fs>,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
         self.set_aside_local_wal_with_authority_within(
-            db_path,
+            root,
             validate,
             &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
         )
@@ -189,13 +183,12 @@ impl CloudWalRecoveryPlan {
 
     pub(crate) fn set_aside_local_wal_with_authority_within(
         &self,
-        db_path: &std::path::Path,
+        root: &std::sync::Arc<dyn crate::io::Fs>,
         validate: &dyn Fn() -> crate::common::MidgeResult<()>,
         scope: &crate::common::DeadlineScope,
     ) -> crate::common::MidgeResult<()> {
         scope.check("local WAL salvage set-aside")?;
-        let fs = crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?;
-        let fs = crate::io::scope_fs(std::sync::Arc::new(fs), scope.clone());
+        let fs = crate::io::scope_fs(std::sync::Arc::clone(root), scope.clone());
         let mut renamed = false;
         for path in &self.set_aside_local_paths {
             scope.check("local WAL salvage rename")?;

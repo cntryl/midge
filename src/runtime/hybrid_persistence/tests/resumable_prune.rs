@@ -841,7 +841,6 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
     }
     let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
         metadata_cloud,
-        metadata_path.clone(),
         Arc::new(crate::io::real::RealFs::new(&metadata_path).unwrap()),
         budget.clone(),
         crate::runtime::MetadataPublicationLock::default(),

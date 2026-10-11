@@ -830,7 +830,7 @@ fn should_account_for_recovered_wal_memtable_bytes_when_reopening() {
 
     // Act
     let reopened = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -889,7 +889,7 @@ fn should_reject_recovery_when_wal_segment_identity_space_is_exhausted() -> Midg
     // Arrange
     let dir = tempfile::tempdir()?;
     drop(RuntimeState::try_new(
-        dir.path().to_path_buf(),
+        dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )?);
@@ -898,11 +898,7 @@ fn should_reject_recovery_when_wal_segment_identity_space_is_exhausted() -> Midg
     std::fs::write(wal_dir.join(crate::wal::segment_file_name(u64::MAX)), [])?;
 
     // Act
-    let result = RuntimeState::try_new(
-        dir.path().to_path_buf(),
-        false,
-        crate::config::RecoveryPolicy::Strict,
-    );
+    let result = RuntimeState::try_new(dir.path(), false, crate::config::RecoveryPolicy::Strict);
 
     // Assert
     match result {
@@ -1231,7 +1227,7 @@ fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_re
 
     // Act
     let mut reopened = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -1242,7 +1238,7 @@ fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_re
         .expect("replay duplicate intents");
     drop(reopened);
     let mut second_reopen = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -1571,7 +1567,7 @@ fn should_replay_every_compaction_publication_crash_point_to_complete_authority(
 
             // Act
             let mut reopened = RuntimeState::try_new(
-                temp_dir.path().to_path_buf(),
+                temp_dir.path(),
                 false,
                 crate::config::RecoveryPolicy::Strict,
             )
@@ -1641,7 +1637,7 @@ fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() 
 
     // Act
     let mut reopened = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -1679,7 +1675,7 @@ fn should_publish_remove_only_compaction_after_manifest_phase_crash() {
 
     // Act
     let mut reopened = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -1948,7 +1944,7 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
 
     // Act
     let mut reopened = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -2222,7 +2218,7 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let mut state = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -2291,7 +2287,7 @@ fn state_with_worker_intent(
     temp_dir: &tempfile::TempDir,
 ) -> (RuntimeState, crate::runtime::IntentLogEntry) {
     let state = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -2663,7 +2659,7 @@ fn measure_flush_publication_io_with_sst_size(
 ) -> (u64, u64, u64, u64) {
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let mut state = RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
+        temp_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -2773,7 +2769,7 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
+            directory.path(),
             false,
             crate::config::RecoveryPolicy::Strict,
         )
@@ -2940,7 +2936,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
     let scenario = fail::FailScenario::setup();
     let directory = tempfile::tempdir().unwrap();
     let mut state = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -3017,7 +3013,7 @@ fn should_reject_flush_ack_when_failed_snapshot_frontier_fallback_cannot_sync() 
     ] {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
+            directory.path(),
             false,
             crate::config::RecoveryPolicy::Strict,
         )
@@ -3077,7 +3073,7 @@ fn should_recover_duplicate_flush_frontiers_when_optional_checkpoint_fails() {
     let scenario = fail::FailScenario::setup();
     let directory = tempfile::tempdir().unwrap();
     let mut state = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -3119,7 +3115,7 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
     let measure = |require_snapshot| {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
+            directory.path(),
             false,
             crate::config::RecoveryPolicy::Strict,
         )
@@ -3185,7 +3181,7 @@ fn should_preserve_original_journal_cost_when_healthy_cheap_flush_is_checkpointe
     let measure = |original: bool| {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
+            directory.path(),
             false,
             crate::config::RecoveryPolicy::Strict,
         )
@@ -3290,7 +3286,7 @@ fn should_stop_journal_growth_when_cheap_flush_checkpoint_cannot_be_saved() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
+            directory.path(),
             false,
             crate::config::RecoveryPolicy::Strict,
         )
@@ -3350,7 +3346,7 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
     let mut state = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )
@@ -3436,7 +3432,7 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
     let scenario = fail::FailScenario::setup();
     let directory = tempfile::tempdir().unwrap();
     let mut state = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )

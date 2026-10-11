@@ -170,6 +170,7 @@ fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<crate::met
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &metadata.cloud,
         store.as_ref(),
+        &crate::io::real::test_root(directory.path()),
         directory.path(),
         crate::config::RecoveryPolicy::Strict,
     )?;

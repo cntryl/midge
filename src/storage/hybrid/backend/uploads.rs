@@ -2,7 +2,7 @@
 
 use super::{
     cb, mpsc, thread, Arc, BoundedEventQueue, Duration, HybridStorage, Instant, JoinHandle, Mutex,
-    Path, StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState, UploadStatus,
+    StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState, UploadStatus,
     MAX_CLOUD_ERROR_BYTES,
 };
 use crate::storage::CloudUploadFailureKind;
@@ -66,16 +66,14 @@ impl HybridStorage {
         &self,
         request_id: u64,
         object_key: String,
-        local_path: &Path,
+        source: crate::io::FsLocation,
         frontier: u64,
     ) -> crate::common::MidgeResult<()> {
-        let size_bytes = std::fs::metadata(local_path)
-            .map_err(crate::common::MidgeError::Io)?
-            .len();
+        let size_bytes = source.len().map_err(crate::io::FsError::into_midge)?;
         let upload_state = UploadState {
             segment_id: request_id,
             object_key,
-            local_path: local_path.to_path_buf(),
+            source: Arc::new(source),
             status: UploadStatus::Pending,
             max_sequence: frontier,
             retries: 0,
@@ -103,7 +101,6 @@ impl HybridStorage {
 
         tracing::debug!(
             request_id,
-            ?local_path,
             frontier,
             queue_size = queue.entries.len(),
             queue_bytes = queue.pending_bytes,
@@ -449,16 +446,12 @@ impl HybridStorage {
             if with_worker {
                 eprintln!(
                     "[midge] CloudAsync upload start: segment_id={} max_sequence={} path={}",
-                    upload.segment_id,
-                    upload.max_sequence,
-                    upload.local_path.display()
+                    upload.segment_id, upload.max_sequence, upload.source
                 );
             } else {
                 eprintln!(
                     "[midge] CloudAsync inline upload start: segment_id={} max_sequence={} path={}",
-                    upload.segment_id,
-                    upload.max_sequence,
-                    upload.local_path.display()
+                    upload.segment_id, upload.max_sequence, upload.source
                 );
             }
         }
@@ -472,8 +465,11 @@ impl HybridStorage {
     }
 
     fn read_wal_file(upload: &UploadState) -> Result<Vec<u8>, String> {
-        std::fs::read(&upload.local_path)
-            .map_err(|error| format!("read {}: {}", upload.local_path.display(), error))
+        upload
+            .source
+            .read_all()
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| format!("read {}: {error}", upload.source))
     }
 
     fn emit_wal_upload_failure(

@@ -7,7 +7,6 @@ use crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot;
 impl CloudCoordinator {
     pub(in crate::runtime::event_loop) fn metadata_prune_snapshot_for_wal_cleanup(
         &self,
-        db_path: &std::path::Path,
         fs: std::sync::Arc<dyn crate::io::Fs>,
         metadata_publication_lock: crate::runtime::MetadataPublicationLock,
         leader_store: Option<std::sync::Arc<dyn crate::lease::LeaderStore>>,
@@ -27,14 +26,9 @@ impl CloudCoordinator {
                 )
             })?;
 
-        let snapshot = CloudMetadataPruneSnapshot::new(
-            cloud.clone(),
-            db_path.to_path_buf(),
-            fs,
-            budget,
-            metadata_publication_lock,
-        )
-        .with_progress(self.cloud_wal_prune_progress.clone());
+        let snapshot =
+            CloudMetadataPruneSnapshot::new(cloud.clone(), fs, budget, metadata_publication_lock)
+                .with_progress(self.cloud_wal_prune_progress.clone());
         let snapshot = match leader_store {
             Some(store) => snapshot.with_authority(store, holder_id.to_string(), writer_epoch),
             None if cfg!(test) => snapshot,
@@ -54,7 +48,6 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<Option<CloudMetadataPruneSnapshot>> {
         self.cloud_coordinator
             .metadata_prune_snapshot_for_wal_cleanup(
-                &self.state.db_path,
                 self.state.fs.clone(),
                 self.metadata_publication_lock.clone(),
                 self.fencing.leader_store.clone(),
@@ -90,7 +83,7 @@ mod tests {
         metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> crate::common::MidgeResult<super::EventLoop> {
         let state = crate::runtime::state::RuntimeState::try_new(
-            db_path.to_path_buf(),
+            db_path,
             false,
             crate::config::RecoveryPolicy::Strict,
         )?;

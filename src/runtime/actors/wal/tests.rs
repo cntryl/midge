@@ -219,7 +219,7 @@ fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted()
     let mut state = RuntimeState::new("/tmp/test_midge_sequence_exhaustion".into(), true);
     state.sequence = u64::MAX - 1;
     let mut actor = WalActor::new(
-        state.wal_dir.clone(),
+        state.host_wal_dir().clone(),
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
         true,
@@ -2490,7 +2490,7 @@ fn should_not_regress_local_durable_seq_when_older_sync_receipt_completes_after_
     // Arrange: the local frontier has already reached 20.
     let mut state = RuntimeState::new("/tmp/test_midge_frontier_regression".into(), true);
     let mut actor = WalActor::new(
-        state.wal_dir.clone(),
+        state.host_wal_dir().clone(),
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
         true,

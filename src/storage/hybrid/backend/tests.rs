@@ -1008,7 +1008,7 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
     let upload = UploadState {
         segment_id,
         object_key: "wal/epochs/upload-ack-panic.bin".to_string(),
-        local_path: wal_path,
+        source: Arc::new(crate::io::FsLocation::host_file(&wal_path)),
         status: UploadStatus::InFlight {
             started_at: Instant::now(),
         },

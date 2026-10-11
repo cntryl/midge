@@ -53,7 +53,7 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     let recovered = StreamingCloudWalRecovery::build(
-        &case.root.join("local"),
+        &crate::io::real::test_root(case.root.join("local")),
         &cloud,
         &catalog,
         RecoveryPolicy::Salvage,
@@ -63,9 +63,12 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
     )?;
     crash::configure_nth_abort_failpoint(&case.trigger, "salvage-prefix", case.ordinal);
     // Act
-    recovered
-        .plan
-        .commit_set_aside(&persistence, 9, &catalog, &case.root.join("local"))?;
+    recovered.plan.commit_set_aside(
+        &persistence,
+        9,
+        &catalog,
+        &crate::io::real::test_root(case.root.join("local")),
+    )?;
     // Assert
     panic!("salvage crash boundary was not reached");
 }
@@ -118,7 +121,7 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
                     &persistence(&fixture)?,
                     9,
                     &fixture.catalog,
-                    &fixture.directory.path().join("local"),
+                    &crate::io::real::test_root(fixture.directory.path().join("local")),
                 )?;
                 fixture.catalog =
                     WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
@@ -234,7 +237,7 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
             &persistence(&fixture)?,
             9,
             &fixture.catalog,
-            &fixture.directory.path().join("local"),
+            &crate::io::real::test_root(fixture.directory.path().join("local")),
             &|| {
                 check
                     .remaining(9)

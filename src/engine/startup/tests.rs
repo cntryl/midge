@@ -694,6 +694,7 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &fixture.cloud,
         fixture.leader_store.as_ref(),
+        &crate::io::real::test_root(fresh_cache.path()),
         fresh_cache.path(),
         crate::config::RecoveryPolicy::Strict,
     )?;
@@ -902,7 +903,7 @@ fn should_reject_provider_bootstrap_when_current_epoch_ddl_registry_has_history(
     ))?;
     let state_dir = tempfile::tempdir()?;
     let mut state = crate::runtime::RuntimeState::try_new(
-        state_dir.path().to_path_buf(),
+        state_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )?;

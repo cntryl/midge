@@ -306,7 +306,7 @@ fn should_release_wal_disk_budget_only_after_local_segment_removal(
     storage.enable_ephemeral_sst_cache(4096);
     let path = event_loop
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(77));
     std::fs::create_dir_all(&path)?;
     storage.admit_local_wal_bytes(100)?;
@@ -1345,12 +1345,15 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
 fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
     let (seg_id, max_sequence) = seal_segment_without_remote_proof_for_test(el)?;
     if let Some(storage) = el.cloud_coordinator.hybrid_storage.as_ref() {
-        let local_path = el.state.wal_dir.join(crate::wal::segment_file_name(seg_id));
+        let local_path = el
+            .state
+            .host_wal_dir()
+            .join(crate::wal::segment_file_name(seg_id));
         cloud_persistence(storage)
             .publish_remote_wal_segment(
                 seg_id,
                 max_sequence,
-                &local_path,
+                &crate::io::FsLocation::host_file(&local_path),
                 el.state.writer_epoch,
                 &crate::common::OperationDeadline::unbounded(),
             )
@@ -1457,7 +1460,7 @@ fn write_test_file(path: PathBuf, data: &[u8]) {
 fn copy_local_segment_to_remote_wal_for_test(el: &EventLoop, segment_id: u64) {
     let local_path = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     let remote_path = remote_wal_path_for_test(el, segment_id);
     if let Some(parent) = remote_path.parent() {
@@ -1480,7 +1483,7 @@ fn publish_remote_wal_bytes_for_test(
 ) {
     let local_path = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     write_test_file(local_path.clone(), bytes);
     write_test_file(remote_wal_path_for_test(el, segment_id), bytes);
@@ -1489,7 +1492,7 @@ fn publish_remote_wal_bytes_for_test(
             .publish_remote_wal_segment(
                 segment_id,
                 max_sequence,
-                &local_path,
+                &crate::io::FsLocation::host_file(&local_path),
                 el.state.writer_epoch,
                 &crate::common::OperationDeadline::unbounded(),
             )
@@ -5628,7 +5631,7 @@ fn should_keep_local_wal_when_remote_wal_readback_fails_after_cloud_ack(
     let segment_id = 1;
     let local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     write_test_file(local_wal.clone(), b"local wal still needed");
 
@@ -5677,7 +5680,7 @@ fn should_validate_uncached_cloud_ack_before_local_wal_removal() -> crate::commo
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     assert!(
         local_wal.exists(),
@@ -5719,7 +5722,7 @@ fn should_reject_cloud_ack_given_remote_wal_from_different_writer_epoch(
     assert_eq!(sequence, max_sequence);
     let local_wal = event_loop
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     let stale_record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
@@ -5773,7 +5776,7 @@ fn should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued(
     assert_eq!(sequence, max_sequence);
     let local_path = event_loop
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     healthy.store(false, Ordering::Release);
 
@@ -5842,7 +5845,7 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     assert!(second_segment > first_segment);
     let second_local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(second_segment));
 
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -6007,7 +6010,7 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     cloud_persistence(
         el.cloud_coordinator
@@ -6018,7 +6021,7 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     .publish_remote_wal_segment(
         segment_id,
         max_sequence,
-        &local_wal,
+        &crate::io::FsLocation::host_file(&local_wal),
         el.state.writer_epoch,
         &crate::common::OperationDeadline::unbounded(),
     )
@@ -6593,7 +6596,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
         let pending_before = event_loop.state.wal.pending_writes;
         let sealed_path = event_loop
             .state
-            .wal_dir
+            .host_wal_dir()
             .join(crate::wal::segment_file_name(segment_id));
         let request_id = 90_400 + segment_id;
         let response = event_loop.router.register(request_id, "CloudDurability");
@@ -6985,9 +6988,11 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
         .publish_remote_wal_segment(
             segment_id,
             last_wal_sequence,
-            &el.state
-                .wal_dir
-                .join(crate::wal::segment_file_name(segment_id)),
+            &crate::io::FsLocation::host_file(
+                &el.state
+                    .host_wal_dir()
+                    .join(crate::wal::segment_file_name(segment_id)),
+            ),
             el.state.writer_epoch,
             &crate::common::OperationDeadline::unbounded(),
         )
@@ -7116,7 +7121,11 @@ fn complete_retry_and_ack(
     .publish_remote_wal_segment(
         seg_id,
         last_sequence,
-        &el.state.wal_dir.join(crate::wal::segment_file_name(seg_id)),
+        &crate::io::FsLocation::host_file(
+            &el.state
+                .host_wal_dir()
+                .join(crate::wal::segment_file_name(seg_id)),
+        ),
         el.state.writer_epoch,
         &crate::common::OperationDeadline::unbounded(),
     )
@@ -7552,10 +7561,12 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
     ));
     cloud_persistence(&storage).fence_cloud_wal_catalog(1)?;
     cloud_persistence(&storage).enqueue_wal_segment(
+        &crate::io::FsLocation::host_file(
+            &el.state
+                .host_wal_dir()
+                .join(crate::wal::segment_file_name(first_segment)),
+        ),
         first_segment,
-        &el.state
-            .wal_dir
-            .join(crate::wal::segment_file_name(first_segment)),
         first_max_sequence,
     )?;
     el.set_hybrid_storage(Arc::clone(&storage));
@@ -8585,9 +8596,13 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_path = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
-    cloud_persistence(&storage).enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
+    cloud_persistence(&storage).enqueue_wal_segment(
+        &crate::io::FsLocation::host_file(&local_path),
+        segment_id,
+        max_sequence,
+    )?;
     assert!(storage.process_uploads().is_empty());
     let ack_wait_started = Instant::now();
     while storage_event_rx.is_empty() && ack_wait_started.elapsed() < Duration::from_secs(2) {
@@ -8779,7 +8794,6 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
     let budget = crate::common::resource_budget::ResourceBudget::new(512);
     let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
         cloud,
-        el.state.db_path.clone(),
         el.state.fs.clone(),
         budget.clone(),
         el.metadata_publication_lock.clone(),
@@ -8837,7 +8851,7 @@ fn should_complete_cloud_waiter_when_only_completion_adapter_headroom_is_missing
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     let budget = el
         .cloud_coordinator
@@ -8895,7 +8909,7 @@ fn assert_cloud_waiter_survives_admission_pressure(
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     let budget = el
         .cloud_coordinator
@@ -8962,7 +8976,6 @@ fn should_defer_metadata_cleanup_when_publication_lock_outlives_deadline(
     let held = el.metadata_publication_lock.lock();
     let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
         cloud.clone(),
-        el.state.db_path.clone(),
         el.state.fs.clone(),
         crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
         el.metadata_publication_lock.clone(),
@@ -9011,7 +9024,7 @@ fn should_complete_cloud_ack_waiter_but_defer_local_wal_retirement_under_verific
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
-        .wal_dir
+        .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
     assert!(el.verification_barrier.activate(41));
 

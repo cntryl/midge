@@ -11,6 +11,7 @@ use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
 
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -463,9 +464,10 @@ struct WalRecoveryState {
 /// - Response routing is handled exclusively by `ResponseRouter`
 ///   (shared between `RuntimeHandle` and `EventLoop`).
 pub struct RuntimeState {
-    // === Paths ===
+    /// The configured database path. The runtime reaches storage only
+    /// through `fs`; tests use this to place or inspect host files.
+    #[cfg(test)]
     pub db_path: PathBuf,
-    pub wal_dir: PathBuf,
 
     // === Sequence Numbers ===
     /// Global monotonic sequence number
@@ -549,6 +551,13 @@ impl RuntimeState {
     /// The host directory behind the root's `sst/`, for tests that place or
     /// inspect SST files directly. The runtime itself addresses SSTs only by
     /// root-relative paths through `fs`.
+    /// The host directory behind the root's `wal/`, for tests that place or
+    /// inspect WAL files directly.
+    #[cfg(test)]
+    pub(crate) fn host_wal_dir(&self) -> PathBuf {
+        self.db_path.join(crate::wal::WAL_DIR)
+    }
+
     #[cfg(test)]
     pub(crate) fn host_sst_dir(&self) -> PathBuf {
         self.db_path.join(crate::sst::fs::SST_DIR)

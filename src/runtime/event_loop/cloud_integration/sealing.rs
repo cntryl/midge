@@ -174,11 +174,11 @@ impl EventLoop {
             return Err(error);
         }
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
-        let local_path = self
+        let existing_bytes = self
             .state
-            .wal_dir
-            .join(crate::wal::segment_file_name(segment_id));
-        let existing_bytes = std::fs::metadata(&local_path).map_or(0, |metadata| metadata.len());
+            .fs
+            .metadata(&crate::wal::segment_key(segment_id))
+            .map_or(0, |metadata| metadata.len);
         if !recovered_active {
             storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         }
@@ -354,12 +354,11 @@ impl EventLoop {
             else {
                 return Ok(());
             };
-            let local_path = self
-                .state
-                .wal_dir
-                .join(crate::wal::segment_file_name(segment_id));
-            let resource = match storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)
-            {
+            let source = crate::io::FsLocation::new(
+                std::sync::Arc::clone(&self.state.fs),
+                crate::wal::segment_key(segment_id),
+            );
+            let resource = match storage.enqueue_wal_segment(&source, segment_id, max_sequence) {
                 Ok(resource) => resource,
                 Err(crate::common::MidgeError::WriteStall(_)) => {
                     // Capacity remains owned by already admitted uploads. Keep

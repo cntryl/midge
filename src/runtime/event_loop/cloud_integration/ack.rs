@@ -475,14 +475,14 @@ impl EventLoop {
                 "CloudAck received without HybridStorage".to_string(),
             ));
         };
-        let local_path = self
-            .state
-            .wal_dir
-            .join(crate::wal::segment_file_name(segment_id));
+        let source = crate::io::FsLocation::new(
+            std::sync::Arc::clone(&self.state.fs),
+            crate::wal::segment_key(segment_id),
+        );
         CloudPersistence::new(std::sync::Arc::clone(storage)).publish_remote_wal_segment(
             segment_id,
             max_sequence,
-            &local_path,
+            &source,
             self.state.writer_epoch,
             deadline,
         )
@@ -563,11 +563,8 @@ impl EventLoop {
 
         if requeue_publication {
             if let Some(max_seq) = failed_max_sequence {
-                let local_path = self
-                    .state
-                    .wal_dir
-                    .join(crate::wal::segment_file_name(segment_id));
-                if local_path.exists() {
+                let local_path = crate::wal::segment_key(segment_id);
+                if matches!(self.state.fs.exists(&local_path), Ok(true)) {
                     self.cloud_coordinator
                         .cloud_wal
                         .upload_backlog
@@ -576,7 +573,7 @@ impl EventLoop {
                 } else {
                     tracing::error!(
                         segment_id,
-                        path = %local_path.display(),
+                        path = local_path.0,
                         "could not requeue failed cloud WAL publication because its local segment is missing"
                     );
                 }

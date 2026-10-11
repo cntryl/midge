@@ -133,7 +133,7 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
 
     // Act
     let mut recovered = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )?;

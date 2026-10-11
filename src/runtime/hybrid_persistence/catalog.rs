@@ -217,7 +217,7 @@ pub(super) fn commit_catalog_with_authority(
     let primary = storage
         .write_control_object_with_authority(
             crate::wal::cloud_catalog::OBJECT_KEY,
-            expected_primary.map(ControlObject::metadata),
+            expected_primary.map(ControlObject::object_metadata),
             &encoded.bytes,
             &budget,
             deadline,
@@ -257,7 +257,7 @@ fn sync_catalog_copy_with_authority(
     storage
         .write_control_object_with_authority(
             key,
-            existing.as_ref().map(ControlObject::metadata),
+            existing.as_ref().map(ControlObject::object_metadata),
             bytes,
             &budget,
             deadline,

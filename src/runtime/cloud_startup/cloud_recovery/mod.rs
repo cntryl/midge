@@ -151,41 +151,35 @@ impl CloudStartupRecovery {
         })
     }
 
-    pub(crate) fn recovery_staging_fs(
-        db_path: &Path,
-    ) -> MidgeResult<Arc<dyn crate::io::traits::Fs>> {
-        let real = crate::io::real::RealFs::new(db_path).map_err(|error| {
-            MidgeError::RecoveryFailed(format!(
-                "failed to initialize recovery staging filesystem: {error}"
-            ))
-        })?;
-        Ok(Arc::new(real))
-    }
-
     pub(crate) fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
         leader_store: &dyn crate::lease::LeaderStore,
+        root: &Arc<dyn crate::io::Fs>,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
         Self::hydrate_cloud_metadata_within(
             cloud,
             leader_store,
+            root,
             db_path,
             recovery_policy,
             &DeadlineScope::new(OperationDeadline::unbounded()),
         )
     }
 
+    /// Stage the committed cloud metadata generation into `root`. `db_path`
+    /// only names the database in errors.
     pub(crate) fn hydrate_cloud_metadata_within(
         cloud: &crate::storage::cloud::CloudStorage,
         leader_store: &dyn crate::lease::LeaderStore,
+        root: &Arc<dyn crate::io::Fs>,
         db_path: &Path,
         _recovery_policy: RecoveryPolicy,
         scope: &DeadlineScope,
     ) -> MidgeResult<()> {
         scope.check("cloud metadata hydration")?;
-        let staging_fs = crate::io::scope_fs(Self::recovery_staging_fs(db_path)?, scope.clone());
+        let staging_fs = crate::io::scope_fs(Arc::clone(root), scope.clone());
         let head = leader_store
             .read_committed_metadata(scope.clamp(cloud.callback_timeout()))
             .map_err(|error| {
@@ -207,14 +201,13 @@ impl CloudStartupRecovery {
                     .copied()
                     .chain(std::iter::once(crate::metadata::files::MANIFEST))
                 {
-                    match std::fs::symlink_metadata(db_path.join(file_name)) {
-                        Ok(_) => {
-                            return Err(MidgeError::RecoveryFailed(format!(
-                                "local metadata '{file_name}' exists without a committed cloud generation"
-                            )));
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.into()),
+                    if staging_fs
+                        .exists(&crate::io::traits::FsPath::new(file_name))
+                        .map_err(FsError::into_midge)?
+                    {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "local metadata '{file_name}' exists without a committed cloud generation"
+                        )));
                     }
                 }
                 return Ok(());
@@ -288,7 +281,7 @@ impl CloudStartupRecovery {
     #[cfg(test)]
     pub(crate) fn mirror_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
-        db_path: &Path,
+        root: &Arc<dyn crate::io::Fs>,
         recovery_policy: RecoveryPolicy,
         authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>,
         publication_lock: &crate::runtime::MetadataPublicationLock,
@@ -299,7 +292,7 @@ impl CloudStartupRecovery {
         ));
         Self::mirror_cloud_metadata_within(
             cloud,
-            db_path,
+            root,
             recovery_policy,
             authority,
             publication_lock,
@@ -311,7 +304,7 @@ impl CloudStartupRecovery {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn mirror_cloud_metadata_within(
         cloud: &crate::storage::cloud::CloudStorage,
-        db_path: &Path,
+        root: &Arc<dyn crate::io::Fs>,
         recovery_policy: RecoveryPolicy,
         authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>,
         publication_lock: &crate::runtime::MetadataPublicationLock,
@@ -320,7 +313,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         scope.check("cloud metadata mirror")?;
         let local_manifest = match Self::load_local_manifest_for_cloud_metadata_mirror_within(
-            db_path, scope,
+            root, scope,
         ) {
             Ok(manifest) => manifest,
             Err(error @ MidgeError::Timeout(_)) => return Err(error),
@@ -331,10 +324,7 @@ impl CloudStartupRecovery {
             Err(error) => return Err(error),
         };
         let local_manifest_sequence = local_manifest.last_persisted_sequence;
-        let fs: Arc<dyn crate::io::Fs> = crate::io::scope_fs(
-            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?),
-            scope.clone(),
-        );
+        let fs: Arc<dyn crate::io::Fs> = crate::io::scope_fs(Arc::clone(root), scope.clone());
         let deadline = scope.deadline();
         // Untimed startup retains the ordinary finite mirror attempt budget.
         let deadline = if deadline.is_bounded() {
@@ -483,79 +473,41 @@ impl CloudStartupRecovery {
         ))
     }
 
+    /// Local WAL files under the root's `wal/`, as root-relative paths.
     pub(crate) fn collect_local_wal_paths(
-        local_wal_dir: &Path,
+        fs: &dyn crate::io::Fs,
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
     ) -> MidgeResult<Option<LocalWalPaths>> {
-        let entries = match std::fs::read_dir(local_wal_dir) {
+        let entries = match fs.list_dir(&crate::io::FsPath::new(crate::wal::WAL_DIR)) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(FsError::NotFound(_)) => return Ok(None),
+            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                tracing::warn!(
-                    %error,
-                    path = %local_wal_dir.display(),
-                    "could not list intact local WAL during salvage open"
-                );
+                tracing::warn!(%error, "could not list intact local WAL during salvage open");
                 *opened_in_salvage_mode = true;
                 return Ok(None);
             }
             Err(error) => {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "failed to list intact local WAL directory '{}': {error}",
-                    local_wal_dir.display()
+                    crate::wal::WAL_DIR
                 )))
             }
         };
+        let wal_dir = Path::new(crate::wal::WAL_DIR);
         let mut segment_paths = std::collections::BTreeMap::<u64, Vec<PathBuf>>::new();
         let mut active_path = None;
-        for entry_result in entries {
-            let entry = match entry_result {
-                Ok(entry) => entry,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(
-                        %error,
-                        "skipping unreadable local WAL directory entry during salvage"
-                    );
-                    *opened_in_salvage_mode = true;
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to read intact local WAL directory entry: {error}"
-                    )))
-                }
-            };
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(
-                        %error,
-                        path = %entry.path().display(),
-                        "skipping local WAL entry with unreadable type during salvage"
-                    );
-                    *opened_in_salvage_mode = true;
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to inspect intact local WAL entry '{}': {error}",
-                        entry.path().display()
-                    )))
-                }
-            };
-            if !file_type.is_file() {
+        for entry in entries {
+            if entry.is_dir {
                 continue;
             }
-            let source_path = entry.path();
-            let Some(source_name) = source_path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if source_name == crate::wal::ACTIVE_FILE_NAME {
+            let source_path = wal_dir.join(&entry.name);
+            if entry.name == crate::wal::ACTIVE_FILE_NAME {
                 active_path = Some(source_path);
                 continue;
             }
-            let Some(segment_id) = crate::wal::parse_segment_id(source_name) else {
+            let Some(segment_id) = crate::wal::parse_segment_id(&entry.name) else {
                 continue;
             };
             segment_paths

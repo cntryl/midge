@@ -1041,18 +1041,9 @@ const UNROUTED: &[&str] = &[
     "src/engine/startup/epoch_floor.rs",
     "src/engine/startup/storage.rs",
     "src/engine/verification.rs",
-    "src/runtime/cloud_startup/cloud_recovery/metadata.rs",
     "src/runtime/cloud_startup/cloud_recovery/mod.rs",
-    "src/runtime/cloud_startup/mod.rs",
-    "src/runtime/cloud_startup/streaming_wal_plan.rs",
-    "src/runtime/event_loop/cloud_integration/ack.rs",
-    "src/runtime/event_loop/cloud_integration/sealing.rs",
-    "src/runtime/event_loop/wal_retention/cloud.rs",
-    "src/runtime/hybrid_persistence.rs",
-    "src/runtime/hybrid_persistence/metadata_snapshot.rs",
     "src/storage/filesystem.rs",
     "src/storage/filesystem/windows.rs",
-    "src/storage/hybrid/backend/uploads.rs",
     "src/storage/simulated.rs",
 ];
 

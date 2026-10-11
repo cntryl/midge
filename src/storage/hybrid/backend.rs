@@ -48,7 +48,6 @@ use crate::storage::{StorageBackend, StorageEvent, StorageObjectMetadata, Storag
 use crossbeam::channel as cb;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -95,7 +94,8 @@ pub enum UploadStatus {
 pub struct UploadState {
     pub segment_id: u64,
     pub object_key: String,
-    pub local_path: PathBuf,
+    /// The file uploaded, read through the filesystem that wrote it.
+    pub(crate) source: Arc<crate::io::FsLocation>,
     pub status: UploadStatus,
     pub max_sequence: u64,
     pub retries: u32,

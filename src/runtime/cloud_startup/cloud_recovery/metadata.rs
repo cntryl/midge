@@ -1,8 +1,6 @@
 use super::{BlockingCloudIo, CloudStartupRecovery, MidgeError, MidgeResult, RecoveryPolicy};
 use crate::common::DeadlineScope;
-use crate::io::FsError;
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::Arc;
 
 impl CloudStartupRecovery {
@@ -116,13 +114,11 @@ impl CloudStartupRecovery {
     }
 
     pub(crate) fn load_local_manifest_for_cloud_metadata_mirror_within(
-        db_path: &Path,
+        root: &Arc<dyn crate::io::traits::Fs>,
         scope: &DeadlineScope,
     ) -> MidgeResult<crate::metadata::Manifest> {
         scope.check("local cloud mirror manifest")?;
-        let fs: Arc<dyn crate::io::traits::Fs> =
-            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
-        let fs = crate::io::scope_fs(fs, scope.clone());
+        let fs = crate::io::scope_fs(Arc::clone(root), scope.clone());
         crate::metadata::ManifestPersistence::load_with_fs_and_policy_within(
             &fs,
             RecoveryPolicy::Strict,

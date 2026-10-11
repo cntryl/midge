@@ -435,7 +435,7 @@ fn reserve_sst_sequence(
         validate_lease(config)?;
         super::CloudStartupRecovery::mirror_cloud_metadata_within(
             cloud,
-            &state.db_path,
+            &state.fs,
             crate::config::RecoveryPolicy::Strict,
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: config.leader_store.as_deref().ok_or_else(|| {

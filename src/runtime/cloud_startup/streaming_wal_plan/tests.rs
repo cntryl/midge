@@ -79,7 +79,9 @@ impl Fixture {
         let recovered = self.plan_only(policy, limits)?;
         recovered
             .plan
-            .set_aside_local_wal(&self.directory.path().join("local"))?;
+            .set_aside_local_wal(&crate::io::real::test_root(
+                self.directory.path().join("local"),
+            ))?;
         Ok(recovered)
     }
 
@@ -89,8 +91,7 @@ impl Fixture {
         policy: RecoveryPolicy,
         local: &Arc<dyn Fs>,
     ) -> MidgeResult<StreamingCloudWalRecovery> {
-        StreamingCloudWalRecovery::build_with_local_fs(
-            &self.directory.path().join("local"),
+        StreamingCloudWalRecovery::build(
             local,
             &self.cloud,
             &self.catalog,
@@ -107,7 +108,7 @@ impl Fixture {
         limits: StreamingReplayLimits,
     ) -> MidgeResult<StreamingCloudWalRecovery> {
         StreamingCloudWalRecovery::build(
-            &self.directory.path().join("local"),
+            &crate::io::real::test_root(self.directory.path().join("local")),
             &self.cloud,
             &self.catalog,
             policy,
@@ -1286,8 +1287,7 @@ fn run_planner_with_expiring_second_head(
             evidence: Arc::clone(&evidence),
             deadline,
         });
-        let result = StreamingCloudWalRecovery::build_with_local_fs_within(
-            &db_path,
+        let result = StreamingCloudWalRecovery::build_within(
             &local,
             &remote,
             &fixture.catalog,

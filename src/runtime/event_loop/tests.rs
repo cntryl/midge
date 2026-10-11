@@ -263,7 +263,7 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Salvage,
     )?;
