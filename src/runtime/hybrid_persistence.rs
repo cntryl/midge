@@ -626,21 +626,6 @@ impl CloudPersistence {
     /// writes made after it. Their objects stay in place: retirement here is
     /// not followed by a delete. The sequence floor covering them must
     /// already be persisted (`raise_wal_sequence_floor`).
-    #[cfg(test)]
-    pub(crate) fn retire_unreplayed_wal_segments_with_authority(
-        &self,
-        writer_epoch: u64,
-        segments: &[PublishedWalSegment],
-        validate: &dyn Fn() -> MidgeResult<()>,
-    ) -> MidgeResult<()> {
-        self.retire_unreplayed_wal_segments_with_authority_within(
-            writer_epoch,
-            segments,
-            validate,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-    }
-
     pub(crate) fn retire_unreplayed_wal_segments_with_authority_within(
         &self,
         writer_epoch: u64,

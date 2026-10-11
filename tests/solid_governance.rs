@@ -1171,7 +1171,7 @@ const WAL_AUTHORITY_SCOPE: &[&str] = &[
     "src/runtime/cloud_startup/",
     "src/runtime/event_loop/wal_retention",
     "src/runtime/event_loop/cloud_integration",
-    "src/storage/hybrid_persistence",
+    "src/runtime/hybrid_persistence",
     "src/engine/startup/",
 ];
 
@@ -1184,6 +1184,7 @@ const WAL_PATH_WORDS: &[&str] = &[
     "salvage",
     "plan",
     "recover",
+    "publish",
 ];
 
 /// Test-only functions in the WAL authority scope that name a WAL path, each

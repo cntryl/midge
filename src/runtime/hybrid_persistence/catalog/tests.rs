@@ -281,9 +281,12 @@ impl CatalogExpiryFixture {
                 .map(|_| ())
             }
             "floor" => storage.raise_wal_sequence_floor_with_authority(7, 11, &validate),
-            "retirement" => {
-                storage.retire_unreplayed_wal_segments_with_authority(7, &[segment], &validate)
-            }
+            "retirement" => storage.retire_unreplayed_wal_segments_with_authority_within(
+                7,
+                &[segment],
+                &validate,
+                &deadline,
+            ),
             "mirror-after-commit" | "prepared-primary" | "prepared-mirror" => {
                 catalog.raise_sequence_floor(7, 11).unwrap();
                 commit_catalog_with_authority(
