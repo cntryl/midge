@@ -9505,3 +9505,48 @@ fn should_fence_writer_when_storage_reports_a_corrupt_upload() -> crate::common:
     assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     Ok(())
 }
+
+#[test]
+fn should_withdraw_first_upload_when_publishing_its_run_fails() -> crate::common::MidgeResult<()> {
+    // Arrange: the later upload waits for the earlier one, and a successor
+    // has fenced the catalog, so publishing their run fails.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second, second_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second,
+        max_sequence: second_max_sequence,
+    });
+    let storage = Arc::clone(
+        el.cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage"),
+    );
+    cloud_persistence(&storage).fence_cloud_wal_catalog(el.state.writer_epoch + 1)?;
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first,
+        max_sequence: first_max_sequence,
+    });
+
+    // Assert
+    assert_eq!(published_wal_segments_for_test(&el)?, Vec::<u64>::new());
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    let tracker = &el.cloud_coordinator.cloud_wal;
+    assert!(
+        !tracker.acked_segments.contains_key(&first),
+        "no later publication may pass the withdrawn upload"
+    );
+    assert_eq!(
+        tracker.upload_backlog.get(&first),
+        Some(&first_max_sequence)
+    );
+    assert!(tracker.acked_segments.contains_key(&second));
+    Ok(())
+}

@@ -290,7 +290,7 @@ impl EventLoop {
             return;
         };
 
-        if !self.publish_contiguous_cloud_uploads(&ready_segments, &deadline) {
+        if !self.publish_contiguous_cloud_uploads(segment_id, &ready_segments, &deadline) {
             return;
         }
         self.commit_contiguous_cloud_ack(&ready_segments, durable_segment_id, durable_max_sequence);
@@ -300,24 +300,30 @@ impl EventLoop {
     /// acknowledged segments past the published frontier, in one catalog
     /// compare-and-swap. Returns whether the whole run is published.
     ///
-    /// A failure withdraws the run's first segment for a fresh upload and
+    /// A failure withdraws the run's first upload, or the acknowledged
+    /// `segment_id` when the run needed none, for a fresh upload and
     /// readback, so no later publication can pass it in the meantime.
     fn publish_contiguous_cloud_uploads(
         &mut self,
+        segment_id: u64,
         ready_segments: &[(u64, u64)],
         deadline: &OperationDeadline,
     ) -> bool {
-        let Some(&(first_segment, first_max_sequence)) = ready_segments.first() else {
-            return true;
-        };
         let run = self
             .cloud_coordinator
             .cloud_wal
             .unpublished_uploads(ready_segments);
-        if !run.is_empty() {
+        let failed_segment = run.first().map_or(segment_id, |upload| upload.segment_id);
+        if let Some(first_upload) = run.first() {
+            let first_max_sequence = first_upload.max_sequence;
             if let Err(error) = self.publish_cloud_wal_run(&run, deadline) {
+                // Withdraw the upload before deferring it, so no other
+                // acknowledgement publishes it while its retry is queued.
+                self.cloud_coordinator
+                    .cloud_wal
+                    .forget_upload(failed_segment);
                 if self.defer_cloud_ack_for_memory(
-                    first_segment,
+                    failed_segment,
                     first_max_sequence,
                     &error,
                     deadline,
@@ -325,11 +331,11 @@ impl EventLoop {
                     return false;
                 }
                 if matches!(error, crate::common::MidgeError::Corruption(_)) {
-                    self.fence_cloud_upload(first_segment, &error);
+                    self.fence_cloud_upload(failed_segment, &error);
                     return false;
                 }
                 self.handle_cloud_upload_failure(
-                    first_segment,
+                    failed_segment,
                     &Self::cloud_ack_error("cloud WAL catalog publication failed", error),
                     true,
                 );
@@ -338,7 +344,7 @@ impl EventLoop {
         }
         if let Err(error) = self.validate_runtime_writer_lease_within(deadline) {
             self.handle_cloud_upload_failure(
-                first_segment,
+                failed_segment,
                 &Self::cloud_ack_error(
                     "writer lease validation failed after cloud WAL publication",
                     error,
