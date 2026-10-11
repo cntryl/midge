@@ -355,3 +355,6 @@ fn join(dir: &FsPath, leaf: &str) -> FsPath {
         FsPath::new(format!("{base}/{leaf}"))
     }
 }
+
+#[cfg(test)]
+mod tests;
