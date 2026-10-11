@@ -84,13 +84,15 @@ const MAX_CLOUD_ERROR_BYTES: usize = 4 * 1024;
 const WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS: u32 = 3;
 /// The delay before a failed WAL upload's first retry. It doubles with every
 /// further failure, up to [`WAL_UPLOAD_RETRY_MAX_DELAY`], so a segment that
-/// keeps failing cannot spin.
+/// keeps failing cannot spin. The cap stays short because callers and a
+/// shutdown drain wait on this path: a longer one spends their budget
+/// waiting instead of retrying.
 #[cfg(not(test))]
-const WAL_UPLOAD_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+const WAL_UPLOAD_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 #[cfg(test)]
 const WAL_UPLOAD_RETRY_BASE_DELAY: Duration = Duration::from_millis(5);
 #[cfg(not(test))]
-const WAL_UPLOAD_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const WAL_UPLOAD_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const WAL_UPLOAD_RETRY_MAX_DELAY: Duration = Duration::from_millis(80);
 
