@@ -206,6 +206,10 @@ pub mod __internal {
         pub use crate::simulation::crash_fs::{
             CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
         };
+        #[cfg(feature = "cloud-common")]
+        pub use crate::simulation::object_store::{
+            Fate, Operation, RequestId, Schedule, SimulatedObjectStore,
+        };
     }
     pub mod types {
         pub use crate::types::{EntryType, KeyState};
