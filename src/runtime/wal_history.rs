@@ -215,11 +215,11 @@ impl WalHistory {
     /// What salvage drops is kept first, in a new `salvaged-…/` directory
     /// nothing reads: a copy of the cut segment, which stays history, and the
     /// dropped members themselves, moved there in ascending order. Then the
-    /// next segment is created, the ledger records the set-aside, and the cut
-    /// segment is cut back to the prefix replay applied. A crash before the
+    /// cut segment is cut back to the prefix replay applied, the next segment
+    /// is created, and the ledger records the set-aside. A crash before the
     /// ledger records it leaves the ledger naming members whose files moved,
-    /// which the next salvage sets aside from the same point; after it, every
-    /// remaining step is safe to repeat.
+    /// which the next salvage sets aside from the same point; after it, only
+    /// the orphan sweep remains, and any open repeats it.
     pub(crate) fn set_aside(
         &mut self,
         set_aside: SetAside,
@@ -238,8 +238,6 @@ impl WalHistory {
         let dropped: Vec<SegmentId> = ledger.members().filter(|id| *id >= from).collect();
         let open = ledger.next_segment_id().max(open_at_least);
         let aside = self.keep_aside(cut.map(|cut| cut.segment), &dropped)?;
-        create_segment(self.wal.as_ref(), open)?;
-        self.commit(&LedgerEdit::SetAside { from, open })?;
         if let Some(cut) = cut {
             crate::io::truncate_durably(
                 self.wal.as_ref(),
@@ -248,6 +246,8 @@ impl WalHistory {
             )
             .map_err(FsError::into_midge)?;
         }
+        create_segment(self.wal.as_ref(), open)?;
+        self.commit(&LedgerEdit::SetAside { from, open })?;
         self.sweep_orphans()?;
         tracing::warn!(
             aside = %aside.0,
@@ -276,6 +276,7 @@ impl WalHistory {
             if wal.exists(&name).map_err(FsError::into_midge)? {
                 wal.rename_atomic(&name, &join(&aside, &name.0))
                     .map_err(FsError::into_midge)?;
+                crate::failpoints::fail_point!("midge::recovery::after_salvage_member_moved");
             }
         }
         wal.sync_dir(&aside, Durability::Durable)

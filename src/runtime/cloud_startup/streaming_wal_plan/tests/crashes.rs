@@ -76,6 +76,8 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
     // Arrange
     let tuples = [
         ("midge::recovery::after_salvage_floor_before_quarantine", 1),
+        ("midge::recovery::after_salvage_member_moved", 1),
+        ("midge::recovery::after_salvage_member_moved", 2),
         ("midge::recovery::before_salvage_catalog_retirement", 1),
     ];
     let artifacts = PathBuf::from(

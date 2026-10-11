@@ -1497,7 +1497,7 @@ fn should_continue_past_successor_history_when_clean_cache_fails_back() -> Midge
 }
 
 #[test]
-fn should_refuse_cache_with_unpublished_wal_when_successor_published_past_it() -> MidgeResult<()> {
+fn should_set_aside_cache_tail_when_successor_published_past_it() -> MidgeResult<()> {
     // Arrange: as above, but this cache's open segment holds a record the
     // catalog never received.
     let mut fixture = Fixture::new()?;
@@ -1510,17 +1510,128 @@ fn should_refuse_cache_with_unpublished_wal_when_successor_published_past_it() -
     fixture.publish(3, 3, 8, &framed_wal(3, 8, b"three"))?;
 
     // Act
-    let result = fixture.build(RecoveryPolicy::Salvage);
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
 
-    // Assert
-    assert!(
-        matches!(result, Err(MidgeError::RecoveryFailed(_))),
-        "{:?}",
-        result.err()
-    );
+    // Assert: only the catalog replays; the stale tail is kept aside.
     assert_eq!(
-        std::fs::read(fixture.segment(2))?,
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(recovered.plan.active_wal.is_none());
+    assert_eq!(
+        std::fs::read(fixture.salvaged(2).expect("stale tail kept aside"))?,
         framed_wal(2, 7, b"stale")
     );
+    assert_eq!(fixture.history()?.ledger().open_segment(), 4);
+    Ok(())
+}
+
+#[test]
+fn should_not_replay_unpublished_segment_below_catalog_when_successor_took_over() -> MidgeResult<()>
+{
+    // Arrange: this cache published 1 but never 2; a successor published 3
+    // and 4, then retired 1 from the catalog.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &framed_wal(2, 7, b"unpublished"))?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    fixture.publish(3, 3, 8, &framed_wal(3, 8, b"three"))?;
+    fixture.publish(4, 4, 8, &framed_wal(4, 8, b"four"))?;
+    fixture.catalog.segments.remove(&1);
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert: segment 2 is not history once another writer took over.
+    assert!(recovered.plan.local_segments.is_empty());
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert!(fixture.salvaged(2).is_some());
+    assert_eq!(fixture.history()?.ledger().open_segment(), 5);
+    Ok(())
+}
+
+#[test]
+fn should_rejoin_when_failed_back_cache_lost_its_open_segment_mid_set_aside() -> MidgeResult<()> {
+    // Arrange: an earlier rejoin moved the open segment aside, then stopped
+    // before the ledger recorded it.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    fixture.publish(2, 2, 8, &framed_wal(2, 8, b"two"))?;
+    std::fs::remove_file(fixture.segment(2))?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(fixture.history()?.ledger().open_segment(), 3);
+    Ok(())
+}
+
+#[test]
+fn should_stop_salvage_at_local_member_whose_file_is_missing() -> MidgeResult<()> {
+    // Arrange: segment 2 never reached the catalog, and its file is gone.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &framed_wal(2, 7, b"lost"))?;
+    fixture.active(&framed_wal(3, 7, b"after"))?;
+    drop(fixture.history()?);
+    std::fs::remove_file(fixture.segment(2))?;
+
+    // Act
+    let strict = fixture.build(RecoveryPolicy::Strict);
+    let salvaged = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert: strict refuses; salvage keeps 1, sets 2 onward aside and lifts
+    // the floor over the records after the hole.
+    assert!(
+        matches!(strict, Err(MidgeError::RecoveryFailed(_))),
+        "{:?}",
+        strict.err()
+    );
+    assert!(salvaged.plan.opened_in_salvage_mode);
+    assert_eq!(
+        salvaged
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(salvaged.plan.active_wal.is_none());
+    assert!(salvaged.plan.max_unreplayed_sequence >= 3);
+    assert!(fixture.salvaged(3).is_some());
     Ok(())
 }

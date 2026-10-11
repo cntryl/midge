@@ -417,3 +417,32 @@ fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
     assert_eq!(retried.expect("retire after healing").removed, vec![(1, 9)]);
     assert_eq!(members(&history), vec![2, 3, 4]);
 }
+
+#[test]
+fn should_not_record_set_aside_when_the_cut_fails() {
+    // Arrange: cutting segment 2 back to its replayed prefix fails.
+    let device = CrashDevice::new();
+    let mut history = four_segments(&device);
+    let fault = device.inject(Fault {
+        op: FaultOp::Write,
+        path: key(2),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+
+    // Act
+    let result = history.set_aside(
+        SetAside::After(SalvageCut {
+            segment: 2,
+            valid_bytes: 7,
+        }),
+        0,
+    );
+
+    // Assert: the ledger never records a set-aside whose cut segment still
+    // holds the bytes past its replayed prefix, which strict replay rejects.
+    assert!(device.fired(fault));
+    assert!(result.is_err());
+    assert_eq!(members(&history), vec![1, 2, 3, 4]);
+}

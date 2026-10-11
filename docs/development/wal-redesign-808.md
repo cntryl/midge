@@ -55,10 +55,11 @@ Decisions that refine the #808 target design:
   The queue is WAL-only.
 - Rotation does not pre-open the next segment, because the next header links
   the previous segment's final digest.
-- The ledger's `Genesis` edit records the holder identity and the first open
-  segment. A fresh cloud cache starts one past the catalog's last segment, and
-  a ledger whose open segment is below that fails the open: only another
-  writer publishes there.
+- Genesis records the holder identity and the first open segment. A fresh
+  cloud cache starts one past the catalog's last segment. A ledger whose open
+  segment is below that was succeeded by another writer, which alone
+  publishes there; its local WAL is set aside and history continues past
+  the catalog.
 - Salvage drops a suffix of the ledger with `SetAside{from, open}`, after
   copying the dropped files into `wal/salvaged-<millis>/`. Nothing is renamed.
 - Files the ledger does not name are orphans. The writable open sweeps them,
@@ -98,8 +99,10 @@ unlinked, so a file whose removal fails is never replayed. The matching
 campaign detections became controls. `predecessor-cache` moved to stage 4:
 a segment id cannot tell a predecessor's stale tail from a successor's
 history once the successor's catalog entries retire, so it needs ownership
-(#820). A cache whose ledger is behind the catalog rejoins only when it holds
-nothing unpublished, and is refused otherwise.
+(#820). A cache whose ledger is behind the catalog
+belongs to a writer another one succeeded: it sets its local WAL aside,
+replays only the catalog, and continues past it, since an unpublished tail is
+not history once another writer has taken over.
 
 Three fixtures lost their scenario under the ledger and were re-targeted to
 reproduce the same defects:

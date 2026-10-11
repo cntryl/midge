@@ -581,8 +581,9 @@ pub(super) fn discover_frontiers(
     let mut read_ns = 0;
     let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("frontier_scan");
     for path in paths {
+        // Replay stops at a missing member, so discovery does too.
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut read_ns)? else {
-            continue;
+            break;
         };
         let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;

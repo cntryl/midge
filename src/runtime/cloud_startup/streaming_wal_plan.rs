@@ -85,10 +85,10 @@ impl StreamingCloudWalRecovery {
         scope.check("cloud WAL planning")?;
         let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
         let next_remote_id = next_segment_id(catalog.segments.keys().copied().max())?;
+        // This ledger records each seal before it uploads, so only another
+        // writer publishes at or past its open segment: that writer took
+        // over, and this cache's unpublished tail is not history.
         let failed_back = ledger.open_segment() < next_remote_id;
-        if failed_back {
-            ensure_nothing_unpublished(local.as_ref(), ledger, catalog, next_remote_id)?;
-        }
         let mut replay_fs = StreamingWalFs::new(read_window)?;
         let mut plan = CloudWalRecoveryPlan {
             remote_segments: BTreeMap::new(),
@@ -100,8 +100,14 @@ impl StreamingCloudWalRecovery {
             set_aside_from: None,
         };
         if failed_back {
-            // History continues past the catalog, in a new segment.
-            plan.set_aside(ledger.open_segment());
+            // Rejoin past the catalog: keep every local member aside, replay
+            // only what the catalog published, and continue in a new segment.
+            tracing::warn!(
+                open_segment = ledger.open_segment(),
+                next_remote_id,
+                "another writer published past this cache; setting its local WAL aside"
+            );
+            plan.set_aside(ledger.log_start());
         }
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
@@ -243,8 +249,21 @@ fn merge_local_sources(
     } = *context;
     scope.check("local WAL source discovery")?;
     let mut skipped = BTreeSet::new();
+    let set_aside = |segment_id: SegmentId| plan_sets_aside(plan.set_aside_from, segment_id);
     for segment_id in ledger.sealed() {
         scope.check("local WAL source selection")?;
+        if set_aside(segment_id) {
+            continue;
+        }
+        // A cataloged member's local copy only confirms the remote bytes;
+        // without it, the catalog's copy replays.
+        if sources.contains_key(&segment_id)
+            && !local
+                .exists(&crate::wal::segment_key(segment_id))
+                .map_err(FsError::into_midge)?
+        {
+            continue;
+        }
         let selected = select_local_segment(
             local,
             segment_id,
@@ -279,7 +298,7 @@ fn merge_local_sources(
         }
     }
     let open = ledger.open_segment();
-    let active = if plan.set_aside_from.is_some_and(|from| from <= open) {
+    let active = if plan_sets_aside(plan.set_aside_from, open) {
         None
     } else {
         active_local_source(local, open, policy, limits, plan)?
@@ -287,42 +306,19 @@ fn merge_local_sources(
     Ok(LocalSources { active, skipped })
 }
 
-/// A ledger whose open segment is below the catalog's next id belongs to a
-/// cache another writer succeeded: this ledger records each seal before it
-/// uploads, so only another writer publishes at or past its open segment.
-/// The cache may rejoin only when it holds nothing the catalog lacks: its
-/// open segment is empty, and every sealed member is cataloged or below the
-/// catalog's oldest segment (retired, so covered by SSTs). Telling a stale
-/// unpublished tail from the successor's needs ownership (#820), so any
-/// other cache is refused rather than replayed.
-fn ensure_nothing_unpublished(
-    local: &dyn Fs,
-    ledger: &WalLedger,
-    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-    next_remote_id: SegmentId,
-) -> MidgeResult<()> {
-    let open = ledger.open_segment();
-    let open_bytes = match local.metadata(&crate::wal::segment_key(open)) {
-        Ok(metadata) => Some(metadata.len),
-        Err(FsError::NotFound(_)) => None,
-        Err(error) => return Err(error.into_midge()),
-    };
-    let oldest = catalog
-        .segments
-        .keys()
-        .next()
-        .copied()
-        .unwrap_or(next_remote_id);
-    let unpublished: Vec<SegmentId> = ledger
-        .sealed()
-        .filter(|id| *id >= oldest && !catalog.segments.contains_key(id))
-        .collect();
-    if open_bytes == Some(0) && unpublished.is_empty() {
-        return Ok(());
-    }
-    Err(MidgeError::RecoveryFailed(format!(
-        "the local WAL ledger's open segment {open} is below the cloud catalog's next segment {next_remote_id}: another writer published past this cache, which holds WAL the catalog lacks (open segment bytes {open_bytes:?}, unpublished sealed segments {unpublished:?})"
-    )))
+fn plan_sets_aside(from: Option<SegmentId>, segment_id: SegmentId) -> bool {
+    from.is_some_and(|from| from <= segment_id)
+}
+
+/// A ledger member's file, which must exist: one that is gone lost its
+/// records, which salvage may skip and strict recovery may not.
+fn open_member<'a>(fs: &'a dyn Fs, path: &FsPath) -> MidgeResult<Box<dyn crate::io::File + 'a>> {
+    fs.open(path, READ_ONLY).map_err(|error| match error {
+        FsError::NotFound(_) => MidgeError::Corruption(format!(
+            "WAL segment {path} is history but its file is missing"
+        )),
+        error => error.into_midge(),
+    })
 }
 
 fn validate_publication_identity(
@@ -471,7 +467,7 @@ fn select_local_segment(
 ) -> MidgeResult<Option<(FsPath, crate::runtime::RecoveredCloudWalSegment)>> {
     let path = crate::wal::segment_key(segment_id);
     let result = (|| {
-        let file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
+        let file = open_member(fs.as_ref(), &path)?;
         inspect_local_sealed_wal_file(file.as_ref(), &path, limits)
     })();
     Ok(recover_or_salvage(result, policy, salvaged)?.map(|prefix| {
@@ -498,7 +494,7 @@ fn active_local_source(
 ) -> MidgeResult<Option<ReplaySource>> {
     let path = crate::wal::segment_key(open);
     let Some(file) = recover_or_salvage(
-        fs.open(&path, READ_ONLY).map_err(FsError::into_midge),
+        open_member(fs.as_ref(), &path),
         policy,
         &mut plan.opened_in_salvage_mode,
     )?
