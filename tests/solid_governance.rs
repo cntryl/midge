@@ -1103,4 +1103,13 @@ fn should_route_storage_io_through_injected_fs() {
         stale.is_empty(),
         "remove routed files from UNROUTED: {stale:?}"
     );
+    let stale_boundary: Vec<_> = HOST_BOUNDARY
+        .iter()
+        .filter(|(file, _)| !violations.contains_key(*file))
+        .map(|(file, _)| file)
+        .collect();
+    assert!(
+        stale_boundary.is_empty(),
+        "remove files that no longer touch the host from HOST_BOUNDARY: {stale_boundary:?}"
+    );
 }

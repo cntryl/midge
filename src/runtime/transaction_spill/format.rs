@@ -89,6 +89,21 @@ pub(super) struct RunFile {
     tracker: Option<Arc<RunFileTracker>>,
 }
 
+/// Classify a failure on a spill file the write set itself owns, never as a
+/// caller's mistake: a run that vanished lost intents the transaction still
+/// needs, and a name collision is an engine fault.
+fn spill_file_error(error: FsError) -> MidgeError {
+    match error {
+        FsError::NotFound(path) => {
+            MidgeError::Corruption(format!("transaction spill run is missing: {path}"))
+        }
+        FsError::AlreadyExists(path) => {
+            MidgeError::Internal(format!("transaction spill file already exists: {path}"))
+        }
+        error => error.into_midge(),
+    }
+}
+
 impl RunFile {
     pub(super) fn open(root: &dyn Fs, path: &FsPath) -> MidgeResult<Self> {
         let file = root
@@ -101,7 +116,7 @@ impl RunFile {
                     truncate: false,
                 },
             )
-            .map_err(FsError::into_midge)?;
+            .map_err(spill_file_error)?;
         let file = FileReader::new(file)?;
         #[cfg(test)]
         let tracker = RUN_FILE_TRACKER.with(|tracker| tracker.borrow().clone());
@@ -462,7 +477,7 @@ pub(super) fn create_spill_file(root: &dyn Fs, path: &FsPath) -> MidgeResult<Fil
                 truncate: false,
             },
         )
-        .map_err(FsError::into_midge)?;
+        .map_err(spill_file_error)?;
     Ok(FileWriter::new(file))
 }
 

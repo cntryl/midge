@@ -2,7 +2,9 @@
 //! only through the injected database root, so a fault or crash simulator
 //! observes every effect (#808).
 
-use cntryl_midge::__internal::io::{Fs, MockFs, RealFs};
+use cntryl_midge::__internal::io::{
+    Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, RealFs,
+};
 use cntryl_midge::{Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions};
 use std::sync::Arc;
 
@@ -337,16 +339,22 @@ fn commit_spilled_transaction(engine: &Engine) {
 fn should_spill_transaction_into_injected_root_when_pool_is_small() {
     // Arrange
     let named = tempfile::tempdir().expect("named directory");
-    let root: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let memory = Arc::new(MockFs::new());
     let options = OpenOptions::local(named.path())
         .background_compaction(false)
         .transaction_memory_pool_size(4 * 1024)
-        .filesystem_for_testing(root)
+        .filesystem_for_testing(memory.clone())
         .build()
         .expect("open options");
     let spilled_on_host = {
         let mut engine = Engine::open(options.clone()).expect("open");
         commit_spilled_transaction(&engine);
+        assert!(
+            memory
+                .exists(&FsPath::new("txn"))
+                .expect("probe spill directory"),
+            "the transaction must have spilled into the root"
+        );
         let spilled_on_host = host_entries(named.path());
         engine
             .shutdown(std::time::Duration::from_secs(5))
@@ -369,4 +377,37 @@ fn should_spill_transaction_into_injected_root_when_pool_is_small() {
     assert_eq!(value.as_deref(), Some(&[63_u8; 512][..]));
     assert_eq!(spilled_on_host, Vec::<std::path::PathBuf>::new());
     assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn should_remove_orphaned_spill_runs_when_opening_from_injected_root() {
+    // Arrange: a previous process left a spill run in the root.
+    let named = tempfile::tempdir().expect("named directory");
+    let memory = Arc::new(MockFs::new());
+    memory
+        .open(
+            &FsPath::new("txn/0000000000000001-00000000.run"),
+            FileOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        )
+        .and_then(|mut file| file.append(bytes::Bytes::from_static(b"orphaned run")))
+        .expect("plant orphaned run");
+    let options = OpenOptions::local(named.path())
+        .background_compaction(false)
+        .filesystem_for_testing(memory.clone())
+        .build()
+        .expect("open options");
+
+    // Act
+    let engine = Engine::open(options).expect("open");
+
+    // Assert
+    assert!(!memory
+        .exists(&FsPath::new("txn/0000000000000001-00000000.run"))
+        .expect("probe orphaned run"));
+    drop(engine);
 }

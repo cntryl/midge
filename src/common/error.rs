@@ -263,6 +263,17 @@ pub(crate) fn is_no_space(kind: io::ErrorKind) -> bool {
 
 impl From<io::Error> for MidgeError {
     fn from(err: io::Error) -> Self {
+        // A filesystem error carried through `std::io` keeps its own class.
+        type Payload = dyn std::error::Error + Send + Sync;
+        if err.get_ref().is_some_and(Payload::is::<crate::io::FsError>) {
+            if let Some(Ok(error)) = err
+                .into_inner()
+                .map(Payload::downcast::<crate::io::FsError>)
+            {
+                return error.into_midge();
+            }
+            return MidgeError::Internal("filesystem error payload changed type".into());
+        }
         if is_no_space(err.kind()) {
             MidgeError::NoSpace(err.to_string())
         } else {
