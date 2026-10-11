@@ -350,8 +350,8 @@ fn should_reopen_without_losing_kept_history_when_power_is_lost_during_salvage()
 }
 
 #[test]
-fn should_refuse_further_edits_when_a_ledger_write_fails() {
-    // Arrange: the ledger's next append fails.
+fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
+    // Arrange: the ledger's next append fails, as on a full disk.
     let device = CrashDevice::new();
     let mut history = four_segments(&device);
     device.inject(Fault {
@@ -365,16 +365,18 @@ fn should_refuse_further_edits_when_a_ledger_write_fails() {
         effect: FaultEffect::Before,
         error: FaultError::Io,
     });
+    let failed = history.retire_below(3);
+    let kept = device.files();
 
     // Act
-    let failed = history.retire_below(3);
-    let next = history.retire_below(2);
+    let retried = history.retire_below(2);
 
-    // Assert: nothing is removed, and the history stays refused.
+    // Assert: the failed retirement removed nothing, and the next one heals
+    // the ledger and goes ahead.
     assert!(failed.is_err());
-    assert!(next.is_err());
-    let files = device.files();
     for id in 1..=4 {
-        assert!(files.contains_key(&key(id)), "segment {id} removed");
+        assert!(kept.contains_key(&key(id)), "segment {id} removed");
     }
+    assert_eq!(retried.expect("retire after healing"), vec![1]);
+    assert_eq!(members(&history), vec![2, 3, 4]);
 }
