@@ -88,17 +88,19 @@ pub(crate) enum Stop {
     PowerLoss,
     /// A process crash, then a takeover by a process with an empty cache.
     FreshCache,
+    /// A clean shutdown, then a power loss that keeps nothing unsynced.
+    PowerLossAfterShutdown,
 }
 
 impl Stop {
     /// Whether the stopping process died rather than shut down.
     fn crashes_process(self) -> bool {
-        self != Self::Clean
+        !matches!(self, Self::Clean | Self::PowerLossAfterShutdown)
     }
 
     /// Whether the device lost power, dropping what was not durable.
     fn loses_power(self) -> bool {
-        self == Self::PowerLoss
+        matches!(self, Self::PowerLoss | Self::PowerLossAfterShutdown)
     }
 
     /// What the next process recovers from.
@@ -449,6 +451,11 @@ impl Campaign {
             if engine.shutdown(Duration::from_secs(10)).is_ok() {
                 self.history.shut_down();
             }
+            drop(engine);
+            if stop.loses_power() {
+                self.device.process_crash();
+                self.device.power_loss_with(|_| 0);
+            }
         }
         self.snapshot(remaining, stop);
         self.recover(stop)
@@ -483,6 +490,9 @@ impl Campaign {
             Op::ProcessCrash => self.restart(Stop::ProcessCrash, remaining, 0)?,
             Op::PowerLoss { seed } => self.restart(Stop::PowerLoss, remaining, *seed)?,
             Op::FreshCache => self.restart(Stop::FreshCache, remaining, 0)?,
+            Op::PowerLossAfterShutdown => {
+                self.restart(Stop::PowerLossAfterShutdown, remaining, 0)?;
+            }
             Op::LandLate => {
                 let _ = self.store.land_late_effects();
             }

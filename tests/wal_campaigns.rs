@@ -170,18 +170,31 @@ fn should_reproduce_recovered_tail_loss_when_campaigning() {
     });
 }
 
+/// #811: a completed lease release unlinks its acquisition lock without a
+/// directory sync, so a power loss before any later one brings the lock back
+/// and refuses every open. Every open republishes the segment ledger and
+/// syncs `wal/` after taking its lease (#842), and on the simulated device a
+/// directory sync commits every earlier namespace change, the unlink
+/// included. The release a clean shutdown completes has no open after it.
 #[test]
 fn should_reproduce_stale_lease_lock_when_power_is_lost() {
-    // Arrange: #811, found by power losses; the operator's workaround is off.
+    // Arrange: the operator's workaround is off.
     let config = Config {
         clear_stale_lease_lock: false,
         ..Config::default()
     };
+    let workload = [
+        Op::Put {
+            family: 0,
+            key: 1,
+            durability: Durability::Sync,
+        },
+        Op::PowerLossAfterShutdown,
+    ];
 
     // Act
-    let found = DETECTION_SEEDS
-        .map(|seed| (seed, Profile::CrashControl.workload(seed, 24, Mode::Local)))
-        .find_map(|(seed, workload)| Campaign::run(seed, &workload, config).err())
+    let found = Campaign::run(0, &workload, config)
+        .err()
         .map(|finding| *finding);
 
     // Assert
