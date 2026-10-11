@@ -1,7 +1,8 @@
 # WAL redesign regression inventory (#808)
 
 This change inventories the 14 original audit classes as 17 executable tests,
-plus two supplemental allocation/history cases. It supplies a baseline runner
+plus two supplemental allocation/history cases and one case the crash
+simulator found (`torn-unsynced-tail`, #817). It supplies a baseline runner
 and CI coverage. It does not implement the redesign or complete its simulator
 stage. Refs #808.
 
@@ -21,7 +22,7 @@ names the stage whose pull request turns a case GREEN:
 
 | Stage | Scope | Issues |
 |---|---|---|
-| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 |
+| 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, leader store, scheduler), #831 (oracle, campaigns) |
 | 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818 |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |

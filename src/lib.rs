@@ -78,6 +78,10 @@ mod wal;
 // Main engine (canonical public API — re-exported below)
 mod engine;
 
+// Simulated storage for crash campaigns; never part of production builds.
+#[cfg(any(test, feature = "internal-testing"))]
+mod simulation;
+
 // ---------------------------------------------------------------------------
 // Internal Test Surface (NOT public API)
 // ---------------------------------------------------------------------------
@@ -196,6 +200,12 @@ pub mod __internal {
             #[doc(inline)]
             pub use crate::storage::cloud::{CloudBackend, CloudCallback};
         }
+    }
+    /// Simulated storage for crash and fault campaigns.
+    pub mod simulation {
+        pub use crate::simulation::crash_fs::{
+            CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
+        };
     }
     pub mod types {
         pub use crate::types::{EntryType, KeyState};

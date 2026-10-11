@@ -1102,6 +1102,36 @@ fn should_route_storage_io_through_injected_fs() {
     );
 }
 
+/// The crash simulator is test support: its module compiles only for tests
+/// and `internal-testing`, and production code never reaches it (#817).
+#[test]
+fn should_keep_simulation_out_of_production_builds() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let compiled: Vec<_> = files
+        .iter()
+        .filter(|file| file.relative.starts_with("src/simulation/"))
+        .map(|file| file.relative.clone())
+        .collect();
+    let reaching: Vec<_> = files
+        .iter()
+        .filter(|file| file.production.contains("simulation::"))
+        .map(|file| file.relative.clone())
+        .collect();
+
+    // Assert
+    assert!(
+        compiled.is_empty(),
+        "simulation compiles into production builds: {compiled:?}"
+    );
+    assert!(
+        reaching.is_empty(),
+        "production code reaches the simulator: {reaching:?}"
+    );
+}
+
 /// Code the #808 redesign deleted. Each entry names the issue that removed
 /// it; nothing in the crate, its tests, benches, examples or fuzz targets may
 /// bring it back. Entries are whole identifiers or path segments.
