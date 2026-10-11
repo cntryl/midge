@@ -204,7 +204,7 @@ pub mod __internal {
     /// Simulated storage for crash and fault campaigns.
     pub mod simulation {
         pub use crate::simulation::crash_fs::{
-            CrashDevice, Fault, FaultEffect, FaultError, FaultOp,
+            CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp,
         };
         #[cfg(feature = "cloud-common")]
         pub use crate::simulation::object_store::{

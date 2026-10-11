@@ -910,9 +910,13 @@ fn should_count_every_name_given_when_paths_are_reused() {
     // Act
     fs.rename_atomic(&path("wal/active"), &path("wal/1.wal"))
         .expect("seal");
+    let before_sync = device.names_ever();
+    fs.sync_dir(&path("wal"), Durability::Durable)
+        .expect("sync wal");
     let names = device.names_ever();
 
-    // Assert
+    // Assert: a name counts once its giving is durable.
+    assert_eq!(before_sync.get("wal/1.wal"), Some(&1));
     assert_eq!(names.get("wal/1.wal"), Some(&2));
     assert_eq!(names.get("wal/active"), Some(&1));
 }

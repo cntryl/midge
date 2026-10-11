@@ -538,8 +538,8 @@ struct State {
     faults: Vec<FaultRule>,
     /// How many inodes each path has created.
     created: BTreeMap<String, u64>,
-    /// How many times each path has been given to an inode, by creation or
-    /// rename, over the device's life.
+    /// How many times each path has durably been given to an inode, by
+    /// creation or rename, over the device's life.
     named: BTreeMap<String, u64>,
 }
 
@@ -681,19 +681,6 @@ impl State {
 
     /// Apply a directory operation to the live namespace and log it.
     fn record(&mut self, op: NamespaceOp) {
-        let named = match &op {
-            NamespaceOp::Link {
-                directory, name, ..
-            }
-            | NamespaceOp::Rename {
-                to: (directory, name),
-                ..
-            } => Some(self.path_in(*directory, name)),
-            NamespaceOp::Unlink { .. } => None,
-        };
-        if let Some(path) = named {
-            *self.named.entry(path).or_default() += 1;
-        }
         op.apply(&mut self.nodes, false);
         self.pending.push(op);
     }
@@ -739,6 +726,19 @@ impl State {
     fn commit(&mut self, count: usize) {
         let committed: Vec<NamespaceOp> = self.pending.drain(..count).collect();
         for op in committed {
+            let named = match &op {
+                NamespaceOp::Link {
+                    directory, name, ..
+                }
+                | NamespaceOp::Rename {
+                    to: (directory, name),
+                    ..
+                } => Some(self.path_in(*directory, name)),
+                NamespaceOp::Unlink { .. } => None,
+            };
+            if let Some(path) = named {
+                *self.named.entry(path).or_default() += 1;
+            }
             op.apply(&mut self.nodes, true);
         }
         self.reclaim();
@@ -1020,8 +1020,9 @@ impl CrashDevice {
         self.lock().end_process();
     }
 
-    /// How many times each path has been given to a file or directory, by
-    /// creation or rename, over the device's life.
+    /// How many times each path has durably been given to a file or
+    /// directory, by creation or rename, over the device's life. A name a
+    /// power loss undid was never given.
     #[must_use]
     pub fn names_ever(&self) -> BTreeMap<String, u64> {
         self.lock().named.clone()

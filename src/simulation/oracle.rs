@@ -1,21 +1,32 @@
 //! The campaign oracle (#831): is a recovered state one the engine was
 //! allowed to recover?
 //!
-//! Commits are recorded in the order the engine acknowledged them. A commit
-//! logged in the WAL survives only with every earlier WAL record, so the WAL
-//! commits that survive form a prefix of that order. A commit that bypassed
-//! the WAL (best effort) or that returned an error may or may not have
-//! survived on its own. A commit is *required* once something promised it:
-//! a synced commit makes every earlier WAL commit durable, a completed flush
-//! makes its family's earlier commits durable, and a clean shutdown makes
-//! every acknowledged commit durable.
+//! Commits are recorded in the order the engine acknowledged them. midge has
+//! one WAL for every family, and a WAL record survives only with every
+//! earlier one, so the WAL commits that survive form a prefix of that order.
+//! A commit that bypassed the WAL (best effort) or that returned an error may
+//! or may not have survived on its own. A commit becomes required when
+//! something promised it:
+//!
+//! - a synced commit makes every earlier WAL commit durable, which raises the
+//!   shortest prefix recovery may keep;
+//! - a completed flush makes its own family's commits durable in an SST. It
+//!   promises nothing about other families, so it does not raise the prefix:
+//!   the engine does not promise cross-family ordering for unsynced writes;
+//! - a clean shutdown makes every acknowledged commit durable.
 //!
 //! A recovered state is consistent when one prefix length explains every key
 //! at once: each key holds the value of its last required write, or of an
 //! optional write after it. One prefix for all keys is what makes a recovery
-//! hole (a later commit surviving an earlier lost one) a violation. The check
-//! is polynomial: for each candidate prefix, each key's writes are scanned
-//! once.
+//! hole (a later commit surviving an earlier lost one) a violation. Keys the
+//! history never wrote must be absent, so a resurrection is caught however
+//! long ago its delete was verified. A commit's keys are judged one by one,
+//! so a commit torn across several keys is not detected; campaigns write one
+//! key per commit.
+//!
+//! The check is incremental: moving the prefix by one commit changes only
+//! that commit's keys, so judging every prefix costs one pass over the
+//! history plus each key's writes once per change.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,13 +92,39 @@ enum Status {
     Excluded,
 }
 
+/// Maps keyed by [`Key`] serialize as lists of pairs, which JSON can hold.
+mod pairs {
+    use super::Key;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub(super) fn serialize<S: Serializer>(
+        map: &BTreeMap<Key, Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        map.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<Key, Vec<u8>>, D::Error> {
+        Ok(Vec::<(Key, Vec<u8>)>::deserialize(deserializer)?
+            .into_iter()
+            .collect())
+    }
+}
+
 /// The commits since the last verified state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct History {
+    #[serde(with = "pairs")]
     base: BTreeMap<Key, Vec<u8>>,
     families: BTreeSet<String>,
     commits: Vec<Commit>,
+    /// Commits that must survive, whatever the prefix.
     required: BTreeSet<usize>,
+    /// Required WAL commits that also bound the prefix from below.
+    prefix_floor: BTreeSet<usize>,
 }
 
 impl History {
@@ -97,8 +134,7 @@ impl History {
         Self {
             base,
             families,
-            commits: Vec::new(),
-            required: BTreeSet::new(),
+            ..Self::default()
         }
     }
 
@@ -140,12 +176,13 @@ impl History {
         for (position, commit) in self.commits.iter().enumerate().take(index + 1) {
             if commit.acknowledged && commit.logging == Logging::Wal {
                 self.required.insert(position);
+                self.prefix_floor.insert(position);
             }
         }
     }
 
     /// A flush of `family` completed: its acknowledged commits so far must
-    /// survive.
+    /// survive, in an SST, whatever the WAL keeps.
     pub fn flushed(&mut self, family: &str) {
         for (position, commit) in self.commits.iter().enumerate() {
             if commit.acknowledged && commit.family == family {
@@ -159,6 +196,9 @@ impl History {
         for (position, commit) in self.commits.iter().enumerate() {
             if commit.acknowledged {
                 self.required.insert(position);
+                if commit.logging == Logging::Wal {
+                    self.prefix_floor.insert(position);
+                }
             }
         }
     }
@@ -178,73 +218,97 @@ impl History {
         }
     }
 
-    /// The values `key` may hold under `prefix`.
-    fn allowed(&self, key: &Key, prefix: usize) -> Vec<Option<Vec<u8>>> {
+    /// The values `key` may hold under `prefix`, given the indices of the
+    /// commits that write it.
+    fn allowed(&self, key: &Key, writers: &[usize], prefix: usize) -> Vec<Option<Vec<u8>>> {
         let mut allowed = vec![self.base.get(key).cloned()];
-        for (index, commit) in self.commits.iter().enumerate() {
-            if commit.family != key.0 {
-                continue;
-            }
-            for (written, value) in &commit.writes {
-                if *written != key.1 {
-                    continue;
-                }
-                match self.status(index, prefix) {
-                    Status::Applied => allowed = vec![value.clone()],
-                    Status::Optional => allowed.push(value.clone()),
-                    Status::Excluded => {}
-                }
+        for &index in writers {
+            let value = self.commits[index]
+                .writes
+                .iter()
+                .filter(|(written, _)| *written == key.1)
+                .map(|(_, value)| value.clone())
+                .next_back()
+                .flatten();
+            match self.status(index, prefix) {
+                Status::Applied => allowed = vec![value],
+                Status::Optional => allowed.push(value),
+                Status::Excluded => {}
             }
         }
         allowed
     }
 
-    /// Judge a recovered state: the value of every key the history names, and
-    /// the families recovery reopened.
+    /// Judge a recovered state: every key recovery holds, and the families it
+    /// reopened. Keys the history names but recovery lacks read as absent.
     #[must_use]
     pub fn check(&self, observed: &BTreeMap<Key, Vec<u8>>, families: &BTreeSet<String>) -> Verdict {
         let lost_families: Vec<String> = self.families.difference(families).cloned().collect();
-        let shortest = self
-            .required
-            .iter()
-            .filter(|index| self.commits[**index].logging == Logging::Wal)
-            .max()
-            .map_or(0, |index| index + 1);
-        let keys = self.keys();
-        let mut best: Option<Violation> = None;
+        let mut writers: BTreeMap<Key, Vec<usize>> = self
+            .keys()
+            .into_iter()
+            .chain(observed.keys().cloned())
+            .filter(|key| !lost_families.contains(&key.0))
+            .map(|key| (key, Vec::new()))
+            .collect();
+        for (index, commit) in self.commits.iter().enumerate() {
+            for (key, _) in &commit.writes {
+                if let Some(indices) = writers.get_mut(&(commit.family.clone(), key.clone())) {
+                    if indices.last() != Some(&index) {
+                        indices.push(index);
+                    }
+                }
+            }
+        }
+        let fails = |key: &Key, prefix: usize| {
+            !self
+                .allowed(key, &writers[key], prefix)
+                .contains(&observed.get(key).cloned())
+        };
+        let shortest = self.prefix_floor.iter().max().map_or(0, |index| index + 1);
+        let mut failing: BTreeSet<Key> = writers
+            .keys()
+            .filter(|key| fails(key, shortest))
+            .cloned()
+            .collect();
+        let mut best = (shortest, failing.len());
         for prefix in shortest..=self.commits.len() {
-            let failing: Vec<Mismatch> = keys
-                .iter()
-                .filter(|key| !lost_families.contains(&key.0))
-                .filter_map(|key| {
-                    let seen = observed.get(key).cloned();
-                    let allowed = self.allowed(key, prefix);
-                    (!allowed.contains(&seen)).then(|| Mismatch {
-                        key: key.clone(),
-                        observed: seen,
-                        allowed,
-                    })
-                })
-                .collect();
+            if prefix > shortest {
+                // Only the commit the prefix now takes in changes status.
+                let entered = &self.commits[prefix - 1];
+                for (key, _) in &entered.writes {
+                    let key = (entered.family.clone(), key.clone());
+                    if !writers.contains_key(&key) {
+                        continue;
+                    }
+                    if fails(&key, prefix) {
+                        failing.insert(key);
+                    } else {
+                        failing.remove(&key);
+                    }
+                }
+            }
             if failing.is_empty() && lost_families.is_empty() {
                 return Verdict::Consistent { prefix };
             }
-            if best
-                .as_ref()
-                .is_none_or(|best| failing.len() < best.keys.len())
-            {
-                best = Some(Violation {
-                    prefix,
-                    keys: failing,
-                    lost_families: lost_families.clone(),
-                });
+            if failing.len() < best.1 {
+                best = (prefix, failing.len());
             }
         }
-        Verdict::Violation(best.unwrap_or(Violation {
-            prefix: shortest,
-            keys: Vec::new(),
+        let prefix = best.0;
+        Verdict::Violation(Violation {
+            prefix,
+            keys: writers
+                .keys()
+                .filter(|key| fails(key, prefix))
+                .map(|key| Mismatch {
+                    key: key.clone(),
+                    observed: observed.get(key).cloned(),
+                    allowed: self.allowed(key, &writers[key], prefix),
+                })
+                .collect(),
             lost_families,
-        }))
+        })
     }
 }
 

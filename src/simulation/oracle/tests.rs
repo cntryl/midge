@@ -184,30 +184,81 @@ fn should_report_lost_family_when_acknowledged_creation_did_not_survive() {
 }
 
 #[test]
-fn should_judge_long_history_quickly_when_most_commits_are_optional() {
-    // Arrange: thousands of unlogged and failed commits, which subset
-    // semantics would make exponential.
+fn should_judge_long_history_quickly_when_only_the_full_prefix_fits() {
+    // Arrange: every prefix must be judged before the last one fits, the
+    // worst case for the search.
     let mut history = history();
-    for index in 0..2_000 {
-        let name = format!("k{}", index % 50);
+    let mut state = BTreeMap::new();
+    for index in 0..2_000_u32 {
+        let name = format!("k{index}");
         let value = index.to_string();
-        history.commit(write(
-            &name,
-            Some(&value),
-            if index % 2 == 0 {
-                Logging::Unlogged
-            } else {
-                Logging::Wal
-            },
-            index % 3 != 0,
-        ));
+        history.commit(put(&name, &value));
+        state.insert(key(&name), value.into_bytes());
     }
 
     // Act
     let started = std::time::Instant::now();
-    let verdict = history.check(&BTreeMap::new(), &families());
+    let verdict = history.check(&state, &families());
 
     // Assert
+    assert_eq!(verdict, Verdict::Consistent { prefix: 2_000 });
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn should_reject_key_the_history_never_wrote_when_it_reappears() {
+    // Arrange: k was deleted and verified absent before this history began.
+    let history = history();
+
+    // Act
+    let verdict = history.check(&observed(&[("k", "1")]), &families());
+
+    // Assert
+    assert!(matches!(verdict, Verdict::Violation(_)), "{verdict:?}");
+}
+
+#[test]
+fn should_allow_flushed_family_to_outlive_earlier_family_when_nothing_was_synced() {
+    // Arrange: a buffered put to the default family, then a buffered put to
+    // another family that is flushed.
+    let mut history = History::new(
+        BTreeMap::new(),
+        BTreeSet::from([FAMILY.to_string(), "other".to_string()]),
+    );
+    history.commit(put("k", "1"));
+    history.commit(Commit {
+        family: "other".to_string(),
+        writes: vec![(b"j".to_vec(), Some(b"2".to_vec()))],
+        logging: Logging::Wal,
+        acknowledged: true,
+    });
+    history.flushed("other");
+
+    // Act: the flushed family survived, the earlier unsynced write did not.
+    let verdict = history.check(
+        &BTreeMap::from([(("other".to_string(), b"j".to_vec()), b"2".to_vec())]),
+        &BTreeSet::from([FAMILY.to_string(), "other".to_string()]),
+    );
+
+    // Assert: a flush promises its own family, not ordering across families.
     assert!(matches!(verdict, Verdict::Consistent { .. }), "{verdict:?}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn should_round_trip_through_json_when_history_is_saved() {
+    // Arrange
+    let mut history = History::new(observed(&[("base", "0")]), families());
+    let synced = history.commit(put("k", "1"));
+    history.synced(synced);
+
+    // Act
+    let json = serde_json::to_string(&history).expect("encode history");
+    let decoded: History = serde_json::from_str(&json).expect("decode history");
+
+    // Assert
+    assert_eq!(
+        decoded.check(&observed(&[("base", "0"), ("k", "1")]), &families()),
+        Verdict::Consistent { prefix: 1 }
+    );
+    assert_eq!(decoded.keys(), history.keys());
 }

@@ -2,20 +2,27 @@
 //!
 //! Seeded workloads drive a local engine on a simulated device through
 //! clean restarts, process crashes, power losses and injected faults. After
-//! every reopen the oracle judges the recovered data against the history of
-//! commits, and a WAL invariant checks that no segment name is ever given
-//! twice. A finding carries a crash image: the device files of the last
-//! recovery point before it, with the history, the names given so far and
-//! the remaining workload, so replaying it needs nothing else. Images are
-//! written below `MIDGE_CAMPAIGN_IMAGES` when that variable names a
-//! directory.
+//! every reopen the oracle judges every key the workload can touch, in every
+//! family, against the history of commits, and a WAL invariant checks that
+//! no segment name is durably given twice. What recovery serves becomes the
+//! verified base for the next history: the engine may not lose a value it has
+//! already returned after a crash.
+//!
+//! A finding carries a crash image: the device files of the last recovery
+//! point before it, with the history, the names given so far and the
+//! remaining workload, so replaying it needs nothing else. Images are written
+//! below `MIDGE_CAMPAIGN_IMAGES` when that variable names a directory, and
+//! load back for replay.
 
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
-    Commit, CrashDevice, Fault, FaultEffect, FaultError, FaultOp, History, Logging, Verdict,
+    Commit, CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp, History, Logging,
+    Verdict, Violation,
 };
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,10 +33,11 @@ const LEASE_TTL: Duration = Duration::from_millis(40);
 /// made durable, so a power loss can bring the lock back and block every
 /// later open.
 const LEASE_LOCK: &str = ".midge_leader.lock";
+/// Workloads write keys `0..KEYS` in every family; recovery reads them all.
 const KEYS: u8 = 6;
 const DEFAULT: &str = "default";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Durability {
     Sync,
     Buffered,
@@ -53,7 +61,7 @@ impl Durability {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Op {
     Put {
         family: usize,
@@ -109,9 +117,12 @@ impl Rng {
 /// Which operations a workload draws, by weight.
 #[derive(Debug, Clone, Copy)]
 enum Profile {
-    /// Synced WAL writes through crashes and power losses only: no trigger
-    /// of a known #808 bug, so any finding is new.
-    Control,
+    /// Synced writes through process crashes and power losses.
+    CrashControl,
+    /// Synced and buffered writes, flushes, compaction, clean restarts and
+    /// power losses, without the triggers of known #808 bugs: no best-effort
+    /// writes, no faults, and no process crash before a power loss.
+    RetentionControl,
     /// Buffered writes, a process crash, then a power loss.
     BufferedCrashes,
     /// Families created and written, a process crash, then a power loss:
@@ -126,69 +137,56 @@ enum Profile {
 }
 
 impl Profile {
+    #[allow(clippy::too_many_lines)] // One weighted table per profile.
     fn op(self, rng: &mut Rng, families: usize) -> Op {
         let family = usize::try_from(rng.below(families as u64)).expect("family fits usize");
         let key = rng.key();
-        let durable = rng.pick(&[Durability::Sync, Durability::Buffered]);
+        let logged = rng.pick(&[Durability::Sync, Durability::Buffered]);
+        let put = |family, durability| Op::Put {
+            family,
+            key,
+            durability,
+        };
+        let delete = |family, durability| Op::Delete {
+            family,
+            key,
+            durability,
+        };
         match self {
-            Self::Control => match rng.below(10) {
-                0..=4 => Op::Put {
-                    family: 0,
-                    key,
-                    durability: Durability::Sync,
-                },
-                5..=6 => Op::Delete {
-                    family: 0,
-                    key,
-                    durability: Durability::Sync,
-                },
+            Self::CrashControl => match rng.below(10) {
+                0..=4 => put(0, Durability::Sync),
+                5..=6 => delete(0, Durability::Sync),
                 7 => Op::ProcessCrash,
+                _ => Op::PowerLoss { seed: rng.next() },
+            },
+            Self::RetentionControl => match rng.below(14) {
+                0..=4 => put(0, logged),
+                5..=6 => delete(0, logged),
+                7..=8 => Op::Flush { family: 0 },
+                9 => Op::Compact,
+                10 => Op::CleanRestart,
+                _ => Op::PowerLoss { seed: rng.next() },
+            },
+            Self::BufferedCrashes => match rng.below(8) {
+                0..=4 => put(0, Durability::Buffered),
+                5 => Op::ProcessCrash,
                 _ => Op::PowerLoss { seed: rng.next() },
             },
             Self::FamilyCrashes => match rng.below(10) {
                 0..=1 => Op::CreateFamily,
-                2..=5 => Op::Put {
-                    family,
-                    key,
-                    durability: Durability::Sync,
-                },
+                2..=5 => put(family, Durability::Sync),
                 6..=7 => Op::ProcessCrash,
                 _ => Op::PowerLoss { seed: rng.next() },
             },
-            Self::BufferedCrashes => match rng.below(8) {
-                0..=4 => Op::Put {
-                    family: 0,
-                    key,
-                    durability: Durability::Buffered,
-                },
-                5 => Op::ProcessCrash,
-                _ => Op::PowerLoss { seed: rng.next() },
-            },
             Self::BestEffortDelete => match rng.below(10) {
-                0..=3 => Op::Put {
-                    family: 0,
-                    key,
-                    durability: Durability::Sync,
-                },
-                4..=5 => Op::Delete {
-                    family: 0,
-                    key,
-                    durability: rng.pick(&[Durability::Sync, Durability::BestEffort]),
-                },
+                0..=3 => put(0, Durability::Sync),
+                4..=5 => delete(0, rng.pick(&[Durability::Sync, Durability::BestEffort])),
                 6..=7 => Op::Flush { family: 0 },
                 _ => Op::CleanRestart,
             },
             Self::FailedUnlink => match rng.below(15) {
-                0..=4 => Op::Put {
-                    family,
-                    key,
-                    durability: Durability::Sync,
-                },
-                5..=6 => Op::Delete {
-                    family,
-                    key,
-                    durability: Durability::Sync,
-                },
+                0..=4 => put(family, Durability::Sync),
+                5..=6 => delete(family, Durability::Sync),
                 7..=8 => Op::Flush { family },
                 9 => Op::Compact,
                 10 => Op::CreateFamily,
@@ -198,11 +196,7 @@ impl Profile {
                 _ => Op::CleanRestart,
             },
             Self::SegmentRetirement => match rng.below(8) {
-                0..=3 => Op::Put {
-                    family: 0,
-                    key,
-                    durability: durable,
-                },
+                0..=3 => put(0, logged),
                 4..=5 => Op::Flush { family: 0 },
                 _ => Op::CleanRestart,
             },
@@ -228,8 +222,8 @@ impl Profile {
 #[derive(Debug, Clone)]
 enum FindingKind {
     /// Recovered data no allowed history explains.
-    Data(String),
-    /// This WAL segment name was given to a file a second time.
+    Data(Violation),
+    /// This WAL segment name was durably given to a file a second time.
     SegmentReuse(String),
     /// The engine refused to open after a crash it must survive.
     OpenRefused(String),
@@ -240,29 +234,36 @@ impl FindingKind {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 
-    fn detail(&self) -> &str {
-        match self {
-            Self::Data(detail) | Self::SegmentReuse(detail) | Self::OpenRefused(detail) => detail,
-        }
+    /// Whether a key came back that only an absent value explains.
+    fn resurrects(&self) -> bool {
+        matches!(self, Self::Data(violation) if violation.keys.iter().any(|mismatch| {
+            mismatch.observed.is_some() && mismatch.allowed == [None]
+        }))
+    }
+
+    /// Whether a value recovery had to keep came back absent.
+    fn loses_required_value(&self) -> bool {
+        matches!(self, Self::Data(violation) if violation.keys.iter().any(|mismatch| {
+            mismatch.observed.is_none() && mismatch.allowed.iter().all(Option::is_some)
+        }))
     }
 }
 
 /// A recovery point: everything a replay needs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Image {
+    #[serde(skip)]
     files: BTreeMap<String, Vec<u8>>,
     history: History,
     families: Vec<String>,
     names: BTreeMap<String, u64>,
-    /// The operations after this point, starting with the recovery itself.
-    remaining: Vec<Recovery>,
-}
-
-/// A replay step: the recovery the image was taken for, then the workload.
-#[derive(Debug, Clone)]
-enum Recovery {
-    Reopen,
-    Run(Op),
+    /// Values written so far, so replayed writes stay distinct.
+    values: u64,
+    /// The operations after this point, after the recovery itself.
+    remaining: Vec<Op>,
+    /// Whether this point follows a crash, rather than a clean shutdown or
+    /// the start of the workload.
+    crashed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -271,15 +272,18 @@ struct Finding {
     seed: u64,
     workload: Vec<Op>,
     image: Image,
+    /// Injected faults that fired before the finding.
+    faults_fired: usize,
 }
 
-/// Which known #808 bug classes a campaign reports.
+/// Which known #808 bug classes a campaign reports, and how it copes with
+/// #811.
 #[derive(Debug, Clone, Copy)]
 struct Checks {
     /// Report a reused WAL segment name (`restarted-segment-id`).
     segment_reuse: bool,
-    /// Remove a stale lease lock as an operator would (#811) instead of
-    /// reporting the refused open.
+    /// After a power loss, remove a resurrected lease lock as an operator
+    /// would (#811) instead of reporting the refused open.
     clear_stale_lease_lock: bool,
 }
 
@@ -290,6 +294,14 @@ impl Default for Checks {
             clear_stale_lease_lock: true,
         }
     }
+}
+
+/// How the engine stopped before a recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    Clean,
+    ProcessCrash,
+    PowerLoss,
 }
 
 struct Campaign {
@@ -304,25 +316,29 @@ struct Campaign {
     restored_names: BTreeMap<String, u64>,
     values: u64,
     images: Vec<Image>,
-    /// Report WAL segment names given twice (`restarted-segment-id`).
-    check_segment_reuse: bool,
-    /// Remove a stale lease lock as an operator would (#811) instead of
-    /// reporting the refused open.
-    clear_stale_lease_lock: bool,
+    faults: Vec<FaultId>,
+    /// Resurrected lease locks removed after power losses (#811).
+    stale_lease_locks: usize,
+    checks: Checks,
 }
 
 impl Campaign {
-    fn new() -> Self {
-        Self::from_image(&Image {
-            files: BTreeMap::new(),
-            history: History::new(BTreeMap::new(), BTreeSet::from([DEFAULT.to_string()])),
-            families: vec![DEFAULT.to_string()],
-            names: BTreeMap::new(),
-            remaining: Vec::new(),
-        })
+    fn new(checks: Checks) -> Self {
+        Self::from_image(
+            &Image {
+                files: BTreeMap::new(),
+                history: History::new(BTreeMap::new(), BTreeSet::from([DEFAULT.to_string()])),
+                families: vec![DEFAULT.to_string()],
+                names: BTreeMap::new(),
+                values: 0,
+                remaining: Vec::new(),
+                crashed: false,
+            },
+            checks,
+        )
     }
 
-    fn from_image(image: &Image) -> Self {
+    fn from_image(image: &Image, checks: Checks) -> Self {
         let device = CrashDevice::with_files(&image.files);
         let restored_names = device.names_ever();
         Self {
@@ -333,10 +349,11 @@ impl Campaign {
             families: image.families.clone(),
             names_before: image.names.clone(),
             restored_names,
-            values: 0,
+            values: image.values,
             images: Vec::new(),
-            check_segment_reuse: true,
-            clear_stale_lease_lock: true,
+            faults: Vec::new(),
+            stale_lease_locks: 0,
+            checks,
         }
     }
 
@@ -355,7 +372,7 @@ impl Campaign {
         self.engine.as_ref().expect("engine is open")
     }
 
-    /// Names given so far, over every device this history used.
+    /// Names durably given so far, over every device this history used.
     fn names(&self) -> BTreeMap<String, u64> {
         let mut names = self.names_before.clone();
         for (name, count) in self.device.names_ever() {
@@ -365,18 +382,8 @@ impl Campaign {
         names
     }
 
-    fn image(&self, remaining: Vec<Recovery>) -> Image {
-        Image {
-            files: self.device.files(),
-            history: self.history.clone(),
-            families: self.families.clone(),
-            names: self.names(),
-            remaining,
-        }
-    }
-
     fn reused_segment(&self) -> Option<String> {
-        if !self.check_segment_reuse {
+        if !self.checks.segment_reuse {
             return None;
         }
         self.names().into_iter().find_map(|(name, count)| {
@@ -385,16 +392,57 @@ impl Campaign {
         })
     }
 
-    /// Reopen after a restart or crash, then judge what recovery kept.
-    fn recover(&mut self, crashed: bool) -> Result<(), FindingKind> {
+    fn faults_fired(&self) -> usize {
+        self.faults
+            .iter()
+            .filter(|fault| self.device.fired(**fault))
+            .count()
+    }
+
+    /// Record a recovery point for replay.
+    fn snapshot(&mut self, remaining: &[Op], crashed: bool) {
+        let image = Image {
+            files: self.device.files(),
+            history: self.history.clone(),
+            families: self.families.clone(),
+            names: self.names(),
+            values: self.values,
+            remaining: remaining.to_vec(),
+            crashed,
+        };
+        self.images.push(image);
+    }
+
+    /// The recovery point a replay of `kind` starts from: the latest one, or
+    /// for a reused segment name the latest before the reuse. The first
+    /// point precedes the workload, so one always exists.
+    fn image_for(&self, kind: &FindingKind) -> Image {
+        self.images
+            .iter()
+            .rev()
+            .find(|image| match kind {
+                FindingKind::SegmentReuse(name) => image.names.get(name).copied().unwrap_or(0) <= 1,
+                FindingKind::Data(_) | FindingKind::OpenRefused(_) => true,
+            })
+            .cloned()
+            .expect("the first recovery point precedes every finding")
+    }
+
+    /// Reopen after `stop`, then judge what recovery kept.
+    fn recover(&mut self, stop: Stop) -> Result<(), FindingKind> {
         self.device.disarm_faults();
-        if crashed {
+        if stop != Stop::Clean {
             // A restarted process takes the dead one's lease over once it
             // is stale.
             std::thread::sleep(LEASE_TTL * 3);
         }
         let engine = match Engine::open(self.options()) {
-            Err(error) if self.clear_stale_lease_lock && error.to_string().contains(LEASE_LOCK) => {
+            Err(error)
+                if stop == Stop::PowerLoss
+                    && self.checks.clear_stale_lease_lock
+                    && error.to_string().contains(LEASE_LOCK) =>
+            {
+                self.stale_lease_locks += 1;
                 self.device
                     .fs()
                     .remove_file(&FsPath::new(LEASE_LOCK))
@@ -405,27 +453,29 @@ impl Campaign {
         }
         .map_err(|error| FindingKind::OpenRefused(error.to_string()))?;
         self.engine = Some(engine);
-        self.verify()
+        self.verify()?;
+        self.reused_segment()
+            .map_or(Ok(()), |reuse| Err(FindingKind::SegmentReuse(reuse)))
     }
 
+    /// Read every key the workload can write, in every family recovery
+    /// holds, and judge it.
     fn verify(&mut self) -> Result<(), FindingKind> {
         let engine = self.engine();
-        let families: BTreeSet<String> = engine
-            .list_column_families()
-            .expect("list families")
+        let handles = engine.list_column_families().expect("list families");
+        let families: BTreeSet<String> = handles
             .iter()
             .map(|family| family.name().to_string())
             .collect();
         let mut observed = BTreeMap::new();
-        for (family, key) in self.history.keys() {
-            let Some(handle) = engine.get_column_family(&family) else {
-                continue;
-            };
+        for handle in &handles {
             let tx = engine
                 .begin_tx(handle.id(), TransactionMode::ReadOnly)
                 .expect("read");
-            if let Some(value) = tx.get(&key).expect("get") {
-                observed.insert((family, key), value.to_vec());
+            for key in 0..KEYS {
+                if let Some(value) = tx.get(&[key]).expect("get") {
+                    observed.insert((handle.name().to_string(), vec![key]), value.to_vec());
+                }
             }
         }
         match self.history.check(&observed, &families) {
@@ -433,12 +483,16 @@ impl Campaign {
                 self.history = History::new(observed, families);
                 Ok(())
             }
-            Verdict::Violation(violation) => Err(FindingKind::Data(format!("{violation:?}"))),
+            Verdict::Violation(violation) => Err(FindingKind::Data(violation)),
         }
     }
 
+    fn family(&self, family: usize) -> String {
+        self.families[family.min(self.families.len() - 1)].clone()
+    }
+
     fn write(&mut self, family: usize, key: u8, delete: bool, durability: Durability) {
-        let family = self.families[family.min(self.families.len() - 1)].clone();
+        let family = self.family(family);
         self.values += 1;
         let value = (!delete).then(|| format!("v{}", self.values).into_bytes());
         let engine = self.engine();
@@ -463,47 +517,31 @@ impl Campaign {
         }
     }
 
-    /// The process dies; reopen from what the device kept.
-    fn crash(
+    /// Stop the engine by `stop`, record the recovery point, and recover.
+    fn restart(
         &mut self,
-        step: usize,
-        workload: &[Op],
-        power_loss: Option<u64>,
+        stop: Stop,
+        remaining: &[Op],
+        power_seed: u64,
     ) -> Result<(), FindingKind> {
-        self.device.process_crash();
-        if let Some(seed) = power_loss {
-            self.device.power_loss(seed);
+        if stop == Stop::Clean {
+            let mut engine = self.engine.take().expect("engine is open");
+            if engine.shutdown(Duration::from_secs(10)).is_ok() {
+                self.history.shut_down();
+            }
+        } else {
+            self.device.process_crash();
+            if stop == Stop::PowerLoss {
+                self.device.power_loss(power_seed);
+            }
+            // The fenced process can no longer reach the device.
+            drop(self.engine.take());
         }
-        // The fenced process can no longer reach the device.
-        drop(self.engine.take());
-        self.snapshot(step, workload);
-        self.recover(true)
+        self.snapshot(remaining, stop != Stop::Clean);
+        self.recover(stop)
     }
 
-    fn snapshot(&mut self, step: usize, workload: &[Op]) {
-        let remaining = std::iter::once(Recovery::Reopen)
-            .chain(workload[step + 1..].iter().cloned().map(Recovery::Run))
-            .collect();
-        let image = self.image(remaining);
-        self.images.push(image);
-    }
-
-    /// The recovery point a replay of `kind` starts from: the latest one,
-    /// or for a reused segment name the latest before the reuse.
-    fn image_for(&self, kind: &FindingKind) -> Image {
-        let latest = |image: &&Image| match kind {
-            FindingKind::SegmentReuse(name) => image.names.get(name).copied().unwrap_or(0) <= 1,
-            FindingKind::Data(_) | FindingKind::OpenRefused(_) => true,
-        };
-        self.images
-            .iter()
-            .rev()
-            .find(latest)
-            .cloned()
-            .unwrap_or_else(|| self.image(Vec::new()))
-    }
-
-    fn apply(&mut self, step: usize, op: &Op, workload: &[Op]) -> Result<(), FindingKind> {
+    fn apply(&mut self, op: &Op, remaining: &[Op]) -> Result<(), FindingKind> {
         match op {
             Op::Put {
                 family,
@@ -516,7 +554,7 @@ impl Campaign {
                 durability,
             } => self.write(*family, *key, true, *durability),
             Op::Flush { family } => {
-                let name = self.families[(*family).min(self.families.len() - 1)].clone();
+                let name = self.family(*family);
                 let engine = self.engine();
                 let handle = engine.get_column_family(&name).expect("family exists");
                 if engine.flush_cf(&handle).is_ok() {
@@ -533,85 +571,64 @@ impl Campaign {
                     self.families.push(name);
                 }
             }
-            Op::CleanRestart => {
-                let mut engine = self.engine.take().expect("engine is open");
-                if engine.shutdown(Duration::from_secs(10)).is_ok() {
-                    self.history.shut_down();
-                }
-                drop(engine);
-                self.snapshot(step, workload);
-                self.recover(false)?;
-            }
-            Op::ProcessCrash => self.crash(step, workload, None)?,
-            Op::PowerLoss { seed } => self.crash(step, workload, Some(*seed))?,
+            Op::CleanRestart => self.restart(Stop::Clean, remaining, 0)?,
+            Op::ProcessCrash => self.restart(Stop::ProcessCrash, remaining, 0)?,
+            Op::PowerLoss { seed } => self.restart(Stop::PowerLoss, remaining, *seed)?,
             Op::FailWalRemoval { nth } => {
-                let _ = self.device.inject(Fault {
+                let fault = self.device.inject(Fault {
                     op: FaultOp::RemoveFile,
                     path: "wal".into(),
                     nth: *nth,
                     effect: FaultEffect::Before,
                     error: FaultError::Io,
                 });
+                self.faults.push(fault);
             }
         }
         self.reused_segment()
             .map_or(Ok(()), |reuse| Err(FindingKind::SegmentReuse(reuse)))
     }
 
-    /// Run `workload`, ending with a clean restart; return the first finding.
-    fn run_with(seed: u64, workload: &[Op], checks: Checks) -> Result<(), Box<Finding>> {
-        let mut campaign = Self::new();
-        campaign.clear_stale_lease_lock = checks.clear_stale_lease_lock;
-        campaign.check_segment_reuse = checks.segment_reuse;
-        let finding = |campaign: &Campaign, kind: FindingKind| {
-            Box::new(Finding {
-                image: campaign.image_for(&kind),
-                kind,
-                seed,
-                workload: workload.to_vec(),
-            })
-        };
-        if let Err(kind) = campaign.recover(false) {
-            return Err(finding(&campaign, kind));
-        }
+    /// Run `workload` and a final clean restart from the recovery point
+    /// `campaign` holds; return the first finding.
+    fn drive(&mut self, workload: &[Op], stop: Stop) -> Result<(), FindingKind> {
+        self.recover(stop)?;
         let mut full = workload.to_vec();
         full.push(Op::CleanRestart);
         for (step, op) in full.iter().enumerate() {
-            if let Err(kind) = campaign.apply(step, op, &full) {
-                return Err(finding(&campaign, kind));
-            }
+            self.apply(op, &full[step + 1..])?;
         }
-        let mut engine = campaign.engine.take().expect("engine is open");
+        let mut engine = self.engine.take().expect("engine is open");
         engine
             .shutdown(Duration::from_secs(10))
             .expect("final shutdown");
         Ok(())
     }
 
+    /// Run `workload` on a fresh device; return the first finding.
+    fn run(seed: u64, workload: &[Op], checks: Checks) -> Result<(), Box<Finding>> {
+        let mut campaign = Self::new(checks);
+        campaign.snapshot(workload, false);
+        campaign.drive(workload, Stop::Clean).map_err(|kind| {
+            Box::new(Finding {
+                image: campaign.image_for(&kind),
+                faults_fired: campaign.faults_fired(),
+                kind,
+                seed,
+                workload: workload.to_vec(),
+            })
+        })
+    }
+
     /// Replay an image from its recovery point; return what it finds.
     fn replay(image: &Image, checks: Checks) -> Result<(), FindingKind> {
-        let mut campaign = Self::from_image(image);
-        campaign.clear_stale_lease_lock = checks.clear_stale_lease_lock;
-        campaign.check_segment_reuse = checks.segment_reuse;
-        let workload: Vec<Op> = image
-            .remaining
-            .iter()
-            .filter_map(|step| match step {
-                Recovery::Run(op) => Some(op.clone()),
-                Recovery::Reopen => None,
-            })
-            .collect();
-        campaign.recover(true)?;
-        if let Some(reuse) = campaign.reused_segment() {
-            return Err(FindingKind::SegmentReuse(reuse));
-        }
-        for (step, op) in workload.iter().enumerate() {
-            campaign.apply(step, op, &workload)?;
-        }
-        if let Some(mut engine) = campaign.engine.take() {
-            let _ = engine.shutdown(Duration::from_secs(10));
-        }
-        Ok(())
+        let mut campaign = Self::from_image(image, checks);
+        let stop = if image.crashed {
+            Stop::PowerLoss
+        } else {
+            Stop::Clean
+        };
+        campaign.drive(&image.remaining, stop)
     }
 }
 
@@ -624,9 +641,8 @@ fn campaign(
 ) -> Option<Finding> {
     let found = seeds
         .map(|seed| (seed, profile.workload(seed, len)))
-        .find_map(|(seed, workload)| Campaign::run_with(seed, &workload, checks).err())?;
-    let found = *found;
-    Some(shrink(found, checks))
+        .find_map(|(seed, workload)| Campaign::run(seed, &workload, checks).err())?;
+    Some(shrink(*found, checks))
 }
 
 /// Drop operations one at a time while the same class of finding remains.
@@ -637,7 +653,7 @@ fn shrink(mut finding: Finding, checks: Checks) -> Finding {
         attempts += 1;
         let mut candidate = finding.workload.clone();
         candidate.remove(index);
-        match Campaign::run_with(finding.seed, &candidate, checks) {
+        match Campaign::run(finding.seed, &candidate, checks) {
             Err(smaller) if smaller.kind.same_class(&finding.kind) => finding = *smaller,
             _ => index += 1,
         }
@@ -645,62 +661,120 @@ fn shrink(mut finding: Finding, checks: Checks) -> Finding {
     finding
 }
 
-/// Write `finding`'s image below `MIDGE_CAMPAIGN_IMAGES`, if set.
-fn save(case: &str, finding: &Finding) {
-    let Some(root) = std::env::var_os("MIDGE_CAMPAIGN_IMAGES") else {
-        return;
-    };
-    let directory = std::path::Path::new(&root).join(format!("{case}-seed-{}", finding.seed));
-    for (path, bytes) in &finding.image.files {
+/// Write `image` below `directory`: its files under `files/`, the rest as
+/// JSON. An earlier image there is replaced.
+fn save_image(directory: &Path, image: &Image) {
+    if directory.exists() {
+        std::fs::remove_dir_all(directory).expect("replace earlier image");
+    }
+    for (path, bytes) in &image.files {
         let target = directory.join("files").join(path);
         std::fs::create_dir_all(target.parent().expect("image file parent"))
             .expect("image directory");
         std::fs::write(target, bytes).expect("write image file");
     }
+    std::fs::create_dir_all(directory).expect("image directory");
     std::fs::write(
-        directory.join("history.json"),
-        serde_json::to_vec_pretty(&finding.image.history).expect("encode history"),
+        directory.join("image.json"),
+        serde_json::to_vec_pretty(image).expect("encode image"),
     )
-    .expect("write history");
-    std::fs::write(
-        directory.join("finding.txt"),
-        format!(
-            "{}\n\nworkload: {:#?}\n\nremaining after image: {:#?}\n\nnames: {:#?}\n",
-            finding.kind.detail(),
-            finding.workload,
-            finding.image.remaining,
-            finding.image.names
-        ),
-    )
-    .expect("write finding");
+    .expect("write image");
 }
 
-/// Assert `finding` is of `class`, save it, and prove its image replays it.
-fn assert_reproduced(case: &str, finding: Option<Finding>, class: &FindingKind, checks: Checks) {
-    let finding = finding.unwrap_or_else(|| panic!("{case}: the campaign found nothing"));
-    assert!(
-        finding.kind.same_class(class),
-        "{case}: found {:?} instead",
-        finding.kind
+/// Read an image `save_image` wrote.
+fn load_image(directory: &Path) -> Image {
+    let mut image: Image =
+        serde_json::from_slice(&std::fs::read(directory.join("image.json")).expect("read image"))
+            .expect("decode image");
+    let root = directory.join("files");
+    let mut pending = vec![root.clone()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("image entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("image file below root")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                image
+                    .files
+                    .insert(relative, std::fs::read(&path).expect("read image file"));
+            }
+        }
+    }
+    image
+}
+
+/// Save `finding`'s image below `MIDGE_CAMPAIGN_IMAGES`, or a temporary
+/// directory, and load it back: replays run from what was saved.
+fn saved_and_loaded(case: &str, finding: &Finding) -> Image {
+    let temporary = tempfile::tempdir().expect("image directory");
+    let directory = std::env::var_os("MIDGE_CAMPAIGN_IMAGES").map_or_else(
+        || temporary.path().join(case),
+        |root| Path::new(&root).join(format!("{case}-seed-{}", finding.seed)),
     );
-    save(case, &finding);
-    let replayed = Campaign::replay(&finding.image, checks);
+    save_image(&directory, &finding.image);
+    std::fs::write(
+        directory.join("finding.txt"),
+        format!("{:#?}\n\nworkload: {:#?}\n", finding.kind, finding.workload),
+    )
+    .expect("write finding");
+    load_image(&directory)
+}
+
+/// Assert `finding` matches `signature`, save its image, and prove the saved
+/// image replays it.
+fn assert_reproduced(
+    case: &str,
+    finding: Option<Finding>,
+    signature: impl Fn(&Finding) -> bool,
+    checks: Checks,
+) {
+    let finding = finding.unwrap_or_else(|| panic!("{case}: the campaign found nothing"));
+    assert!(signature(&finding), "{case}: found {finding:#?}");
+    let image = saved_and_loaded(case, &finding);
+    let replayed = Campaign::replay(&image, checks);
     assert!(
         replayed
             .as_ref()
             .is_err_and(|kind| kind.same_class(&finding.kind)),
-        "{case}: the image did not reproduce {:?}: {replayed:?}",
+        "{case}: the saved image did not reproduce {:?}: {replayed:?}",
         finding.kind
     );
 }
 
 #[test]
-fn should_find_no_violation_when_control_workload_survives_crashes() {
+fn should_find_no_violation_when_synced_writes_survive_crashes() {
     // Arrange
     let workloads = 0..8;
 
     // Act
-    let finding = campaign(Profile::Control, workloads, 24, Checks::default());
+    let finding = campaign(Profile::CrashControl, workloads, 24, Checks::default());
+
+    // Assert
+    assert!(finding.is_none(), "{finding:#?}");
+}
+
+#[test]
+fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
+    // Arrange: segment-name reuse after restarts is the known
+    // `restarted-segment-id`, reported by its own campaign.
+    let workloads = 0..8;
+    let checks = Checks {
+        segment_reuse: false,
+        ..Checks::default()
+    };
+
+    // Act
+    let finding = campaign(Profile::RetentionControl, workloads, 30, checks);
 
     // Assert
     assert!(finding.is_none(), "{finding:#?}");
@@ -731,11 +805,22 @@ fn should_reproduce_best_effort_delete_when_campaigning() {
     // Act
     let finding = campaign(Profile::BestEffortDelete, 0..20, 16, checks);
 
-    // Assert
+    // Assert: a key came back after a best-effort delete.
     assert_reproduced(
         "best-effort-delete",
         finding,
-        &FindingKind::Data(String::new()),
+        |finding| {
+            finding.kind.resurrects()
+                && finding.workload.iter().any(|op| {
+                    matches!(
+                        op,
+                        Op::Delete {
+                            durability: Durability::BestEffort,
+                            ..
+                        }
+                    )
+                })
+        },
         checks,
     );
 }
@@ -751,11 +836,11 @@ fn should_reproduce_failed_local_unlink_when_campaigning() {
     // Act
     let finding = campaign(Profile::FailedUnlink, 0..40, 30, checks);
 
-    // Assert
+    // Assert: a deleted key came back after a WAL removal failed.
     assert_reproduced(
         "failed-local-unlink",
         finding,
-        &FindingKind::Data(String::new()),
+        |finding| finding.kind.resurrects() && finding.faults_fired > 0,
         checks,
     );
 }
@@ -772,7 +857,7 @@ fn should_reproduce_restarted_segment_id_when_campaigning() {
     assert_reproduced(
         "restarted-segment-id",
         finding,
-        &FindingKind::SegmentReuse(String::new()),
+        |finding| matches!(&finding.kind, FindingKind::SegmentReuse(name) if name.starts_with("wal/")),
         Checks::default(),
     );
 }
@@ -785,11 +870,18 @@ fn should_reproduce_recovered_tail_loss_when_campaigning() {
     // Act
     let finding = campaign(Profile::BufferedCrashes, workloads, 12, Checks::default());
 
-    // Assert
+    // Assert: a value recovery served after a process crash was lost.
     assert_reproduced(
         "recovered-tail-not-durable",
         finding,
-        &FindingKind::Data(String::new()),
+        |finding| {
+            finding.kind.loses_required_value()
+                && finding.workload.contains(&Op::ProcessCrash)
+                && finding
+                    .workload
+                    .iter()
+                    .any(|op| matches!(op, Op::PowerLoss { .. }))
+        },
         Checks::default(),
     );
 }
@@ -804,15 +896,15 @@ fn should_reproduce_stale_lease_lock_when_power_is_lost() {
 
     // Act
     let found = (0..8)
-        .map(|seed| (seed, Profile::Control.workload(seed, 24)))
-        .find_map(|(seed, workload)| Campaign::run_with(seed, &workload, checks).err())
+        .map(|seed| (seed, Profile::CrashControl.workload(seed, 24)))
+        .find_map(|(seed, workload)| Campaign::run(seed, &workload, checks).err())
         .map(|finding| *finding);
 
     // Assert
     assert_reproduced(
         "stale-lease-lock",
-        found.filter(|finding| finding.kind.detail().contains(LEASE_LOCK)),
-        &FindingKind::OpenRefused(String::new()),
+        found,
+        |finding| matches!(&finding.kind, FindingKind::OpenRefused(error) if error.contains(LEASE_LOCK)),
         checks,
     );
 }
@@ -826,13 +918,13 @@ fn should_reproduce_stale_lease_lock_when_power_is_lost() {
 fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
     // Arrange: a buffered put, then the process dies and a restarted process
     // recovers and serves the replayed tail.
-    let mut campaign = Campaign::new();
-    campaign.recover(false).expect("first open");
+    let mut campaign = Campaign::new(Checks::default());
+    campaign.recover(Stop::Clean).expect("first open");
     campaign.write(0, 1, false, Durability::Buffered);
     campaign.device.process_crash();
     drop(campaign.engine.take());
     campaign
-        .recover(true)
+        .recover(Stop::ProcessCrash)
         .expect("recover from the process crash");
     let served = campaign
         .history
@@ -842,7 +934,7 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
     // Act: power is lost with nothing unsynced reaching the device.
     campaign.device.power_loss_with(|_| 0);
     drop(campaign.engine.take());
-    let recovered = campaign.recover(true);
+    let recovered = campaign.recover(Stop::PowerLoss);
 
     // Assert
     assert!(served, "recovery did not serve the buffered tail");
