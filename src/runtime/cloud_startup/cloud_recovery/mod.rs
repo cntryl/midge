@@ -359,51 +359,18 @@ impl CloudStartupRecovery {
         fs: &dyn crate::io::Fs,
         path: &crate::io::FsPath,
     ) -> MidgeResult<()> {
-        const COPY_CHUNK: u64 = 1024 * 1024;
         let retained_path = Self::unused_retained_path(fs, path)?;
-        (|| {
-            let source = fs.open(
-                path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?;
-            let mut retained = fs.open(
-                &retained_path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: false,
-                    create_new: true,
-                    truncate: false,
-                },
-            )?;
-            let length = source.len()?;
-            let mut offset = 0;
-            while offset < length {
-                let chunk = source.read_at(offset, COPY_CHUNK.min(length - offset))?;
-                if chunk.is_empty() {
-                    return Err(FsError::Io(format!(
-                        "short read copying '{}' at byte {offset}",
-                        path.0
-                    )));
+        crate::io::copy_durably(fs, path, &retained_path)
+            .map(|_| ())
+            .map_err(|error| {
+                if let FsError::Timeout(message) = error {
+                    return MidgeError::Timeout(message);
                 }
-                offset += chunk.len() as u64;
-                retained.append(chunk)?;
-            }
-            retained.sync(crate::io::Durability::Durable)
-        })()
-        .map_err(|error| {
-            if let FsError::Timeout(message) = error {
-                return MidgeError::Timeout(message);
-            }
-            MidgeError::RecoveryFailed(format!(
-                "failed to retain a copy of local WAL '{}' as '{}': {error}",
-                path.0, retained_path.0
-            ))
-        })
+                MidgeError::RecoveryFailed(format!(
+                    "failed to retain a copy of local WAL '{}' as '{}': {error}",
+                    path.0, retained_path.0
+                ))
+            })
     }
 
     fn unused_retained_path(

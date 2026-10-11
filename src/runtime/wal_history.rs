@@ -35,17 +35,33 @@ impl WalHistory {
     /// The ledger as stored in `wal`, without changing anything: for epoch
     /// discovery and verification, which do not hold the lease. `None`
     /// before the first open.
+    ///
+    /// # Errors
+    ///
+    /// Fails, as the writable open would, when segment files hold data but
+    /// no ledger names them.
     pub(crate) fn read(wal: &Arc<dyn Fs>) -> MidgeResult<Option<WalLedger>> {
-        Ok(LedgerStore::load(wal)?.map(|(ledger, _tail)| ledger))
+        if let Some((ledger, _tail)) = LedgerStore::load(wal)? {
+            return Ok(Some(ledger));
+        }
+        for (_, name) in segment_files(wal.as_ref())? {
+            if !is_empty(wal.as_ref(), &name)? {
+                return Err(unrecorded_history(&name));
+            }
+        }
+        Ok(None)
     }
 
-    /// Open the ledger for writing, under the lease. A database without one
-    /// gets one whose first open segment is `first_open`.
+    /// Open the ledger for writing, under the lease, and sweep the files it
+    /// does not name. A database without one gets one whose first open
+    /// segment is `first_open`.
     pub(crate) fn open(wal: Arc<dyn Fs>, first_open: SegmentId) -> MidgeResult<Self> {
-        match LedgerStore::open(Arc::clone(&wal))? {
-            Some(store) => Ok(Self { wal, store }),
-            None => Self::genesis(wal, first_open),
-        }
+        let history = match LedgerStore::open(Arc::clone(&wal))? {
+            Some(store) => Self { wal, store },
+            None => Self::genesis(wal, first_open)?,
+        };
+        history.sweep_orphans()?;
+        Ok(history)
     }
 
     /// Start the history of a new database: create its first segment, then
@@ -54,14 +70,13 @@ impl WalHistory {
     fn genesis(wal: Arc<dyn Fs>, first_open: SegmentId) -> MidgeResult<Self> {
         wal.create_dir_all(&FsPath::new(""))
             .map_err(FsError::into_midge)?;
-        if let Some(name) = segment_files(wal.as_ref())?
-            .into_iter()
-            .find(|(id, _)| *id != first_open)
-            .map(|(_, name)| name)
-        {
-            return Err(MidgeError::RecoveryFailed(format!(
-                "WAL segment {name} exists without a WAL ledger; refusing to start a new history over it"
-            )));
+        // Empty files are what an interrupted genesis or rotation leaves;
+        // the sweep after genesis removes them. Data is history this ledger
+        // never knew.
+        for (_, name) in segment_files(wal.as_ref())? {
+            if !is_empty(wal.as_ref(), &name)? {
+                return Err(unrecorded_history(&name));
+            }
         }
         create_segment(wal.as_ref(), first_open)?;
         let mut ledger = WalLedger::empty();
@@ -127,9 +142,9 @@ impl WalHistory {
         })
     }
 
-    /// Remove segment files the ledger does not name, and staging residue.
-    /// Members are never touched.
-    pub(crate) fn sweep_orphans(&self) -> MidgeResult<usize> {
+    /// Remove segment files the ledger does not name. Members are never
+    /// touched.
+    fn sweep_orphans(&self) -> MidgeResult<usize> {
         let ledger = self.ledger();
         let mut removed = 0;
         for (id, name) in segment_files(self.wal.as_ref())? {
@@ -195,11 +210,14 @@ impl WalHistory {
     /// Salvage: continue history in a new segment, at least `open_at_least`,
     /// without the members `set_aside` names.
     ///
-    /// Each affected file is first copied into `salvaged-<millis>/`, which
-    /// nothing reads, so a crash at any step loses nothing: until the ledger
-    /// records the set-aside every member is still history, and afterwards
-    /// the dropped members are orphans that the sweep removes. A cut segment
-    /// is truncated only once the ledger no longer replays past it.
+    /// What salvage drops is kept first, in a new `salvaged-…/` directory
+    /// nothing reads: a copy of the cut segment, which stays history, and the
+    /// dropped members themselves, moved there in ascending order. Then the
+    /// next segment is created, the ledger records the set-aside, and the cut
+    /// segment is cut back to the prefix replay applied. A crash before the
+    /// ledger records it leaves the ledger naming members whose files moved,
+    /// which the next salvage sets aside from the same point; after it, every
+    /// remaining step is safe to repeat.
     pub(crate) fn set_aside(
         &mut self,
         set_aside: SetAside,
@@ -215,17 +233,18 @@ impl WalHistory {
                 Some(cut),
             ),
         };
-        let affected: Vec<SegmentId> = cut
-            .map(|cut| cut.segment)
-            .into_iter()
-            .chain(ledger.members().filter(|id| *id >= from))
-            .collect();
+        let dropped: Vec<SegmentId> = ledger.members().filter(|id| *id >= from).collect();
         let open = ledger.next_segment_id().max(open_at_least);
-        let aside = copy_aside(self.wal.as_ref(), &affected)?;
+        let aside = self.keep_aside(cut.map(|cut| cut.segment), &dropped)?;
         create_segment(self.wal.as_ref(), open)?;
         self.commit(&LedgerEdit::SetAside { from, open })?;
         if let Some(cut) = cut {
-            truncate(self.wal.as_ref(), cut)?;
+            crate::io::truncate_durably(
+                self.wal.as_ref(),
+                &FsPath::new(crate::wal::segment_file_name(cut.segment)),
+                cut.valid_bytes,
+            )
+            .map_err(FsError::into_midge)?;
         }
         self.sweep_orphans()?;
         tracing::warn!(
@@ -236,6 +255,32 @@ impl WalHistory {
             "set aside WAL that salvage recovery did not replay"
         );
         Ok(())
+    }
+
+    /// Keep what salvage drops in a new directory: a durable copy of `cut`,
+    /// then each of `dropped` moved there. A dropped member whose file is
+    /// already gone has nothing to keep.
+    fn keep_aside(&self, cut: Option<SegmentId>, dropped: &[SegmentId]) -> MidgeResult<FsPath> {
+        let wal = self.wal.as_ref();
+        let aside = unused_aside_directory(wal)?;
+        wal.create_dir_all(&aside).map_err(FsError::into_midge)?;
+        if let Some(id) = cut {
+            let name = crate::wal::segment_file_name(id);
+            crate::io::copy_durably(wal, &FsPath::new(&name), &join(&aside, &name))
+                .map_err(FsError::into_midge)?;
+        }
+        for id in dropped {
+            let name = FsPath::new(crate::wal::segment_file_name(*id));
+            if wal.exists(&name).map_err(FsError::into_midge)? {
+                wal.rename_atomic(&name, &join(&aside, &name.0))
+                    .map_err(FsError::into_midge)?;
+            }
+        }
+        wal.sync_dir(&aside, Durability::Durable)
+            .map_err(FsError::into_midge)?;
+        wal.sync_dir(&FsPath::new(""), Durability::Durable)
+            .map_err(FsError::into_midge)?;
+        Ok(aside)
     }
 }
 
@@ -284,74 +329,29 @@ pub(crate) struct SalvageCut {
     pub(crate) valid_bytes: u64,
 }
 
-/// Copy `segments` durably into a new `salvaged-<millis>/` directory.
-fn copy_aside(wal: &dyn Fs, segments: &[SegmentId]) -> MidgeResult<FsPath> {
-    const CHUNK: u64 = 4 << 20;
+fn unrecorded_history(name: &str) -> MidgeError {
+    MidgeError::RecoveryFailed(format!(
+        "WAL segment {name} exists without a WAL ledger; refusing to start a new history over it"
+    ))
+}
+
+/// A `salvaged-<millis>[-n]/` directory name that does not exist yet.
+fn unused_aside_directory(wal: &dyn Fs) -> MidgeResult<FsPath> {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis());
-    let aside = FsPath::new(format!("salvaged-{millis}"));
-    wal.create_dir_all(&aside).map_err(FsError::into_midge)?;
-    for id in segments {
-        let name = crate::wal::segment_file_name(*id);
-        let source = wal
-            .open(&FsPath::new(&name), read_only())
-            .map_err(FsError::into_midge)?;
-        let length = source.len().map_err(FsError::into_midge)?;
-        let mut copy = wal
-            .open(
-                &join(&aside, &name),
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: true,
-                    create_new: true,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        let mut offset = 0;
-        while offset < length {
-            let bytes = source
-                .read_at(offset, CHUNK.min(length - offset))
-                .map_err(FsError::into_midge)?;
-            copy.write_at(offset, bytes).map_err(FsError::into_midge)?;
-            offset += CHUNK.min(length - offset);
+    for attempt in 0_u32.. {
+        let name = if attempt == 0 {
+            format!("salvaged-{millis}")
+        } else {
+            format!("salvaged-{millis}-{attempt}")
+        };
+        let path = FsPath::new(name);
+        if !wal.exists(&path).map_err(FsError::into_midge)? {
+            return Ok(path);
         }
-        copy.sync(Durability::Durable)
-            .map_err(FsError::into_midge)?;
     }
-    wal.sync_dir(&aside, Durability::Durable)
-        .map_err(FsError::into_midge)?;
-    wal.sync_dir(&FsPath::new(""), Durability::Durable)
-        .map_err(FsError::into_midge)?;
-    Ok(aside)
-}
-
-/// Cut segment `cut.segment` back to its verified prefix, durably.
-fn truncate(wal: &dyn Fs, cut: SalvageCut) -> MidgeResult<()> {
-    let mut file = wal
-        .open(
-            &FsPath::new(crate::wal::segment_file_name(cut.segment)),
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .map_err(FsError::into_midge)?;
-    file.truncate(cut.valid_bytes)
-        .map_err(FsError::into_midge)?;
-    file.sync(Durability::Durable).map_err(FsError::into_midge)
-}
-
-fn read_only() -> OpenOptions {
-    OpenOptions {
-        mode: OpenMode::ReadOnly,
-        create: false,
-        create_new: false,
-        truncate: false,
-    }
+    unreachable!("some salvage directory name below u32::MAX attempts is free")
 }
 
 /// The files `ledger` replays, relative to `wal_dir`: sealed members in

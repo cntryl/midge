@@ -78,7 +78,6 @@ fn reopen_with_intact_members(
     expected: &BTreeMap<SegmentId, Vec<u8>>,
 ) -> WalHistory {
     let history = WalHistory::open(wal(device), 1).expect("reopen after the crash");
-    history.sweep_orphans().expect("sweep after the crash");
     let files = device.files();
     for id in history.ledger().members() {
         let held = files
@@ -325,22 +324,64 @@ fn should_reopen_without_losing_kept_history_when_power_is_lost_during_salvage()
 
         // Act
         device.power_loss(seed);
-        let reopened = reopen_with_intact_members(&device, &segment_bytes(1..=1));
+        let reopened = WalHistory::open(wal(&device), 1).expect("reopen after power loss");
 
-        // Assert: the set-aside is durable or absent. A durable one kept its
-        // salvage copies; an absent one kept every member whole.
+        // Assert: the set-aside is durable or absent, and no byte salvage
+        // dropped is lost: each segment is still in place or kept aside.
         let members = members(&reopened);
         let files = device.files();
-        if members == vec![1, 2, 5] {
-            for (id, bytes) in segment_bytes(2..=4) {
-                assert!(has_salvage_copy(&files, id, &bytes), "seed {seed}: {id}");
-            }
-        } else {
-            assert_eq!(members, vec![1, 2, 3, 4], "seed {seed}");
-            for (id, bytes) in segment_bytes(2..=4) {
-                assert_eq!(files[&key(id)], bytes, "seed {seed}: member {id} changed");
-            }
+        assert!(
+            members == vec![1, 2, 5] || members == vec![1, 2, 3, 4],
+            "seed {seed}: members {members:?}"
+        );
+        assert_eq!(files[&key(1)], b"segment-1".to_vec(), "seed {seed}");
+        for (id, bytes) in segment_bytes(2..=4) {
+            let in_place = files.get(&key(id)) == Some(&bytes);
+            assert!(
+                in_place || has_salvage_copy(&files, id, &bytes),
+                "seed {seed}: segment {id} lost"
+            );
         }
+        if members == vec![1, 2, 5] {
+            assert!(has_salvage_copy(&files, 2, b"segment-2"), "seed {seed}");
+        }
+    }
+}
+
+#[test]
+fn should_set_aside_again_when_power_was_lost_after_members_moved() {
+    // Arrange: the dropped members moved aside, but the ledger never
+    // recorded the set-aside, so it still names them.
+    let device = CrashDevice::new();
+    let mut history = four_segments(&device);
+    let fault = device.inject(Fault {
+        op: FaultOp::Write,
+        path: format!(
+            "{}/{}",
+            crate::wal::WAL_DIR,
+            crate::wal::ledger_store::LEDGER_FILE
+        ),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+    let interrupted = history.set_aside(SetAside::From(3), 0);
+    device.process_crash();
+    device.disarm_faults();
+    let mut reopened = WalHistory::open(wal(&device), 1).expect("reopen");
+
+    // Act: the next salvage stops at the first missing member.
+    reopened
+        .set_aside(SetAside::From(3), 0)
+        .expect("set aside again");
+
+    // Assert
+    assert!(device.fired(fault));
+    assert!(interrupted.is_err());
+    assert_eq!(members(&reopened), vec![1, 2, 5]);
+    let files = device.files();
+    for (id, bytes) in segment_bytes(3..=4) {
+        assert!(has_salvage_copy(&files, id, &bytes), "segment {id} lost");
     }
 }
 

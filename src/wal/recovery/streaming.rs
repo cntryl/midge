@@ -630,7 +630,19 @@ fn replay_paths(
     for (index, path) in paths.iter().enumerate() {
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut state.stats.wal_read_ns)?
         else {
-            continue;
+            // Every planned file is history: one that is gone lost its
+            // records, so nothing after it may replay (#842).
+            return state.stop_at(
+                storage,
+                paths,
+                index,
+                0,
+                policy,
+                ReplayFailure::Record(MidgeError::Corruption(format!(
+                    "WAL segment {} is history but its file is missing",
+                    path.path
+                ))),
+            );
         };
         let source = frame_reader::source(&*file, &path.path, state.limits);
         // End of the last frame this file replayed: the verified prefix.

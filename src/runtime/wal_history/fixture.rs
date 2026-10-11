@@ -44,7 +44,10 @@ pub(crate) fn record(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -
         ids.windows(2).all(|pair| pair[0] + 1 == pair[1]),
         "a recorded WAL history is consecutive: {ids:?}"
     );
-    if WalHistory::read(wal)?.is_some() {
+    if wal
+        .exists(&FsPath::new(crate::wal::ledger_store::LEDGER_FILE))
+        .map_err(FsError::into_midge)?
+    {
         return Err(MidgeError::InvalidArgument(
             "the WAL directory already has a ledger".into(),
         ));

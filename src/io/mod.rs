@@ -48,4 +48,4 @@ pub(crate) use subdirectory::subdirectory;
 pub use traits::{
     Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions,
 };
-pub(crate) use whole_file::read_all;
+pub(crate) use whole_file::{copy_durably, read_all, truncate_durably};

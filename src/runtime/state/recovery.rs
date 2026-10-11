@@ -503,7 +503,6 @@ impl RuntimeState {
             check_scope(scope, "WAL ledger")?;
             let wal = crate::io::subdirectory(Arc::clone(root), "wal");
             let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1)?;
-            history.sweep_orphans()?;
             let mut recovered = Self::replay_wal_storage_within(
                 replay_dir,
                 root,
@@ -620,19 +619,20 @@ impl RuntimeState {
             let segment = crate::wal::parse_segment_id(&stop.path.0).ok_or_else(|| {
                 MidgeError::Corruption(format!("salvage stopped in non-segment file {}", stop.path))
             })?;
-            history
-                .set_aside(
-                    crate::runtime::wal_history::SetAside::After(
-                        crate::runtime::wal_history::SalvageCut {
-                            segment,
-                            valid_bytes: stop.valid_bytes,
-                        },
-                    ),
-                    0,
+            // A segment replay took nothing from leaves history whole.
+            let set_aside = if stop.valid_bytes == 0 {
+                crate::runtime::wal_history::SetAside::From(segment)
+            } else {
+                crate::runtime::wal_history::SetAside::After(
+                    crate::runtime::wal_history::SalvageCut {
+                        segment,
+                        valid_bytes: stop.valid_bytes,
+                    },
                 )
-                .map_err(|error| {
-                    preserve_timeout(error, "failed to set aside WAL beyond the salvage point")
-                })?;
+            };
+            history.set_aside(set_aside, 0).map_err(|error| {
+                preserve_timeout(error, "failed to set aside WAL beyond the salvage point")
+            })?;
             recovered_sequence = recovered_sequence.max(stop.max_unreplayed_sequence.unwrap_or(0));
         }
         check_scope(scope, "local WAL replay completion")?;
@@ -695,31 +695,16 @@ impl RuntimeState {
         storage: &dyn crate::io::Fs,
         tail: &crate::wal::recovery::ToleratedActiveTail,
     ) -> MidgeResult<()> {
-        let mut file = storage
-            .open(
-                &tail.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
+        let discarded = crate::io::truncate_durably(storage, &tail.path, tail.valid_bytes)
             .map_err(FsError::into_midge)?;
-        let length = file.len().map_err(FsError::into_midge)?;
-        if length <= tail.valid_bytes {
-            return Ok(());
+        if discarded > 0 {
+            tracing::warn!(
+                path = %tail.path,
+                discarded_bytes = discarded,
+                valid_bytes = tail.valid_bytes,
+                "truncated torn active WAL tail before reopening for append"
+            );
         }
-        file.truncate(tail.valid_bytes)
-            .map_err(FsError::into_midge)?;
-        file.sync(crate::io::Durability::Durable)
-            .map_err(FsError::into_midge)?;
-        tracing::warn!(
-            path = %tail.path,
-            discarded_bytes = length - tail.valid_bytes,
-            valid_bytes = tail.valid_bytes,
-            "truncated torn active WAL tail before reopening for append"
-        );
         Ok(())
     }
 
@@ -1476,6 +1461,62 @@ mod salvage_quarantine_tests {
             .expect("a file-backed recovery opens the WAL ledger")
             .ledger();
         (ledger.sealed().collect(), ledger.open_segment())
+    }
+
+    /// Segments 1..=3 write `k` at 1, `k` again at 2 and `z` at 3, as
+    /// recorded history, with segment 3 open; then segment 2's file is lost.
+    fn history_missing_its_middle_segment(wal_dir: &std::path::Path) {
+        for (id, key, value) in [(1, b"k", b"a"), (2, b"k", b"b"), (3, b"z", b"z")] {
+            write(
+                &wal_dir.join(crate::wal::segment_file_name(id)),
+                &[frame_with_value(key, value, id)],
+            );
+        }
+        record_history(wal_dir, &[1, 2], 3);
+        std::fs::remove_file(wal_dir.join(crate::wal::segment_file_name(2)))
+            .expect("lose segment 2");
+    }
+
+    #[test]
+    fn should_fail_strict_recovery_when_a_ledger_member_file_is_missing() {
+        // Arrange: replaying 1 then 3 would skip 2's writes and keep 3's.
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        history_missing_its_middle_segment(&wal_dir);
+
+        // Act
+        let result = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
+
+        // Assert
+        match result {
+            Err(MidgeError::RecoveryFailed(_) | MidgeError::Corruption(_)) => {}
+            Err(error) => panic!("unexpected error class: {error}"),
+            Ok(recovered) => panic!(
+                "strict recovery replayed {} records past a missing member",
+                recovered.records_replayed
+            ),
+        }
+    }
+
+    #[test]
+    fn should_stop_salvage_at_a_missing_ledger_member() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        history_missing_its_middle_segment(&wal_dir);
+
+        // Act
+        let recovered =
+            recover(&wal_dir, crate::config::RecoveryPolicy::Salvage).expect("salvage opens");
+
+        // Assert: history keeps segment 1 and continues past every id it
+        // handed out; segment 3 is set aside, not replayed after the hole.
+        assert!(recovered.opened_in_salvage_mode);
+        assert_eq!(history_of(&recovered), (vec![1], 4));
+        assert_eq!(recovered.records_replayed, 1);
+        assert!(recovered.recovered_sequence >= 3);
     }
 
     #[test]

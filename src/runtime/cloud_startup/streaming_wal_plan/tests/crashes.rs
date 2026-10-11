@@ -48,7 +48,6 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
     let wal: Arc<dyn Fs> =
         Arc::new(crate::io::RealFs::new(case.root.join("local/wal")).map_err(FsError::into_midge)?);
     let mut history = crate::runtime::wal_history::WalHistory::open(wal, 1)?;
-    history.sweep_orphans()?;
     let recovered = StreamingCloudWalRecovery::build(
         &crate::io::real::test_root(case.root.join("local")),
         history.ledger(),

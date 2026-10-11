@@ -113,14 +113,15 @@ impl Fixture {
             crate::io::RealFs::new(self.directory.path().join("local/wal"))
                 .map_err(FsError::into_midge)?,
         );
-        if crate::runtime::wal_history::WalHistory::read(&wal)?.is_none() {
+        if !wal
+            .exists(&FsPath::new(crate::wal::ledger_store::LEDGER_FILE))
+            .map_err(FsError::into_midge)?
+        {
             let open = self.open_segment();
             let sealed: Vec<u64> = self.sealed.iter().copied().collect();
             crate::runtime::wal_history::fixture::record(&wal, &sealed, open)?;
         }
-        let history = crate::runtime::wal_history::WalHistory::open(wal, 1)?;
-        history.sweep_orphans()?;
-        Ok(history)
+        crate::runtime::wal_history::WalHistory::open(wal, 1)
     }
 
     /// Where salvage copied segment `id` aside, if it did.

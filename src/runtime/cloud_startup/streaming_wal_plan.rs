@@ -505,20 +505,7 @@ fn active_local_source(
             fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)
                 .map_err(FsError::into_midge)?;
         }
-        let mut file = fs
-            .open(
-                &path,
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        file.truncate(prefix.valid_bytes as u64)
-            .map_err(FsError::into_midge)?;
-        file.sync(crate::io::Durability::Durable)
+        crate::io::truncate_durably(fs.as_ref(), &path, prefix.valid_bytes as u64)
             .map_err(FsError::into_midge)?;
     }
     if prefix.record_count == 0 {

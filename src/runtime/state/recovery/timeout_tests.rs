@@ -444,12 +444,11 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
     );
     assert!(evidence.read_failed.load(Ordering::Acquire));
     assert!(evidence.completed_lists.load(Ordering::Acquire) >= 1);
-    assert_eq!(std::fs::read(wal_dir.join(target)).unwrap(), before);
     let aside = std::fs::read_dir(&wal_dir)
         .unwrap()
         .filter_map(Result::ok)
         .find(|entry| entry.file_name().to_string_lossy().starts_with("salvaged-"))
-        .expect("salvage copies the segment aside before changing history")
+        .expect("salvage keeps the segment aside before changing history")
         .path();
     assert_eq!(std::fs::read(aside.join(target)).unwrap(), before);
 }
@@ -500,12 +499,11 @@ fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
     let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap()));
 
     // Act: open the WAL history the way recovery does.
-    let result = crate::runtime::wal_history::WalHistory::open(wal, 1).and_then(|history| {
-        history.sweep_orphans()?;
-        Ok((
+    let result = crate::runtime::wal_history::WalHistory::open(wal, 1).map(|history| {
+        (
             history.ledger().open_segment(),
             history.ledger().next_segment_id(),
-        ))
+        )
     });
 
     // Assert: either the open fails, or history continues in segment 6 and

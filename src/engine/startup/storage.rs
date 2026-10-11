@@ -95,7 +95,6 @@ fn open_cloud_wal_history(
         crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR),
         first_open,
     )?;
-    history.sweep_orphans()?;
     Ok(history)
 }
 
