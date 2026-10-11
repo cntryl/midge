@@ -125,7 +125,7 @@ impl RuntimeState {
         check_scope(scope, "recovery filesystem")?;
         Self::ensure_directories(root.as_ref(), memory_mode)?;
         if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(&root)?;
+            crate::metadata::ensure_or_create_format_marker(&root, &db_path)?;
         }
         check_scope(scope, "recovery directories")?;
         let fs = match scope {

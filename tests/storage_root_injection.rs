@@ -15,7 +15,7 @@ fn served_options(named: &std::path::Path, served: &std::path::Path) -> OpenOpti
 }
 
 #[test]
-fn should_keep_metadata_wal_and_lease_under_injected_root_when_opening_local_database() {
+fn should_serve_routed_files_from_injected_root_when_opening_local_database() {
     // Arrange: the configured path names the database; a different host
     // directory serves it.
     let named = tempfile::tempdir().expect("named directory");

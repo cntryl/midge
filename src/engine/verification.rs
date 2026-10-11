@@ -262,7 +262,7 @@ fn verify_storage_path_with_sst_fs(
         }
         Err(error) => return Err(error.into_midge()),
     };
-    crate::metadata::validate_format_marker(fs.as_ref())?;
+    crate::metadata::validate_format_marker(fs.as_ref(), db_path)?;
     let manifest =
         crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
@@ -609,8 +609,11 @@ mod tests {
     ) -> VerificationFixture {
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
-        crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(&db_path))
-            .expect("create format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(&db_path),
+            &db_path,
+        )
+        .expect("create format marker");
         std::fs::create_dir_all(db_path.join("sst")).expect("create SST directory");
 
         let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 96)
@@ -690,8 +693,11 @@ mod tests {
         // Arrange: no SSTs, so only the WAL scan can observe the deadline.
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
-        crate::metadata::ensure_or_create_format_marker(&crate::io::real::test_root(&db_path))
-            .expect("create format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(&db_path),
+            &db_path,
+        )
+        .expect("create format marker");
         ManifestPersistence::save(&db_path, &Manifest::default()).expect("save empty manifest");
         std::fs::create_dir_all(db_path.join("wal")).expect("create WAL directory");
         let mut wal = Vec::new();

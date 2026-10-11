@@ -1,5 +1,6 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{staging, Fs, FsError, FsPath};
+use std::path::Path;
 use std::sync::Arc;
 
 pub const CURRENT_FORMAT_VERSION: u32 = 4;
@@ -16,20 +17,21 @@ pub(crate) fn current_format_marker_bytes() -> Vec<u8> {
 }
 
 /// Validate the database's FORMAT marker, creating it for a new database.
+/// `db_path` names the database in error messages; all I/O goes through `fs`.
 ///
 /// # Errors
 ///
 /// Returns `CompatibilityError` for an unsupported or malformed marker, or
 /// for a database that holds state without one, and the filesystem error when
 /// the marker cannot be read or published.
-pub fn ensure_or_create_format_marker(fs: &Arc<dyn Fs>) -> MidgeResult<u32> {
+pub fn ensure_or_create_format_marker(fs: &Arc<dyn Fs>, db_path: &Path) -> MidgeResult<u32> {
     if fs
         .exists(&FsPath::new(FORMAT_FILE))
         .map_err(FsError::into_midge)?
     {
         // Upgrade before this process writes any newer-format metadata, so
         // an older build refuses the database instead of misreading it.
-        if validate_format_marker(fs.as_ref())? < CURRENT_FORMAT_VERSION {
+        if validate_format_marker(fs.as_ref(), db_path)? < CURRENT_FORMAT_VERSION {
             publish_current_marker(fs)?;
         }
         return Ok(CURRENT_FORMAT_VERSION);
@@ -37,7 +39,8 @@ pub fn ensure_or_create_format_marker(fs: &Arc<dyn Fs>) -> MidgeResult<u32> {
 
     if has_persisted_state_without_format_marker(fs.as_ref())? {
         return Err(MidgeError::CompatibilityError(format!(
-            "database contains persisted state but no {FORMAT_FILE} marker; on-disk state without an explicit format marker is unsupported and must be rebuilt or re-imported"
+            "database at '{}' contains persisted state but no {FORMAT_FILE} marker; on-disk state without an explicit format marker is unsupported and must be rebuilt or re-imported",
+            db_path.display()
         )));
     }
 
@@ -64,23 +67,27 @@ fn publish_current_marker(fs: &Arc<dyn Fs>) -> MidgeResult<()> {
     Ok(())
 }
 
-/// Read and validate the FORMAT marker without writing anything.
+/// Read and validate the FORMAT marker without writing anything. `db_path`
+/// names the database in error messages; all I/O goes through `fs`.
 ///
 /// # Errors
 ///
 /// Returns `CompatibilityError` for a missing, malformed or unsupported
 /// marker, and the filesystem error when it cannot be read.
-pub fn validate_format_marker(fs: &dyn Fs) -> MidgeResult<u32> {
+pub fn validate_format_marker(fs: &dyn Fs, db_path: &Path) -> MidgeResult<u32> {
+    let marker_path = db_path.join(FORMAT_FILE);
     let bytes =
         crate::io::read_all(fs, &FsPath::new(FORMAT_FILE)).map_err(|error| match error {
             FsError::NotFound(message) => MidgeError::CompatibilityError(format!(
-                "failed to read {FORMAT_FILE} marker: {message}"
+                "failed to read {FORMAT_FILE} marker at '{}': {message}",
+                marker_path.display()
             )),
             error => error.into_midge(),
         })?;
     let invalid = || {
         MidgeError::CompatibilityError(format!(
-            "invalid {FORMAT_FILE} marker: expected '{FORMAT_PREFIX}<version>'"
+            "invalid {FORMAT_FILE} marker at '{}': expected '{FORMAT_PREFIX}<version>'",
+            marker_path.display()
         ))
     };
     let contents = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
@@ -94,12 +101,16 @@ pub fn validate_format_marker(fs: &dyn Fs) -> MidgeResult<u32> {
         .ok_or_else(invalid)?
         .parse::<u32>()
         .map_err(|error| {
-            MidgeError::CompatibilityError(format!("invalid {FORMAT_FILE} marker version: {error}"))
+            MidgeError::CompatibilityError(format!(
+                "invalid {FORMAT_FILE} marker version at '{}': {error}",
+                marker_path.display()
+            ))
         })?;
 
     if !(MIN_SUPPORTED_FORMAT_VERSION..=CURRENT_FORMAT_VERSION).contains(&version) {
         return Err(MidgeError::CompatibilityError(format!(
-            "unsupported on-disk format version {version}; this build supports versions {MIN_SUPPORTED_FORMAT_VERSION}..={CURRENT_FORMAT_VERSION}"
+            "unsupported on-disk format version {version} at '{}'; this build supports versions {MIN_SUPPORTED_FORMAT_VERSION}..={CURRENT_FORMAT_VERSION}",
+            db_path.display()
         )));
     }
 
@@ -152,8 +163,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
 
         // Act
-        let version =
-            ensure_or_create_format_marker(&root(temp_dir.path())).expect("create marker");
+        let version = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
+            .expect("create marker");
 
         // Assert
         assert_eq!(version, CURRENT_FORMAT_VERSION);
@@ -176,12 +187,12 @@ mod tests {
             .expect("configure FORMAT publication failure");
 
         // Act
-        let error = ensure_or_create_format_marker(&root(temp_dir.path()))
+        let error = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
             .expect_err("injected publication failure must be visible");
         let marker_existed_after_failure = temp_dir.path().join(FORMAT_FILE).exists();
         let temp_existed_after_failure = temp_dir.path().join(FORMAT_FILE_TEMP).exists();
         fail::remove("midge::format::before_publish");
-        let retry = ensure_or_create_format_marker(&root(temp_dir.path()));
+        let retry = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path());
         scenario.teardown();
 
         // Assert
@@ -190,7 +201,7 @@ mod tests {
         assert!(!temp_existed_after_failure);
         retry.expect("retry after pre-publish failure should create FORMAT");
         assert_eq!(
-            validate_format_marker(root(temp_dir.path()).as_ref())
+            validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
                 .expect("validate retried FORMAT"),
             CURRENT_FORMAT_VERSION
         );
@@ -204,8 +215,8 @@ mod tests {
             .expect("write legacy manifest");
 
         // Act
-        let error =
-            ensure_or_create_format_marker(&root(temp_dir.path())).expect_err("legacy format");
+        let error = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
+            .expect_err("legacy format");
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
@@ -223,7 +234,8 @@ mod tests {
         .expect("write version 3 marker");
 
         // Act
-        let version = ensure_or_create_format_marker(&root(temp_dir.path())).expect("open v3");
+        let version = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
+            .expect("open v3");
 
         // Assert
         assert_eq!(version, 4);
@@ -244,7 +256,8 @@ mod tests {
         .expect("write version 3 marker");
 
         // Act
-        let version = validate_format_marker(root(temp_dir.path()).as_ref()).expect("validate v3");
+        let version = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
+            .expect("validate v3");
 
         // Assert
         assert_eq!(version, 3);
@@ -265,7 +278,8 @@ mod tests {
         .expect("write version 2 marker");
 
         // Act
-        let error = validate_format_marker(root(temp_dir.path()).as_ref()).expect_err("too old");
+        let error = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
+            .expect_err("too old");
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
@@ -282,8 +296,8 @@ mod tests {
         .expect("write marker");
 
         // Act
-        let error =
-            validate_format_marker(root(temp_dir.path()).as_ref()).expect_err("unknown version");
+        let error = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
+            .expect_err("unknown version");
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
@@ -297,8 +311,8 @@ mod tests {
             .expect("write malformed format marker");
 
         // Act
-        let error =
-            validate_format_marker(root(temp_dir.path()).as_ref()).expect_err("malformed marker");
+        let error = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
+            .expect_err("malformed marker");
 
         // Assert
         assert!(matches!(
@@ -328,7 +342,7 @@ mod tests {
                 .expect("write non-verbatim format marker");
 
             // Act
-            let result = validate_format_marker(root(temp_dir.path()).as_ref());
+            let result = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path());
 
             // Assert
             assert!(
@@ -343,13 +357,14 @@ mod tests {
     fn should_report_io_error_given_inaccessible_format_marker_when_validating() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        ensure_or_create_format_marker(&root(temp_dir.path())).expect("create marker");
+        ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path())
+            .expect("create marker");
         let marker_path = temp_dir.path().join(FORMAT_FILE);
         std::fs::remove_file(&marker_path).expect("remove FORMAT file");
         std::fs::create_dir(&marker_path).expect("replace FORMAT with directory");
 
         // Act
-        let error = validate_format_marker(root(temp_dir.path()).as_ref())
+        let error = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())
             .expect_err("inaccessible marker");
 
         // Assert
