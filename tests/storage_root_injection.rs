@@ -5,7 +5,7 @@
 use cntryl_midge::__internal::io::{
     Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, RealFs,
 };
-use cntryl_midge::__internal::simulation::CrashDevice;
+use cntryl_midge::__internal::simulation::{CrashDevice, Operation, SimulatedObjectStore};
 use cntryl_midge::__internal::storage::cloud::MockCloudBackend;
 use cntryl_midge::{Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions};
 use std::sync::Arc;
@@ -426,6 +426,47 @@ fn should_serve_cloud_database_when_every_store_is_injected() {
         stored_data_objects(&store),
         ["sst", "wal"].map(str::to_string).into()
     );
+    assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn should_serve_cloud_database_when_running_on_simulated_storage() {
+    // Arrange: the cache lives on a crash device and every cloud object in
+    // the simulated object store.
+    let named = tempfile::tempdir().expect("named directory");
+    let device = CrashDevice::new();
+    let root: Arc<dyn Fs> = Arc::new(device.fs());
+    let store = SimulatedObjectStore::eager();
+    let provider =
+        cntryl_midge::CloudProviderConfig::aws_s3_static("bucket", "us-east-1", "access", "secret");
+    let options = OpenOptions::cloud(
+        named.path(),
+        cntryl_midge::CloudStorageLocation::new(provider, "simulated/"),
+    )
+    .background_compaction(false)
+    .filesystem_for_testing(root)
+    .object_store_for_testing(Arc::new(store.clone()))
+    .build()
+    .expect("open options");
+
+    // Act
+    let values = flush_restart_read(&options);
+
+    // Assert: WAL segments and SSTs were published to the store (flushed
+    // segments are retired again, so the trace records them).
+    assert_eq!(values, expected_compacted());
+    let uploaded: Vec<String> = store
+        .trace()
+        .into_iter()
+        .filter(|(request, _)| request.operation == Operation::Put)
+        .map(|(request, _)| request.key)
+        .collect();
+    for extension in [".wal", ".sst"] {
+        assert!(
+            uploaded.iter().any(|key| key.ends_with(extension)),
+            "{extension} uploads: {uploaded:?}"
+        );
+    }
     assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
 }
 

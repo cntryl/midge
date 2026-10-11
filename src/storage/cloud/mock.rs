@@ -225,7 +225,11 @@ impl CloudBackend for MockCloudBackend {
         let result = match (data, generation) {
             (Some(data), Some(generation)) => CloudOutcome::Ok((
                 data.clone(),
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{generation}")),
+                ObjectMetadata {
+                    size: data.len() as u64,
+                    etag: format!("mock-gen-{generation}"),
+                    generation: None,
+                },
             )),
             _ => CloudOutcome::Err(CloudError::NotFound(key.to_string())),
         };
@@ -342,7 +346,11 @@ impl CloudBackend for MockCloudBackend {
             .map(|data| {
                 // ETag is generation based and independent from content length.
                 let gen = self.gens.lock().get(&key).copied().unwrap_or(0);
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{gen}"))
+                ObjectMetadata {
+                    size: data.len() as u64,
+                    etag: format!("mock-gen-{gen}"),
+                    generation: None,
+                }
             })
             .ok_or(MidgeError::NotFound);
         let event = CloudEvent::Head {
