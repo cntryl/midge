@@ -1683,7 +1683,7 @@ mod tests {
             event_loop
                 .wal_actor
                 .ledger()
-                .map(|ledger| ledger.log_start()),
+                .map(crate::wal::ledger::WalLedger::log_start),
             Some(1)
         );
         Ok(())
@@ -2597,7 +2597,7 @@ mod tests {
             event_loop
                 .wal_actor
                 .ledger()
-                .map(|ledger| ledger.log_start()),
+                .map(crate::wal::ledger::WalLedger::log_start),
             Some(4)
         );
         for segment_id in 1..=3 {

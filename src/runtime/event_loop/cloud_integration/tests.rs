@@ -6597,7 +6597,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     event_loop
                         .wal_actor
                         .ledger()
-                        .map(|ledger| ledger.open_segment()),
+                        .map(crate::wal::ledger::WalLedger::open_segment),
                     Some(segment_id),
                     "{boundary:?}"
                 );

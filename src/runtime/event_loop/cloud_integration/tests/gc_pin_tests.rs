@@ -96,7 +96,9 @@ fn should_release_gc_pin_when_ledger_retires_segment_whose_local_unlink_fails(
     // Assert: the ledger retired segment 1, so recovery never replays the
     // leftover and its tombstone pin can go.
     assert_eq!(
-        el.wal_actor.ledger().map(|ledger| ledger.log_start()),
+        el.wal_actor
+            .ledger()
+            .map(crate::wal::ledger::WalLedger::log_start),
         Some(2)
     );
     assert!(
