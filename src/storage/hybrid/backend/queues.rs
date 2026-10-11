@@ -29,6 +29,16 @@ impl WalUploadRetryPolicy {
     }
 }
 
+/// WAL uploads that left the queue but whose WAL the writer still owes the
+/// cloud: verified, yet not published, because an earlier upload has not
+/// landed. They count against the queue's limits, so a segment that keeps
+/// failing bounds the writes behind it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HeldUploads {
+    pub(crate) entries: usize,
+    pub(crate) bytes: u64,
+}
+
 impl Default for WalUploadRetryPolicy {
     fn default() -> Self {
         Self {
@@ -164,10 +174,10 @@ impl UploadQueue {
         )))
     }
 
-    pub(super) fn is_stalled(&self) -> bool {
+    pub(super) fn is_stalled(&self, held: HeldUploads) -> bool {
         self.blocked_upload_bytes.is_some()
-            || self.entries.len() >= self.max_entries
-            || self.pending_bytes >= self.max_bytes
+            || self.entries.len().saturating_add(held.entries) >= self.max_entries
+            || self.pending_bytes.saturating_add(held.bytes) >= self.max_bytes
     }
 
     /// How long until the queue next needs a turn: `poll` while an upload

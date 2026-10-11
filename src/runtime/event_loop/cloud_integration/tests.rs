@@ -9629,3 +9629,51 @@ fn should_fence_with_conflicting_segment_when_a_later_run_member_conflicts(
     );
     Ok(())
 }
+
+#[test]
+fn should_refuse_writes_when_unpublished_uploads_fill_the_upload_queue(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: an upload queue of two entries, and a first segment whose
+    // upload never lands, so every later upload is verified but waits for
+    // it and leaves the queue unpublished.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let cloud = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open cloud store"),
+    );
+    el.set_hybrid_storage(Arc::new(
+        crate::storage::HybridStorage::with_test_upload_limits(
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            2,
+            u64::MAX,
+        ),
+    ));
+    append_cloud_async_put(&mut el)?;
+    el.seal_cloud_wal_without_enqueue_for_test()?;
+
+    // Act: keep writing cloud_async segments whose uploads land.
+    let mut admitted = 0;
+    let mut admission = el.check_cloud_wal_admission();
+    while admission.is_ok() && admitted < 10 {
+        append_cloud_async_put(&mut el)?;
+        let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+        admitted += 1;
+        admission = el.check_cloud_wal_admission();
+    }
+
+    // Assert: the WAL the writer owes the cloud stays within the queue's
+    // limit even though the queue itself is empty.
+    assert!(
+        matches!(admission, Err(crate::common::MidgeError::WriteStall(_))),
+        "writes kept flowing behind an unpublished segment: {admission:?}"
+    );
+    assert_eq!(admitted, 2);
+    Ok(())
+}

@@ -380,6 +380,28 @@ impl EventLoop {
         }
     }
 
+    /// Whether a new `CloudAsync` write may enter the WAL: refused while the
+    /// runtime backlog still owns sealed segments, and while the WAL the
+    /// writer owes the cloud fills the upload queue's limits.
+    pub(in crate::runtime::event_loop) fn check_cloud_wal_admission(
+        &self,
+    ) -> crate::common::MidgeResult<()> {
+        if !self.wal_actor.is_cloud_async() {
+            return Ok(());
+        }
+        let Some(storage) = &self.cloud_coordinator.hybrid_storage else {
+            return Err(crate::common::MidgeError::Internal(
+                "CloudAsync requires HybridStorage".to_string(),
+            ));
+        };
+        if !self.cloud_coordinator.cloud_wal.upload_backlog.is_empty() {
+            return Err(crate::common::MidgeError::WriteStall(
+                "CloudAsync WAL recovery uploads are still draining".to_string(),
+            ));
+        }
+        storage.ensure_wal_write_admission(self.cloud_coordinator.cloud_wal.held_uploads())
+    }
+
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
         let deadline = crate::common::OperationDeadline::from_budget(self.runtime_response_timeout);
         self.drain_cloud_wal_upload_backlog_within(&deadline);

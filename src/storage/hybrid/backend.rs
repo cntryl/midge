@@ -66,10 +66,10 @@ mod uploads;
 
 use proofs::PruneWorkerRegistry;
 pub(crate) use proofs::{GuardedObjectProof, RemoteObjectProof};
-pub(crate) use queues::HybridQueueLimits;
 #[cfg(test)]
 pub(crate) use queues::WalUploadRetryPolicy;
 use queues::{BoundedEventQueue, UploadQueue};
+pub(crate) use queues::{HeldUploads, HybridQueueLimits};
 
 const MAX_PENDING_WAL_UPLOADS: usize = 1_024;
 const MAX_PENDING_WAL_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;

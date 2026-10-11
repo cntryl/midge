@@ -88,6 +88,20 @@ impl CloudWalUploadTracker {
         }
     }
 
+    /// The verified uploads still waiting to be published: they hold local
+    /// WAL the writer owes the cloud, and count against the upload queue's
+    /// limits.
+    pub(super) fn held_uploads(&self) -> crate::storage::hybrid::backend::HeldUploads {
+        crate::storage::hybrid::backend::HeldUploads {
+            entries: self.uploaded.len(),
+            bytes: self
+                .uploaded
+                .values()
+                .map(|upload| upload.size_bytes)
+                .fold(0, u64::saturating_add),
+        }
+    }
+
     pub(super) fn has_pending_uploads(&self) -> bool {
         !self.upload_backlog.is_empty()
     }

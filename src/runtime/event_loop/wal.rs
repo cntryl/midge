@@ -428,62 +428,18 @@ impl WalCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return false;
         }
-
-        if event_loop.wal_actor.is_cloud_async()
-            && event_loop.cloud_coordinator.hybrid_storage.is_none()
-        {
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(
-                        "CloudAsync requires HybridStorage".to_string(),
-                    ),
-                },
-            );
-            return false;
-        }
-
-        if event_loop.wal_actor.is_cloud_async() {
-            if !event_loop
-                .cloud_coordinator
-                .cloud_wal
-                .upload_backlog
-                .is_empty()
-            {
+        if let Err(error) = event_loop.check_cloud_wal_admission() {
+            if matches!(error, crate::common::MidgeError::WriteStall(_)) {
                 event_loop
                     .state
                     .diagnostics
                     .record_write_admission_rejection(
                         crate::diagnostics::WriteAdmissionRejection::CloudWal,
                     );
-                event_loop.respond(
-                    request_id,
-                    RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::WriteStall(
-                            "CloudAsync WAL recovery uploads are still draining".to_string(),
-                        ),
-                    },
-                );
-                return false;
             }
-            if let Some(storage) = &event_loop.cloud_coordinator.hybrid_storage {
-                if let Err(error) = storage.ensure_wal_write_admission() {
-                    if matches!(error, crate::common::MidgeError::WriteStall(_)) {
-                        event_loop
-                            .state
-                            .diagnostics
-                            .record_write_admission_rejection(
-                                crate::diagnostics::WriteAdmissionRejection::CloudWal,
-                            );
-                    }
-                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-                    return false;
-                }
-            }
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return false;
         }
-
         true
     }
 

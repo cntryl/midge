@@ -1,9 +1,9 @@
 //! WAL upload scheduling, worker execution, retries, and acknowledgements.
 
 use super::{
-    cb, mpsc, thread, Arc, BoundedEventQueue, Duration, HybridStorage, Instant, JoinHandle, Mutex,
-    StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState, UploadStatus,
-    MAX_CLOUD_ERROR_BYTES,
+    cb, mpsc, thread, Arc, BoundedEventQueue, Duration, HeldUploads, HybridStorage, Instant,
+    JoinHandle, Mutex, StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState,
+    UploadStatus, MAX_CLOUD_ERROR_BYTES,
 };
 use crate::storage::CloudUploadFailureKind;
 
@@ -42,22 +42,27 @@ impl HybridStorage {
         Ok(())
     }
 
-    pub fn ensure_wal_write_admission(&self) -> crate::common::MidgeResult<()> {
+    pub(crate) fn ensure_wal_write_admission(
+        &self,
+        held: HeldUploads,
+    ) -> crate::common::MidgeResult<()> {
         let queue = self.upload_queue.lock();
-        if !queue.is_stalled() {
+        if !queue.is_stalled(held) {
             return Ok(());
         }
         Err(crate::common::MidgeError::WriteStall(format!(
-            "CloudAsync WAL upload queue remains at capacity: entries={}/{}, bytes={}/{}",
+            "CloudAsync WAL upload queue remains at capacity: entries={}+{} held/{}, bytes={}+{} held/{}",
             queue.entries.len(),
+            held.entries,
             queue.max_entries,
             queue.pending_bytes,
+            held.bytes,
             queue.max_bytes
         )))
     }
 
-    pub fn is_wal_upload_stalled(&self) -> bool {
-        self.upload_queue.lock().is_stalled()
+    pub(crate) fn is_wal_upload_stalled(&self, held: HeldUploads) -> bool {
+        self.upload_queue.lock().is_stalled(held)
     }
 
     /// How long until the upload queue next needs

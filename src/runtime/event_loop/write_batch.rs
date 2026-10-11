@@ -65,7 +65,9 @@ impl EventLoop {
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
-                .is_some_and(|storage| storage.is_wal_upload_stalled())
+                .is_some_and(|storage| {
+                    storage.is_wal_upload_stalled(self.cloud_coordinator.cloud_wal.held_uploads())
+                })
     }
 
     pub(super) fn write_pressure_mask(&self, cf_id: crate::types::ColumnFamilyId) -> u8 {
@@ -94,7 +96,9 @@ impl EventLoop {
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
-                .is_some_and(|storage| storage.is_wal_upload_stalled())
+                .is_some_and(|storage| {
+                    storage.is_wal_upload_stalled(self.cloud_coordinator.cloud_wal.held_uploads())
+                })
             {
                 mask |= PRESSURE_UPLOAD_STALLED;
             }

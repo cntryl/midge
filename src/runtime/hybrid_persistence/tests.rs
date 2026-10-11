@@ -3172,7 +3172,7 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&first_path), 1, 1)
         .expect("first upload must fit");
     assert!(matches!(
-        storage.ensure_wal_write_admission(),
+        storage.ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default()),
         Err(crate::common::MidgeError::WriteStall(_))
     ));
 
@@ -3184,7 +3184,7 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
     // Assert
     assert!(matches!(error, crate::common::MidgeError::WriteStall(_)));
     assert!(matches!(
-        storage.ensure_wal_write_admission(),
+        storage.ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default()),
         Err(crate::common::MidgeError::WriteStall(_))
     ));
     assert_eq!(storage.pending_upload_count(), 1);
@@ -3222,19 +3222,25 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
     let _ = storage
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&second_path), 22, 22)
         .expect_err("capacity must reject second upload");
-    assert!(storage.ensure_wal_write_admission().is_err());
+    assert!(storage
+        .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+        .is_err());
 
     // Act
     storage.process_uploads();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < deadline && storage.ensure_wal_write_admission().is_err() {
+    while Instant::now() < deadline
+        && storage
+            .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+            .is_err()
+    {
         storage.process_uploads();
         std::thread::sleep(Duration::from_millis(5));
     }
 
     // Assert
     storage
-        .ensure_wal_write_admission()
+        .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
         .expect("completed upload must reopen admission");
     assert_eq!(storage.pending_upload_count(), 0);
 }
@@ -3263,7 +3269,9 @@ fn should_keep_storage_reservation_for_retry_when_upload_callbacks_are_lost() {
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&wal_path), 3, 3)
         .expect("enqueue WAL upload");
     assert!(
-        storage.ensure_wal_write_admission().is_err(),
+        storage
+            .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+            .is_err(),
         "the only queue reservation must close write admission while upload is stuck"
     );
     storage.process_uploads();
@@ -3286,7 +3294,9 @@ fn should_keep_storage_reservation_for_retry_when_upload_callbacks_are_lost() {
     }));
     assert_eq!(storage.pending_upload_count(), 1);
     assert!(
-        storage.ensure_wal_write_admission().is_err(),
+        storage
+            .ensure_wal_write_admission(crate::storage::hybrid::backend::HeldUploads::default())
+            .is_err(),
         "the retained upload keeps its queue reservation"
     );
 }
