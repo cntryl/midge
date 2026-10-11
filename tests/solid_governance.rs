@@ -1542,8 +1542,8 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("BeforeWriterCreate", "#842"),
     ("AfterWriterCreate", "#842"),
     ("AfterReplacementDirectorySync", "#842"),
-    ("segment_object_key", "#842"),
-    ("segment_file_name", "#842"),
+    ("cloud_segment_object_key", "#842"),
+    ("cloud_segment_file_name", "#842"),
     ("faults_fired", "#842"),
 ];
 
