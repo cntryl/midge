@@ -3,7 +3,7 @@
 use super::super::ReplayCoverage;
 use crate::common::{DeadlineScope, MidgeResult, OperationDeadline};
 use crate::config::RecoveryPolicy;
-use crate::io::{Fs, FsError, FsPath};
+use crate::io::{Fs, FsError};
 use crate::memtable::SkipListMemtable;
 use crate::metadata::{FileMeta, Manifest};
 use crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery;
@@ -369,7 +369,7 @@ fn should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_
     let started = Instant::now();
     let stats = replay_wal_with_options(
         recovered.fs.as_ref(),
-        &FsPath::new("wal"),
+        &recovered.segments,
         &mut memtables,
         ReplayPolicy::Strict,
         None,

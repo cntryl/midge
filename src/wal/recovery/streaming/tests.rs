@@ -162,7 +162,7 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -218,7 +218,7 @@ fn should_read_many_local_wal_frames_with_one_window_per_file_pass() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -266,7 +266,7 @@ fn should_read_large_frame_directly_when_payload_exceeds_read_ahead_window() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -310,7 +310,7 @@ fn should_checkpoint_only_complete_split_transactions() {
     // Act
     replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -367,7 +367,7 @@ fn should_reject_atomic_batch_before_checkpoint_when_transaction_exceeds_encoded
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -405,7 +405,7 @@ fn should_bound_uncommitted_split_transaction_buffers() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -434,7 +434,7 @@ fn should_preserve_epoch_ordinals_when_duplicate_rotation_frames_are_rescanned()
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -468,7 +468,7 @@ fn should_fail_closed_when_corrupt_length_hides_verified_active_suffix() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -499,7 +499,7 @@ fn should_tolerate_only_verified_active_prefix_when_final_frame_is_torn() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -528,7 +528,7 @@ fn should_reject_compressed_record_before_expanding_beyond_replay_budget() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -580,7 +580,7 @@ fn should_ignore_fenced_overlap_when_prior_epoch_uses_same_key_and_sequence() {
     // Act
     let stats = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -620,7 +620,7 @@ fn should_reject_conflicting_point_after_its_memtable_was_checkpointed() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -671,7 +671,7 @@ fn should_reject_conflicting_transaction_batch_after_checkpoint() {
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -721,7 +721,7 @@ fn should_recover_atomic_batch_above_soft_checkpoint_target_within_hard_capacity
     // Act
     replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -832,7 +832,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     // Act
     let result = replay_wal_with_checkpoint(
         &storage,
-        &FsPath::new("wal"),
+        &segments(&storage),
         &mut memtables,
         ReplayPolicy::Strict,
         None,
@@ -859,4 +859,9 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
     }
     assert!(!recovered.contains(b"abandoned".as_slice()));
     assert_eq!(recovered.len(), 397);
+}
+
+/// The WAL files `storage` holds under `wal/`.
+fn segments(storage: &dyn crate::io::Fs) -> ReplaySegments {
+    crate::wal::recovery::fixture::segments(storage, &FsPath::new("wal"))
 }

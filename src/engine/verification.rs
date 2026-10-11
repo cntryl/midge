@@ -296,13 +296,16 @@ fn verify_storage_root(
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
 
-    let wal_stats = crate::wal::recovery::validate_wal_with_policy(
-        fs.as_ref(),
-        &FsPath::new("wal"),
-        crate::wal::recovery::ReplayPolicy::Strict,
-        deadline,
-    )
-    .map_err(|error| verification_stage_error("WAL verification failed", error))?;
+    let wal_stats = crate::runtime::wal_history::listed_segments(fs.as_ref(), &FsPath::new("wal"))
+        .and_then(|segments| {
+            crate::wal::recovery::validate_wal_with_policy(
+                fs.as_ref(),
+                &segments,
+                crate::wal::recovery::ReplayPolicy::Strict,
+                deadline,
+            )
+        })
+        .map_err(|error| verification_stage_error("WAL verification failed", error))?;
     let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(fs)
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);

@@ -2,7 +2,7 @@
 
 use super::RuntimeStorageMaterialization;
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsPath};
+use crate::io::Fs;
 use crate::memtable::SkipListMemtable;
 use crate::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
@@ -25,6 +25,8 @@ pub(super) struct CloudReplay {
     #[cfg(feature = "internal-testing")]
     pub probe: coverage::probe::RecoveryProbeVariant,
     pub fs: Arc<dyn Fs>,
+    /// The planned WAL files in `fs`, in replay order.
+    pub segments: crate::wal::recovery::ReplaySegments,
     pub limits: StreamingReplayLimits,
     /// Sequences at or below this belong to WAL salvage set aside unreplayed.
     pub sequence_floor: u64,
@@ -117,7 +119,7 @@ impl CloudReplay {
         let mut names = names::Names::new(self.limits);
         let replay_result = replay_wal_with_options(
             self.fs.as_ref(),
-            &FsPath::new("wal"),
+            &self.segments,
             &mut memtables,
             policy,
             None,

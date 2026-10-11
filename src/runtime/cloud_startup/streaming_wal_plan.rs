@@ -11,6 +11,7 @@ use crate::wal::recovery::streaming::{
     inspect_local_sealed_wal_file, inspect_sealed_wal_file, inspect_wal_file,
     max_verified_suffix_sequence, StreamingReplayLimits,
 };
+use crate::wal::recovery::ReplaySegments;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +34,8 @@ struct ReplaySource {
 
 pub(crate) struct StreamingCloudWalRecovery {
     pub(crate) fs: Arc<dyn Fs>,
+    /// The planned WAL files in `fs`, in replay order.
+    pub(crate) segments: ReplaySegments,
     pub(crate) plan: CloudWalRecoveryPlan,
     pub(crate) next_segment_id: u64,
 }
@@ -144,34 +147,44 @@ impl StreamingCloudWalRecovery {
             &mut sources,
             &mut active_source,
         )?;
-        assemble_planned_sources(&mut replay_fs, sources, active_source, scope)?;
+        let segments = assemble_planned_sources(&mut replay_fs, sources, active_source, scope)?;
         scope.check("cloud WAL planning completion")?;
         Ok(Self {
             fs: crate::io::scope_fs(Arc::new(replay_fs), scope.clone()),
+            segments,
             plan,
             next_segment_id: next_remote_id.max(next_local_id),
         })
     }
 }
 
+/// Expose the planned sources as one WAL directory and return the order
+/// replay reads them in.
 fn assemble_planned_sources(
     replay_fs: &mut StreamingWalFs,
     sources: BTreeMap<u64, ReplaySource>,
     active_source: Option<ReplaySource>,
     scope: &DeadlineScope,
-) -> MidgeResult<()> {
+) -> MidgeResult<ReplaySegments> {
+    let mut sealed = Vec::with_capacity(sources.len());
     for (segment_id, source) in sources {
         scope.check("cloud WAL source assembly")?;
-        replay_fs.insert(
-            crate::wal::segment_file_name(segment_id),
-            source.fs,
-            source.path,
-        )?;
+        let name = crate::wal::segment_file_name(segment_id);
+        sealed.push(FsPath::new(format!("{}/{name}", crate::wal::WAL_DIR)));
+        replay_fs.insert(name, source.fs, source.path)?;
     }
-    if let Some(source) = active_source {
-        replay_fs.insert(crate::wal::ACTIVE_FILE_NAME.into(), source.fs, source.path)?;
-    }
-    Ok(())
+    let active = match active_source {
+        Some(source) => {
+            replay_fs.insert(crate::wal::ACTIVE_FILE_NAME.into(), source.fs, source.path)?;
+            Some(FsPath::new(format!(
+                "{}/{}",
+                crate::wal::WAL_DIR,
+                crate::wal::ACTIVE_FILE_NAME
+            )))
+        }
+        None => None,
+    };
+    Ok(ReplaySegments::new(sealed, active))
 }
 
 fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {

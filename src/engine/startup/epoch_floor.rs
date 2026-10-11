@@ -105,11 +105,13 @@ impl StartupEpochFloor {
         if let Some(scope) = scope {
             storage = crate::io::scope_fs(storage, scope.clone());
         }
-        let result = crate::wal::recovery::max_writer_epoch(
+        let result = crate::runtime::wal_history::listed_segments(
             storage.as_ref(),
             &crate::io::FsPath::new(""),
-            replay_policy,
-        );
+        )
+        .and_then(|segments| {
+            crate::wal::recovery::max_writer_epoch(storage.as_ref(), &segments, replay_policy)
+        });
         if let Some(scope) = scope {
             scope.check("local WAL epoch discovery")?;
         }
