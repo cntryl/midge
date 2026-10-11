@@ -896,3 +896,47 @@ fn should_match_whole_path_segments_when_scoping_faults() {
     assert!(matches!(child, Err(FsError::Io(_))), "{child:?}");
     assert!(device.fired(fault));
 }
+
+#[test]
+fn should_count_every_name_given_when_paths_are_reused() {
+    // Arrange: a segment name given by creation, then again by rename.
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    fs.create_dir_all(&path("wal")).expect("create wal");
+    durable_file(&fs, "wal/1.wal", b"one");
+    fs.remove_file(&path("wal/1.wal")).expect("retire");
+    durable_file(&fs, "wal/active", b"two");
+
+    // Act
+    fs.rename_atomic(&path("wal/active"), &path("wal/1.wal"))
+        .expect("seal");
+    let before_sync = device.names_ever();
+    fs.sync_dir(&path("wal"), Durability::Durable)
+        .expect("sync wal");
+    let names = device.names_ever();
+
+    // Assert: a name counts once its giving is durable.
+    assert_eq!(before_sync.get("wal/1.wal"), Some(&1));
+    assert_eq!(names.get("wal/1.wal"), Some(&2));
+    assert_eq!(names.get("wal/active"), Some(&1));
+}
+
+#[test]
+fn should_rebuild_durable_state_when_restoring_files() {
+    // Arrange
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    fs.create_dir_all(&path("wal")).expect("create wal");
+    durable_file(&fs, "wal/1.wal", b"segment");
+    durable_file(&fs, "MANIFEST", b"manifest");
+    let files = device.files();
+
+    // Act
+    let restored = CrashDevice::with_files(&files);
+    let decisions = restored.decisions();
+    restored.power_loss(0);
+
+    // Assert: the image is durable, so a power loss changes nothing.
+    assert_eq!(decisions, Vec::new());
+    assert_eq!(restored.files(), files);
+}

@@ -538,6 +538,9 @@ struct State {
     faults: Vec<FaultRule>,
     /// How many inodes each path has created.
     created: BTreeMap<String, u64>,
+    /// How many times each path has durably been given to an inode, by
+    /// creation or rename, over the device's life.
+    named: BTreeMap<String, u64>,
 }
 
 impl Default for State {
@@ -554,6 +557,7 @@ impl Default for State {
             generation: 0,
             faults: Vec::new(),
             created: BTreeMap::new(),
+            named: BTreeMap::new(),
         }
     }
 }
@@ -619,6 +623,41 @@ impl State {
 
     fn is_directory(&self, inode: Inode) -> bool {
         matches!(self.nodes.get(&inode), Some(Node::Directory(_)))
+    }
+
+    /// The path of `name` in `directory`, by the directory's creating path.
+    fn path_in(&self, directory: Inode, name: &str) -> String {
+        match self.nodes.get(&directory).map(|node| &node.identity().path) {
+            Some(parent) if !parent.is_empty() => format!("{parent}/{name}"),
+            _ => name.to_string(),
+        }
+    }
+
+    /// Every file the live namespace holds, by path, with its live bytes.
+    fn files(&self) -> BTreeMap<String, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![(ROOT, String::new())];
+        while let Some((inode, path)) = pending.pop() {
+            let Some(node) = self.nodes.get(&inode) else {
+                continue;
+            };
+            match node {
+                Node::Directory(directory) => {
+                    for (name, child) in &directory.live {
+                        let child_path = if path.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{path}/{name}")
+                        };
+                        pending.push((*child, child_path));
+                    }
+                }
+                Node::Data(data) => {
+                    files.insert(path, data.live.clone());
+                }
+            }
+        }
+        files
     }
 
     /// The identity of a new inode at `name` in `parent`.
@@ -687,6 +726,19 @@ impl State {
     fn commit(&mut self, count: usize) {
         let committed: Vec<NamespaceOp> = self.pending.drain(..count).collect();
         for op in committed {
+            let named = match &op {
+                NamespaceOp::Link {
+                    directory, name, ..
+                }
+                | NamespaceOp::Rename {
+                    to: (directory, name),
+                    ..
+                } => Some(self.path_in(*directory, name)),
+                NamespaceOp::Unlink { .. } => None,
+            };
+            if let Some(path) = named {
+                *self.named.entry(path).or_default() += 1;
+            }
             op.apply(&mut self.nodes, true);
         }
         self.reclaim();
@@ -819,6 +871,9 @@ impl State {
             if !matches {
                 continue;
             }
+            if rule.seen == u64::MAX {
+                continue;
+            }
             if rule.seen + 1 < rule.fault.nth {
                 rule.seen += 1;
             } else if first.is_none() {
@@ -941,6 +996,14 @@ impl CrashDevice {
         FaultId(state.faults.len() - 1)
     }
 
+    /// Retire every fault that has not fired, as a crashed process's failing
+    /// hardware path does not follow the restarted one.
+    pub fn disarm_faults(&self) {
+        for rule in &mut self.lock().faults {
+            rule.seen = u64::MAX;
+        }
+    }
+
     /// Whether the fault fired and its call returned the injected error.
     #[must_use]
     pub fn fired(&self, fault: FaultId) -> bool {
@@ -955,6 +1018,55 @@ impl CrashDevice {
     /// handles are fenced.
     pub fn process_crash(&self) {
         self.lock().end_process();
+    }
+
+    /// How many times each path has durably been given to a file or
+    /// directory, by creation or rename, over the device's life. A name a
+    /// power loss undid was never given.
+    #[must_use]
+    pub fn names_ever(&self) -> BTreeMap<String, u64> {
+        self.lock().named.clone()
+    }
+
+    /// Every file the current process sees, by path. After a power loss this
+    /// is the device's durable state.
+    #[must_use]
+    pub fn files(&self) -> BTreeMap<String, Vec<u8>> {
+        self.lock().files()
+    }
+
+    /// A device whose durable state holds exactly `files`, as a crash image
+    /// is replayed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a path cannot be created, as when a file and a directory
+    /// share a name.
+    #[must_use]
+    pub fn with_files(files: &BTreeMap<String, Vec<u8>>) -> Self {
+        let device = Self::new();
+        let fs = device.fs();
+        for (path, bytes) in files {
+            let mut file = fs
+                .open(
+                    &FsPath::new(path.as_str()),
+                    OpenOptions {
+                        mode: OpenMode::ReadWrite,
+                        create: true,
+                        create_new: true,
+                        truncate: false,
+                    },
+                )
+                .expect("create image file");
+            file.write_at(0, Bytes::copy_from_slice(bytes))
+                .expect("write image file");
+            file.sync(Durability::Durable).expect("sync image file");
+        }
+        let mut state = device.lock();
+        let pending = state.pending.len();
+        state.commit(pending);
+        drop(state);
+        device
     }
 
     /// The choices the next power loss will make.
