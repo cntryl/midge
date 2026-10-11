@@ -118,7 +118,7 @@ impl CloudPersistence {
         result
     }
 
-    pub(crate) fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()> {
+    pub(crate) fn write_sst_object(&self, sst_name: &str, data: &[u8]) -> MidgeResult<()> {
         self.write_sst_object_within(
             sst_name,
             data,
@@ -129,7 +129,7 @@ impl CloudPersistence {
     pub(crate) fn write_sst_object_within(
         &self,
         sst_name: &str,
-        data: Vec<u8>,
+        data: &[u8],
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
         self.write_sst_object_with_proof(sst_name, data, deadline)
@@ -139,12 +139,12 @@ impl CloudPersistence {
     pub(crate) fn write_sst_object_with_proof(
         &self,
         sst_name: &str,
-        data: Vec<u8>,
+        data: &[u8],
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<GuardedObjectProof> {
         let expected_size = data.len() as u64;
-        let expected_crc = crc32c::crc32c(&data);
-        validate_sst_object_bytes(sst_name, expected_size, None, None, &data)
+        let expected_crc = crc32c::crc32c(data);
+        validate_sst_object_bytes(sst_name, expected_size, None, None, data)
             .map_err(MidgeError::Internal)?;
         crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_upload", |_| Err(
             MidgeError::Internal("failpoint: cloud SST upload failed".to_string())
@@ -483,16 +483,11 @@ fn should_retain_cloud_wal_authority_when_retirement_memory_is_exhausted() {
 fn should_delete_range_verified_wal_with_filesystem_identity() {
     // Arrange
     let directory = tempfile::tempdir().expect("directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(directory.path().join("local"))
-            .expect("local store"),
-    );
     let remote = Arc::new(
         crate::storage::filesystem::FileSystem::new(directory.path().join("remote"))
             .expect("remote store"),
     );
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         remote,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -590,56 +585,6 @@ fn should_prune_wal_without_fetching_unrelated_ssts_when_local_cache_is_ephemera
 }
 
 #[test]
-fn should_publish_sst_without_duplicate_local_copy_when_ephemeral_cache_is_enabled() {
-    // Arrange
-    let (_cloud, storage) = hybrid_with_mock_cloud();
-    storage.enable_ephemeral_sst_cache(20 * 1024 * 1024 * 1024);
-    let name = "ephemeral.sst";
-    let key = crate::cloud_layout::object_key(name);
-    let bytes = valid_sst_bytes(b"key", b"value", 1);
-
-    // Act
-    storage
-        .write_sst_object(name, bytes.clone())
-        .expect("remote publication");
-
-    // Assert
-    assert_eq!(read_cloud_object(&storage, &key), bytes);
-    let exists = HybridStorage::object_exists_in_backend_within(
-        &storage.local_store(),
-        &key,
-        storage.callback_timeout(),
-        &crate::common::OperationDeadline::unbounded(),
-    )
-    .expect("local cache existence check");
-    assert!(
-        !exists,
-        "remote publication must not duplicate the runtime SST staging file"
-    );
-}
-
-#[test]
-fn should_preserve_remote_sst_when_evicting_legacy_local_cache() {
-    // Arrange
-    let (_cloud, storage) = hybrid_with_mock_cloud();
-    let name = "legacy-local.sst";
-    let key = crate::cloud_layout::object_key(name);
-    let bytes = valid_sst_bytes(b"key", b"value", 1);
-    storage
-        .write_sst_object(name, bytes.clone())
-        .expect("publish both copies");
-    storage.enable_ephemeral_sst_cache(20 * 1024 * 1024 * 1024);
-
-    // Act
-    storage
-        .evict_local_object_cache(&key)
-        .expect("local cache eviction");
-
-    // Assert
-    assert_eq!(read_cloud_object(&storage, &key), bytes);
-}
-
-#[test]
 fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
@@ -728,11 +673,6 @@ fn should_converge_catalog_copies_after_takeover() {
 #[test]
 fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
     // Arrange
-    let tmp = tempfile::tempdir().expect("create initial catalog race test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let mock_cloud = Arc::new(MockCloudBackend::new());
     let winning_catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7)
         .expect("create winning catalog")
@@ -745,7 +685,6 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
     });
     let cloud = Arc::new(CloudStorage::new(racing_cloud, String::new()));
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -777,7 +716,7 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
 fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create takeover race test dir");
-    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud();
 
     let segment_id = 1;
     let max_sequence = 11;
@@ -826,7 +765,7 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
 fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create catalog mutation race test dir");
-    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud();
 
     let retired_segment_id = 1;
     let retired_max_sequence = 11;
@@ -932,7 +871,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
 fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create bounded catalog lock test dir");
-    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud();
 
     let holding_segment_id = 1;
     let holding_max_sequence = 11;
@@ -1048,18 +987,12 @@ fn should_reject_stale_catalog_compare_exchange_after_takeover() {
 }
 
 fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, CloudPersistence) {
-    let tmp = tempfile::tempdir().expect("create hybrid storage test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let mock_cloud = Arc::new(MockCloudBackend::new());
     let cloud = Arc::new(CloudStorage::new(
         mock_cloud.clone(),
         "hybrid-test".to_string(),
     ));
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -1087,18 +1020,11 @@ fn assert_wal_catalog_copies_match(
         .expect("decode converged WAL catalog")
 }
 
-fn hybrid_with_pausing_catalog_cloud(
-    root: &std::path::Path,
-) -> (Arc<PausingCatalogCasBackend>, Arc<CloudPersistence>) {
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(root.join("local"))
-            .expect("create pausing catalog local backend"),
-    );
+fn hybrid_with_pausing_catalog_cloud() -> (Arc<PausingCatalogCasBackend>, Arc<CloudPersistence>) {
     let mock_cloud = Arc::new(MockCloudBackend::new());
     let pausing_cloud = Arc::new(PausingCatalogCasBackend::new(Arc::clone(&mock_cloud)));
     let cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
     let storage = Arc::new(CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ))));
@@ -1200,11 +1126,6 @@ impl CloudBackend for PausingCatalogCasBackend {
 #[test]
 fn should_route_each_object_class_to_its_separate_cloud_store() {
     // Arrange
-    let tmp = tempfile::tempdir().expect("create class-routing test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let wal_mock = Arc::new(MockCloudBackend::new());
     let sst_mock = Arc::new(MockCloudBackend::new());
     let control_mock = Arc::new(MockCloudBackend::new());
@@ -1213,7 +1134,6 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
     let control_cloud = Arc::new(CloudStorage::new(control_mock.clone(), String::new()));
     let storage = CloudPersistence::new(Arc::new(
         HybridStorage::with_class_stores_policy_event_sender_and_limits(
-            local,
             wal_cloud,
             sst_cloud,
             control_cloud,
@@ -1254,7 +1174,7 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
         storage.process_uploads();
     }
     storage
-        .write_sst_object("000017.sst", valid_sst_bytes(b"key", b"value", 17))
+        .write_sst_object("000017.sst", &valid_sst_bytes(b"key", b"value", 17))
         .expect("publish SST");
     storage
         .compare_exchange_remote_object(
@@ -1873,34 +1793,6 @@ fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     }
 }
 
-fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    storage.local_store().write_for_test(key, data, tx);
-    match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(StorageEvent::WriteComplete {
-            result: StorageOutcome::Ok(()),
-            ..
-        }) => {}
-        other => panic!("local write for '{key}' failed: {other:?}"),
-    }
-}
-
-fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    storage.local_store().submit_metadata_read_request(
-        crate::storage::StorageRequest::new(
-            key,
-            crate::common::OperationDeadline::unbounded(),
-            Duration::from_secs(1),
-        ),
-        tx,
-    );
-    match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(Ok((data, _metadata))) => data,
-        other => panic!("local read for '{key}' failed: {other:?}"),
-    }
-}
-
 fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
     storage.sst_store().submit_metadata_read_request(
@@ -2293,7 +2185,7 @@ fn should_not_overwrite_remote_object_given_different_content_when_authoritative
     write_cloud_object(&storage, &key, existing_bytes.clone());
 
     let error = storage
-        .write_sst_object(sst_name, upload_bytes)
+        .write_sst_object(sst_name, &upload_bytes)
         .expect_err("existing remote SST object must fail authoritative upload");
 
     // Act
@@ -2308,45 +2200,6 @@ fn should_not_overwrite_remote_object_given_different_content_when_authoritative
         existing_bytes,
         "authoritative SST upload must not overwrite an existing remote object"
     );
-    let local_entry = HybridStorage::object_exists_in_backend_within(
-        &storage.local_store(),
-        &key,
-        storage.callback_timeout(),
-        &crate::common::OperationDeadline::unbounded(),
-    )
-    .expect("local cache existence check");
-    assert!(
-        !local_entry,
-        "failed authoritative SST upload must not leave a local cache entry"
-    );
-}
-
-#[test]
-fn should_not_create_remote_sst_when_local_cache_key_already_exists() {
-    // Arrange
-    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
-    let sst_name = "local-collision.sst";
-    let key = crate::cloud_layout::object_key(sst_name);
-    let existing_bytes = valid_sst_bytes(b"a", b"local-already-committed", 1);
-    let upload_bytes = valid_sst_bytes(b"b", b"new-upload", 2);
-    write_local_object(&storage, &key, existing_bytes.clone());
-
-    let error = storage
-        .write_sst_object(sst_name, upload_bytes)
-        .expect_err("existing local SST cache object must fail authoritative upload");
-
-    // Act
-    // Assert
-    assert!(
-        error.to_string().contains("local cache already exists"),
-        "unexpected local SST collision error: {error}"
-    );
-    assert_eq!(
-        read_local_object(&storage, &key),
-        existing_bytes,
-        "authoritative SST upload must not overwrite an existing local cache object"
-    );
-    assert_cloud_object_missing(&storage, &key);
 }
 
 #[test]
@@ -2361,12 +2214,11 @@ fn should_resume_same_content_sst_publication_after_remote_only_success() {
 
     // Act
     storage
-        .write_sst_object(sst_name, bytes.clone())
-        .expect("same-content retry should finish local cache publication");
+        .write_sst_object(sst_name, &bytes)
+        .expect("same-content retry should finish publication");
 
     // Assert
     assert_eq!(read_cloud_object(&storage, &key), bytes);
-    assert_eq!(read_local_object(&storage, &key), bytes);
 }
 
 #[test]
@@ -2377,17 +2229,16 @@ fn should_retry_same_content_upload_idempotently_given_remote_object_already_exi
     let key = crate::cloud_layout::object_key(sst_name);
     let bytes = valid_sst_bytes(b"retry", b"value", 8);
     storage
-        .write_sst_object(sst_name, bytes.clone())
+        .write_sst_object(sst_name, &bytes)
         .expect("publish both copies");
 
     // Act
     storage
-        .write_sst_object(sst_name, bytes.clone())
+        .write_sst_object(sst_name, &bytes)
         .expect("same-content retry must be idempotent");
 
     // Assert
     assert_eq!(read_cloud_object(&storage, &key), bytes);
-    assert_eq!(read_local_object(&storage, &key), bytes);
 }
 
 #[test]
@@ -2490,18 +2341,12 @@ fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
 #[test]
 fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
     // Arrange
-    let tmp = tempfile::tempdir().expect("create guarded-prune race test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let segment_id = 12;
     let key = crate::wal::cloud_segment::object_key(segment_id, 1);
     let bytes = valid_wal_bytes(22);
     let backend = Arc::new(RacingReadDeleteBackend::new(bytes.clone()));
     let cloud: Arc<dyn StorageBackend> = backend.clone();
     let storage = Arc::new(CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ))));
@@ -3025,14 +2870,9 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
 fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create WAL retry test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let write_attempts = Arc::new(AtomicUsize::new(0));
     let cloud = Arc::new(AlwaysFailingWriteBackend::new(Arc::clone(&write_attempts)));
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -3094,14 +2934,9 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
 fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create WAL worker panic test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let write_attempts = Arc::new(AtomicUsize::new(0));
     let cloud = Arc::new(PanickingWriteBackend::new(Arc::clone(&write_attempts)));
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -3150,10 +2985,6 @@ fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
 fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create bounded upload test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let first_path = tmp.path().join(crate::wal::segment_file_name(1));
     let second_path = tmp.path().join(crate::wal::segment_file_name(2));
@@ -3168,7 +2999,6 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
     };
     let storage = CloudPersistence::new(Arc::new(
         HybridStorage::with_policy_event_sender_and_limits(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             None,
@@ -3202,10 +3032,6 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
 fn should_restore_wal_admission_after_upload_capacity_drains() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create admission release test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let mock_cloud = Arc::new(MockCloudBackend::new());
     let cloud = Arc::new(CloudStorage::new(
         mock_cloud,
@@ -3217,7 +3043,6 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
     };
     let storage = CloudPersistence::new(Arc::new(
         HybridStorage::with_policy_event_sender_and_limits(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             None,
@@ -3255,10 +3080,6 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
 fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_times_out() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create callback timeout test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create local backend"),
-    );
     let cloud = Arc::new(NeverCompletesBackend::default());
     let limits = HybridQueueLimits {
         callback_timeout: Duration::from_millis(20),
@@ -3267,7 +3088,6 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
     };
     let storage = CloudPersistence::new(Arc::new(
         HybridStorage::with_policy_event_sender_and_limits(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             None,
@@ -3323,11 +3143,6 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
     // conditional PUT never answers. A fresh per-call timeout would let this
     // attempt outlive its advertised deadline by roughly two seconds, leaving
     // a full second of scheduler headroom in the bounded assertion.
-    let tmp = tempfile::tempdir().expect("create deadline publication directory");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create deadline publication local backend"),
-    );
     let cloud = Arc::new(BudgetConsumingSstPublicationBackend::new(
         Duration::from_millis(300),
     ));
@@ -3337,7 +3152,6 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
     };
     let storage = CloudPersistence::new(Arc::new(
         HybridStorage::with_policy_event_sender_and_limits(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             None,
@@ -3350,7 +3164,7 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
     let started = Instant::now();
     let result = storage.write_sst_object_within(
         "deadline-publication.sst",
-        valid_sst_bytes(b"deadline", b"value", 1),
+        &valid_sst_bytes(b"deadline", b"value", 1),
         &deadline,
     );
     let elapsed = started.elapsed();

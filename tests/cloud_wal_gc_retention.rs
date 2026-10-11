@@ -131,7 +131,7 @@ fn assert_value(engine: &Engine, cf: u32, key: &[u8], expected: Option<&[u8]>) {
 }
 
 fn clear_caches(root: &std::path::Path) {
-    for name in ["wal", "sst", "hybrid_local"] {
+    for name in ["wal", "sst"] {
         let path = root.join(name);
         if path.exists() {
             std::fs::remove_dir_all(path).unwrap();

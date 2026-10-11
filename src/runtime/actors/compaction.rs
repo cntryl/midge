@@ -1407,14 +1407,10 @@ mod tests {
             crate::io::subdirectory(Arc::clone(&state.fs), crate::sst::fs::SST_DIR),
             4096,
         )));
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            temp.path().join("local"),
-        )?);
         let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
             temp.path().join("cloud"),
         )?);
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000),
         ));
@@ -2074,16 +2070,11 @@ mod tests {
         let input_bytes =
             write_shutdown_compaction_input(&mut state, delegate.as_ref(), &input_name);
 
-        let local = Arc::new(
-            crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-local"))
-                .expect("create local storage"),
-        );
         let cloud = Arc::new(
             crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-cloud"))
                 .expect("create cloud storage"),
         );
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));

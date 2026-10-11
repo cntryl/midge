@@ -2251,13 +2251,8 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
         cloud_fs,
         Duration::from_millis(2_500),
     ));
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open deadline-bounded DDL local backend"),
-    );
     el.cloud_coordinator.hybrid_storage =
         Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             ddl_cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
@@ -2333,13 +2328,8 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     );
     let delayed_cloud = Arc::new(DelayedCommitDdlBackend::new(cloud_fs));
     let commit_complete = delayed_cloud.commit_complete();
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open delayed DDL local backend"),
-    );
     el.cloud_coordinator.hybrid_storage =
         Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             delayed_cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
@@ -2789,16 +2779,11 @@ fn should_set_hybrid_storage() {
     assert!(event_loop.cloud_coordinator.hybrid_storage.is_none());
 
     let db_path = event_loop.state.db_path.clone();
-    let local = std::sync::Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
-            .expect("create local backend"),
-    );
     let cloud = std::sync::Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
     let hybrid_storage = std::sync::Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -2864,13 +2849,8 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
         cloud_fs,
         Duration::from_secs(1),
     ));
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open delayed prune local backend"),
-    );
     el.cloud_coordinator.hybrid_storage =
         Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             delayed_cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
@@ -3027,15 +3007,10 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
             .expect("open ambiguous prune cloud backend"),
     );
     let ambiguous_cloud = Arc::new(CommitThenBlockCatalogCasCallbackBackend::new(cloud_fs));
-    let local: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open ambiguous prune local backend"),
-    );
     let ambiguous_backend: Arc<dyn crate::storage::StorageBackend> = ambiguous_cloud.clone();
     let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
     el.cloud_coordinator.hybrid_storage = Some(Arc::new(
         crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-            local,
             Arc::clone(&ambiguous_backend),
             Arc::clone(&ambiguous_backend),
             ambiguous_backend,
@@ -3139,7 +3114,7 @@ fn should_retain_reclaimed_sst_when_salvage_metadata_mirror_exceeds_deadline(
             .as_ref()
             .expect("hybrid storage"),
     )
-    .write_sst_object(sst_name, sst_bytes)?;
+    .write_sst_object(sst_name, &sst_bytes)?;
     el.gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
     let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
@@ -3181,7 +3156,7 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
             .as_ref()
             .expect("hybrid storage"),
     )
-    .write_sst_object(sst_name, sst_bytes)?;
+    .write_sst_object(sst_name, &sst_bytes)?;
     el.gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
     let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
@@ -3959,7 +3934,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
             .as_ref()
             .expect("hybrid storage"),
     )
-    .write_sst_object(input_sst, input_bytes)?;
+    .write_sst_object(input_sst, &input_bytes)?;
     assert!(
         remote_sst_path_for_test(&el, input_sst).exists(),
         "test setup should create the obsolete provider SST object"
@@ -4029,10 +4004,6 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     let sst_bytes = valid_sst_bytes_for_test(b"slow-delete", b"value", 12);
     write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
 
-    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_slow"))
-            .expect("create slow local backend"),
-    );
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create slow cloud backend"),
@@ -4047,12 +4018,11 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
             Arc::clone(&release_delete),
         ));
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local_backend,
         cloud_backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
 
     let request_id = 4546;
     let response_rx = el.router.register(request_id, "TestRequest");
@@ -4122,10 +4092,6 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     let sst_bytes = valid_sst_bytes_for_test(b"retry-delete", b"value", 14);
     write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
 
-    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_retry"))
-            .expect("create retry local backend"),
-    );
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create retry cloud backend"),
@@ -4137,12 +4103,11 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::clone(&failing_cloud) as Arc<dyn crate::storage::StorageBackend>;
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local_backend,
         cloud_backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
 
     let (retry_tx, retry_rx) = crossbeam::channel::unbounded();
     el.gc_actor.set_retry_notifier(Some(retry_tx));
@@ -4201,10 +4166,6 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     let sst_bytes = valid_sst_bytes_for_test(b"shutdown-delete", b"value", 13);
     write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
 
-    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_shutdown"))
-            .expect("create local backend"),
-    );
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create cloud backend"),
@@ -4219,12 +4180,11 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
             Arc::clone(&release_delete),
         ));
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local_backend,
         cloud_backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
 
     let request_id = 4547;
     let (_response_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -5192,12 +5152,6 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     let segment_id = 82;
     let max_sequence = 82;
     let wal_key = crate::wal::cloud_segment_object_key(segment_id, el.state.writer_epoch);
-    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(
-            el.state.db_path.join("hybrid_local_blocked_wal_prune"),
-        )
-        .expect("create blocked WAL prune local backend"),
-    );
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create blocked WAL prune cloud backend"),
@@ -5213,7 +5167,6 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
             Arc::clone(&release_delete),
         ));
     el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
-        local_backend,
         cloud_backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -5298,14 +5251,6 @@ fn should_delete_retired_wal_when_coverage_dependency_changes_after_catalog_cas(
     )?;
     let segment_id = 84;
     let max_sequence = 84;
-    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(
-            el.state
-                .db_path
-                .join("hybrid_local_post_retirement_dependency_change"),
-        )
-        .expect("create post-retirement dependency local backend"),
-    );
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create post-retirement dependency cloud backend"),
@@ -5315,7 +5260,6 @@ fn should_delete_retired_wal_when_coverage_dependency_changes_after_catalog_cas(
     ));
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> = changing_cloud.clone();
     el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
-        local_backend,
         cloud_backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -5366,12 +5310,6 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
     let segment_id = 83;
     let max_sequence = 83;
     let wal_key = crate::wal::cloud_segment_object_key(segment_id, el.state.writer_epoch);
-    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(
-            el.state.db_path.join("hybrid_local_failed_wal_prune"),
-        )
-        .expect("create failed WAL prune local backend"),
-    );
     let cloud_backend_inner = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("create failed WAL prune cloud backend"),
@@ -5383,7 +5321,6 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::clone(&failing_cloud) as Arc<dyn crate::storage::StorageBackend>;
     el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
-        local_backend,
         cloud_backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -7544,16 +7481,11 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
     append_cloud_async_put(&mut el)?;
     let (second_segment, second_max_sequence) =
         seal_segment_without_remote_proof_for_test(&mut el)?;
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("bounded-retry-local"))
-            .expect("create bounded retry local storage"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("bounded-retry-cloud"))
             .expect("create bounded retry cloud storage"),
     );
     let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         1,
@@ -7952,16 +7884,11 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
     // longer safely begin.
     let tmp = tempfile::tempdir().expect("create bounded strict-seal directory");
     let state = RuntimeState::new(tmp.path().to_path_buf(), false);
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("hybrid-local"))
-            .expect("create bounded strict-seal local backend"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(tmp.path().join("cloud-store"))
             .expect("create bounded strict-seal cloud backend"),
     );
     let storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -8578,14 +8505,9 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
         cloud_fs,
         Duration::from_secs(1),
     ));
-    let local: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open shutdown acknowledgement local backend"),
-    );
     let cloud: Arc<dyn crate::storage::StorageBackend> = delayed_cloud.clone();
     let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
     let storage = Arc::new(crate::storage::HybridStorage::new_with_event_sender(
-        local,
         cloud,
         storage_event_tx,
     ));
@@ -8666,12 +8588,7 @@ fn should_poll_inflight_cloud_upload_on_interval_without_busy_spin(
         cloud_fs,
         Duration::from_millis(250),
     ));
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open delayed upload local backend"),
-    );
     el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         delayed_cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
@@ -8726,12 +8643,7 @@ fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
         cloud_fs,
         Duration::from_secs(1),
     ));
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
-            .expect("open delayed acknowledgement local backend"),
-    );
     el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         delayed_cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));

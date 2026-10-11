@@ -549,7 +549,7 @@ mod cloud_many_families {
     }
 
     fn working_bytes(path: &Path) -> u64 {
-        ["wal", "sst", "staging", "hybrid_local"]
+        ["wal", "sst", "staging"]
             .iter()
             .map(|name| file_bytes(&path.join(name)))
             .sum()

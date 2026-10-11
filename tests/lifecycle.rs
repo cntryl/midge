@@ -2253,7 +2253,6 @@ mod column_family_reclamation_hardening {
             .flat_map(|name| {
                 let mut paths = vec![root.join("sst").join(name)];
                 if matches!(storage, TestStorage::SimulatedCloud) {
-                    paths.push(root.join("hybrid_local").join("sst").join(name));
                     paths.push(root.join("cloud_store").join("sst").join(name));
                 }
                 paths

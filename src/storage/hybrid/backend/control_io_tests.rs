@@ -137,7 +137,6 @@ fn should_condition_control_replacement_on_filesystem_range_identity() {
     let backend: Arc<dyn StorageBackend> =
         Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
     let storage = HybridStorage::with_policy(
-        backend.clone(),
         backend,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );

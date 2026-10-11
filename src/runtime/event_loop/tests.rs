@@ -210,16 +210,11 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
 
     let state = RuntimeState::new(db_path.clone(), false);
     let router = Arc::new(ResponseRouter::new());
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
-            .expect("create local backend"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         storage_policy,
     ));
@@ -282,11 +277,7 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     let _lease_guard = Arc::clone(&lease)
         .try_acquire()
         .expect("acquire cloud metadata lease");
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        directory.path().join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -468,16 +459,11 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     state.sequence = 3;
     state.wal.frontiers.set_local_durable_for_test(3);
     state.reset_cloud_durable_sequence_for_recovery();
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
-            .expect("create local backend"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -1977,10 +1963,6 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
 
     state.sequence = 3;
     state.wal.current_segment_id = 3;
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid-local"))
-            .expect("create local storage"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),
@@ -1990,7 +1972,6 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         .max(second_bytes.len())
         .max(active_bytes.len()) as u64;
     let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         1,
@@ -2067,10 +2048,6 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     std::fs::write(&local_path, cloud_recovery_wal_bytes(1)).expect("write validated local copy");
     state.sequence = 1;
     state.wal.current_segment_id = 2;
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid-local"))
-            .expect("create local storage"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),
@@ -2078,7 +2055,6 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ))),
@@ -2667,9 +2643,6 @@ fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
     let budget = crate::common::resource_budget::ResourceBudget::new(64);
 
     let hybrid = crate::storage::HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(
-            temp_dir.path().join("local"),
-        )?),
         Arc::new(crate::storage::filesystem::FileSystem::new(
             temp_dir.path().join("cloud"),
         )?),

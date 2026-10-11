@@ -37,7 +37,6 @@ fn storage_fixture() -> (tempfile::TempDir, super::super::CloudPersistence) {
     use std::sync::Arc;
     let directory = tempfile::tempdir().unwrap();
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
         Arc::new(CloudStorage::with_mock()),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));

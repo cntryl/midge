@@ -912,16 +912,12 @@ mod tests {
         );
         let file_meta = FlushActor::write_memtable_to_staging(&sst_factory, &mut build_task)?;
 
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("local"),
-        )?);
         let sst_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let sst_cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             sst_backend.clone(),
             String::new(),
         ));
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             sst_cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));

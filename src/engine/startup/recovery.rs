@@ -15,9 +15,9 @@ impl RuntimeRecoveryMaterialization {
             return Ok(());
         };
         let fs = crate::telemetry::recovery_progress::observe_reads(Arc::clone(fs));
-        let Some(storage) = &materialized.runtime_config.hybrid_storage else {
+        if materialized.runtime_config.hybrid_storage.is_none() {
             return Ok(());
-        };
+        }
         let mut salvaged = Vec::new();
         for meta in &materialized.state.manifest.files {
             materialized
@@ -27,10 +27,8 @@ impl RuntimeRecoveryMaterialization {
                 continue;
             }
             let root = Arc::clone(&materialized.state.fs);
-            let path = crate::io::FsPath::new(crate::cloud_layout::object_key(&meta.name));
-            let secondary = crate::io::FsPath::new(format!("hybrid_local/{}", path.0));
-            let resident = root.exists(&path).map_err(FsError::into_midge)?;
-            if !resident && !root.exists(&secondary).map_err(FsError::into_midge)? {
+            let path = crate::sst::fs::sst_key(&meta.name);
+            if !root.exists(&path).map_err(FsError::into_midge)? {
                 continue;
             }
             // This migration path reads only objects which already have a
@@ -60,16 +58,13 @@ impl RuntimeRecoveryMaterialization {
                 }
                 return Err(error);
             }
-            if resident {
-                materialized
-                    .state
-                    .check_startup_scope("resident SST eviction")?;
-                root.remove_file(&path).map_err(FsError::into_midge)?;
-                materialized
-                    .state
-                    .check_startup_scope("resident SST eviction")?;
-            }
-            storage.evict_local_object_cache(&crate::cloud_layout::object_key(&meta.name))?;
+            materialized
+                .state
+                .check_startup_scope("resident SST eviction")?;
+            root.remove_file(&path).map_err(FsError::into_midge)?;
+            materialized
+                .state
+                .check_startup_scope("resident SST eviction")?;
         }
         if !salvaged.is_empty() {
             materialized.state.salvaged_local_ssts.extend(salvaged);
@@ -245,11 +240,6 @@ impl RuntimeRecoveryMaterialization {
         Self::prepare_storage_for_wal_replay(&mut materialized)?;
         if let Some(replay) = materialized.streaming_wal.take() {
             super::timing::measure("wal_replay", || replay.replay(&mut materialized))?;
-        }
-        // Legacy hybrid_local SST copies have been swept above. Replay may
-        // publish new SSTs, so retire the secondary backend only afterward.
-        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-            storage.retire_legacy_local_store();
         }
         let recovered_sequence = materialized.state.sequence;
         let recovered_cf_metas = materialized.state.manifest.column_families.clone();

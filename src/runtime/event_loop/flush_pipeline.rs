@@ -835,12 +835,7 @@ impl EventLoop {
                 .and_then(|path| self.state.fs.exists(&path).map_err(FsError::into_midge))
                 .is_ok_and(|exists| !exists)
         });
-        if !primary_absent
-            || !matches!(
-                hybrid.local_object_cache_is_absent(&crate::cloud_layout::object_key(name)),
-                Ok(true)
-            )
-        {
+        if !primary_absent {
             return;
         }
         // This completed worker owns no bytes. Clear only its exact token;
@@ -1100,15 +1095,11 @@ mod tests {
         directory: &tempfile::TempDir,
     ) -> crate::common::MidgeResult<(EventLoop, Arc<crate::storage::HybridStorage>)> {
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("hybrid-local"),
-        )?);
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             String::new(),
         ));
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -2947,15 +2938,11 @@ mod tests {
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
         let healthy = Arc::new(AtomicBool::new(true));
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("hybrid-local"),
-        )?);
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             String::new(),
         ));
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));

@@ -174,14 +174,10 @@ fn event_loop_with_storage(
     ephemeral: bool,
 ) -> MidgeResult<(EventLoop, Arc<crate::storage::HybridStorage>)> {
     let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        directory.path().join("hybrid_local"),
-    )?);
     let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
         directory.path().join("cloud_store"),
     )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::new(LOCAL_BUDGET),
     ));

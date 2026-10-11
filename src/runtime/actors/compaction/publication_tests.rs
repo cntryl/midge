@@ -285,9 +285,6 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let original = std::fs::read(&path)?;
     let cloud_path = directory.path().join("cloud");
     let hybrid = crate::storage::HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("local"),
-        )?),
         Arc::new(crate::storage::filesystem::FileSystem::new(&cloud_path)?),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
@@ -393,9 +390,6 @@ fn upload_charge_case(manual: bool) -> MidgeResult<()> {
     );
     let (tx, _rx) = crossbeam::channel::unbounded();
     let hybrid = crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-        Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("local"),
-        )?),
         cloud.clone(),
         cloud.clone(),
         cloud,
@@ -477,9 +471,6 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("input.sst"))?;
         let cloud_path = directory.path().join("cloud");
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                directory.path().join("local"),
-            )?),
             Arc::new(crate::storage::filesystem::FileSystem::new(&cloud_path)?),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -597,9 +588,6 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
     );
     let (tx, _rx) = crossbeam::channel::unbounded();
     let hybrid = crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-        Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("local"),
-        )?),
         cloud.clone(),
         cloud.clone(),
         cloud,

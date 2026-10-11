@@ -873,33 +873,6 @@ fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> Mid
     result
 }
 
-#[test]
-fn should_sweep_legacy_local_sst_before_retiring_local_backend() -> MidgeResult<()> {
-    // Arrange
-    let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
-    let options = || OpenOptions::cloud_simulated(directory.path(), "legacy", "sweep").build();
-    let mut engine = Engine::open(options()?)?;
-    let cf = engine.get_column_family("default").expect("default CF");
-    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-    tx.put(b"legacy-key".to_vec(), b"value".to_vec(), None)?;
-    tx.commit(WriteOptions::cloud_strict())?;
-    engine.flush_cf(&cf)?;
-    engine.shutdown(Duration::from_secs(5))?;
-    let manifest =
-        crate::metadata::ManifestPersistence::load(directory.path()).expect("read checkpoint");
-    let name = &manifest.files.first().expect("flushed SST").name;
-    let legacy = directory.path().join("hybrid_local/sst").join(name);
-    std::fs::create_dir_all(legacy.parent().expect("legacy SST directory"))?;
-    std::fs::copy(directory.path().join("cloud_store/sst").join(name), &legacy)?;
-
-    // Act
-    let mut reopened = Engine::open(options()?)?;
-
-    // Assert
-    assert!(!legacy.exists(), "startup must sweep the legacy local copy");
-    reopened.shutdown(Duration::from_secs(5))
-}
-
 fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) -> Vec<u8> {
     let record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,

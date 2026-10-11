@@ -1088,7 +1088,6 @@ mod tests {
             registry_writes: AtomicUsize::new(0),
         });
         let storage = Arc::new(HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             provider.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1162,7 +1161,6 @@ mod tests {
             "ddl-prepare-expiry".into(),
         ));
         let storage = Arc::new(HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1254,11 +1252,7 @@ mod tests {
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             "ddl-fence-test".to_string(),
         ));
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            temp.path().join("hybrid-local"),
-        )?);
         let storage = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1399,9 +1393,6 @@ mod tests {
             registry_writes: AtomicUsize::new(0),
         });
         let storage = crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                temp.path().join("hybrid-local"),
-            )?),
             lossy.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -1438,9 +1429,6 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
         let storage = Arc::new(crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                temp.path().join("hybrid-local"),
-            )?),
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1499,9 +1487,6 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
         let storage = crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                temp.path().join("hybrid-local"),
-            )?),
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );

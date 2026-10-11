@@ -388,7 +388,6 @@ mod tests {
             crate::storage::filesystem::FileSystem::new(directory.path()).unwrap(),
         );
         let storage = crate::storage::HybridStorage::with_policy(
-            local.clone(),
             local,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );

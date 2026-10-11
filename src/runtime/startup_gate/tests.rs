@@ -256,16 +256,11 @@ impl ActiveWalFixture {
         .unwrap();
         state.sequence = 1;
         state.wal.current_segment_id = 1;
-        let local = Arc::new(
-            crate::storage::filesystem::FileSystem::new(directory.path().join("hybrid-local"))
-                .unwrap(),
-        );
         let cloud = Arc::new(
             crate::storage::filesystem::FileSystem::new(directory.path().join("cloud-store"))
                 .unwrap(),
         );
         let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             1,

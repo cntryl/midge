@@ -280,9 +280,7 @@ fn pin_durable_files(
         collect_files(&root.join(name), root, &mut paths)?;
     }
     if simulated_cloud {
-        for name in ["cloud_store", "hybrid_local"] {
-            collect_files(&root.join(name), root, &mut paths)?;
-        }
+        collect_files(&root.join("cloud_store"), root, &mut paths)?;
     }
     paths.sort();
     paths.dedup();

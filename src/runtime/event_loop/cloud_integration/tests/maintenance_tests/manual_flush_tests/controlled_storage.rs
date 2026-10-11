@@ -51,11 +51,7 @@ pub(super) fn install(
         fail_upload: AtomicBool::new(fail_upload),
         uploads: Mutex::new(Vec::new()),
     });
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        el.state.db_path.join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
