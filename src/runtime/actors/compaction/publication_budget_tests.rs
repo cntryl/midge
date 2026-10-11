@@ -138,7 +138,7 @@ impl PublicationFixture {
         let mut originals = Vec::new();
         for ordinal in 0..count {
             let name = crate::cloud_layout::compaction_file_name(0, 1, 3, ordinal);
-            let path = directory.path().join(&name);
+            let path = directory.path().join(crate::sst::fs::sst_location(&name));
             let mut writer = factory.create()?;
             writer.add_with_meta(b"key", Some(b"exact value"), 9, EntryType::Put, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &path)?;
@@ -156,7 +156,7 @@ impl PublicationFixture {
             )?);
         }
         Ok(Self {
-            directory: directory.path().to_path_buf(),
+            directory: directory.path().join(crate::sst::fs::SST_DIR),
             _directory: directory,
             fs,
             backend,
@@ -199,7 +199,6 @@ impl PublicationFixture {
             },
             phase: publication::CompactionPublishPhase::OutputDurable,
             outputs: self.outputs.clone(),
-            sst_dir: self.directory.clone(),
             fs: self.fs.clone(),
             hybrid_storage: Some(self.hybrid.clone()),
             cloud_metadata_storage: None,

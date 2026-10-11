@@ -38,7 +38,7 @@ pub(super) fn install(
     ));
     let delegate = Arc::new(
         crate::sst::FsSstFactoryIo::new(reads, 64 * 1024)
-            .with_compaction_scratch_directory(el.state.sst_dir.join(".flush-staging")),
+            .with_compaction_scratch_directory(el.state.host_sst_dir().join(".flush-staging")),
     );
     let (reached, arrived) = crossbeam::channel::bounded(1);
     let (release, resumed) = crossbeam::channel::bounded(1);

@@ -36,7 +36,7 @@ fn cloud_debt_with_wal_records(
     ));
     el.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(
         crate::sst::FsSstFactoryIo::new(reads, 64 * 1024)
-            .with_compaction_scratch_directory(el.state.sst_dir.join(".flush-staging")),
+            .with_compaction_scratch_directory(el.state.host_sst_dir().join(".flush-staging")),
     ));
     let other = el.state.create_cf("remaining-debt".into())?;
     let record = crate::wal::WalRecord::new(
@@ -58,7 +58,7 @@ fn cloud_debt_with_wal_records(
             let name = crate::cloud_layout::file_name(cf_id, 0, number);
             let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
             el.state.manifest.test_mut().files.last_mut().unwrap().cf_id = cf_id;
-            write_test_file(el.state.sst_dir.join(&name), &bytes);
+            write_test_file(el.state.host_sst_dir().join(&name), &bytes);
         }
     }
     let (tx, rx) = crossbeam::channel::unbounded();
@@ -199,7 +199,7 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
     for cf_id in [0, other] {
         let name = crate::cloud_layout::file_name(cf_id, 0, 1);
         let bytes = valid_sst_bytes_for_test(b"local-debt", b"value", 81);
-        write_test_file(el.state.sst_dir.join(&name), &bytes);
+        write_test_file(el.state.host_sst_dir().join(&name), &bytes);
         el.state
             .manifest
             .test_mut()

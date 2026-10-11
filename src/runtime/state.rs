@@ -466,7 +466,6 @@ pub struct RuntimeState {
     // === Paths ===
     pub db_path: PathBuf,
     pub wal_dir: PathBuf,
-    pub sst_dir: PathBuf,
 
     // === Sequence Numbers ===
     /// Global monotonic sequence number
@@ -547,6 +546,14 @@ impl RuntimeState {
 }
 
 impl RuntimeState {
+    /// The host directory behind the root's `sst/`, for tests that place or
+    /// inspect SST files directly. The runtime itself addresses SSTs only by
+    /// root-relative paths through `fs`.
+    #[cfg(test)]
+    pub(crate) fn host_sst_dir(&self) -> PathBuf {
+        self.db_path.join(crate::sst::fs::SST_DIR)
+    }
+
     pub fn health(&self) -> crate::config::EngineHealth {
         let residue = self.storage_residue_assessment();
         crate::runtime::storage_residue::classify_engine_health(
@@ -797,10 +804,12 @@ impl RuntimeState {
             return crate::runtime::storage_residue::StorageResidueAssessment::default();
         }
 
-        crate::runtime::storage_residue::StorageResidueAssessment::scan_sst_dir(
-            &self.db_path,
+        crate::runtime::storage_residue::StorageResidueAssessment::scan(
+            self.fs.as_ref(),
             &self.manifest,
+            |_| Ok(()),
         )
+        .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -814,36 +823,11 @@ impl RuntimeState {
         &self,
     ) -> MidgeResult<crate::runtime::storage_residue::StorageResidueAssessment> {
         self.check_startup_scope("storage residue inventory")?;
-        let mut residue = crate::runtime::storage_residue::StorageResidueAssessment::default();
-        let entries = match self.fs.list_dir(&FsPath::new("sst")) {
-            Ok(entries) => entries,
-            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
-            Err(_) => return Ok(residue),
-        };
-        let published: HashSet<_> = self
-            .manifest
-            .files
-            .iter()
-            .map(|file| file.name.as_str())
-            .collect();
-        for entry in entries {
-            self.check_startup_scope("storage residue inventory entry")?;
-            let name = entry.name;
-            let path = std::path::Path::new(&name);
-            if name.ends_with(".sst.tmp")
-                || path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
-            {
-                residue.sst_temp_files.push(name);
-            } else if path.extension().is_some_and(|extension| extension == "sst")
-                && !published.contains(name.as_str())
-            {
-                residue.orphan_ssts.push(name);
-            }
-        }
-        residue.orphan_ssts.sort();
-        residue.sst_temp_files.sort();
+        let residue = crate::runtime::storage_residue::StorageResidueAssessment::scan(
+            self.fs.as_ref(),
+            &self.manifest,
+            |context| self.check_startup_scope(context),
+        )?;
         self.check_startup_scope("storage residue inventory completion")?;
         Ok(residue)
     }
@@ -925,11 +909,11 @@ impl RuntimeState {
 
     fn cleanup_flush_staging_residue(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("flush staging residue")?;
-        let staging_dir = self.sst_dir.join(".flush-staging");
-        match self.fs.remove_dir_all(&FsPath::new("sst/.flush-staging")) {
+        let staging_dir = crate::sst::fs::FLUSH_STAGING_DIR;
+        match self.fs.remove_dir_all(&FsPath::new(staging_dir)) {
             Ok(()) => {
                 tracing::info!(
-                    path = %staging_dir.display(),
+                    path = staging_dir,
                     "deleted non-authoritative flush staging residue during startup"
                 );
             }
@@ -938,7 +922,7 @@ impl RuntimeState {
             Err(error) => {
                 self.mark_persistence_anomaly();
                 tracing::warn!(
-                    path = %staging_dir.display(),
+                    path = staging_dir,
                     error = %error,
                     "failed to delete non-authoritative flush staging residue"
                 );
@@ -952,19 +936,16 @@ impl RuntimeState {
     /// directory.
     fn cleanup_repair_scratch_residue(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("repair scratch residue")?;
-        let directory = self.sst_dir.join(".compaction-repair");
-        match self
-            .fs
-            .remove_dir_all(&FsPath::new("sst/.compaction-repair"))
-        {
+        let directory = crate::sst::fs::REPAIR_SCRATCH_DIR;
+        match self.fs.remove_dir_all(&FsPath::new(directory)) {
             Ok(()) => {
-                tracing::info!(path = %directory.display(), "deleted stale overlap-repair scratch");
+                tracing::info!(path = directory, "deleted stale overlap-repair scratch");
             }
             Err(FsError::NotFound(_)) => {}
             Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(error) => {
                 self.mark_persistence_anomaly();
-                tracing::warn!(path = %directory.display(), error = %error, "retaining unclean overlap-repair scratch");
+                tracing::warn!(path = directory, error = %error, "retaining unclean overlap-repair scratch");
             }
         }
         self.check_startup_scope("startup residue completion")

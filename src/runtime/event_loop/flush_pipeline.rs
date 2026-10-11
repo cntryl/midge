@@ -192,7 +192,7 @@ impl EventLoop {
             return;
         }
 
-        let staging_path = self.state.sst_dir.join(".flush-staging").join(format!(
+        let staging_path = std::path::Path::new(crate::sst::fs::FLUSH_STAGING_DIR).join(format!(
             "{}-{}.sst",
             identity.writer_epoch, identity.flush_id
         ));
@@ -241,7 +241,6 @@ impl EventLoop {
             build,
             sst_name,
             sst_seq,
-            sst_dir: self.state.sst_dir.clone(),
             fs: Arc::clone(&self.state.fs),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 self.cloud_coordinator.hybrid_storage.clone(),
@@ -366,13 +365,7 @@ impl EventLoop {
         &self,
         path: &std::path::Path,
     ) -> crate::common::MidgeResult<crate::io::FsPath> {
-        let relative = path
-            .strip_prefix(&self.state.db_path)
-            .map_err(|_| crate::common::MidgeError::InvalidPath)?;
-        let relative = relative
-            .to_str()
-            .ok_or(crate::common::MidgeError::InvalidPath)?;
-        Ok(crate::io::FsPath::new(relative))
+        crate::sst::fs::fs_relative_sst_path(&self.state.fs, path)
     }
 
     /// Picks the SST sequence for a flush output and, when the output can
@@ -835,7 +828,7 @@ impl EventLoop {
         let paths = [
             build.staging_path.clone(),
             std::path::PathBuf::from(temporary),
-            self.state.sst_dir.join(name),
+            crate::sst::fs::sst_location(name),
         ];
         let primary_absent = paths.iter().all(|path| {
             self.runtime_fs_path(path)
@@ -1444,7 +1437,7 @@ mod tests {
                 sequence: 1,
             },
             memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
-            staging_path: directory.path().join("orphan.sst"),
+            staging_path: std::path::PathBuf::from("orphan.sst"),
             reservation: Some(reservation),
             build_ns: 1,
             result: Err(crate::common::MidgeError::Fenced("orphan".to_string())),
@@ -1944,7 +1937,7 @@ mod tests {
             let path = match residue {
                 "staging" => Some(staging_path.clone()),
                 "temporary" => Some(directory.path().join("failed.sst.tmp")),
-                "final" => Some(event_loop.state.sst_dir.join(&name)),
+                "final" => Some(event_loop.state.host_sst_dir().join(&name)),
                 "secondary" => Some(directory.path().join("hybrid-local/sst").join(&name)),
                 _ => None,
             };

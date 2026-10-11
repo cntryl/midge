@@ -169,6 +169,7 @@ impl Fs for MockFs {
         if let Some(data) = files.get(&path.0) {
             Ok(Metadata {
                 len: data.data.len() as u64,
+                is_dir: false,
             })
         } else {
             Err(FsError::NotFound(path.0.clone()))

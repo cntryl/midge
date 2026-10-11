@@ -2,7 +2,6 @@ use super::cloud_io::BlockingCloudIo;
 use super::{CloudSstRecoveryProof, CloudStartupRecovery};
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::RecoveryPolicy;
-use crate::io::Fs as _;
 use crate::io::FsError;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
@@ -849,8 +848,10 @@ impl CloudStartupRecovery {
         file: &crate::metadata::FileMeta,
     ) -> MidgeResult<bool> {
         state.check_startup_scope("local salvage SST proof")?;
+        let primary = crate::sst::fs::sst_key(&file.name);
         let retained = Self::local_sst_file_matches_manifest_within(
-            &state.sst_dir.join(&file.name),
+            &state.fs,
+            &primary,
             file,
             state.startup_scope.as_ref(),
         )?;
@@ -858,8 +859,9 @@ impl CloudStartupRecovery {
         if retained {
             return Ok(true);
         }
-        let secondary = state.db_path.join("hybrid_local/sst").join(&file.name);
+        let secondary = crate::io::FsPath::new(format!("hybrid_local/sst/{}", file.name));
         let retained = Self::local_sst_file_matches_manifest_within(
+            &state.fs,
             &secondary,
             file,
             state.startup_scope.as_ref(),
@@ -870,14 +872,11 @@ impl CloudStartupRecovery {
         }
         // Move the verified secondary into the canonical read path without
         // allocating another full SST. A failed rename preserves its source.
-        let fs = crate::io::RealFs::open_existing(&state.db_path).map_err(FsError::into_midge)?;
-        fs.rename_atomic(
-            &crate::io::FsPath::new(format!("hybrid_local/sst/{}", file.name)),
-            &crate::io::FsPath::new(format!("sst/{}", file.name)),
-        )
-        .map_err(FsError::into_midge)?;
+        let fs = &state.fs;
+        fs.rename_atomic(&secondary, &primary)
+            .map_err(FsError::into_midge)?;
         fs.sync_dir(
-            &crate::io::FsPath::new("sst"),
+            &crate::io::FsPath::new(crate::sst::fs::SST_DIR),
             crate::io::Durability::Durable,
         )
         .map_err(FsError::into_midge)?;
@@ -918,9 +917,9 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         let sst_name = proof.name.clone();
         let cloud_key = crate::cloud_layout::object_key(&sst_name);
-        let local_path = state.sst_dir.join(&sst_name);
         if Self::local_sst_file_matches_proof_within(
-            &local_path,
+            &state.fs,
+            &crate::sst::fs::sst_key(&sst_name),
             &sst_name,
             proof.expected_size_bytes,
             proof.expected_crc32c,

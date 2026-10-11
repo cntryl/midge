@@ -9,7 +9,7 @@ pub mod reader_io;
 mod scratch;
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
@@ -19,15 +19,35 @@ use crate::sst::traits::DynSstWriter;
 pub use factory_io::FsSstFactoryIo;
 pub use reader_io::{SstFileIo, SstFileSummary};
 
-/// Compute immutable SST length and CRC with fixed stack space.
-#[cfg(test)]
-pub(crate) fn file_identity(path: &Path) -> MidgeResult<(u64, u32)> {
-    let identity = crate::sst::identity::SstIdentity::of_path(path)?;
-    Ok((identity.size_bytes, identity.crc32c))
+/// The SST directory below the database root. Every runtime SST location is
+/// a root-relative path under it, so one injected root addresses them all.
+pub(crate) const SST_DIR: &str = "sst";
+
+/// Non-authoritative flush outputs and build scratch awaiting publication,
+/// named within [`SST_DIR`] and as a root-relative path.
+pub(crate) const STAGING_DIR_NAME: &str = ".flush-staging";
+pub(crate) const FLUSH_STAGING_DIR: &str = "sst/.flush-staging";
+
+/// Overlap-repair runs, which never enter the manifest, named within
+/// [`SST_DIR`] and as a root-relative path.
+pub(crate) const REPAIR_DIR_NAME: &str = ".compaction-repair";
+pub(crate) const REPAIR_SCRATCH_DIR: &str = "sst/.compaction-repair";
+
+/// Root-relative location of the SST named `name`.
+pub(crate) fn sst_location(name: &str) -> std::path::PathBuf {
+    Path::new(SST_DIR).join(name)
+}
+
+/// Root filesystem key of the SST named `name`.
+pub(crate) fn sst_key(name: &str) -> FsPath {
+    FsPath::new(format!("{SST_DIR}/{name}"))
 }
 
 /// Compute an SST identity through the same filesystem that published it.
-pub(crate) fn file_identity_with_fs(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult<(u64, u32)> {
+pub(crate) fn identity_with_fs(
+    fs: &Arc<dyn Fs>,
+    path: &Path,
+) -> MidgeResult<crate::sst::identity::SstIdentity> {
     let path = fs_relative_sst_path(fs, path)?;
     let size = fs.metadata(&path).map_err(FsError::into_midge)?.len;
     let file = fs
@@ -41,7 +61,12 @@ pub(crate) fn file_identity_with_fs(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResul
             },
         )
         .map_err(FsError::into_midge)?;
-    let identity = crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)?;
+    crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
+}
+
+/// Compute immutable SST length and CRC through the filesystem that published it.
+pub(crate) fn file_identity_with_fs(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult<(u64, u32)> {
+    let identity = identity_with_fs(fs, path)?;
     Ok((identity.size_bytes, identity.crc32c))
 }
 
@@ -54,78 +79,42 @@ pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> Midg
     writer.finish_to_path(path)
 }
 
-/// Express an SST target relative to a filesystem `root`, keeping every
-/// component below the root exactly as the caller wrote it.
+/// Map an SST target onto the key space of `fs`.
 ///
-/// A relative target is resolved against `anchor`, the directory the
-/// filesystem's own root was resolved from, so the two are read in the same
-/// frame even if the host process later changes working directory.
+/// A relative target is already a key below the filesystem root: the engine
+/// names every SST location that way (`sst/<name>`), so mapping it touches
+/// neither the host nor the process working directory. An absolute target is
+/// accepted only by a host-rooted filesystem, and only below its root. A
+/// target outside it is rejected rather than silently rewritten into the
+/// root: publishing an SST somewhere other than where the caller named it
+/// would leave the manifest pointing at a file that does not exist.
 ///
-/// The root is recorded in canonical form, so the target may reach it through
-/// a symlink or an uncanonical prefix (`/var` on macOS). The shallowest
-/// ancestor of the target that canonicalizes to the root marks where the root
-/// begins; everything after it is kept unresolved. Resolving it instead would
-/// turn an in-root symlink (in any component, not only the last) into a
-/// publish redirected to a path the caller never named, which the manifest
-/// would not record and no reader could open. [`crate::io::RealFs`] rejects a
-/// symlink in any component it is given, so keeping them makes that fail
-/// closed. `None` means no ancestor is the root: the target lies outside it.
-fn root_relative_path(
-    anchor: Option<&Path>,
-    root: &Path,
-    path: &Path,
-) -> MidgeResult<Option<PathBuf>> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        let anchor = match anchor {
-            Some(anchor) => anchor.to_path_buf(),
-            None => std::env::current_dir().map_err(MidgeError::Io)?,
-        };
-        anchor.join(path)
-    };
-    let ancestors: Vec<&Path> = absolute.ancestors().skip(1).collect();
-    for ancestor in ancestors.into_iter().rev() {
-        if std::fs::canonicalize(ancestor).is_ok_and(|resolved| resolved == root) {
-            let relative = absolute
-                .strip_prefix(ancestor)
-                .map_err(|error| MidgeError::Internal(format!("SST target prefix: {error}")))?;
-            return Ok(Some(relative.to_path_buf()));
-        }
-    }
-    Ok(None)
-}
-
-/// Map an SST target path onto the path space of `fs`.
-///
-/// Filesystems rooted on the host only address paths inside their root, so a
-/// target outside it is rejected rather than silently rewritten into the root:
-/// publishing an SST somewhere other than where the caller named it would
-/// leave the manifest pointing at a file that does not exist. Rootless
-/// backends (in-memory mocks, object stores) own their key space and take the
-/// path as written.
+/// Components stay exactly as written. [`crate::io::RealFs`] rejects a
+/// symlink in any component, so an in-root symlink fails closed instead of
+/// redirecting the publish to a path no reader could open.
 ///
 /// Every failure here is an engine or deployment fault reached from flush and
 /// compaction rather than something an API caller asked for, so they are
 /// reported as [`MidgeError::Internal`] ([`crate::common::Severity::Defect`])
 /// instead of a caller error that would be documented as pointless to retry.
 pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult<FsPath> {
-    let Some(addressing) = fs.host_addressing() else {
-        // A rootless filesystem owns its key space, so the caller's own path
-        // string is already the key it addresses.
-        let path = path.to_str().ok_or_else(|| {
-            MidgeError::Internal(format!("SST target {} is not valid UTF-8", path.display()))
+    let relative = if path.is_absolute() {
+        let addressing = fs.host_addressing().ok_or_else(|| {
+            MidgeError::Internal(format!(
+                "SST target {} is a host path, but the filesystem has no host root",
+                path.display()
+            ))
         })?;
-        return Ok(FsPath::new(path));
-    };
-    let relative =
-        root_relative_path(addressing.anchor, addressing.root, path)?.ok_or_else(|| {
+        addressing.relative(path).ok_or_else(|| {
             MidgeError::Internal(format!(
                 "SST target {} lies outside the filesystem root {}",
                 path.display(),
                 addressing.root.display()
             ))
-        })?;
+        })?
+    } else {
+        path
+    };
 
     // Reject rather than drop traversal components: a rooted filesystem
     // silently discards them, which would publish the SST somewhere other
@@ -146,18 +135,16 @@ pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult
             | std::path::Component::RootDir
             | std::path::Component::Prefix(_) => {
                 return Err(MidgeError::Internal(format!(
-                    "SST target {} escapes the filesystem root {}",
-                    path.display(),
-                    addressing.root.display()
+                    "SST target {} escapes the filesystem root",
+                    path.display()
                 )))
             }
         }
     }
     if parts.is_empty() {
         return Err(MidgeError::Internal(format!(
-            "SST target {} names the filesystem root {} rather than a file",
-            path.display(),
-            addressing.root.display()
+            "SST target {} names the filesystem root rather than a file",
+            path.display()
         )));
     }
     Ok(FsPath::new(parts.join("/")))

@@ -1,7 +1,8 @@
 use super::{CloudStartupRecovery, MidgeError, MidgeResult};
+use crate::io::{Fs, FsError, FsPath};
 use crate::sst::identity::{ProofPolicy, SstIdentity};
 use crate::types::ExpectedSst;
-use std::path::Path;
+use std::sync::Arc;
 
 /// Describe a manifest proof for the shared identity checker.
 ///
@@ -40,86 +41,26 @@ impl CloudStartupRecovery {
             .map_err(|mismatch| MidgeError::RecoveryFailed(mismatch.to_string()))
     }
 
-    pub(crate) fn local_sst_file_matches_proof(
-        path: &Path,
-        sst_name: &str,
-        expected_size_bytes: Option<u64>,
-        expected_crc32c: Option<u32>,
-    ) -> bool {
-        if !path.exists() {
-            return false;
-        }
-
-        let Ok(identity) = SstIdentity::of_path(path) else {
-            return false;
-        };
-        if identity
-            .verify_against(
-                expected_sst(sst_name, expected_size_bytes, expected_crc32c),
-                None,
-                ProofPolicy::Legacy,
-            )
-            .is_err()
-        {
-            return false;
-        }
-
-        let Ok(reader) = crate::sst::fs::SstFileIo::open_with_real_fs(path) else {
-            return false;
-        };
-        // A matching whole-file CRC already proves the bytes; without one, the
-        // only remaining evidence is a full block-level pass.
-        expected_crc32c.is_some() || reader.verify_all_blocks().is_ok()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn local_sst_file_matches_manifest(
-        path: &Path,
-        file: &crate::metadata::FileMeta,
-    ) -> bool {
-        // A manifest size of 0 means "not recorded" on every other recovery
-        // path, so this one no longer reads it as "the file must be empty".
-        Self::local_sst_file_matches_proof(
-            path,
-            &file.name,
-            (file.size_bytes != 0).then_some(file.size_bytes),
-            file.content_crc32c,
-        )
-    }
-
+    /// Whether the SST at `path` in `fs` carries the recorded proof. Any
+    /// failure to read it is a "no", except an expired startup deadline.
     pub(crate) fn local_sst_file_matches_proof_within(
-        path: &Path,
+        fs: &Arc<dyn Fs>,
+        path: &FsPath,
         sst_name: &str,
         expected_size_bytes: Option<u64>,
         expected_crc32c: Option<u32>,
         scope: Option<&crate::common::DeadlineScope>,
     ) -> MidgeResult<bool> {
-        let Some(scope) = scope else {
-            return Ok(Self::local_sst_file_matches_proof(
-                path,
-                sst_name,
-                expected_size_bytes,
-                expected_crc32c,
-            ));
-        };
-        scope.check("local recovery SST proof")?;
-        let Some(parent) = path.parent() else {
-            return Ok(false);
-        };
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            return Ok(false);
-        };
-        let fs: std::sync::Arc<dyn crate::io::Fs> = match crate::io::RealFs::open_existing(parent) {
-            Ok(fs) => std::sync::Arc::new(fs),
-            Err(crate::io::FsError::Timeout(message)) => return Err(MidgeError::Timeout(message)),
-            Err(_) => return Ok(false),
-        };
-        let fs = crate::io::scope_fs(fs, scope.clone());
-        let path = crate::io::FsPath::new(name);
+        let check = |context: &str| scope.map_or(Ok(()), |scope| scope.check(context));
+        check("local recovery SST proof")?;
+        let fs = scope.map_or_else(
+            || Arc::clone(fs),
+            |scope| crate::io::scope_fs(Arc::clone(fs), scope.clone()),
+        );
         let prove = || -> MidgeResult<bool> {
             let file = fs
                 .open(
-                    &path,
+                    path,
                     crate::io::OpenOptions {
                         mode: crate::io::OpenMode::ReadOnly,
                         create: false,
@@ -127,8 +68,8 @@ impl CloudStartupRecovery {
                         truncate: false,
                     },
                 )
-                .map_err(crate::io::FsError::into_midge)?;
-            let size = file.len().map_err(crate::io::FsError::into_midge)?;
+                .map_err(FsError::into_midge)?;
+            let size = file.len().map_err(FsError::into_midge)?;
             let identity = SstIdentity::of_file(file.as_ref(), size, None)?;
             if identity
                 .verify_against(
@@ -140,12 +81,14 @@ impl CloudStartupRecovery {
             {
                 return Ok(false);
             }
-            scope.check("local recovery SST checksum")?;
-            let reader = crate::sst::fs::SstFileIo::open(&path.0, fs.clone())?;
+            check("local recovery SST checksum")?;
+            let reader = crate::sst::fs::SstFileIo::open(&path.0, Arc::clone(&fs))?;
+            // A matching whole-file CRC already proves the bytes; without one,
+            // the only remaining evidence is a full block-level pass.
             if expected_crc32c.is_none() {
                 reader.verify_all_blocks()?;
             }
-            scope.check("local recovery SST blocks")?;
+            check("local recovery SST blocks")?;
             Ok(true)
         };
         match prove() {
@@ -156,11 +99,14 @@ impl CloudStartupRecovery {
     }
 
     pub(crate) fn local_sst_file_matches_manifest_within(
-        path: &Path,
+        fs: &Arc<dyn Fs>,
+        path: &FsPath,
         file: &crate::metadata::FileMeta,
         scope: Option<&crate::common::DeadlineScope>,
     ) -> MidgeResult<bool> {
+        // A manifest size of 0 means "not recorded" on every recovery path.
         Self::local_sst_file_matches_proof_within(
+            fs,
             path,
             &file.name,
             (file.size_bytes != 0).then_some(file.size_bytes),
@@ -173,20 +119,22 @@ impl CloudStartupRecovery {
 #[cfg(test)]
 mod tests {
     use super::CloudStartupRecovery;
+    use crate::io::{Fs, FsPath, MockFs};
     use crate::metadata::FileMeta;
     use crate::types::EntryType;
+    use std::sync::Arc;
 
-    fn write_sst(directory: &tempfile::TempDir, name: &str) -> (std::path::PathBuf, Vec<u8>) {
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(directory.path()).expect("open fs"));
-        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+    fn write_sst(fs: &Arc<dyn Fs>, name: &str) -> Vec<u8> {
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(fs), 4096);
         let mut writer = crate::sst::traits::SstFactory::create(&factory).expect("create writer");
         writer
             .add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)
             .expect("add entry");
-        let path = directory.path().join(name);
-        crate::sst::fs::finish_writer_to_path(writer, &path).expect("finish sst");
-        let bytes = std::fs::read(&path).expect("read sst");
-        (path, bytes)
+        crate::sst::fs::finish_writer_to_path(writer, std::path::Path::new(name))
+            .expect("finish sst");
+        crate::io::read_all(fs.as_ref(), &FsPath::new(name))
+            .expect("read sst")
+            .to_vec()
     }
 
     /// The byte-level proof and the local-file proof used to disagree about a
@@ -196,8 +144,8 @@ mod tests {
     #[test]
     fn should_reach_the_same_verdict_for_an_unrecorded_size_on_both_recovery_proofs() {
         // Arrange
-        let directory = tempfile::tempdir().expect("create directory");
-        let (path, bytes) = write_sst(&directory, "000001.sst");
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let bytes = write_sst(&fs, "000001.sst");
         let entry = FileMeta {
             name: "000001.sst".to_string(),
             size_bytes: 0,
@@ -212,7 +160,13 @@ mod tests {
             (entry.size_bytes != 0).then_some(entry.size_bytes),
             entry.content_crc32c,
         );
-        let from_file = CloudStartupRecovery::local_sst_file_matches_manifest(&path, &entry);
+        let from_file = CloudStartupRecovery::local_sst_file_matches_manifest_within(
+            &fs,
+            &FsPath::new(&entry.name),
+            &entry,
+            None,
+        )
+        .expect("local proof");
 
         // Assert
         assert!(from_bytes.is_ok(), "{from_bytes:?}");
@@ -222,8 +176,8 @@ mod tests {
     #[test]
     fn should_reject_a_corrupt_local_file_on_both_recovery_proofs() {
         // Arrange
-        let directory = tempfile::tempdir().expect("create directory");
-        let (path, bytes) = write_sst(&directory, "000002.sst");
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let bytes = write_sst(&fs, "000002.sst");
         let entry = FileMeta {
             name: "000002.sst".to_string(),
             size_bytes: bytes.len() as u64,
@@ -238,7 +192,13 @@ mod tests {
             Some(entry.size_bytes),
             entry.content_crc32c,
         );
-        let from_file = CloudStartupRecovery::local_sst_file_matches_manifest(&path, &entry);
+        let from_file = CloudStartupRecovery::local_sst_file_matches_manifest_within(
+            &fs,
+            &FsPath::new(&entry.name),
+            &entry,
+            None,
+        )
+        .expect("local proof");
 
         // Assert
         assert!(from_bytes.is_err(), "a CRC mismatch must be rejected");

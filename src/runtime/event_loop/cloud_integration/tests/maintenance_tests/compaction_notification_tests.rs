@@ -42,7 +42,7 @@ impl NotificationFixture {
         let input_bytes = std::fs::read(if cloud {
             remote_sst_path_for_test(&el, &input)
         } else {
-            el.state.sst_dir.join(&input)
+            el.state.host_sst_dir().join(&input)
         })?;
         Ok(Self {
             el,
@@ -109,7 +109,7 @@ impl NotificationFixture {
             std::fs::read(if self.cloud {
                 remote_sst_path_for_test(&self.el, &self.input)
             } else {
-                self.el.state.sst_dir.join(&self.input)
+                self.el.state.host_sst_dir().join(&self.input)
             })?,
             self.input_bytes
         );
@@ -268,7 +268,7 @@ fn should_fail_manual_caller_once_when_real_compute_detects_corrupt_input() -> M
         assert!(payload >= 4 && trailer < fixture.input_bytes.len());
         fixture.input_bytes[trailer] ^= 0xff;
         std::fs::write(
-            fixture.el.state.sst_dir.join(&fixture.input),
+            fixture.el.state.host_sst_dir().join(&fixture.input),
             &fixture.input_bytes,
         )?;
         fixture.el.state.manifest.test_mut().files[0].content_crc32c =

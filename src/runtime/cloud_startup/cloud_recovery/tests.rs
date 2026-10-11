@@ -138,7 +138,7 @@ fn should_retain_invalid_restored_sst_when_staging_filesystem_cannot_discard_it(
     // Assert
     assert!(result.is_ok(), "salvage keeps opening: replay revalidates");
     assert!(
-        state.sst_dir.join(&sst_name).exists(),
+        state.host_sst_dir().join(&sst_name).exists(),
         "a discard the staging filesystem refused must leave the bytes in place, not bypass it"
     );
     Ok(())

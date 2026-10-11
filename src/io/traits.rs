@@ -88,6 +88,8 @@ pub struct OpenOptions {
 #[derive(Debug, Clone)]
 pub struct Metadata {
     pub len: u64,
+    /// Whether the path names a directory rather than a file.
+    pub is_dir: bool,
 }
 
 /// Directory entry
@@ -178,16 +180,29 @@ pub trait File: Send {
 
 /// The host path frame used to address a rooted filesystem.
 ///
-/// A host-rooted backend records both the canonical root it serves and the
-/// directory against which callers' relative host paths were originally
-/// resolved. Keeping them in one value makes a wrapper either delegate the
-/// complete frame or expose no host addressing capability at all.
+/// A host-rooted backend records the canonical root it serves and the same
+/// directory as its caller named it. Keeping them in one value makes a
+/// wrapper either delegate the complete frame or expose no host addressing
+/// capability at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostAddressing<'a> {
     /// Canonical host directory the filesystem serves.
     pub root: &'a Path,
-    /// Directory relative host paths are resolved against, if one was recorded.
-    pub anchor: Option<&'a Path>,
+    /// The root as its caller named it, made absolute without resolving
+    /// symlinks (`/var/...` where `root` is `/private/var/...` on macOS).
+    pub named_root: &'a Path,
+}
+
+impl HostAddressing<'_> {
+    /// The part of an absolute host `path` below this root, reached through
+    /// either spelling of the root. This compares paths without touching the
+    /// host, so every component below the root stays exactly as written.
+    #[must_use]
+    pub fn relative<'p>(&self, path: &'p Path) -> Option<&'p Path> {
+        path.strip_prefix(self.root)
+            .or_else(|_| path.strip_prefix(self.named_root))
+            .ok()
+    }
 }
 
 /// Filesystem abstraction - agnostic of domain

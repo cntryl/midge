@@ -165,7 +165,7 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&el.state.fs), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(KEY, Some(VALUE), 7, EntryType::Put, None)?;
-    let path = el.state.sst_dir.join(&name);
+    let path = el.state.host_sst_dir().join(&name);
     writer.finish_to_path(&path)?;
     let bytes = std::fs::read(path)?;
     let manifest = el.state.manifest.test_mut();
@@ -260,7 +260,7 @@ impl NameFixture {
     }
 
     fn exact_data(&self) -> MidgeResult<DataEvidence> {
-        let bytes = std::fs::read(self.el.state.sst_dir.join(&self.sst_name))?;
+        let bytes = std::fs::read(self.el.state.host_sst_dir().join(&self.sst_name))?;
         let reader = self
             .el
             .compaction_actor

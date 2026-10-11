@@ -11,8 +11,6 @@ use crate::storage::hybrid::backend::{GuardedObjectProof, HybridStorage, RemoteO
 use crate::storage::{StorageBackend, StorageObjectMetadata};
 use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
 use crate::wal::cloud_segment::DataCoverageRecord;
-#[cfg(test)]
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -488,17 +486,21 @@ fn validate_sst_object_bytes(
         }
     }
 
-    let mut temp = tempfile::Builder::new()
-        .prefix("midge-cloud-sst-verify-")
-        .suffix(".sst")
-        .tempfile()
-        .map_err(|error| format!("create temp SST verifier for '{sst_name}': {error}"))?;
-    temp.write_all(data)
-        .map_err(|error| format!("write temp SST verifier for '{sst_name}': {error}"))?;
-    temp.flush()
-        .map_err(|error| format!("flush temp SST verifier for '{sst_name}': {error}"))?;
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    let verifier = crate::io::FsPath::new("verify.sst");
+    fs.open(
+        &verifier,
+        crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadWrite,
+            create: true,
+            create_new: true,
+            truncate: false,
+        },
+    )
+    .and_then(|mut file| file.append(bytes::Bytes::copy_from_slice(data)))
+    .map_err(|error| format!("stage SST verifier for '{sst_name}': {error}"))?;
 
-    let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs(temp.path())
+    let summary = crate::sst::fs::SstFileIo::summarize_with_fs(&verifier.0, fs)
         .map_err(|error| format!("cloud SST '{sst_name}' summary validation: {error}"))?;
     if let Some(expected_file) = expected_file {
         verify_sst_summary_matches_manifest(sst_name, &summary, expected_file)?;

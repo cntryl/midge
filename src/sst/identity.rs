@@ -76,30 +76,6 @@ impl SstIdentity {
         }
     }
 
-    /// Identity of a local file, streamed with fixed stack space.
-    pub(crate) fn of_path(path: &std::path::Path) -> MidgeResult<Self> {
-        use std::io::Read as _;
-
-        let mut file = std::fs::File::open(path)?;
-        // Fixed stack space, independent of SST size; every byte stays covered.
-        let mut buffer = [0_u8; 8192];
-        let mut size_bytes = 0_u64;
-        let mut crc32c = 0;
-        let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sst_crc");
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                progress.finish();
-                return Ok(Self { size_bytes, crc32c });
-            }
-            size_bytes = size_bytes
-                .checked_add(count as u64)
-                .ok_or_else(|| MidgeError::ResourceLimit("SST size overflow".into()))?;
-            crc32c = crc32c::crc32c_append(crc32c, &buffer[..count]);
-            progress.completed(count as u64, 0);
-        }
-    }
-
     /// Identity of an opened file, read through the `io::File` abstraction.
     ///
     /// The caller supplies the length it pinned, so a file that grows or

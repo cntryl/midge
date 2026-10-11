@@ -726,8 +726,8 @@ fn write_runtime_l0_sst_for_test(
 ) -> crate::runtime::FileMeta {
     let key = format!("key-{largest_seq:04}");
     let bytes = valid_sst_bytes_for_event_loop_test(key.as_bytes(), b"value", largest_seq);
-    std::fs::create_dir_all(&event_loop.state.sst_dir).expect("create test sst dir");
-    std::fs::write(event_loop.state.sst_dir.join(name), &bytes).expect("write test SST");
+    std::fs::create_dir_all(event_loop.state.host_sst_dir()).expect("create test sst dir");
+    std::fs::write(event_loop.state.host_sst_dir().join(name), &bytes).expect("write test SST");
     crate::runtime::FileMeta {
         name: name.to_string(),
         level: 0,
@@ -2105,6 +2105,7 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
 fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let sst_dir = event_loop.state.host_sst_dir();
     let cf_id = event_loop
         .manifest_actor
         .create_column_family(&mut event_loop.state, "compacting")
@@ -2113,8 +2114,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
-    std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)
-        .expect("write compaction input");
+    std::fs::write(sst_dir.join(&input_name), &input_bytes).expect("write compaction input");
     event_loop
         .state
         .manifest
@@ -2157,8 +2157,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     assert!(event_loop.state.get_cf(cf_id).is_some());
 
     // Arrange: simulate the serialized compaction authority switch.
-    std::fs::write(event_loop.state.sst_dir.join(&output_name), &output_bytes)
-        .expect("write compaction output");
+    std::fs::write(sst_dir.join(&output_name), &output_bytes).expect("write compaction output");
     event_loop
         .state
         .manifest
@@ -2210,7 +2209,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
         .files
         .iter()
         .all(|file| file.cf_id != cf_id));
-    assert!(!event_loop.state.sst_dir.join(output_name).exists());
+    assert!(!sst_dir.join(output_name).exists());
 }
 
 #[test]
@@ -2233,7 +2232,8 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         }))
     {
         let bytes = valid_sst_bytes_for_event_loop_test(&[key], b"input", sequence);
-        std::fs::write(event_loop.state.sst_dir.join(&name), &bytes).expect("write input SST");
+        std::fs::write(event_loop.state.host_sst_dir().join(&name), &bytes)
+            .expect("write input SST");
         event_loop
             .state
             .manifest
@@ -2254,7 +2254,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
     }
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"output", 10);
     std::fs::write(
-        event_loop.state.sst_dir.join(&current_output),
+        event_loop.state.host_sst_dir().join(&current_output),
         &output_bytes,
     )
     .expect("write completed output");
@@ -2329,8 +2329,11 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
     let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
     let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"value", 2);
-    std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)
-        .expect("write late compaction output");
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&output_name),
+        output_bytes,
+    )
+    .expect("write late compaction output");
     event_loop
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
@@ -2367,7 +2370,7 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
             .expect("late completion response"),
         RuntimeResponse::Error { .. }
     ));
-    assert!(!event_loop.state.sst_dir.join(&output_name).exists());
+    assert!(!event_loop.state.host_sst_dir().join(&output_name).exists());
     assert!(event_loop
         .state
         .manifest
@@ -2383,7 +2386,10 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     let mut event_loop = create_test_local_event_loop()?;
     let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"input", b"value", 1);
-    std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)?;
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&input_name),
+        &input_bytes,
+    )?;
     event_loop
         .state
         .manifest
@@ -2405,8 +2411,14 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     let second_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 1);
     let first_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"first", 2);
     let second_bytes = valid_sst_bytes_for_event_loop_test(b"z", b"second", 2);
-    std::fs::write(event_loop.state.sst_dir.join(&first_name), first_bytes)?;
-    std::fs::write(event_loop.state.sst_dir.join(&second_name), second_bytes)?;
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&first_name),
+        first_bytes,
+    )?;
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&second_name),
+        second_bytes,
+    )?;
     event_loop
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
@@ -2451,15 +2463,15 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     assert!(!event_loop.state.manifest_has_file(&second_name));
     assert!(event_loop.state.intent_log.is_empty());
     for _ in 0..100 {
-        if !event_loop.state.sst_dir.join(&first_name).exists()
-            && !event_loop.state.sst_dir.join(&second_name).exists()
+        if !event_loop.state.host_sst_dir().join(&first_name).exists()
+            && !event_loop.state.host_sst_dir().join(&second_name).exists()
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(!event_loop.state.sst_dir.join(first_name).exists());
-    assert!(!event_loop.state.sst_dir.join(second_name).exists());
+    assert!(!event_loop.state.host_sst_dir().join(first_name).exists());
+    assert!(!event_loop.state.host_sst_dir().join(second_name).exists());
     Ok(())
 }
 
@@ -2468,6 +2480,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
+    let sst_dir = event_loop.state.host_sst_dir();
     let source_name = crate::cloud_layout::file_name(0, 0, 1);
     let selected_target = crate::cloud_layout::file_name(0, 1, 2);
     let concurrent_target = crate::cloud_layout::file_name(0, 1, 3);
@@ -2477,7 +2490,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         (&concurrent_target, 1, b'y', b'n', b'z', 3_u64),
     ] {
         let bytes = valid_sst_bytes_for_event_loop_test(&[key], b"value", sequence);
-        std::fs::write(event_loop.state.sst_dir.join(name), &bytes)?;
+        std::fs::write(sst_dir.join(name), &bytes)?;
         event_loop
             .state
             .manifest
@@ -2498,7 +2511,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
     }
     let output_name = crate::cloud_layout::compaction_file_name(0, 1, 4, 0);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"m", b"replacement", 4);
-    std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)?;
+    std::fs::write(sst_dir.join(&output_name), output_bytes)?;
     let captured_inputs = vec![source_name.clone(), selected_target.clone()];
     event_loop
         .compaction_actor
@@ -2663,9 +2676,19 @@ fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
 
+    let source = crate::io::RealFs::new(temp_dir.path()).map_err(crate::io::FsError::into_midge)?;
+
     // Act
-    let result =
-        hybrid.publish_immutable_file("sst/oversized-partition.sst", &path, 128, 0, &budget);
+    let result = hybrid.publish_immutable_file(
+        crate::storage::hybrid::backend::ImmutableFileSource {
+            key: "sst/oversized-partition.sst",
+            fs: &source,
+            path: &crate::io::FsPath::new("oversized-partition.sst"),
+            size: 128,
+            checksum: 0,
+        },
+        &budget,
+    );
 
     // Assert
     assert!(matches!(
@@ -2683,12 +2706,15 @@ fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
     let temp_dir = tempfile::tempdir()?;
     let path = temp_dir.path().join("checksum-input.sst");
     std::fs::write(&path, [1u8; 128])?;
+    let fs = crate::io::real::test_root(temp_dir.path());
     let budget = crate::common::resource_budget::ResourceBudget::new(64);
 
     // Act
     let result =
         crate::runtime::actors::compaction::publication::checksummed_file_crc_for_publication_test(
-            &path, &budget,
+            &fs,
+            std::path::Path::new("checksum-input.sst"),
+            &budget,
         );
 
     // Assert

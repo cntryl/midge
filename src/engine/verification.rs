@@ -290,8 +290,12 @@ fn verify_storage_path_with_sst_fs(
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
 
-    let residue =
-        crate::runtime::storage_residue::StorageResidueAssessment::scan_sst_dir(db_path, &manifest);
+    let residue = crate::runtime::storage_residue::StorageResidueAssessment::scan(
+        fs.as_ref(),
+        &manifest,
+        |_| Ok(()),
+    )
+    .unwrap_or_default();
     let health = match runtime_health {
         Some(EngineHealth::Healthy) | None => {
             crate::runtime::storage_residue::classify_engine_health(

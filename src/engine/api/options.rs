@@ -684,9 +684,10 @@ impl OpenOptionsBuilder {
 
     /// Serve the database from `filesystem` instead of the host directory, so
     /// tests can fault or crash its storage effects. The filesystem is the
-    /// database root; the configured path names it only. Metadata, WAL and
-    /// lease files are served today; SST output still uses the configured
-    /// path until #808 stage 1 routes it, so flushing fails closed.
+    /// database root; the configured path names it only. Metadata, WAL,
+    /// lease and SST files are served from it; transaction spill runs and
+    /// cloud working storage still use the configured path until #808
+    /// stage 1 routes them.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]

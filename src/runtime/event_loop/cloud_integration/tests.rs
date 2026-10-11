@@ -150,7 +150,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     for number in 1..=4 {
         let name = crate::cloud_layout::file_name(0, 0, number);
         let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
-        write_test_file(el.state.sst_dir.join(&name), &bytes);
+        write_test_file(el.state.host_sst_dir().join(&name), &bytes);
     }
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
     el.worker_msg_tx = Some(worker_tx);
@@ -3629,7 +3629,7 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
         .set_cloud_durable_for_test(max_sequence);
 
     let sst_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", max_sequence);
-    write_test_file(el.state.sst_dir.join(sst_name), &sst_bytes);
+    write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
     write_test_file(remote_sst_path_for_test(&el, sst_name), &sst_bytes);
     let file_meta = crate::runtime::FileMeta {
         name: sst_name.to_string(),
@@ -3714,7 +3714,7 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
     let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"ordered", b"value", 11);
-    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+    write_test_file(el.state.host_sst_dir().join(&output_sst), &output_bytes);
 
     let saw_compaction_intent = Arc::new(AtomicBool::new(false));
     let remote_existed_at_intent_publish = Arc::new(AtomicBool::new(false));
@@ -3782,7 +3782,7 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
 
     let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
-    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+    write_test_file(el.state.host_sst_dir().join(&output_sst), &output_bytes);
 
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
@@ -3847,7 +3847,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
 
     let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
-    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+    write_test_file(el.state.host_sst_dir().join(&output_sst), &output_bytes);
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let failing_backend = Arc::new(FailThirdIntentPutBackend::new(metadata_backend));
@@ -3949,7 +3949,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
             largest_seq: Some(10),
             ..Default::default()
         });
-    write_test_file(el.state.sst_dir.join(input_sst), &input_bytes);
+    write_test_file(el.state.host_sst_dir().join(input_sst), &input_bytes);
     cloud_persistence(
         el.cloud_coordinator
             .hybrid_storage
@@ -3964,7 +3964,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
 
     let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
-    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+    write_test_file(el.state.host_sst_dir().join(&output_sst), &output_bytes);
 
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
@@ -3993,7 +3993,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         RuntimeResponse::Ok { .. }
     ));
     for _ in 0..100 {
-        if !el.state.sst_dir.join(input_sst).exists()
+        if !el.state.host_sst_dir().join(input_sst).exists()
             && !remote_sst_path_for_test(&el, input_sst).exists()
         {
             break;
@@ -4001,7 +4001,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        !el.state.sst_dir.join(input_sst).exists(),
+        !el.state.host_sst_dir().join(input_sst).exists(),
         "obsolete input SST should be removed from the local runtime cache"
     );
     assert!(
@@ -4024,7 +4024,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     )?;
     let sst_name = "slow-cloud-gc.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"slow-delete", b"value", 12);
-    write_test_file(el.state.sst_dir.join(sst_name), &sst_bytes);
+    write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
 
     let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_slow"))
@@ -4089,7 +4089,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
         .join()
         .expect("release blocked delete thread should finish");
     for _ in 0..100 {
-        if !el.state.sst_dir.join(sst_name).exists()
+        if !el.state.host_sst_dir().join(sst_name).exists()
             && !remote_sst_path_for_test(&el, sst_name).exists()
         {
             break;
@@ -4097,7 +4097,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        !el.state.sst_dir.join(sst_name).exists(),
+        !el.state.host_sst_dir().join(sst_name).exists(),
         "runtime-local orphan should be deleted after provider cleanup completes"
     );
     assert!(
@@ -4117,7 +4117,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     )?;
     let sst_name = "retry-cloud-gc.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"retry-delete", b"value", 14);
-    write_test_file(el.state.sst_dir.join(sst_name), &sst_bytes);
+    write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
 
     let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_retry"))
@@ -4163,7 +4163,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
 
     for _ in 0..100 {
         el.progress_pass(&msg_rx);
-        if !el.state.sst_dir.join(sst_name).exists()
+        if !el.state.host_sst_dir().join(sst_name).exists()
             && !remote_sst_path_for_test(&el, sst_name).exists()
         {
             break;
@@ -4177,7 +4177,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
         "the failed cloud delete should be attempted again"
     );
     assert!(
-        !el.state.sst_dir.join(sst_name).exists(),
+        !el.state.host_sst_dir().join(sst_name).exists(),
         "the runtime-local orphan should be deleted after retry"
     );
     assert!(
@@ -4196,7 +4196,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     )?;
     let sst_name = "shutdown-cloud-gc.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"shutdown-delete", b"value", 13);
-    write_test_file(el.state.sst_dir.join(sst_name), &sst_bytes);
+    write_test_file(el.state.host_sst_dir().join(sst_name), &sst_bytes);
 
     let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local_shutdown"))
@@ -4255,7 +4255,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
         shutdown_elapsed >= Duration::from_millis(150),
         "shutdown returned before the cloud GC worker completed: {shutdown_elapsed:?}"
     );
-    assert!(!el.state.sst_dir.join(sst_name).exists());
+    assert!(!el.state.host_sst_dir().join(sst_name).exists());
     assert!(!remote_sst_path_for_test(&el, sst_name).exists());
     Ok(())
 }
@@ -9269,7 +9269,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
 
     let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"counted", b"value", 11);
-    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+    write_test_file(el.state.host_sst_dir().join(&output_sst), &output_bytes);
 
     // A proof for an output the worker already staged, pointing at a backend
     // that counts how many times the event loop re-verifies it.
@@ -9330,9 +9330,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
                 level: 1,
                 size_bytes: output_bytes.len() as u64,
                 // The worker always records the checksum it staged with.
-                content_crc32c: Some(
-                    crate::sst::fs::file_identity(&el.state.sst_dir.join(&output_sst))?.1,
-                ),
+                content_crc32c: Some(crc32c::crc32c(&output_bytes)),
                 cf_id: 0,
                 smallest_key: Some(b"counted".to_vec()),
                 largest_key: Some(b"counted".to_vec()),

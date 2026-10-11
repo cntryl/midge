@@ -351,11 +351,7 @@ impl WalActor {
             .cloned()
             .collect();
 
-        let sst_path_prefix = state
-            .sst_dir
-            .strip_prefix(&state.db_path)
-            .unwrap_or_else(|_| std::path::Path::new("sst"))
-            .to_path_buf();
+        let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
 
         // Read through the event loop's reader and block caches when given,
         // so validating many ops opens each SST once (#492). Without them
