@@ -1,10 +1,14 @@
-//! #808 native-provider predecessor-cache regression.
+//! #808 WAL authority regressions: the native-provider predecessor cache, and
+//! salvage substituting an intact local segment for a damaged cloud copy.
 use crate::common::crash;
+use cntryl_midge::__internal::simulation::SimulatedClock;
 use cntryl_midge::{
-    CloudProviderConfig, CloudStorageLocation, Engine, OpenOptions, TransactionMode, WriteOptions,
+    CloudProviderConfig, CloudStorageLocation, Engine, OpenOptions, RecoveryPolicy,
+    TransactionMode, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CHILD: &str =
@@ -133,27 +137,69 @@ fn should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache()
     );
 }
 
-#[test]
-#[ignore = "#808 stage 5: substitute-upload-collision"]
-fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
-    // Arrange: a cataloged remote segment is damaged while its local copy is intact.
-    let dir = tempfile::tempdir().unwrap();
-    let options = cntryl_midge::OpenOptions::cloud_simulated(dir.path(), "audit", "substitute")
+/// A substitute child: the process that acknowledged segment 1 dies before
+/// that segment's local copy retires.
+const SUBSTITUTE_CHILD: &str =
+    "wal_authority_regressions::should_abort_before_local_retirement_when_substitute_child_is_requested";
+const SUBSTITUTE_ENV: &str = "MIDGE_808_SUBSTITUTE_ROOT";
+const SUBSTITUTE_SCENARIO: &str = "substitute-upload-collision";
+/// Cloud-mode local retirement of an acknowledged segment, before the ledger
+/// records it.
+const LOCAL_RETIREMENT: &str = "midge::cloud::before_local_wal_unlink";
+const SUBSTITUTE_LEASE_TTL: Duration = Duration::from_secs(10);
+
+fn substitute_options(root: &Path, clock: SimulatedClock) -> OpenOptions {
+    OpenOptions::cloud_simulated(root, "audit", "substitute")
         .background_compaction(false)
         .runtime_response_timeout(Duration::from_secs(5))
         .storage_io_timeout(Duration::from_secs(2))
-        .recovery_policy(cntryl_midge::RecoveryPolicy::Salvage)
+        .recovery_policy(RecoveryPolicy::Salvage)
+        .lease_ttl(SUBSTITUTE_LEASE_TTL)
+        .lease_clock_for_testing(Arc::new(clock))
         .build()
-        .unwrap();
-    let mut engine = Engine::open(options.clone()).unwrap();
+        .unwrap()
+}
+
+#[test]
+fn should_abort_before_local_retirement_when_substitute_child_is_requested() {
+    // Arrange
+    let Some(root) = std::env::var_os(SUBSTITUTE_ENV) else {
+        return;
+    };
+    let engine = Engine::open(substitute_options(Path::new(&root), SimulatedClock::new())).unwrap();
     let cf = engine.get_column_family("default").unwrap();
+    crash::configure_abort_failpoint(LOCAL_RETIREMENT, SUBSTITUTE_SCENARIO);
+
+    // Act: segment 1 is cataloged and acknowledged; retiring its local copy
+    // aborts the process.
     let mut seed = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .unwrap();
     seed.put(b"seed".to_vec(), b"value".to_vec(), None).unwrap();
     seed.commit(WriteOptions::cloud_strict()).unwrap();
-    engine.shutdown(Duration::from_secs(10)).unwrap();
-    drop(engine);
+    std::thread::sleep(Duration::from_secs(10));
+
+    // Assert: the parent requires this exact synced marker and process abort.
+    panic!("the acknowledged segment's local retirement never ran");
+}
+
+#[test]
+#[ignore = "#808 stage 5: substitute-upload-collision"]
+fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
+    // Arrange: a process dies after segment 1 is cataloged and acknowledged
+    // but before its local copy retires, so the WAL ledger still names an
+    // intact local member. Then the cataloged remote object is damaged.
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", SUBSTITUTE_CHILD, "--nocapture"])
+        .env(SUBSTITUTE_ENV, dir.path());
+    crash::run_child_expect_abort(
+        &mut child,
+        SUBSTITUTE_SCENARIO,
+        LOCAL_RETIREMENT,
+        dir.path(),
+    );
     let catalog: serde_json::Value = serde_json::from_slice(
         &std::fs::read(
             dir.path()
@@ -167,26 +213,29 @@ fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
         .unwrap()
         .iter()
         .next()
-        .expect("unflushed segment retained");
+        .expect("acknowledged segment cataloged");
     let id = id.parse::<u64>().unwrap();
     let remote = dir
         .path()
         .join("cloud_store")
         .join(entry["object_key"].as_str().unwrap());
     let original = std::fs::read(&remote).unwrap();
-    std::fs::write(
+    let local = std::fs::read(
         dir.path()
             .join("wal")
             .join(cntryl_midge::__internal::wal::segment_file_name(id)),
-        &original,
     )
-    .unwrap();
+    .expect("the crash kept the acknowledged segment's local copy");
+    assert_eq!(local, original, "the local member is the cataloged bytes");
     let mut corrupt = original;
     corrupt[8] ^= 1;
     std::fs::write(remote, corrupt).unwrap();
+    // The restarted process's clock runs past the dead one's lease.
+    let clock = SimulatedClock::new();
+    clock.advance(SUBSTITUTE_LEASE_TTL * 2);
 
     // Act: the real startup planner substitutes the verified local bytes.
-    let mut recovered = Engine::open(options).unwrap();
+    let mut recovered = Engine::open(substitute_options(dir.path(), clock)).unwrap();
     let cf = recovered.get_column_family("default").unwrap();
     assert_eq!(get(&recovered, b"seed"), Some(b"value".to_vec()));
     let mut tx = recovered
