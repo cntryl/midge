@@ -115,6 +115,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_refuse_writer_when_ledger_segment_is_missing() {
+        // Arrange: the ledger names segment 4, but no file holds it.
+        let factory = FsWalFactoryIo::new(std::sync::Arc::new(crate::io::MockFs::new()));
+
+        // Act
+        let result = factory.open_segment(4);
+
+        // Assert: a missing member is lost history, never recreated empty.
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_append_to_existing_ledger_segment_when_opening_it() {
+        // Arrange
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let name = crate::wal::segment_file_name(4);
+        drop(
+            mock.open(
+                &crate::io::FsPath::new(&name),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create segment"),
+        );
+        let factory = FsWalFactoryIo::new(mock.clone());
+
+        // Act
+        let writer = factory.open_segment(4);
+
+        // Assert
+        assert!(writer.is_ok());
+        assert!(mock.get_file(&name).is_some());
+    }
+
+    #[test]
     fn should_create_writer() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());

@@ -412,6 +412,8 @@ fn segment_files(wal: &dyn Fs) -> MidgeResult<Vec<(SegmentId, String)>> {
         .into_iter()
         .filter(|entry| !entry.is_dir && entry.name != LEDGER_FILE)
         .filter_map(|entry| Some((crate::wal::parse_segment_id(&entry.name)?, entry.name)))
+        // Only canonical names are segments; anything else is left alone.
+        .filter(|(id, name)| crate::wal::segment_file_name(*id) == *name)
         .collect();
     files.sort();
     Ok(files)

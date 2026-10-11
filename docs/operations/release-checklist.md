@@ -36,7 +36,7 @@ Use this checklist before publishing a release candidate or stable release.
       `docs/development/release-policy.md`,
       `docs/operations/operator-runbook.md`,
       `docs/operations/release-checklist.md`
-- [ ] `cargo run --bin midge -- verify --json tests/fixtures/compatibility/v3_populated_v4_sst_db` validated where applicable
+- [ ] `cargo run --bin midge -- verify --json <database>` passes on a database the release candidate wrote, and prior-format fixtures under `tests/fixtures/compatibility/` are rejected with `CompatibilityError`
 - [ ] changelog updated
 - [ ] migration guide updated
 - [ ] rollback statement added to release notes
