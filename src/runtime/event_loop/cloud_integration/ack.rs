@@ -95,30 +95,10 @@ impl EventLoop {
             crate::storage::StorageEvent::CloudFail {
                 segment_id,
                 error,
-                terminal,
+                exhausted,
                 failure_kind,
             } => {
-                if terminal {
-                    let error = match failure_kind {
-                        crate::storage::CloudUploadFailureKind::Timeout => {
-                            crate::common::MidgeError::Timeout(format!(
-                                "Cloud durability timed out after storage retries: {error}"
-                            ))
-                        }
-                        crate::storage::CloudUploadFailureKind::Other => {
-                            crate::common::MidgeError::Internal(format!(
-                                "Cloud durability failed after storage retries: {error}"
-                            ))
-                        }
-                    };
-                    self.handle_cloud_upload_failure(segment_id, &error, true);
-                } else {
-                    tracing::warn!(
-                        segment_id,
-                        error = %error,
-                        "Cloud WAL upload attempt failed; storage queue retains retry ownership"
-                    );
-                }
+                self.handle_storage_event_cloud_fail(segment_id, &error, exhausted, failure_kind);
             }
             crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
@@ -147,6 +127,53 @@ impl EventLoop {
                 self.drain_auto_flush_memtables();
             }
             _ => {}
+        }
+    }
+
+    /// A storage-owned upload attempt failed. The storage queue retries it
+    /// with backoff until it succeeds, so the runtime only fails the waiters
+    /// whose attempts are spent; it never requeues. A failure no retry can
+    /// fix ends the upload and fences the writer.
+    fn handle_storage_event_cloud_fail(
+        &mut self,
+        segment_id: u64,
+        error: &str,
+        exhausted: bool,
+        failure_kind: crate::storage::CloudUploadFailureKind,
+    ) {
+        use crate::storage::CloudUploadFailureKind;
+        if !exhausted {
+            tracing::warn!(
+                segment_id,
+                %error,
+                "Cloud WAL upload attempt failed; storage queue retries it"
+            );
+            return;
+        }
+        let error = match failure_kind {
+            CloudUploadFailureKind::Timeout => crate::common::MidgeError::Timeout(format!(
+                "Cloud durability timed out after storage retries; the upload keeps retrying: {error}"
+            )),
+            CloudUploadFailureKind::Other => crate::common::MidgeError::Internal(format!(
+                "Cloud durability failed after storage retries; the upload keeps retrying: {error}"
+            )),
+            CloudUploadFailureKind::Corruption => crate::common::MidgeError::Corruption(format!(
+                "cloud WAL segment {segment_id} cannot be uploaded: {error}"
+            )),
+            CloudUploadFailureKind::Fenced => crate::common::MidgeError::Fenced(format!(
+                "cloud WAL segment {segment_id} upload stopped: {error}"
+            )),
+        };
+        if !failure_kind.ends_upload() {
+            self.handle_cloud_upload_failure(segment_id, &error, false);
+        } else if self.owns_cloud_upload(segment_id) {
+            self.fence_cloud_upload(segment_id, &error);
+        } else {
+            tracing::warn!(
+                segment_id,
+                %error,
+                "ignored ended cloud WAL upload for a segment the runtime no longer owns"
+            );
         }
     }
 
@@ -580,26 +607,34 @@ impl EventLoop {
         }
     }
 
+    /// Whether the runtime still owns `segment_id`'s cloud obligation, or a
+    /// caller still waits on it. A segment retired after cloud durability
+    /// was proven is neither, so a late storage event about it must not
+    /// mutate ownership, frontier, or waiter state it does not cover.
+    fn owns_cloud_upload(&self, segment_id: u64) -> bool {
+        self.wal_transition.owns_segment(segment_id)
+            || self
+                .durability
+                .cloud_segment_max_sequence(segment_id)
+                .is_some()
+            || !self
+                .durability
+                .cloud_durability_request_ids_at(segment_id)
+                .is_empty()
+    }
+
+    /// Fail the waiters a segment's upload failure blocks.
+    ///
+    /// With `requeue_publication`, the segment's completed upload failed
+    /// readback or publication, so the runtime backlog uploads it again.
+    /// Without it, the storage queue still owns the upload and keeps retrying.
     fn handle_cloud_upload_failure(
         &mut self,
         segment_id: u64,
         error: &crate::common::MidgeError,
         requeue_publication: bool,
     ) {
-        if !self.wal_transition.owns_segment(segment_id)
-            && self
-                .durability
-                .cloud_segment_max_sequence(segment_id)
-                .is_none()
-            && self
-                .durability
-                .cloud_durability_request_ids_at(segment_id)
-                .is_empty()
-        {
-            // The runtime no longer owns this segment and nobody is waiting
-            // on it: it was retired after cloud durability was proven. A late
-            // storage event must not mutate ownership, frontier, or waiter
-            // state it does not cover.
+        if !self.owns_cloud_upload(segment_id) {
             tracing::warn!(
                 segment_id,
                 %error,
@@ -607,9 +642,11 @@ impl EventLoop {
             );
             return;
         }
-        self.state.cloud.pending_uploads.retain(|item| {
-            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
-        });
+        if requeue_publication {
+            self.state.cloud.pending_uploads.retain(|item| {
+                crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+            });
+        }
         self.state.mark_persistence_anomaly();
         self.cloud_coordinator.cloud_wal.forget_upload(segment_id);
 

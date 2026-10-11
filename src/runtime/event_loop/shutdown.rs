@@ -254,10 +254,10 @@ impl EventLoop {
             && !deadline.is_expired()
         {
             // UploadQueue and the runtime backlog are two ownership domains
-            // for the same accepted WAL obligation. Terminal storage failure
-            // transfers work back to the latter, so shutdown must keep
-            // admitting it until durability closes or the configured drain
-            // deadline expires.
+            // for the same accepted WAL obligation. A failed readback or
+            // publication transfers work back to the latter, so shutdown must
+            // keep admitting it until durability closes or the configured
+            // drain deadline expires.
             self.drain_cloud_wal_upload_backlog_within(deadline);
             self.tick_hybrid_storage_within(deadline);
             self.drain_hybrid_storage_events_within(deadline);

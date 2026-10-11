@@ -989,9 +989,66 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
         terminal_events.as_slice(),
         [StorageEvent::CloudFail {
             segment_id: failed_segment,
-            terminal: false,
+            exhausted: false,
             failure_kind: crate::storage::CloudUploadFailureKind::Other,
             ..
         }] if *failed_segment == segment_id
     ));
+}
+
+#[test]
+fn should_double_wal_upload_retry_delay_until_its_cap_when_failures_repeat() {
+    // Arrange
+    let failures = [1, 2, 3, 4, 5, 6, 40, u32::MAX];
+
+    // Act
+    let delays = failures.map(queues::wal_upload_retry_delay);
+
+    // Assert
+    assert_eq!(delays[0], WAL_UPLOAD_RETRY_BASE_DELAY);
+    assert_eq!(delays[1], WAL_UPLOAD_RETRY_BASE_DELAY * 2);
+    assert_eq!(delays[2], WAL_UPLOAD_RETRY_BASE_DELAY * 4);
+    assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(delays
+        .iter()
+        .all(|delay| *delay <= WAL_UPLOAD_RETRY_MAX_DELAY));
+    assert_eq!(delays[7], WAL_UPLOAD_RETRY_MAX_DELAY);
+}
+
+#[test]
+fn should_wait_for_earliest_retry_when_only_failed_uploads_are_queued() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create backoff test dir");
+    let source = Arc::new(crate::io::FsLocation::host_file(
+        &tmp.path().join("backoff.wal"),
+    ));
+    let now = Instant::now();
+    let poll = Duration::from_millis(1);
+    let failed = |retry_in: Duration| UploadState {
+        segment_id: 1,
+        object_key: "wal/backoff.wal".to_string(),
+        source: Arc::clone(&source),
+        status: UploadStatus::Failed {
+            error: "provider unavailable".to_string(),
+            retries: 4,
+            retry_at: now + retry_in,
+        },
+        max_sequence: 1,
+        retries: 4,
+        size_bytes: 1,
+    };
+    let mut queue = UploadQueue::new(8, 1024);
+    queue.try_push(failed(Duration::from_millis(300))).unwrap();
+    queue.try_push(failed(Duration::from_millis(200))).unwrap();
+    let empty = UploadQueue::new(8, 1024);
+
+    // Act
+    let backed_off = queue.next_turn(now, poll);
+    queue.entries.front_mut().expect("queued upload").status = UploadStatus::Pending;
+    let pending = queue.next_turn(now, poll);
+
+    // Assert
+    assert_eq!(backed_off, Some(Duration::from_millis(200)));
+    assert_eq!(pending, Some(poll));
+    assert_eq!(empty.next_turn(now, poll), None);
 }

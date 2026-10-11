@@ -423,7 +423,7 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
 }
 
 #[test]
-fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
+fn should_fail_all_generation_waiters_given_exhausted_cloud_upload_attempts(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
@@ -450,7 +450,7 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "terminal upload failure".to_string(),
-        terminal: true,
+        exhausted: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -475,7 +475,7 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
 }
 
 #[test]
-fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
+fn should_preserve_timeout_variant_given_exhausted_cloud_upload_timeouts(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: a strict durability caller is still attached when the storage
     // queue exhausts three callback-timeout attempts.
@@ -493,7 +493,7 @@ fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "cloud WAL upload callback timed out".to_string(),
-        terminal: true,
+        exhausted: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
     });
 
@@ -531,7 +531,7 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "retryable upload failure".to_string(),
-        terminal: false,
+        exhausted: false,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -1368,6 +1368,27 @@ fn seal_segment_without_remote_proof_for_test(
     let (seg_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
     copy_local_segment_to_remote_wal_for_test(el, seg_id);
     Ok((seg_id, max_sequence))
+}
+
+/// Seal a segment whose upload reports success but whose readback finds no
+/// object, so the runtime backlog takes the segment back for a fresh upload.
+fn seal_segment_owned_by_runtime_backlog_for_test(
+    el: &mut EventLoop,
+) -> crate::common::MidgeResult<(u64, u64)> {
+    let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+    assert_eq!(
+        el.cloud_coordinator
+            .cloud_wal
+            .upload_backlog
+            .get(&segment_id),
+        Some(&max_sequence),
+        "a failed readback must hand the upload back to the runtime"
+    );
+    Ok((segment_id, max_sequence))
 }
 
 #[test]
@@ -5895,7 +5916,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
-        terminal: true,
+        exhausted: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -6145,7 +6166,7 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
-        terminal: true,
+        exhausted: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -6793,7 +6814,7 @@ fn should_ignore_stale_cloud_failure_for_segment_the_runtime_no_longer_owns(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id,
         error: "late storage retry report".to_string(),
-        terminal: true,
+        exhausted: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -7796,7 +7817,7 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: second_segment,
         error: "injected later-segment failure".to_string(),
-        terminal: true,
+        exhausted: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
@@ -8142,10 +8163,10 @@ fn should_requeue_known_wal_publication_when_sequence_range_is_inconsistent(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
+fn should_resume_wal_upload_when_provider_recovers_after_attempts_are_exhausted(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: the storage-owned queue exhausts all three upload attempts while
-    // the sealed local WAL remains an accepted runtime obligation.
+    // Arrange: every upload attempt fails until the waiters' attempts are
+    // spent, while the sealed local WAL remains an accepted obligation.
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -8155,15 +8176,16 @@ fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = el
+    let (_, max_sequence) = el
         .seal_current_cloud_segment()?
-        .expect("seal cloud WAL for terminal retry test");
+        .expect("seal cloud WAL for exhausted retry test");
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure WAL upload failures");
 
-    // Act: exhaust storage retries, restore the provider, and continue driving
-    // the event loop without reopening the database.
-    for _ in 0..8 {
+    // Act: exhaust the waiters' attempts, restore the provider, and continue
+    // driving the event loop without reopening the database.
+    let exhausted_deadline = Instant::now() + Duration::from_secs(2);
+    while !el.state.persistence_anomaly_detected() && Instant::now() < exhausted_deadline {
         el.tick_hybrid_storage();
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -8172,25 +8194,24 @@ fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
     // process-global failpoint write lock before asking that worker to evaluate
     // its (now disabled) failpoint hooks.
     drop(test_guard);
+    assert!(
+        el.state.persistence_anomaly_detected(),
+        "the upload must actually exhaust its waiters' attempts"
+    );
     assert_eq!(
         el.cloud_coordinator
             .hybrid_storage
             .as_ref()
             .expect("hybrid storage")
             .pending_upload_count(),
-        0,
-        "the storage queue must actually exhaust its attempt budget"
+        1,
+        "the storage queue keeps a failed upload for its next retry"
     );
-    assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
-        "terminal queue failure must transfer ownership back to the runtime"
+    assert!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        "exhausted attempts never hand the upload back to the runtime"
     );
 
-    std::thread::sleep(Duration::from_millis(25));
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
     let recovery_deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < recovery_deadline
@@ -8215,19 +8236,13 @@ fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
 #[test]
 fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: storage exhausted its attempt budget and transferred a sealed
-    // segment back to the runtime while unrelated requests remain queued.
+    // Arrange: a failed readback handed a sealed segment back to the
+    // runtime while unrelated requests remain queued.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id,
-        error: "storage retry budget exhausted".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
+    let (segment_id, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     std::thread::sleep(Duration::from_millis(25));
     assert_eq!(
         el.cloud_coordinator
@@ -8340,20 +8355,14 @@ fn should_not_create_cloud_sst_when_shutdown_has_no_active_writes() -> crate::co
 #[test]
 fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::common::MidgeResult<()>
 {
-    // Arrange: a terminal storage failure has transferred an accepted segment
-    // into the runtime backlog immediately before shutdown begins.
+    // Arrange: a failed readback has handed an accepted segment back to the
+    // runtime backlog immediately before shutdown begins.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.shutdown_cloud_drain_timeout = Duration::from_secs(2);
     append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id,
-        error: "storage retry budget exhausted".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
+    let (_, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     let request_id = 90_403;
     let response_rx = el.router.register(request_id, "Shutdown");
 
@@ -8432,20 +8441,14 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
 #[test]
 fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::common::MidgeResult<()>
 {
-    // Arrange: terminal upload failure transfers a sealed WAL back to the
-    // runtime just before shutdown, and lease validation is slower than the
-    // entire shutdown drain budget.
+    // Arrange: a failed readback hands a sealed WAL back to the runtime
+    // just before shutdown, and lease validation is slower than the entire
+    // shutdown drain budget.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id,
-        error: "storage retry budget exhausted".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
+    let (segment_id, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     std::thread::sleep(Duration::from_millis(25));
     el.fencing.leader_store = Some(Arc::new(DelayedLeaderStore::new(
         Duration::from_secs(1),
@@ -9423,5 +9426,82 @@ fn should_fence_writer_when_uploaded_wal_object_holds_other_bytes() -> crate::co
         other_bytes,
         "the object is never overwritten"
     );
+    Ok(())
+}
+
+#[test]
+fn should_leave_retry_with_storage_queue_when_upload_attempts_are_exhausted(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a caller waits on a sealed segment the storage queue uploads.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    let request_id = 46_201;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "provider unavailable".to_string(),
+        exhausted: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Internal(_),
+            ..
+        })
+    ));
+    assert!(
+        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        "the storage queue keeps retrying, so the runtime must not upload it again"
+    );
+    assert_eq!(
+        el.durability.cloud_segment_max_sequence(segment_id),
+        Some(max_sequence),
+        "the segment stays owed to the catalog"
+    );
+    assert!(!el.wal_transition.is_fenced());
+    Ok(())
+}
+
+#[test]
+fn should_fence_writer_when_storage_reports_a_corrupt_upload() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, _) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    let request_id = 46_202;
+    let response = el.router.register(request_id, "TestRequest");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "remote object differs from uploaded bytes".to_string(),
+        exhausted: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Corruption,
+    });
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Corruption(_),
+            ..
+        })
+    ));
+    assert!(el.wal_transition.is_fenced());
+    assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     Ok(())
 }

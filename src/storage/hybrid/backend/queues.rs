@@ -1,11 +1,21 @@
 //! Bounded upload and storage-event queues.
 
 use super::{
-    Duration, HashMap, StorageEvent, StorageOutcome, UploadState, UploadStatus, VecDeque,
+    Duration, HashMap, Instant, StorageEvent, StorageOutcome, UploadState, UploadStatus, VecDeque,
     MAX_CONCURRENT_PRUNE_WORKERS, MAX_PENDING_PRUNE_REQUESTS, MAX_PENDING_STORAGE_EVENTS,
     MAX_PENDING_STORAGE_EVENT_BYTES, MAX_PENDING_WAL_UPLOADS, MAX_PENDING_WAL_UPLOAD_BYTES,
-    STORAGE_CALLBACK_TIMEOUT, WAL_UPLOAD_WORKER_QUEUE_CAPACITY,
+    STORAGE_CALLBACK_TIMEOUT, WAL_UPLOAD_RETRY_BASE_DELAY, WAL_UPLOAD_RETRY_MAX_DELAY,
+    WAL_UPLOAD_WORKER_QUEUE_CAPACITY,
 };
+
+/// How long a WAL upload that has failed `failures` times waits before its
+/// next attempt: the base delay, doubled per further failure, capped.
+pub(super) fn wal_upload_retry_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    WAL_UPLOAD_RETRY_BASE_DELAY
+        .saturating_mul(1 << doublings)
+        .min(WAL_UPLOAD_RETRY_MAX_DELAY)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HybridQueueLimits {
@@ -86,13 +96,29 @@ impl UploadQueue {
             || self.pending_bytes >= self.max_bytes
     }
 
+    /// How long until the queue next needs a turn: `poll` while an upload
+    /// waits to start or to finish, else until its earliest retry is due.
+    /// `None` when nothing is queued.
+    pub(super) fn next_turn(&self, now: Instant, poll: Duration) -> Option<Duration> {
+        self.entries
+            .iter()
+            .map(|upload| match &upload.status {
+                UploadStatus::Failed { retry_at, .. } => retry_at.saturating_duration_since(now),
+                _ => poll,
+            })
+            .min()
+    }
+
+    /// Drop finished uploads. A failed upload stays queued for its retry:
+    /// only success, or a failure no retry can fix, ends it.
     pub(super) fn remove_terminal(&mut self) {
         let mut retained_bytes = 0u64;
         self.entries.retain(|upload| {
             let retain = match &upload.status {
-                UploadStatus::Completed => false,
-                UploadStatus::Failed { .. } => upload.retries < 3,
-                UploadStatus::Pending | UploadStatus::InFlight { .. } => true,
+                UploadStatus::Completed | UploadStatus::Abandoned { .. } => false,
+                UploadStatus::Pending
+                | UploadStatus::InFlight { .. }
+                | UploadStatus::Failed { .. } => true,
             };
             if retain {
                 retained_bytes = retained_bytes.saturating_add(upload.size_bytes);

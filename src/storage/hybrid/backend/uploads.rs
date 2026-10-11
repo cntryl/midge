@@ -3,7 +3,7 @@
 use super::{
     cb, mpsc, thread, Arc, BoundedEventQueue, Duration, HybridStorage, Instant, JoinHandle, Mutex,
     StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState, UploadStatus,
-    MAX_CLOUD_ERROR_BYTES,
+    MAX_CLOUD_ERROR_BYTES, WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS,
 };
 use crate::storage::CloudUploadFailureKind;
 
@@ -119,7 +119,8 @@ impl HybridStorage {
     /// This is the ONLY place where WAL segments are uploaded to cloud.
     /// - Reads pending uploads from `upload_queue`
     /// - Initiates cloud upload via cloud backend (not `submit_write`)
-    /// - Handles retries on failure (up to 3 attempts)
+    /// - Retries a failed upload with backoff until it succeeds; only a
+    ///   corrupt remote object or a fenced writer ends it
     /// - Emits CloudAck/CloudFail events to `event_queue`
     ///
     /// Non-blocking - actual uploads happen asynchronously in the dedicated worker thread.
@@ -133,6 +134,7 @@ impl HybridStorage {
         };
 
         let mut queue = self.upload_queue.lock();
+        let now = Instant::now();
 
         // 2) Apply drained events to the upload state machine.
         for queued in &drained_events {
@@ -150,7 +152,10 @@ impl HybridStorage {
                     }
                 }
                 StorageEvent::CloudFail {
-                    segment_id, error, ..
+                    segment_id,
+                    error,
+                    failure_kind,
+                    ..
                 } => {
                     if let Some(item) = queue
                         .entries
@@ -158,9 +163,16 @@ impl HybridStorage {
                         .find(|u| &u.segment_id == segment_id)
                     {
                         item.retries = item.retries.saturating_add(1);
-                        item.status = UploadStatus::Failed {
-                            error: error.clone(),
-                            retries: item.retries,
+                        item.status = if failure_kind.ends_upload() {
+                            UploadStatus::Abandoned {
+                                error: error.clone(),
+                            }
+                        } else {
+                            UploadStatus::Failed {
+                                error: error.clone(),
+                                retries: item.retries,
+                                retry_at: now + super::queues::wal_upload_retry_delay(item.retries),
+                            }
                         };
                     }
                 }
@@ -171,7 +183,8 @@ impl HybridStorage {
         // 3) Schedule any eligible uploads.
         self.schedule_pending_uploads(&mut queue);
 
-        // 4) Garbage-collect finished items (Completed or Failed after 3 attempts).
+        // 4) Garbage-collect finished items: completed, or ended by a failure
+        // no retry can fix. Every other failure stays queued for its retry.
         queue.remove_terminal();
 
         drained_events
@@ -184,16 +197,31 @@ impl HybridStorage {
     fn schedule_pending_uploads(&self, queue: &mut UploadQueue) {
         let now = Instant::now();
         for upload in &mut queue.entries {
-            let eligible = match upload.status {
+            let eligible = match &upload.status {
                 UploadStatus::Pending => true,
-                UploadStatus::Failed { .. } => upload.retries < 3,
-                UploadStatus::InFlight { .. } | UploadStatus::Completed => false,
+                UploadStatus::Failed { retry_at, .. } => now >= *retry_at,
+                UploadStatus::InFlight { .. }
+                | UploadStatus::Completed
+                | UploadStatus::Abandoned { .. } => false,
             };
             if !eligible {
                 continue;
             }
 
             upload.status = UploadStatus::InFlight { started_at: now };
+            // A writer that lost its authority stops uploading: its objects
+            // could only become ignored orphans.
+            if let Err(error @ crate::common::MidgeError::Fenced(_)) = self.check_write_authority()
+            {
+                Self::emit_wal_upload_failure(
+                    upload,
+                    &error.to_string(),
+                    CloudUploadFailureKind::Fenced,
+                    &self.event_queue,
+                    self.external_event_tx.as_ref(),
+                );
+                continue;
+            }
             if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
                 self.counters.record(|m| {
                     m.record_cloud_async_wal_upload_failed();
@@ -428,12 +456,15 @@ impl HybridStorage {
                 let proof =
                     Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
                         .map_err(crate::storage::StorageError::from)?;
+                // An existing object with the same bytes is this upload. One
+                // with other bytes is never overwritten: no retry can fix it.
                 if proof.bytes == expected_data {
                     Ok(())
                 } else {
-                    Err(crate::storage::StorageError::protocol(format!(
-                        "remote object '{object_key}' differs from uploaded bytes"
-                    )))
+                    Err(crate::storage::StorageError::new(
+                        crate::storage::StorageErrorKind::Corruption,
+                        format!("remote object '{object_key}' differs from uploaded bytes"),
+                    ))
                 }
             },
         )
@@ -493,7 +524,8 @@ impl HybridStorage {
         StorageEvent::CloudFail {
             segment_id: upload.segment_id,
             error: error.to_string(),
-            terminal: upload.retries.saturating_add(1) >= 3,
+            exhausted: failure_kind.ends_upload()
+                || upload.retries.saturating_add(1) >= WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS,
             failure_kind,
         }
     }
@@ -577,13 +609,16 @@ impl HybridStorage {
                         write_error.unwrap_or_else(|| "cloud WAL upload failed".to_string())
                     )
                 };
-                let failure_kind = if write_failure_kind == CloudUploadFailureKind::Timeout
-                    || readback_error.is_timeout()
-                {
-                    CloudUploadFailureKind::Timeout
-                } else {
-                    CloudUploadFailureKind::Other
-                };
+                let failure_kind =
+                    if readback_error.kind() == crate::storage::StorageErrorKind::Corruption {
+                        CloudUploadFailureKind::Corruption
+                    } else if write_failure_kind == CloudUploadFailureKind::Timeout
+                        || readback_error.is_timeout()
+                    {
+                        CloudUploadFailureKind::Timeout
+                    } else {
+                        CloudUploadFailureKind::Other
+                    };
                 Self::wal_upload_failure_event(upload, &error, failure_kind)
             }
         }

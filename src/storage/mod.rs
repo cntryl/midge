@@ -254,6 +254,19 @@ impl StorageObjectMetadata {
 pub enum CloudUploadFailureKind {
     Other,
     Timeout,
+    /// The object under the segment's key holds other bytes. Objects are
+    /// immutable, so no retry can upload this segment.
+    Corruption,
+    /// The writer lost its authority, so its uploads stop.
+    Fenced,
+}
+
+impl CloudUploadFailureKind {
+    /// Whether no retry can succeed, so the upload leaves the queue.
+    #[must_use]
+    pub fn ends_upload(self) -> bool {
+        matches!(self, Self::Corruption | Self::Fenced)
+    }
 }
 
 /// Select exactly the identity used by conditional mutations. GCS JSON
@@ -312,13 +325,14 @@ pub enum StorageEvent {
     CloudAck { segment_id: u64, max_sequence: u64 },
     /// Cloud upload attempt failed - segment NOT durable.
     ///
-    /// While `terminal` is false, `HybridStorage` still owns an internal retry.
-    /// A terminal failure transfers the accepted local WAL obligation back to
-    /// the runtime for delayed callerless retry.
+    /// `HybridStorage` keeps a failed WAL upload queued and retries it with
+    /// backoff until it succeeds, unless `failure_kind` ends it. `exhausted`
+    /// says the attempts a waiting caller is owed are spent, so its waiters
+    /// fail while the retries go on.
     CloudFail {
         segment_id: u64,
         error: String,
-        terminal: bool,
+        exhausted: bool,
         failure_kind: CloudUploadFailureKind,
     },
     /// Remote WAL pruning completed after the segment became covered by

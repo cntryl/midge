@@ -231,6 +231,20 @@ impl HybridStorage {
         self.upload_queue.lock().entries.len()
     }
 
+    /// How long until the upload queue next needs
+    /// [`Self::process_uploads`]: `poll` while an upload waits to start or
+    /// to finish, else until its earliest retry is due, so a segment that
+    /// keeps failing does not keep its caller polling. `None` when nothing
+    /// is queued.
+    pub(crate) fn next_upload_turn(
+        &self,
+        poll: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        self.upload_queue
+            .lock()
+            .next_turn(std::time::Instant::now(), poll)
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_upload_bytes(&self) -> u64 {
         self.upload_queue.lock().pending_bytes

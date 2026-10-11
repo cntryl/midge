@@ -19,7 +19,9 @@ pub(crate) struct CloudWalUploadTracker {
     uploaded: BTreeMap<u64, crate::wal::cloud_catalog::PublishedWalSegment>,
     pub(super) upload_backlog: BTreeMap<u64, u64>,
     /// Earliest time at which runtime-owned WAL upload obligations may be
-    /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
+    /// resubmitted: a completed upload whose readback or publication failed,
+    /// or one deferred for memory. A failed upload attempt never comes back
+    /// here; `HybridStorage` retries it itself.
     upload_retry: crate::runtime::retry_schedule::RetrySchedule,
     pub(super) prune_inflight: HashSet<u64>,
 }
