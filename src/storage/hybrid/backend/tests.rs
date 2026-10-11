@@ -1108,3 +1108,39 @@ fn should_wait_for_earliest_retry_when_only_failed_uploads_are_queued() {
     assert_eq!(pending, Some(poll));
     assert_eq!(empty.next_turn(now, poll), None);
 }
+
+#[test]
+fn should_wait_at_least_one_poll_when_failed_uploads_are_overdue() {
+    // Arrange: retries already due, which a full worker channel can keep
+    // from starting.
+    let tmp = tempfile::tempdir().expect("create overdue retry test dir");
+    let source = Arc::new(crate::io::FsLocation::host_file(
+        &tmp.path().join("overdue.wal"),
+    ));
+    let now = Instant::now();
+    let poll = Duration::from_millis(5);
+    let overdue = |segment_id| {
+        queued_upload(
+            &source,
+            segment_id,
+            UploadStatus::Failed {
+                error: "provider unavailable".to_string(),
+                retry_at: now.checked_sub(Duration::from_secs(1)).unwrap_or(now),
+            },
+            2,
+        )
+    };
+    let mut queue = UploadQueue::new(8, 1024, WalUploadRetryPolicy::default());
+    queue.try_push(overdue(1)).unwrap();
+    queue.try_push(overdue(2)).unwrap();
+
+    // Act
+    let turn = queue.next_turn(now, poll);
+
+    // Assert
+    assert_eq!(
+        turn,
+        Some(poll),
+        "an overdue retry must not wake its caller at once"
+    );
+}

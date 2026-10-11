@@ -74,9 +74,14 @@ impl UploadState {
 
     /// How long until this upload next needs a turn of the queue: `poll`
     /// while it waits to start or to finish, else until its retry is due.
+    ///
+    /// Never less than `poll`: a due retry the worker channel cannot take
+    /// yet would otherwise wake the caller at once, again and again.
     pub(super) fn wake(&self, now: Instant, poll: Duration) -> Duration {
         match &self.status {
-            UploadStatus::Failed { retry_at, .. } => retry_at.saturating_duration_since(now),
+            UploadStatus::Failed { retry_at, .. } => {
+                retry_at.saturating_duration_since(now).max(poll)
+            }
             UploadStatus::Pending | UploadStatus::InFlight { .. } | UploadStatus::Completed => poll,
         }
     }

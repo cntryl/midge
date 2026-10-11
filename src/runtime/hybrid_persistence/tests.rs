@@ -3797,3 +3797,54 @@ mod recovery_wal_coverage {
         );
     }
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_poll_no_faster_than_its_interval_when_overdue_retries_cannot_start() {
+    // Arrange: one worker slot. The worker holds the first upload and the
+    // channel the second; the next two fail at once with no retry delay,
+    // so their retries are overdue but cannot start.
+    let tmp = tempfile::tempdir().expect("create overdue retry dir");
+    let storage = CloudPersistence::new(Arc::new(
+        HybridStorage::with_policy_event_sender_and_limits(
+            Arc::new(NeverCompletesBackend::default()),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            None,
+            HybridQueueLimits {
+                worker_entries: 1,
+                callback_timeout: Duration::from_millis(100),
+                wal_upload_retry: crate::storage::hybrid::backend::WalUploadRetryPolicy {
+                    base_delay: Duration::ZERO,
+                    max_delay: Duration::ZERO,
+                },
+                ..HybridQueueLimits::default()
+            },
+        ),
+    ));
+    // Holding the failpoint gate keeps the worker on its first upload.
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    enqueue_test_wal_upload(&storage, tmp.path(), 1, 1);
+    enqueue_test_wal_upload(&storage, tmp.path(), 2, 2);
+    storage.process_uploads();
+    enqueue_test_wal_upload(&storage, tmp.path(), 3, 3);
+    enqueue_test_wal_upload(&storage, tmp.path(), 4, 4);
+    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
+        .expect("configure WAL upload failures");
+    storage.process_uploads();
+    fail::remove("midge::cloud::inject_fail_wal_upload");
+    let poll = Duration::from_millis(5);
+
+    // Act
+    storage.process_uploads();
+    let turn = storage.next_upload_turn(poll);
+
+    // Assert
+    scenario.teardown();
+    drop(test_guard);
+    assert_eq!(
+        turn,
+        Some(poll),
+        "overdue retries behind a full worker must not spin the event loop"
+    );
+}
