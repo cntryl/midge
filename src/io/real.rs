@@ -49,6 +49,7 @@ impl RealFs {
     /// # Errors
     ///
     /// Returns an error when the base directory cannot be created.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         super::durable_dir::create_path_durably(&path)
