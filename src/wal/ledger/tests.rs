@@ -1,16 +1,7 @@
 use super::*;
 
-fn genesis(open: SegmentId) -> LedgerEdit {
-    LedgerEdit::Genesis {
-        holder: "holder-a".to_string(),
-        open,
-    }
-}
-
 fn ledger_at(open: SegmentId) -> WalLedger {
-    let mut ledger = WalLedger::empty();
-    ledger.apply(&genesis(open)).expect("genesis applies");
-    ledger
+    WalLedger::genesis("holder-a", open).expect("genesis")
 }
 
 /// A ledger holding `first..=last`, with `last` open.
@@ -45,7 +36,6 @@ fn rejected(ledger: &WalLedger, edit: &LedgerEdit) -> LedgerError {
 
 fn assert_invariants(ledger: &WalLedger) {
     let members = members(ledger);
-    assert!(ledger.is_initialized());
     assert_ne!(ledger.holder(), "");
     assert!(
         members.windows(2).all(|pair| pair[0] < pair[1]),
@@ -106,16 +96,12 @@ fn valid_edit(ledger: &WalLedger, random: &mut SplitMix64) -> LedgerEdit {
 /// A random edit near `ledger`'s current ids, valid or not.
 fn arbitrary_edit(ledger: &WalLedger, random: &mut SplitMix64) -> LedgerEdit {
     let past_log_start = ledger.log_start() + random.below(4);
-    match random.below(4) {
-        0 => LedgerEdit::Genesis {
-            holder: "holder-b".to_string(),
-            open: random.near(ledger.open_segment()),
-        },
-        1 => LedgerEdit::Rotate {
+    match random.below(3) {
+        0 => LedgerEdit::Rotate {
             seal: random.near(ledger.open_segment()),
             open: random.near(ledger.next_segment_id()),
         },
-        2 => LedgerEdit::AdvanceLogStart {
+        1 => LedgerEdit::AdvanceLogStart {
             to: random.near(past_log_start),
         },
         _ => LedgerEdit::SetAside {
@@ -130,7 +116,6 @@ fn arbitrary_edit(ledger: &WalLedger, random: &mut SplitMix64) -> LedgerEdit {
 fn modelled(ledger: &WalLedger, edit: &LedgerEdit) -> (Vec<SegmentId>, SegmentId) {
     let members = members(ledger);
     match edit {
-        LedgerEdit::Genesis { open, .. } => (vec![*open], open + 1),
         LedgerEdit::Rotate { open, .. } => {
             let mut members = members;
             members.push(*open);
@@ -149,34 +134,14 @@ fn modelled(ledger: &WalLedger, edit: &LedgerEdit) -> (Vec<SegmentId>, SegmentId
 }
 
 #[test]
-fn should_report_no_state_when_ledger_is_empty() {
+fn should_open_first_segment_when_ledger_starts() {
     // Arrange
-    let ledger = WalLedger::empty();
+    let holder = "holder-a";
 
     // Act
-    let initialized = ledger.is_initialized();
+    let ledger = WalLedger::genesis(holder, 7).expect("genesis");
 
     // Assert
-    assert!(!initialized);
-    assert_eq!(ledger.holder(), "");
-    assert_eq!(members(&ledger), Vec::<SegmentId>::new());
-    assert_eq!(sealed(&ledger), Vec::<SegmentId>::new());
-    assert_eq!(ledger.open_segment(), 0);
-    assert_eq!(ledger.log_start(), 0);
-    assert_eq!(ledger.next_segment_id(), 0);
-    assert!(!ledger.is_member(0));
-}
-
-#[test]
-fn should_open_first_segment_when_genesis_applies() {
-    // Arrange
-    let mut ledger = WalLedger::empty();
-
-    // Act
-    ledger.apply(&genesis(7)).expect("genesis applies");
-
-    // Assert
-    assert!(ledger.is_initialized());
     assert_eq!(ledger.holder(), "holder-a");
     assert_eq!(members(&ledger), [7]);
     assert_eq!(sealed(&ledger), Vec::<SegmentId>::new());
@@ -186,51 +151,15 @@ fn should_open_first_segment_when_genesis_applies() {
 }
 
 #[test]
-fn should_reject_genesis_when_ledger_is_initialized() {
-    // Arrange
-    let ledger = ledger_at(1);
-
-    // Act
-    let error = rejected(&ledger, &genesis(5));
-
-    // Assert
-    assert_eq!(error, LedgerError::AlreadyInitialized);
-}
-
-#[test]
 fn should_reject_genesis_when_holder_is_empty() {
     // Arrange
-    let ledger = WalLedger::empty();
-    let edit = LedgerEdit::Genesis {
-        holder: String::new(),
-        open: 1,
-    };
+    let holder = String::new();
 
     // Act
-    let error = rejected(&ledger, &edit);
+    let result = WalLedger::genesis(holder, 1);
 
     // Assert
-    assert_eq!(error, LedgerError::EmptyHolder);
-}
-
-#[test]
-fn should_reject_edit_when_ledger_is_uninitialized() {
-    // Arrange
-    let ledger = WalLedger::empty();
-    let edits = [
-        LedgerEdit::Rotate { seal: 0, open: 0 },
-        LedgerEdit::AdvanceLogStart { to: 1 },
-        LedgerEdit::SetAside { from: 0, open: 0 },
-    ];
-
-    // Act
-    let errors = edits
-        .iter()
-        .map(|edit| rejected(&ledger, edit))
-        .collect::<Vec<_>>();
-
-    // Assert
-    assert_eq!(errors, [const { LedgerError::NotInitialized }; 3]);
+    assert_eq!(result, Err(LedgerError::EmptyHolder));
 }
 
 #[test]
@@ -505,12 +434,11 @@ fn should_skip_gap_when_log_start_advances_into_it() {
 #[test]
 fn should_reject_edit_when_segment_ids_are_exhausted() {
     // Arrange
-    let empty = WalLedger::empty();
     let last = ledger_at(u64::MAX - 1);
 
     // Act
     let errors = [
-        rejected(&empty, &genesis(u64::MAX)),
+        WalLedger::genesis("holder-a", u64::MAX).expect_err("no id follows the last"),
         rejected(
             &last,
             &LedgerEdit::Rotate {
@@ -605,19 +533,6 @@ fn should_round_trip_when_ledger_is_serialized() {
 }
 
 #[test]
-fn should_round_trip_when_empty_ledger_is_serialized() {
-    // Arrange
-    let ledger = WalLedger::empty();
-
-    // Act
-    let image = serde_json::to_vec(&ledger).expect("serialize ledger");
-    let decoded: WalLedger = serde_json::from_slice(&image).expect("deserialize ledger");
-
-    // Assert
-    assert_eq!(decoded, ledger);
-}
-
-#[test]
 fn should_reject_snapshot_when_state_is_unreachable() {
     // Arrange
     let images = [
@@ -641,20 +556,37 @@ fn should_reject_snapshot_when_state_is_unreachable() {
 }
 
 #[test]
-fn should_map_to_corruption_when_ledger_error_converts() {
+fn should_classify_ledger_errors_when_converting() {
     // Arrange
-    let error = LedgerError::NotOpenSegment {
+    let refused = LedgerError::NotOpenSegment {
         seal: 3,
         open_segment: 4,
     };
+    let unreachable = LedgerError::UnreachableState("the holder is empty");
 
     // Act
-    let converted = crate::common::MidgeError::from(error.clone());
+    let converted = [
+        crate::common::MidgeError::from(refused.clone()),
+        crate::common::MidgeError::from(LedgerError::SegmentIdsExhausted),
+        crate::common::MidgeError::from(unreachable.clone()),
+    ];
 
-    // Assert
+    // Assert: a refused edit is a caller's mistake, exhaustion a limit, and
+    // only an unreachable stored state is damage.
     assert!(
-        matches!(&converted, crate::common::MidgeError::Corruption(message)
-            if message.contains(&error.to_string())),
-        "unexpected conversion: {converted:?}"
+        matches!(&converted[0], crate::common::MidgeError::Internal(message)
+            if message.contains(&refused.to_string())),
+        "{:?}",
+        converted[0]
+    );
+    assert!(matches!(
+        converted[1],
+        crate::common::MidgeError::ResourceLimit(_)
+    ));
+    assert!(
+        matches!(&converted[2], crate::common::MidgeError::Corruption(message)
+            if message.contains(&unreachable.to_string())),
+        "{:?}",
+        converted[2]
     );
 }

@@ -5,14 +5,7 @@ use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, F
 use crate::wal::ledger::LedgerEdit;
 
 fn genesis_ledger() -> WalLedger {
-    let mut ledger = WalLedger::empty();
-    ledger
-        .apply(&LedgerEdit::Genesis {
-            holder: "holder-a".to_string(),
-            open: 1,
-        })
-        .expect("genesis applies");
-    ledger
+    WalLedger::genesis("holder-a", 1).expect("genesis")
 }
 
 fn rotate(seal: u64) -> LedgerEdit {
@@ -230,19 +223,6 @@ fn should_refuse_create_when_ledger_exists() {
 }
 
 #[test]
-fn should_refuse_create_when_ledger_is_uninitialized() {
-    // Arrange
-    let fs = mock_fs();
-
-    // Act
-    let result = LedgerStore::create(Arc::clone(&fs), &WalLedger::empty());
-
-    // Assert
-    assert!(result.is_err());
-    assert!(LedgerStore::load(&fs).expect("load").is_none());
-}
-
-#[test]
 fn should_return_none_when_opening_absent_ledger() {
     // Arrange
     let fs = mock_fs();
@@ -267,7 +247,7 @@ fn should_refuse_append_when_edit_does_not_apply() {
     let accepted = store.append(&rotate(1));
 
     // Assert
-    assert!(matches!(refused, Err(MidgeError::Corruption(_))));
+    assert!(matches!(refused, Err(MidgeError::Internal(_))));
     accepted.expect("a valid edit still appends");
     assert_eq!(&ledger_bytes(&fs)[..before.len()], before);
     assert_eq!(
@@ -483,10 +463,7 @@ fn should_fail_when_first_frame_is_edit() {
     // Arrange
     let fs = mock_fs();
     let mut bytes = header();
-    bytes.extend(edit_frame(&LedgerEdit::Genesis {
-        holder: "holder-a".to_string(),
-        open: 1,
-    }));
+    bytes.extend(edit_frame(&rotate(1)));
     write_ledger_bytes(&fs, &bytes);
 
     // Act
@@ -497,11 +474,18 @@ fn should_fail_when_first_frame_is_edit() {
 }
 
 #[test]
-fn should_fail_when_snapshot_is_uninitialized() {
-    // Arrange
+fn should_fail_when_snapshot_has_no_open_segment() {
+    // Arrange: a checksum-valid snapshot of a state no genesis reaches.
     let fs = mock_fs();
     let mut bytes = header();
-    bytes.extend(snapshot_frame(&WalLedger::empty()));
+    let payload = br#"{"Snapshot":{"holder":"h","members":[],"next_segment_id":0}}"#;
+    let length = u32::try_from(payload.len())
+        .expect("payload fits")
+        .to_le_bytes();
+    let checksum = crc32c::crc32c_append(crc32c::crc32c(&length), payload);
+    bytes.extend(length);
+    bytes.extend(checksum.to_le_bytes());
+    bytes.extend(payload);
     write_ledger_bytes(&fs, &bytes);
 
     // Act

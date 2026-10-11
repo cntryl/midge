@@ -79,11 +79,7 @@ impl WalHistory {
             }
         }
         create_segment(wal.as_ref(), first_open)?;
-        let mut ledger = WalLedger::empty();
-        ledger.apply(&LedgerEdit::Genesis {
-            holder: uuid::Uuid::new_v4().to_string(),
-            open: first_open,
-        })?;
+        let ledger = WalLedger::genesis(uuid::Uuid::new_v4().to_string(), first_open)?;
         let store = LedgerStore::create(Arc::clone(&wal), &ledger)?;
         Ok(Self { wal, store })
     }
@@ -359,10 +355,7 @@ fn unused_aside_directory(wal: &dyn Fs) -> MidgeResult<FsPath> {
 /// order, then the open segment.
 pub(crate) fn replay_segments(ledger: &WalLedger, wal_dir: &FsPath) -> ReplaySegments {
     let path = |id| join(wal_dir, &crate::wal::segment_file_name(id));
-    ReplaySegments::new(
-        ledger.sealed().map(path),
-        ledger.is_initialized().then(|| path(ledger.open_segment())),
-    )
+    ReplaySegments::new(ledger.sealed().map(path), Some(path(ledger.open_segment())))
 }
 
 /// Create segment `id` empty and durable: the file, then its directory

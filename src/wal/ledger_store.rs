@@ -24,7 +24,7 @@
 //! Every open and every [`COMPACT_AFTER_EDITS`] appends replace the journal
 //! with a snapshot, so its size stays bounded however long the WAL runs.
 
-use super::ledger::{LedgerEdit, WalLedger};
+use super::ledger::{LedgerEdit, LedgerError, WalLedger};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use bytes::Bytes;
@@ -124,11 +124,6 @@ impl LedgerStore {
                 "WAL ledger {LEDGER_FILE} already exists"
             )));
         }
-        if !ledger.is_initialized() {
-            return Err(MidgeError::InvalidArgument(
-                "cannot persist an uninitialized WAL ledger".into(),
-            ));
-        }
         let mut store = Self {
             fs,
             ledger: ledger.clone(),
@@ -169,8 +164,8 @@ impl LedgerStore {
 
     /// Append one edit frame and sync (durable when this returns).
     ///
-    /// An edit that does not apply to the ledger is refused, as corruption,
-    /// without writing anything. After an earlier failed write the store
+    /// An edit that does not apply to the ledger is refused without writing
+    /// anything. After an earlier failed write the store
     /// heals first; if it cannot, nothing is written. Once
     /// [`COMPACT_AFTER_EDITS`] edits follow the snapshot, the store compacts;
     /// a failed compaction does not fail the durable append, and the next
@@ -248,6 +243,24 @@ impl LedgerStore {
         file.write_at(len, Bytes::copy_from_slice(frame))
             .map_err(FsError::into_midge)?;
         file.sync(Durability::Durable).map_err(FsError::into_midge)
+    }
+}
+
+/// A refused edit is a caller's mistake, not damage on disk; loading maps
+/// edits that do not apply to corruption itself.
+impl From<LedgerError> for MidgeError {
+    fn from(error: LedgerError) -> Self {
+        match error {
+            LedgerError::SegmentIdsExhausted => Self::ResourceLimit(format!("WAL ledger: {error}")),
+            LedgerError::UnreachableState(_) => Self::Corruption(format!("WAL ledger: {error}")),
+            LedgerError::EmptyHolder
+            | LedgerError::NotOpenSegment { .. }
+            | LedgerError::NotNextSegment { .. }
+            | LedgerError::BadLogStart { .. }
+            | LedgerError::BadSetAside { .. } => {
+                Self::Internal(format!("invalid WAL ledger edit: {error}"))
+            }
+        }
     }
 }
 
@@ -364,9 +377,6 @@ fn parse(bytes: &[u8]) -> MidgeResult<Parsed> {
         } => return Err(corruption("opens with an edit instead of a snapshot")),
         NextFrame::End | NextFrame::Torn => return Err(corruption("has no complete snapshot")),
     };
-    if !ledger.is_initialized() {
-        return Err(corruption("holds an uninitialized snapshot"));
-    }
     loop {
         match next_frame(bytes, at)? {
             NextFrame::End => {

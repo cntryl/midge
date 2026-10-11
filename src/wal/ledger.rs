@@ -25,8 +25,6 @@ pub(crate) type SegmentId = u64;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum LedgerEdit {
-    /// First edit of a new database: `holder` identity and the first open segment.
-    Genesis { holder: String, open: SegmentId },
     /// Seal the open segment `seal` and open `open`, which must be `seal + 1`
     /// and equal to `next_segment_id`.
     Rotate { seal: SegmentId, open: SegmentId },
@@ -41,16 +39,15 @@ pub(crate) enum LedgerEdit {
 /// The WAL segment ledger. See the module documentation.
 ///
 /// Every value is a state some sequence of edits reaches from
-/// [`WalLedger::empty`]: deserializing an unreachable state fails.
+/// [`WalLedger::genesis`]: deserializing an unreachable state fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "LedgerImage", try_from = "LedgerImage")]
 pub(crate) struct WalLedger {
-    /// Identity of the database the ledger belongs to; empty until genesis.
+    /// Identity of the database the ledger belongs to.
     holder: String,
-    /// Strictly increasing; the last is the open segment. Empty until genesis.
+    /// Strictly increasing and never empty; the last is the open segment.
     members: VecDeque<SegmentId>,
     /// The id the next rotation opens: always one past the open segment.
-    /// Zero until genesis.
     next_segment_id: SegmentId,
 }
 
@@ -58,11 +55,7 @@ pub(crate) struct WalLedger {
 /// state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LedgerError {
-    /// Only `Genesis` applies to an uninitialized ledger.
-    NotInitialized,
-    /// `Genesis` applies only to an uninitialized ledger.
-    AlreadyInitialized,
-    /// `Genesis` needs a non-empty holder identity.
+    /// Genesis needs a non-empty holder identity.
     EmptyHolder,
     /// `Rotate` must seal the open segment.
     NotOpenSegment {
@@ -98,8 +91,6 @@ pub(crate) enum LedgerError {
 impl fmt::Display for LedgerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotInitialized => f.write_str("the WAL ledger is not initialized"),
-            Self::AlreadyInitialized => f.write_str("the WAL ledger is already initialized"),
             Self::EmptyHolder => f.write_str("WAL ledger genesis needs a holder identity"),
             Self::NotOpenSegment { seal, open_segment } => write!(
                 f,
@@ -142,26 +133,24 @@ impl fmt::Display for LedgerError {
 
 impl std::error::Error for LedgerError {}
 
-impl From<LedgerError> for crate::common::MidgeError {
-    fn from(error: LedgerError) -> Self {
-        Self::Corruption(format!("WAL ledger: {error}"))
-    }
-}
-
 impl WalLedger {
-    /// An uninitialized ledger; only `Genesis` applies to it.
-    pub(crate) fn empty() -> Self {
-        Self {
-            holder: String::new(),
-            members: VecDeque::new(),
-            next_segment_id: 0,
+    /// The ledger of a new database: identity `holder`, history starting in
+    /// segment `open`.
+    pub(crate) fn genesis(holder: impl Into<String>, open: SegmentId) -> Result<Self, LedgerError> {
+        let holder = holder.into();
+        if holder.is_empty() {
+            return Err(LedgerError::EmptyHolder);
         }
+        Ok(Self {
+            holder,
+            members: VecDeque::from([open]),
+            next_segment_id: following(open)?,
+        })
     }
 
     /// Apply one edit, or return why it is invalid without changing anything.
     pub(crate) fn apply(&mut self, edit: &LedgerEdit) -> Result<(), LedgerError> {
         match edit {
-            LedgerEdit::Genesis { holder, open } => self.genesis(holder, *open),
             LedgerEdit::Rotate { seal, open } => self.rotate(*seal, *open),
             LedgerEdit::AdvanceLogStart { to } => self.advance_log_start(*to),
             LedgerEdit::SetAside { from, open } => self.set_aside(*from, *open),
@@ -171,22 +160,8 @@ impl WalLedger {
     // Each edit validates everything before its first mutation, so a
     // rejected edit leaves the ledger as it was.
 
-    fn genesis(&mut self, holder: &str, open: SegmentId) -> Result<(), LedgerError> {
-        if self.is_initialized() {
-            return Err(LedgerError::AlreadyInitialized);
-        }
-        if holder.is_empty() {
-            return Err(LedgerError::EmptyHolder);
-        }
-        let next = following(open)?;
-        holder.clone_into(&mut self.holder);
-        self.members = VecDeque::from([open]);
-        self.next_segment_id = next;
-        Ok(())
-    }
-
     fn rotate(&mut self, seal: SegmentId, open: SegmentId) -> Result<(), LedgerError> {
-        let open_segment = self.initialized_open_segment()?;
+        let open_segment = self.open_segment();
         if seal != open_segment {
             return Err(LedgerError::NotOpenSegment { seal, open_segment });
         }
@@ -203,7 +178,7 @@ impl WalLedger {
     }
 
     fn advance_log_start(&mut self, to: SegmentId) -> Result<(), LedgerError> {
-        let open_segment = self.initialized_open_segment()?;
+        let open_segment = self.open_segment();
         let log_start = self.log_start();
         if to <= log_start || to > open_segment {
             return Err(LedgerError::BadLogStart {
@@ -219,7 +194,6 @@ impl WalLedger {
     }
 
     fn set_aside(&mut self, from: SegmentId, open: SegmentId) -> Result<(), LedgerError> {
-        self.initialized_open_segment()?;
         let log_start = self.log_start();
         if from < log_start || open < self.next_segment_id {
             return Err(LedgerError::BadSetAside {
@@ -238,39 +212,28 @@ impl WalLedger {
         Ok(())
     }
 
-    fn initialized_open_segment(&self) -> Result<SegmentId, LedgerError> {
-        self.members
-            .back()
-            .copied()
-            .ok_or(LedgerError::NotInitialized)
-    }
-
-    /// Whether `Genesis` has applied.
-    pub(crate) fn is_initialized(&self) -> bool {
-        !self.members.is_empty()
-    }
-
-    /// The holder identity `Genesis` recorded; empty when uninitialized.
+    /// The holder identity genesis recorded.
     /// Ownership (#820) reads it; until then only tests do.
     #[cfg(test)]
     pub(crate) fn holder(&self) -> &str {
         &self.holder
     }
 
-    /// The open segment, the newest member; zero when uninitialized.
+    /// The open segment, the newest member.
     pub(crate) fn open_segment(&self) -> SegmentId {
-        self.members.back().copied().unwrap_or(0)
+        // `members` is never empty.
+        self.members.back().copied().unwrap_or_default()
     }
 
-    /// The id the next rotation opens; zero when uninitialized.
+    /// The id the next rotation opens.
     pub(crate) fn next_segment_id(&self) -> SegmentId {
         self.next_segment_id
     }
 
-    /// The oldest member's id; every segment below it is retired. Zero when
-    /// uninitialized.
+    /// The oldest member's id; every segment below it is retired.
     pub(crate) fn log_start(&self) -> SegmentId {
-        self.members.front().copied().unwrap_or(0)
+        // `members` is never empty.
+        self.members.front().copied().unwrap_or_default()
     }
 
     /// Members to replay, oldest first; the last is the open segment.
@@ -326,11 +289,8 @@ impl TryFrom<LedgerImage> for WalLedger {
             next_segment_id,
         } = image;
         let Some(&open) = members.last() else {
-            if holder.is_empty() && next_segment_id == 0 {
-                return Ok(Self::empty());
-            }
             return Err(LedgerError::UnreachableState(
-                "an uninitialized ledger carries state",
+                "the ledger has no open segment",
             ));
         };
         if holder.is_empty() {
