@@ -836,16 +836,17 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
         writer.append_record(&batch).unwrap();
         writer.sync().unwrap();
     }
-    let should_apply = |record: &WalRecord| record.key.as_ref() != b"covered";
+    let should_apply = |record: &WalRecord| Ok(record.key.as_ref() != b"covered");
 
     // Act
     let mut memtables = HashMap::new();
-    let stats = replay_wal_with_manifest_filter(
+    let stats = replay_wal_with_manifest_filter_within(
         &storage,
         &wal_dir,
         &mut memtables,
         ReplayPolicy::Strict,
         &should_apply,
+        None,
     )
     .unwrap();
 

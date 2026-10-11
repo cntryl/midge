@@ -389,24 +389,6 @@ pub(crate) fn validate_wal_with_policy(
     )
 }
 
-#[cfg(test)]
-pub(crate) fn replay_wal_with_manifest_filter(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
-    replay_policy: ReplayPolicy,
-    should_apply: &dyn Fn(&WalRecord) -> bool,
-) -> MidgeResult<RecoveryStats> {
-    replay_local(
-        storage,
-        wal_dir,
-        memtables,
-        replay_policy,
-        Some(should_apply),
-        None,
-    )
-}
-
 pub(crate) fn replay_wal_with_manifest_filter_within(
     storage: &dyn Fs,
     wal_dir: &FsPath,
