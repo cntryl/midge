@@ -24,7 +24,7 @@ names the stage whose pull request turns a case GREEN:
 | Stage | Scope | Issues |
 |---|---|---|
 | 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #837 (fixture re-targeting, campaign budgets), #835 (lease control), #838 (cloud campaigns) |
-| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818; #841 (contiguous publication, upload retries) |
+| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818: #841 (contiguous publication, upload retries), #848 (replay takes segment lists), #842 (segment ledger, prefix-only retention), #843 (linked segments, reservations), #844 (chained catalog, recovery planner) |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |
 | 5 | One salvage rule | #821 |
@@ -55,6 +55,17 @@ Decisions that refine the #808 target design:
   The queue is WAL-only.
 - Rotation does not pre-open the next segment, because the next header links
   the previous segment's final digest.
+- The ledger's `Genesis` edit records the holder identity and the first open
+  segment. A fresh cloud cache starts one past the catalog's last segment, and
+  a ledger whose open segment is below that fails the open: only another
+  writer publishes there.
+- Salvage drops a suffix of the ledger with `SetAside{from, open}`, after
+  copying the dropped files into `wal/salvaged-<millis>/`. Nothing is renamed.
+- Files the ledger does not name are orphans. The writable open sweeps them,
+  and fails closed on one holding data above every id the ledger handed out.
+- An idle column family pins every later local segment until a flush covers
+  its own: prefix-only retirement accepts that growth. Cloud acknowledgements
+  that arrive out of order keep later local copies until the prefix catches up.
 
 ## Named regressions
 
