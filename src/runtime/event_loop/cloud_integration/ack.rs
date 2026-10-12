@@ -109,10 +109,7 @@ impl EventLoop {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
             }
             crate::storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
-                self.cloud_coordinator
-                    .cloud_wal
-                    .prune_inflight
-                    .remove(&segment_id);
+                self.cloud_coordinator.cloud_wal.release_prune(segment_id);
                 tracing::debug!(
                     segment_id,
                     error = %error,
@@ -184,10 +181,12 @@ impl EventLoop {
         }
     }
 
+    /// Whether `error`, a failed readback or publication of `segment_id`'s
+    /// upload, is shared maintenance memory pressure the upload can wait
+    /// out. The caller then requeues it without failing its waiters.
     pub(super) fn defer_cloud_ack_for_memory(
         &mut self,
         segment_id: u64,
-        max_sequence: u64,
         error: &crate::common::MidgeError,
         deadline: &OperationDeadline,
     ) -> bool {
@@ -203,15 +202,10 @@ impl EventLoop {
         {
             // Shared maintenance pressure is backpressure, not a failed
             // accepted write. Keep its waiter and sealed local WAL while
-            // the existing upload backlog owns a bounded retry.
+            // the upload backlog owns a bounded retry.
             self.cloud_coordinator
                 .cloud_wal_prune_progress
                 .discard_idle_proofs();
-            self.cloud_coordinator
-                .cloud_wal
-                .upload_backlog
-                .insert(segment_id, max_sequence);
-            self.cloud_coordinator.cloud_wal.defer_upload_retry();
             tracing::debug!(segment_id, %error, "deferring WAL catalog publication for shared memory");
             return true;
         }
@@ -332,11 +326,7 @@ impl EventLoop {
         segment_id: u64,
         result: crate::storage::StorageOutcome<()>,
     ) {
-        let admitted = self
-            .cloud_coordinator
-            .cloud_wal
-            .prune_inflight
-            .remove(&segment_id);
+        let admitted = self.cloud_coordinator.cloud_wal.release_prune(segment_id);
         if !admitted {
             tracing::debug!(segment_id, "ignored stale cloud WAL prune completion");
             return;
@@ -441,22 +431,42 @@ impl EventLoop {
         segment_id: u64,
         error: &crate::common::MidgeError,
     ) {
+        if self.settle_failed_cloud_upload(segment_id, error) {
+            self.requeue_cloud_upload(segment_id);
+        }
+    }
+
+    /// Withdraw the failed upload of `segment_id` and fail the waiters it
+    /// blocks. Returns whether the runtime still owns the segment, so it is
+    /// to be uploaded again.
+    pub(super) fn settle_failed_cloud_upload(
+        &mut self,
+        segment_id: u64,
+        error: &crate::common::MidgeError,
+    ) -> bool {
         if !self.owns_cloud_upload(segment_id) {
             tracing::warn!(
                 segment_id,
                 %error,
                 "ignored cloud WAL failure for a segment the runtime no longer owns"
             );
-            return;
+            return false;
         }
         self.state.cloud.forget_pending_upload(segment_id);
-        self.cloud_coordinator.cloud_wal.forget_upload(segment_id);
+        self.cloud_coordinator.cloud_wal.withdraw_upload(segment_id);
         self.fail_blocked_waiters(segment_id, error);
         if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
             self.fence_wal_transition(&registration_error, Some(segment_id));
             tracing::error!(%registration_error, segment_id, "cloud WAL failure could not preserve transition ownership");
         }
+        true
+    }
 
+    /// Hand `segment_id`, whose upload was withdrawn, back to the runtime
+    /// backlog for a fresh upload after the retry delay. Every upload that
+    /// comes back to the runtime goes through here, so the backlog is its
+    /// one retry owner.
+    pub(super) fn requeue_cloud_upload(&mut self, segment_id: u64) {
         // Keep the segment in the inflight frontier and preserve its request
         // identities. The accepted local WAL remains owned for callerless
         // retry, so invalidating those identities would let a client retry
@@ -471,21 +481,29 @@ impl EventLoop {
             return;
         };
         let local_path = crate::wal::segment_key(segment_id);
-        // Only a ledger member's file is history worth uploading again.
         let history = &self.state.wal.history;
-        let member = history.segment_files().is_some() && history.ledger().is_member(segment_id);
-        if member && matches!(self.state.fs.exists(&local_path), Ok(true)) {
-            self.cloud_coordinator
-                .cloud_wal
-                .upload_backlog
-                .insert(segment_id, max_sequence);
-            self.cloud_coordinator.cloud_wal.defer_upload_retry();
-        } else {
+        if history.segment_files().is_none()
+            || !matches!(self.state.fs.exists(&local_path), Ok(true))
+        {
             tracing::error!(
                 segment_id,
                 path = local_path.0,
                 "could not requeue failed cloud WAL publication because its local segment is missing"
             );
+            return;
+        }
+        // Only a sealed ledger member is history worth uploading again; the
+        // runtime owning any other segment is a bug.
+        if let Err(not_member) =
+            self.cloud_coordinator
+                .cloud_wal
+                .requeue(segment_id, max_sequence, history.ledger())
+        {
+            let error = crate::common::MidgeError::Internal(format!(
+                "could not requeue failed cloud WAL upload: {not_member}"
+            ));
+            self.fence_wal_transition(&error, Some(segment_id));
+            tracing::error!(%error, segment_id, "cloud WAL upload requeue fenced");
         }
     }
 
@@ -539,11 +557,10 @@ mod tests {
         let error = MidgeError::ResourceLimit("identity space exhausted".into());
 
         // Act
-        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &OperationDeadline::unbounded());
+        let deferred = el.defer_cloud_ack_for_memory(1, &error, &OperationDeadline::unbounded());
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -566,11 +583,10 @@ mod tests {
             .unwrap_err();
 
         // Act
-        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &OperationDeadline::unbounded());
+        let deferred = el.defer_cloud_ack_for_memory(1, &error, &OperationDeadline::unbounded());
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -596,11 +612,10 @@ mod tests {
         let error = other.reserve(1, "other request").unwrap_err();
 
         // Act
-        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &OperationDeadline::unbounded());
+        let deferred = el.defer_cloud_ack_for_memory(1, &error, &OperationDeadline::unbounded());
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -638,11 +653,10 @@ mod tests {
         let deadline = OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act
-        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &deadline);
+        let deferred = el.defer_cloud_ack_for_memory(1, &error, &deadline);
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -683,7 +697,6 @@ mod tests {
         // Act
         let deferred = el.defer_cloud_ack_for_memory(
             7,
-            9,
             &failed_catalog_error,
             &OperationDeadline::unbounded(),
         );
@@ -692,10 +705,6 @@ mod tests {
         assert!(
             deferred,
             "a sibling success must not erase the failure's cause"
-        );
-        assert_eq!(
-            el.cloud_coordinator.cloud_wal.upload_backlog.get(&7),
-            Some(&9)
         );
     }
 }

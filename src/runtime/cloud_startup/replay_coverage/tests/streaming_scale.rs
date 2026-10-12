@@ -11,7 +11,7 @@ use crate::sst::{FsSstFactoryIo, SstFactory};
 use crate::storage::remote_sst::RemoteSstFs;
 use crate::storage::StorageBackend;
 use crate::types::{EntryType, KeyState};
-use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog, OBJECT_KEY};
+use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog, OBJECT_KEY};
 use crate::wal::recovery::streaming::{
     replay_wal_with_options, ReplayOptions, StreamingReplayLimits,
 };
@@ -167,14 +167,10 @@ impl ScaleFixture {
         )
         .bytes(&encoded_batches(&self.records)?)
         .seal();
-        let publication = PublishedWalSegment::from_validated_bytes(
-            1,
-            final_sequence(&self.records),
-            SEGMENT_EPOCH,
-            &bytes,
-        );
+        let publication = CatalogEntry::from_sealed_bytes(&bytes).expect("real sealed WAL");
+        assert_eq!(publication.max_sequence(), final_sequence(&self.records));
         publication.validate_bytes(&bytes).expect("real sealed WAL");
-        self.save_object(&publication.object_key, bytes)?;
+        self.save_object(&publication.object_key(), bytes)?;
         assert!(self
             .catalog
             .append_run(CATALOG_EPOCH, &[publication])

@@ -9,7 +9,7 @@ use crate::metadata::{FileMeta, Manifest};
 use crate::storage::cloud::CloudStorage;
 use crate::storage::hybrid::backend::{GuardedObjectProof, HybridStorage, RemoteObjectProof};
 use crate::storage::{StorageBackend, StorageObjectMetadata};
-use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
+use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use crate::wal::cloud_segment::DataCoverageRecord;
 use std::path::Path;
 use std::sync::Arc;
@@ -22,8 +22,9 @@ pub(crate) use metadata_snapshot::{
 };
 mod streaming_prune;
 use crate::storage::hybrid::backend::ControlObject;
+pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
-use catalog::{commit_catalog_within, load_and_repair_catalog_within};
+use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing, Mutation};
 
 /// Why a WAL upload could not be verified or published (#841).
 #[derive(Debug)]
@@ -263,7 +264,7 @@ struct ValidatedWalObject {
 
 struct ValidatedWalPruneCandidate {
     segment_id: u64,
-    entry: PublishedWalSegment,
+    entry: CatalogEntry,
     validated: ValidatedWalObject,
 }
 
@@ -321,22 +322,6 @@ fn partition_exactly_covered_wal_candidates(
     covered
 }
 
-fn candidates_are_oldest_catalog_prefix(
-    candidate_ids: impl IntoIterator<Item = u64>,
-    catalog: &WalPublicationCatalog,
-) -> bool {
-    let candidate_ids = candidate_ids
-        .into_iter()
-        .filter(|segment_id| catalog.segments.contains_key(segment_id))
-        .collect::<Vec<_>>();
-    catalog
-        .segments
-        .keys()
-        .take(candidate_ids.len())
-        .copied()
-        .eq(candidate_ids)
-}
-
 fn schedule_retired_wal_deletes(storage: &HybridStorage, retired: Vec<ValidatedWalPruneCandidate>) {
     let retired_ids = retired
         .iter()
@@ -361,6 +346,10 @@ fn schedule_retired_wal_deletes(storage: &HybridStorage, retired: Vec<ValidatedW
     }
 }
 
+/// Retire `covered_candidates` from the catalog in one compare-and-swap
+/// ([`WalPublicationCatalog::retire_prefix`]): only the catalog's oldest
+/// segments retire, each exactly as validated. Returns the candidates it
+/// retired; every other candidate's outcome is in `results`.
 fn retire_covered_wal_catalog_prefix_within(
     storage: &HybridStorage,
     covered_candidates: Vec<ValidatedWalPruneCandidate>,
@@ -368,96 +357,42 @@ fn retire_covered_wal_catalog_prefix_within(
     deadline: &crate::common::OperationDeadline,
     results: &mut CloudWalPruneBatchResults,
 ) -> MidgeResult<Vec<ValidatedWalPruneCandidate>> {
-    let catalog_mutation =
-        storage.lock_wal_catalog_mutation_within(deadline, "cloud WAL retirement")?;
-    let authority = load_and_repair_catalog_within(storage, deadline)?.ok_or_else(|| {
-        MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
-    })?;
-    let mut current_catalog = authority.catalog;
-    if current_catalog.fencing_epoch != fencing_epoch {
-        for candidate in covered_candidates {
-            results.push((
-                candidate.segment_id,
-                Err(MidgeError::Fenced(format!(
-                    "cloud WAL catalog advanced to fencing epoch {}, writer epoch {fencing_epoch} rejected during retirement",
-                    current_catalog.fencing_epoch
-                ))),
-            ));
-        }
-        return Ok(Vec::new());
-    }
-    if !candidates_are_oldest_catalog_prefix(
-        covered_candidates
-            .iter()
-            .map(|candidate| candidate.segment_id),
-        &current_catalog,
-    ) {
-        let oldest = current_catalog
-            .segments
-            .keys()
-            .next()
-            .copied()
-            .unwrap_or_default();
-        for candidate in covered_candidates {
-            results.push((
-                candidate.segment_id,
-                Err(MidgeError::Busy(format!(
-                    "cloud WAL segment {} lost oldest-prefix authority before retirement; oldest is {oldest}",
-                    candidate.segment_id
-                ))),
-            ));
-        }
-        return Ok(Vec::new());
-    }
-
-    let mut retired = Vec::with_capacity(covered_candidates.len());
-    let mut blocked_by = None;
-    for candidate in covered_candidates {
-        if let Some(older_segment_id) = blocked_by {
-            results.push((
-                candidate.segment_id,
-                Err(MidgeError::Busy(format!(
-                    "cloud WAL segment {} cannot retire past changed authoritative segment {older_segment_id}",
-                    candidate.segment_id
-                ))),
-            ));
-            continue;
-        }
-        match current_catalog.segments.get(&candidate.segment_id) {
-            None => results.push((candidate.segment_id, Ok(()))),
-            Some(actual) if actual == &candidate.entry => {
-                current_catalog
-                    .retire(fencing_epoch, &candidate.entry)
-                    .map_err(MidgeError::Internal)?;
-                retired.push(candidate);
+    let expected: Vec<CatalogEntry> = covered_candidates
+        .iter()
+        .map(|candidate| candidate.entry.clone())
+        .collect();
+    let retirement = mutate_wal_catalog_within(
+        storage,
+        "cloud WAL retirement",
+        deadline,
+        &|| storage.check_write_authority(),
+        Missing::Refuse,
+        |catalog| {
+            catalog
+                .retire_prefix(fencing_epoch, &expected)
+                .map(|retired| Mutation::of(!retired.is_empty(), retired))
+        },
+    );
+    let retired_ids = match retirement {
+        Ok(Ok((retired, _))) => retired,
+        Ok(Err(refusal)) => {
+            let error = refusal_error(refusal);
+            let error = match error {
+                error @ MidgeError::Fenced(_) => error,
+                // The catalog moved since validation; a later batch retries.
+                error => MidgeError::Busy(error.to_string()),
+            };
+            for candidate in covered_candidates {
+                results.push((candidate.segment_id, Err(error.replay())));
             }
-            Some(_) => {
-                blocked_by = Some(candidate.segment_id);
-                results.push((
-                    candidate.segment_id,
-                    Err(MidgeError::Busy(format!(
-                        "cloud WAL catalog segment {} changed before retirement",
-                        candidate.segment_id
-                    ))),
-                ));
-            }
+            return Ok(Vec::new());
         }
-    }
-
-    if !retired.is_empty() {
-        if let Err(error) = commit_catalog_within(
-            storage,
-            Some(&authority.primary),
-            &current_catalog,
-            deadline,
-        ) {
-            if matches!(error, MidgeError::Fenced(_)) {
-                return Err(error);
-            }
+        Err(error @ MidgeError::Fenced(_)) => return Err(error),
+        Err(error) => {
             let message =
                 contextualize_cloud_error(error, "cloud WAL catalog batch retirement failed")
                     .to_string();
-            for candidate in retired {
+            for candidate in covered_candidates {
                 results.push((
                     candidate.segment_id,
                     Err(MidgeError::Internal(message.clone())),
@@ -465,8 +400,17 @@ fn retire_covered_wal_catalog_prefix_within(
             }
             return Ok(Vec::new());
         }
+    };
+    let mut retired = Vec::with_capacity(retired_ids.len());
+    for candidate in covered_candidates {
+        if retired_ids.contains(&candidate.segment_id) {
+            retired.push(candidate);
+        } else {
+            // The catalog already retired it: a lost answer to an earlier
+            // compare-and-swap.
+            results.push((candidate.segment_id, Ok(())));
+        }
     }
-    drop(catalog_mutation);
     Ok(retired)
 }
 
@@ -584,24 +528,16 @@ impl CloudPersistence {
         .map_err(MidgeError::Corruption)?;
         // The object is named for the epoch of the writer that wrote it,
         // which its header records (#843).
-        let entry = PublishedWalSegment::from_validated_bytes(
-            segment_id,
-            max_sequence,
-            readback.validation.writer_epoch,
-            &bytes,
-        );
-        entry
-            .check(&readback.validation.identity())
-            .map_err(|detail| {
-                MidgeError::Corruption(format!("local WAL segment '{source}': {detail}"))
-            })?;
-        self.enqueue_object_upload(
-            segment_id,
-            entry.object_key.clone(),
-            source.clone(),
-            max_sequence,
-        )?;
-        Ok(entry.object_key)
+        let entry = CatalogEntry::describing(readback.validation.identity(), &bytes);
+        if entry.id() != segment_id {
+            return Err(MidgeError::Corruption(format!(
+                "local WAL segment '{source}' holds segment {}, not {segment_id}",
+                entry.id()
+            )));
+        }
+        let object_key = entry.object_key();
+        self.enqueue_object_upload(segment_id, object_key.clone(), source.clone(), max_sequence)?;
+        Ok(object_key)
     }
 
     pub(crate) fn fence_cloud_wal_catalog(
@@ -619,116 +555,56 @@ impl CloudPersistence {
         writer_epoch: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<AdmittedCatalog> {
-        let existing = load_and_repair_catalog_within(self, deadline)?;
-        let (mut catalog, expected) = if let Some(authority) = existing {
-            (authority.catalog, Some(authority.primary))
-        } else {
-            (AdmittedCatalog::empty(self, writer_epoch)?, None)
-        };
-
-        let changed = if expected.is_some() {
-            catalog.fence_to(writer_epoch).map_err(MidgeError::Fenced)?
-        } else {
-            true
-        };
-        if changed {
-            commit_catalog_within(self, expected.as_ref(), &catalog, deadline)?;
-        }
-        Ok(catalog)
+        mutate_wal_catalog_within(
+            self,
+            "cloud WAL catalog fencing",
+            deadline,
+            &|| self.check_write_authority(),
+            Missing::Create(writer_epoch),
+            |catalog| {
+                catalog
+                    .fence_to(writer_epoch)
+                    .map(|changed| Mutation::of(changed, ()))
+            },
+        )?
+        .map(|((), catalog)| catalog)
+        .map_err(refusal_error)
     }
 
-    /// Drop the segments a salvage open stopped short of from catalog
-    /// authority so later opens do not stop at the same hole and discard
-    /// writes made after it. Their objects stay in place: retirement here is
-    /// not followed by a delete. The sequence floor covering them must
-    /// already be persisted (`raise_wal_sequence_floor`).
-    pub(crate) fn retire_unreplayed_wal_segments_with_authority_within(
+    /// Salvage (#844): in one catalog compare-and-swap, set aside the
+    /// cataloged segments from `from`, which must be `expected` as planning
+    /// saw them, and raise the sequence floor to at least `floor`, so no
+    /// later open replays them or reuses their sequences. Their objects stay
+    /// in place. `validate` is the writer's authority check.
+    ///
+    /// # Errors
+    ///
+    /// `Fenced` when another epoch owns the catalog, `Corruption` when the
+    /// catalog's suffix is not what planning saw, and the load or commit
+    /// error.
+    pub(crate) fn set_aside_catalog_suffix_with_authority_within(
         &self,
         writer_epoch: u64,
-        segments: &[PublishedWalSegment],
+        from: Option<crate::wal::ledger::SegmentId>,
+        expected: &[CatalogEntry],
+        floor: u64,
         validate: &dyn Fn() -> MidgeResult<()>,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
-        validate()?;
-        let _catalog_mutation =
-            self.lock_wal_catalog_mutation_within(deadline, "cloud WAL salvage retirement")?;
-        let authority = catalog::load_and_repair_catalog_with_authority(self, deadline, validate)?
-            .ok_or_else(|| {
-                MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
-            })?;
-        let mut catalog = authority.catalog;
-        let mut changed = false;
-        for segment in segments {
-            changed |= catalog
-                .retire(writer_epoch, segment)
-                .map_err(MidgeError::Fenced)?;
-        }
-        if changed {
-            catalog::commit_catalog_with_authority(
-                self,
-                Some(&authority.primary),
-                &catalog,
-                deadline,
-                validate,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Persist a sequence floor above WAL that salvage sets aside, so a crash
-    /// before the first flush cannot hand those sequences out again (#529).
-    #[cfg(test)]
-    pub(crate) fn raise_wal_sequence_floor(
-        &self,
-        writer_epoch: u64,
-        sequence_floor: u64,
-    ) -> MidgeResult<()> {
-        self.raise_wal_sequence_floor_with_authority(writer_epoch, sequence_floor, &|| Ok(()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn raise_wal_sequence_floor_with_authority(
-        &self,
-        writer_epoch: u64,
-        sequence_floor: u64,
-        validate: &dyn Fn() -> MidgeResult<()>,
-    ) -> MidgeResult<()> {
-        self.raise_wal_sequence_floor_with_authority_within(
-            writer_epoch,
-            sequence_floor,
+        mutate_wal_catalog_within(
+            self,
+            "cloud WAL salvage",
+            deadline,
             validate,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-    }
-
-    pub(crate) fn raise_wal_sequence_floor_with_authority_within(
-        &self,
-        writer_epoch: u64,
-        sequence_floor: u64,
-        validate: &dyn Fn() -> MidgeResult<()>,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        validate()?;
-        let _catalog_mutation =
-            self.lock_wal_catalog_mutation_within(deadline, "cloud WAL salvage floor")?;
-        let authority = catalog::load_and_repair_catalog_with_authority(self, deadline, validate)?
-            .ok_or_else(|| {
-                MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
-            })?;
-        let mut catalog = authority.catalog;
-        if catalog
-            .raise_sequence_floor(writer_epoch, sequence_floor)
-            .map_err(MidgeError::Fenced)?
-        {
-            catalog::commit_catalog_with_authority(
-                self,
-                Some(&authority.primary),
-                &catalog,
-                deadline,
-                validate,
-            )?;
-        }
-        Ok(())
+            Missing::Refuse,
+            |catalog| {
+                catalog
+                    .set_aside_suffix(writer_epoch, from, expected, floor)
+                    .map(|changed| Mutation::of(changed, ()))
+            },
+        )?
+        .map(drop)
+        .map_err(refusal_error)
     }
 
     /// Prove that the remote object for the sealed segment at `source` holds
@@ -749,7 +625,7 @@ impl CloudPersistence {
         expected_max_sequence: u64,
         source: &crate::io::FsLocation,
         deadline: &crate::common::OperationDeadline,
-    ) -> Result<PublishedWalSegment, PublicationError> {
+    ) -> Result<CatalogEntry, PublicationError> {
         let local_bytes = source.read_all().map_err(|error| {
             let error = error.into_io();
             MidgeError::Io(std::io::Error::new(
@@ -765,18 +641,16 @@ impl CloudPersistence {
             expected_max_sequence,
         )
         .map_err(MidgeError::Internal)?;
-        let entry = PublishedWalSegment::from_validated_bytes(
-            segment_id,
-            expected_max_sequence,
-            local_readback.writer_epoch,
-            &local_bytes,
-        );
-        entry
-            .check(&local_readback.identity())
-            .map_err(|detail| PublicationError::Mismatch {
+        let entry = CatalogEntry::describing(local_readback.identity(), &local_bytes);
+        if entry.id() != segment_id {
+            return Err(PublicationError::Mismatch {
                 segment_id,
-                detail: format!("local WAL segment '{source}': {detail}"),
-            })?;
+                detail: format!(
+                    "local WAL segment '{source}' holds segment {}, not {segment_id}",
+                    entry.id()
+                ),
+            });
+        }
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
             return Err(PublicationError::Mismatch {
@@ -806,41 +680,25 @@ impl CloudPersistence {
     /// for a failure a later attempt may not repeat.
     pub(crate) fn publish_wal_segments(
         &self,
-        run: &[PublishedWalSegment],
+        run: &[CatalogEntry],
         fencing_epoch: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> Result<(), PublicationError> {
-        let _catalog_mutation =
-            self.lock_wal_catalog_mutation_within(deadline, "cloud WAL publication")?;
-        let authority = load_and_repair_catalog_within(self, deadline)?.ok_or_else(|| {
-            MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
-        })?;
-        let mut catalog = authority.catalog;
-        if !catalog.append_run(fencing_epoch, run)? {
-            return Ok(());
-        }
-        let publication = commit_catalog_within(self, Some(&authority.primary), &catalog, deadline);
+        let publication = mutate_wal_catalog_within(
+            self,
+            "cloud WAL publication",
+            deadline,
+            &|| self.check_write_authority(),
+            Missing::Refuse,
+            |catalog| {
+                catalog
+                    .append_run(fencing_epoch, run)
+                    .map(|changed| Mutation::of(changed, ()))
+            },
+        );
         match publication {
-            Ok(_) => Ok(()),
-            Err(MidgeError::Busy(conflict)) => {
-                let winning_catalog = load_and_repair_catalog_within(self, deadline)?
-                    .ok_or_else(|| {
-                        MidgeError::Internal(
-                            "cloud WAL publication catalog disappeared after conflict".to_string(),
-                        )
-                    })?
-                    .catalog;
-                if winning_catalog.fencing_epoch > fencing_epoch {
-                    return Err(PublicationError::Fenced(MidgeError::Fenced(format!(
-                        "cloud WAL catalog advanced to fencing epoch {}, writer epoch {fencing_epoch} rejected during publication",
-                        winning_catalog.fencing_epoch
-                    ))));
-                }
-                Err(PublicationError::Retriable(contextualize_cloud_error(
-                    MidgeError::Busy(conflict),
-                    "cloud WAL catalog publication failed",
-                )))
-            }
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(refusal)) => Err(refusal.into()),
             Err(error @ MidgeError::Fenced(_)) => Err(PublicationError::Fenced(error)),
             Err(error) => Err(PublicationError::Retriable(contextualize_cloud_error(
                 error,
@@ -872,23 +730,18 @@ impl CloudPersistence {
         }
 
         let (_, catalog) = authoritative_wal_catalog_within(self, deadline)?;
-        if !candidates_are_oldest_catalog_prefix(
-            ordered_candidates.iter().map(|(segment_id, _)| *segment_id),
-            &catalog,
-        ) {
-            let oldest = catalog.segments.keys().next().copied().unwrap_or_default();
+        if let Err(refusal) =
+            catalog.oldest_prefix(ordered_candidates.iter().map(|(segment_id, _)| *segment_id))
+        {
             return Ok(ordered_candidates
                 .into_iter()
                 .map(|(segment_id, _)| {
-                    if catalog.segments.contains_key(&segment_id) {
-                        (
-                            segment_id,
-                            Err(MidgeError::Busy(format!(
-                                "cloud WAL segment {segment_id} cannot retire before oldest authoritative segment {oldest}"
-                            ))),
-                        )
-                    } else {
+                    // Only a segment at or below the anchor retired; one the
+                    // catalog no longer lists above it was set aside.
+                    if segment_id <= catalog.anchor().id {
                         (segment_id, Ok(()))
+                    } else {
+                        (segment_id, Err(MidgeError::Busy(refusal.to_string())))
                     }
                 })
                 .collect());
@@ -960,7 +813,7 @@ impl CloudPersistence {
 fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
-) -> Result<(ControlObject, PublishedWalSegment), String> {
+) -> Result<(ControlObject, CatalogEntry), String> {
     authoritative_wal_entry_within(
         storage,
         segment_id,
@@ -974,9 +827,9 @@ fn authoritative_wal_entry_within(
     storage: &HybridStorage,
     segment_id: u64,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<(ControlObject, PublishedWalSegment)> {
+) -> MidgeResult<(ControlObject, CatalogEntry)> {
     let (proof, catalog) = authoritative_wal_catalog_within(storage, deadline)?;
-    let entry = catalog.segments.get(&segment_id).cloned().ok_or_else(|| {
+    let entry = catalog.entry(segment_id).cloned().ok_or_else(|| {
         MidgeError::Internal(format!(
             "cloud WAL segment {segment_id} is not authoritative in the publication catalog"
         ))
@@ -998,15 +851,15 @@ fn authoritative_wal_catalog_within(
 
 fn validate_remote_wal(
     storage: &HybridStorage,
-    entry: &PublishedWalSegment,
+    entry: &CatalogEntry,
     deadline: &crate::common::OperationDeadline,
 ) -> Result<ValidatedWalObject, PublicationError> {
-    let proof = storage.remote_object_proof_within(&entry.object_key, deadline)?;
+    let proof = storage.remote_object_proof_within(&entry.object_key(), deadline)?;
     // The object exists but holds other bytes than the segment it names.
     entry
         .validate_bytes(proof.bytes())
         .map_err(|detail| PublicationError::Mismatch {
-            segment_id: entry.segment_id,
+            segment_id: entry.id(),
             detail,
         })?;
     Ok(ValidatedWalObject { proof })

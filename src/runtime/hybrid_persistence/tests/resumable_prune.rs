@@ -242,9 +242,7 @@ fn should_finish_oldest_wal_proof_across_repeated_provider_timeouts() {
             break;
         }
         assert!(
-            assert_wal_catalog_copies_match(&storage)
-                .segments
-                .contains_key(&1),
+            assert_wal_catalog_copies_match(&storage).entry(1).is_some(),
             "incomplete proof cannot retire authority"
         );
     }
@@ -254,9 +252,7 @@ fn should_finish_oldest_wal_proof_across_repeated_provider_timeouts() {
         "bounded retries must preserve completed CRC and exact-record work"
     );
     assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
-    assert!(!assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_none());
 }
 
 fn attempt(
@@ -307,9 +303,7 @@ fn should_restart_crc_progress_when_wal_provider_identity_changes() {
     // Assert
     assert!(result.is_err());
     assert_eq!(backend.reads.lock().first(), Some(&(key, 0)));
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
 }
 
 #[test]
@@ -337,9 +331,7 @@ fn should_restart_semantic_progress_when_sst_provider_identity_changes() {
         backend.reads.lock().first(),
         Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
 }
 
 #[test]
@@ -361,9 +353,7 @@ fn should_revalidate_from_start_when_process_local_proof_state_is_lost() {
         backend.reads.lock().first(),
         Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
 }
 
 #[test]
@@ -401,9 +391,7 @@ fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_ke
                 retired = true;
                 break;
             }
-            assert!(assert_wal_catalog_copies_match(&storage)
-                .segments
-                .contains_key(&1));
+            assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
         }
         // Assert
         assert!(
@@ -428,7 +416,7 @@ fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
         .fence_cloud_wal_catalog(2)
         .expect("settle seeded catalog copies before deadline interruption");
     let catalog = assert_wal_catalog_copies_match(&storage);
-    let key = &catalog.segments[&1].object_key;
+    let key = &catalog.entry(1).unwrap().object_key();
     let original_wal = read_cloud_object(&storage, key);
 
     // Act
@@ -511,9 +499,7 @@ fn finish_interrupted_proof(
                 break;
             }
             Err(crate::MidgeError::Timeout(_)) => {
-                assert!(assert_wal_catalog_copies_match(storage)
-                    .segments
-                    .contains_key(&1));
+                assert!(assert_wal_catalog_copies_match(storage).entry(1).is_some());
             }
             Err(error) => panic!("unexpected proof failure after deadline interruption: {error}"),
         }
@@ -523,7 +509,7 @@ fn finish_interrupted_proof(
         "the interrupted proof must finish once storage stops delaying"
     );
     assert!(wait_for_wal_prune_result(storage, 1).is_ok());
-    assert!(assert_wal_catalog_copies_match(storage).segments.is_empty());
+    assert_eq!(assert_wal_catalog_copies_match(storage).entries(), []);
     assert_eq!(progress.retained_bytes(), Some(0));
 }
 
@@ -539,7 +525,7 @@ fn should_reject_queued_range_when_submission_exhausts_attempt_deadline() {
         .fence_cloud_wal_catalog(2)
         .expect("settle seeded catalog copies before late-range interruption");
     let catalog = assert_wal_catalog_copies_match(&storage);
-    let key = &catalog.segments[&1].object_key;
+    let key = &catalog.entry(1).unwrap().object_key();
     let original_wal = read_cloud_object(&storage, key);
 
     // Act
@@ -640,9 +626,7 @@ fn should_resume_two_family_transaction_proof_without_retiring_partial_coverage(
                 break;
             }
             assert!(
-                assert_wal_catalog_copies_match(&storage)
-                    .segments
-                    .contains_key(&1),
+                assert_wal_catalog_copies_match(&storage).entry(1).is_some(),
                 "batch must remain authoritative until both CFs and all operations are covered"
             );
         }
@@ -674,9 +658,7 @@ fn should_retain_catalog_authority_when_resumed_wal_identity_contains_corrupt_by
         matches!(result, Err(crate::MidgeError::Corruption(_))),
         "replacement must restart full checksum validation"
     );
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
     assert_cloud_object_exists(&storage, &key);
 }
 
@@ -701,9 +683,7 @@ fn should_revalidate_exact_coverage_when_manifest_family_assignment_changes() {
         backend.reads.lock().first(),
         Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
 }
 
 #[test]
@@ -719,9 +699,7 @@ fn should_preserve_oldest_proof_progress_while_newer_ssts_are_appended() {
             retired = true;
             break;
         }
-        assert!(assert_wal_catalog_copies_match(&storage)
-            .segments
-            .contains_key(&1));
+        assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
         let sequence = 1000 + index;
         let name = format!("newer-{index}.sst");
         let bytes = valid_sst_bytes(b"z", b"later", sequence);
@@ -772,9 +750,7 @@ fn should_yield_acknowledged_proof_work_without_shortening_slow_provider_calls()
         "{first:?}"
     );
     assert_eq!(backend.reads.lock().len(), 1);
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
     let mut retired = false;
     for _ in 0..100 {
         match attempt() {
@@ -783,9 +759,7 @@ fn should_yield_acknowledged_proof_work_without_shortening_slow_provider_calls()
                 break;
             }
             Err(crate::MidgeError::Busy(_)) => {
-                assert!(assert_wal_catalog_copies_match(&storage)
-                    .segments
-                    .contains_key(&1));
+                assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_some());
             }
             Err(error) => panic!("cooperative work must preserve the provider budget: {error}"),
         }
@@ -892,9 +866,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
         "cleanup must finish without any new WAL acknowledgements"
     );
     assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
-    assert!(!assert_wal_catalog_copies_match(&storage)
-        .segments
-        .contains_key(&1));
+    assert!(assert_wal_catalog_copies_match(&storage).entry(1).is_none());
     assert_eq!(
         budget.used(),
         0,

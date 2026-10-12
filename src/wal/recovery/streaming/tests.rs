@@ -1,6 +1,6 @@
 use super::*;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, FsError, FsResult, MockFs, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsResult, MockFs, OpenOptions};
 use crate::wal::{encoding, frame, WalOpKind};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +21,7 @@ struct BoundedFile<'a> {
     len_calls: Arc<AtomicUsize>,
 }
 
-impl File for BoundedFile<'_> {
+impl crate::io::ReadFile for BoundedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.read_calls.fetch_add(1, Ordering::SeqCst);
         self.largest_read
@@ -31,18 +31,54 @@ impl File for BoundedFile<'_> {
         }
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.len_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.len()
+    }
+}
+
+impl File for BoundedFile<'_> {
     fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, bytes)
     }
     fn append(&mut self, bytes: Bytes) -> FsResult<u64> {
         self.inner.append(bytes)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.len_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
+    }
+}
+
+impl ReadFs for BoundedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        if path.0 == "wal" {
+            Ok(true)
+        } else {
+            self.inner.exists(path)
+        }
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path).map(|entries| {
+            entries
+                .into_iter()
+                .map(|mut entry| {
+                    entry.name = entry.name.rsplit('/').next().unwrap().to_string();
+                    entry
+                })
+                .collect()
+        })
     }
 }
 
@@ -59,29 +95,8 @@ impl Fs for BoundedFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        if path.0 == "wal" {
-            Ok(true)
-        } else {
-            self.inner.exists(path)
-        }
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path).map(|entries| {
-            entries
-                .into_iter()
-                .map(|mut entry| {
-                    entry.name = entry.name.rsplit('/').next().unwrap().to_string();
-                    entry
-                })
-                .collect()
-        })
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_dir_all(path)

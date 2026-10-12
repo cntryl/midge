@@ -1,3 +1,4 @@
+use cntryl_midge::__internal::wal::catalog::{CatalogEntry, WalPublicationCatalog};
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use std::time::{Duration, Instant};
 
@@ -36,16 +37,10 @@ fn should_retire_cloud_wal_after_compaction_collects_tombstones_before_idle_fami
         .unwrap();
     assert!(read.get(b"deleted").unwrap().is_none());
     drop(read);
-    let catalog_path = directory
-        .path()
-        .join("cloud_store/wal/publication-catalog.v1.json");
-    let before: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
-    let original: Vec<_> = before["segments"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
+    let original: Vec<_> = catalog(directory.path(), false)
+        .entries()
+        .iter()
+        .map(CatalogEntry::id)
         .collect();
     assert!(
         original.len() >= 4,
@@ -56,13 +51,11 @@ fn should_retire_cloud_wal_after_compaction_collects_tombstones_before_idle_fami
     engine.flush_cf(&idle).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let remaining = loop {
-        let catalog: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
-        let segments = catalog["segments"].as_object().unwrap();
+        let current = catalog(directory.path(), false);
         let remaining: Vec<_> = original
             .iter()
-            .filter(|id| segments.contains_key(*id))
-            .cloned()
+            .filter(|id| current.entry(**id).is_some())
+            .copied()
             .collect();
         if remaining.is_empty() || Instant::now() >= deadline {
             break remaining;
@@ -86,38 +79,31 @@ fn options(root: &std::path::Path) -> cntryl_midge::OpenOptions {
         .unwrap()
 }
 
-fn catalog(root: &std::path::Path, mirror: bool) -> serde_json::Value {
+fn catalog(root: &std::path::Path, mirror: bool) -> WalPublicationCatalog {
     let name = if mirror {
         "cloud_store/wal/publication-catalog.v1.mirror.json"
     } else {
         "cloud_store/wal/publication-catalog.v1.json"
     };
-    serde_json::from_slice(&std::fs::read(root.join(name)).unwrap()).unwrap()
+    WalPublicationCatalog::decode(&std::fs::read(root.join(name)).unwrap()).unwrap()
 }
 
-fn wait_for_retirement(root: &std::path::Path, original: &serde_json::Value) {
+fn wait_for_retirement(root: &std::path::Path, original: &WalPublicationCatalog) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let done = [false, true].into_iter().all(|mirror| {
             let current = catalog(root, mirror);
-            original["segments"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .all(|(id, entry)| {
-                    current["segments"].get(id).is_none()
-                        && !root
-                            .join("cloud_store")
-                            .join(entry["object_key"].as_str().unwrap())
-                            .exists()
-                })
+            original.entries().iter().all(|entry| {
+                current.entry(entry.id()).is_none()
+                    && !root.join("cloud_store").join(entry.object_key()).exists()
+            })
         });
         if done {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "original catalog entries or WAL objects remain: {}",
+            "original catalog entries or WAL objects remain: {:?}",
             catalog(root, false)
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -166,7 +152,7 @@ fn retention_control(range: bool) {
     tx.commit(WriteOptions::cloud_strict()).unwrap();
     engine.flush_cf(&data).unwrap();
     let original = catalog(root, false);
-    assert!(original["segments"].as_object().unwrap().len() >= 4);
+    assert!(original.entries().len() >= 4);
 
     // Act: compact while the unrelated family pins every generation.
     engine.compact_all().unwrap();
@@ -177,7 +163,7 @@ fn retention_control(range: bool) {
     );
     assert_value(&engine, data.id(), b"deleted-a", None);
     assert_value(&engine, data.id(), b"deleted-b", None);
-    assert_eq!(catalog(root, false)["segments"], original["segments"]);
+    assert_eq!(catalog(root, false).entries(), original.entries());
     engine.flush_cf(&idle).unwrap();
     wait_for_retirement(root, &original);
     engine.shutdown(Duration::from_secs(30)).unwrap();
@@ -231,7 +217,7 @@ fn should_replay_missing_deletion_proof_when_restarting_pre_fix_stuck_history() 
         root,
     );
     let original = catalog(root, false);
-    assert_eq!(original["segments"].as_object().unwrap().len(), 4);
+    assert_eq!(original.entries().len(), 4);
     // Act: restart replays WAL state absent from the compacted SST layout.
     let mut engine = Engine::open(options(root)).unwrap();
     #[cfg(feature = "internal-testing")]
@@ -303,10 +289,7 @@ fn should_collect_older_tombstones_while_newer_wal_remains_pinned() {
             older.iter().all(|seq| !recent.contains(seq)),
             "old proof was retained: {older:?} -> {recent:?}"
         );
-        assert!(!catalog(root, false)["segments"]
-            .as_object()
-            .unwrap()
-            .is_empty());
+        assert_ne!(catalog(root, false).entries().len(), 0);
         for prior in 0..=cycle {
             assert_value(
                 &engine,

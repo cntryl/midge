@@ -206,7 +206,6 @@ pub struct EventLoop {
     pending_msg: Option<RuntimeMsg>,
 
     verification_barrier: VerificationBarrier,
-    legacy_bound_backfill: read_path::LegacyBoundBackfill,
     publication_gate: ManifestPublicationGate,
 
     flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
@@ -339,7 +338,6 @@ impl EventLoop {
             inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
             verification_barrier: VerificationBarrier::default(),
-            legacy_bound_backfill: read_path::LegacyBoundBackfill::default(),
             publication_gate: ManifestPublicationGate::default(),
             flush_worker_result_rx,
             compaction_publish_result_rx,
@@ -519,7 +517,7 @@ impl EventLoop {
 
         let initially_durable = self
             .durability
-            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acked())
+            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acks())
             .map_err(|refusal| crate::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some(durable) = initially_durable.last() {
@@ -536,8 +534,7 @@ impl EventLoop {
             check_startup_scope(startup_scope, "recovered cloud WAL upload backlog")?;
             self.cloud_coordinator
                 .cloud_wal
-                .upload_backlog
-                .insert(segment_id, segment.max_sequence);
+                .queue_sealed(segment_id, segment.max_sequence);
         }
         if config.upload_at_open {
             // The open fails rather than serve without the writer authority
@@ -675,7 +672,8 @@ impl EventLoop {
         self.state.manifest.advance_persisted_sequence(sequence);
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.state.clear_flush_publication_intent(sst_name)?;
-        self.mirror_metadata_after_local_commit("test flush publication")?;
+        let deadline = self.event_loop_cloud_deadline();
+        self.mirror_metadata_after_local_commit_within("test flush publication", &deadline)?;
         self.publish_snapshot();
         self.schedule_compaction_after_flush_publication(sst_name);
         self.prune_cloud_wal_segments_covered_by_manifest();

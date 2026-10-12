@@ -146,7 +146,7 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
         started.elapsed()
     );
     assert!(cloud.calls.load(Ordering::Acquire) > 0);
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
     assert!(remote_wal_path_for_test(&el, 81).exists());
     assert_compaction_shares_retained_budget(&mut el)?;
     el.schedule_next_flush_worker();
@@ -157,7 +157,7 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 1);
     complete_compaction(&mut el, &worker);
     assert!(el.state.manifest.files.iter().any(|file| file.level > 0));
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
     Ok(())
 }
 
@@ -284,7 +284,7 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
         "unretired WAL recovery authority must survive"
     );
     assert_eq!(std::fs::read(catalog_path)?, catalog_before);
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
     assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
     Ok(())
 }
@@ -316,7 +316,7 @@ fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
         "a shutdown completion must not admit another optional WAL proof"
     );
     assert!(wal_path.exists());
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
     Ok(())
 }
 

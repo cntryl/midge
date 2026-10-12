@@ -1543,14 +1543,41 @@ mod compatibility_fixtures {
 
     /// Copy the populated release fixture as a database of the current
     /// format, for tests whose subject is its manifest and SST rather than
-    /// its format. Its empty pre-ledger `wal.log` goes with the old marker.
+    /// its format. Its empty pre-ledger `wal.log` goes with the old marker,
+    /// and its manifests' byte-array key bounds become hex strings.
     fn copy_populated_fixture_as_current_format() -> tempfile::TempDir {
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
-        fs::write(temp.path().join("FORMAT"), "midge-format-version=6\n")
+        fs::write(temp.path().join("FORMAT"), "midge-format-version=7\n")
             .expect("mark fixture copy as the current format");
         fs::remove_file(temp.path().join("wal").join("wal.log"))
             .expect("drop the pre-ledger active WAL");
+        for name in ["manifest.json", "manifest.snapshot.json"] {
+            hex_encode_key_bounds(&temp.path().join(name));
+        }
         temp
+    }
+
+    /// Rewrite the manifest at `path` with hex key bounds, the only encoding
+    /// FORMAT 7 decodes.
+    fn hex_encode_key_bounds(path: &Path) {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("read fixture manifest"))
+                .expect("decode fixture manifest");
+        for file in manifest["files"]
+            .as_array_mut()
+            .expect("fixture SST metadata")
+        {
+            for bound in ["smallest_key", "largest_key"] {
+                let bytes: Option<Vec<u8>> =
+                    serde_json::from_value(file[bound].take()).expect("byte-array key bound");
+                file[bound] = serde_json::json!(bytes.map(hex::encode));
+            }
+        }
+        fs::write(
+            path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("write fixture manifest");
     }
 
     fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -1654,8 +1681,11 @@ mod compatibility_fixtures {
                     .as_object_mut()
                     .expect("fixture SST metadata");
                 if wrong_key_bounds {
-                    file.insert("smallest_key".into(), serde_json::json!(b"zzz".to_vec()));
-                    file.insert("largest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert(
+                        "smallest_key".into(),
+                        serde_json::json!(hex::encode(b"zzz")),
+                    );
+                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
                     file.insert("key_bounds_complete".into(), serde_json::json!(true));
                 } else {
                     file.insert("smallest_seq".into(), serde_json::json!(99));
@@ -1695,8 +1725,11 @@ mod compatibility_fixtures {
                     .expect("fixture SST metadata");
                 file.insert("key_bounds_complete".into(), serde_json::json!(complete));
                 if !complete {
-                    file.insert("smallest_key".into(), serde_json::json!(b"zzz".to_vec()));
-                    file.insert("largest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert(
+                        "smallest_key".into(),
+                        serde_json::json!(hex::encode(b"zzz")),
+                    );
+                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
                 }
                 fs::write(
                     &path,
@@ -1761,9 +1794,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v7_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v8_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v7");
+        let temp = copy_fixture_dir("future_v8");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())

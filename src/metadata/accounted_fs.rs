@@ -3,7 +3,7 @@
 
 use super::accounting::{Ledger, Payload};
 use crate::io::traits::{DirEntry, Metadata, ReadObserver};
-use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
+use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -46,6 +46,25 @@ fn payload(path: &FsPath) -> Payload {
         Payload::Journal
     } else {
         Payload::OtherMetadata
+    }
+}
+
+impl ReadFs for AccountedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -104,17 +123,8 @@ impl Fs for AccountedFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_file(path))
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.create_dir_all(path))
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_dir_all(path))
@@ -127,10 +137,17 @@ impl Fs for AccountedFs {
     }
 }
 
-impl File for AccountedFile<'_> {
+impl crate::io::ReadFile for AccountedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for AccountedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let bytes = data.len();
         self.ledger.lock().issued(self.payload, bytes);
@@ -156,9 +173,7 @@ impl File for AccountedFile<'_> {
         }
         result
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.sync(durability))
     }

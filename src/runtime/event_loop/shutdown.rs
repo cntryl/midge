@@ -172,14 +172,14 @@ impl EventLoop {
             flush_worker_inflight = self.flush_actor.is_inflight(),
             compaction_publisher_inflight = self.compaction_publish_actor.is_inflight(),
             wal_pending_writes = self.state.wal.pending_writes,
-            runtime_uploads_pending = self.cloud_coordinator.cloud_wal.upload_backlog.len(),
+            runtime_uploads_pending = self.cloud_coordinator.cloud_wal.backlog().len(),
             storage_uploads_pending = self
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
                 .map_or(0, |storage| storage.pending_upload_count()),
-            wal_segments_acked = self.cloud_coordinator.cloud_wal.acked().len(),
-            wal_prunes_inflight = self.cloud_coordinator.cloud_wal.prune_inflight.len(),
+            wal_segments_acked = self.cloud_coordinator.cloud_wal.acks().len(),
+            wal_prunes_inflight = self.cloud_coordinator.cloud_wal.prunes().len(),
             wal_preflight_worker_owned = self.cloud_coordinator.cloud_wal_prune_worker.is_some(),
             "Runtime shutdown started"
         );
@@ -250,7 +250,7 @@ impl EventLoop {
     ) -> Option<MidgeError> {
         let storage = self.cloud_coordinator.hybrid_storage.as_ref()?.clone();
         while (storage.pending_upload_count() > 0
-            || self.cloud_coordinator.cloud_wal.has_pending_uploads())
+            || !self.cloud_coordinator.cloud_wal.backlog().is_empty())
             && !deadline.is_expired()
         {
             // UploadQueue and the runtime backlog are two ownership domains
@@ -274,7 +274,7 @@ impl EventLoop {
         }
 
         let storage_pending = storage.pending_upload_count();
-        let runtime_pending = self.cloud_coordinator.cloud_wal.upload_backlog.len();
+        let runtime_pending = self.cloud_coordinator.cloud_wal.backlog().len();
         if storage_pending > 0 || runtime_pending > 0 {
             crate::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
             tracing::warn!(

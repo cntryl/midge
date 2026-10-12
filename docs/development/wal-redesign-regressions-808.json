@@ -73,13 +73,12 @@
     },
     {
       "id": "predecessor-cache",
-      "fixing_pr_stage": 4,
+      "fixing_pr_stage": 2,
       "target": "fault_injection",
       "source": "tests/fault_injection/wal_authority_regressions.rs",
       "test": "should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache",
-      "baseline": "red",
-      "requires_sqrzl": true,
-      "failure_marker": "foreign predecessor cache overrode successor authority"
+      "baseline": "green",
+      "requires_sqrzl": true
     },
     {
       "id": "out-of-order-publication",

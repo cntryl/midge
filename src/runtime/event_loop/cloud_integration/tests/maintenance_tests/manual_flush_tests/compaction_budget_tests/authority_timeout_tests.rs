@@ -51,9 +51,19 @@ impl RecoveryInputs {
             &self.db_path,
             crate::config::RecoveryPolicy::Strict,
         )?;
-        let mut recovered = RuntimeState::try_new_before_cloud_replay(
-            self.db_path.clone(),
+        let root = crate::io::real::test_root(&self.db_path);
+        let history = crate::runtime::wal_history::WalHistory::open(
+            crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR),
+            1,
+            0,
+        )?;
+        let mut recovered = RuntimeState::recover(
+            &self.db_path,
+            false,
+            root,
             crate::config::RecoveryPolicy::Strict,
+            crate::runtime::state::RecoveryWal::Deferred(history),
+            None,
         )?;
         let recovered_names = manifest_names(&recovered.manifest);
         let before_replay = recovered.intent_log.clone();

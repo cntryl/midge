@@ -1,7 +1,7 @@
 use super::*;
 use crate::codec::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions, ReadFs};
 use crate::sst::traits::{SstFactory, SstStateReader};
 use crate::types::EntryType;
 use std::collections::HashSet;
@@ -51,7 +51,7 @@ struct CountingFile<'a> {
     reads: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
-impl File for CountingFile<'_> {
+impl crate::io::ReadFile for CountingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.reads
             .lock()
@@ -65,6 +65,12 @@ impl File for CountingFile<'_> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for CountingFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -73,12 +79,27 @@ impl File for CountingFile<'_> {
         self.inner.append(data)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
         self.inner.sync(dur)
+    }
+}
+
+impl ReadFs for CountingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -107,20 +128,8 @@ impl Fs for CountingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

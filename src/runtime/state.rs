@@ -193,9 +193,6 @@ pub struct CompactionState {
 pub struct CloudState {
     /// WAL objects queued for upload
     pub pending_uploads: Vec<String>,
-    /// Last checkpoint sequence uploaded to cloud
-    #[cfg(test)]
-    pub last_cloud_checkpoint_seq: u64,
 }
 
 impl CloudState {
@@ -664,7 +661,6 @@ impl RuntimeState {
             health: self.health(),
             current_sequence: self.sequence,
             manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
-            manifest_next_wal_seq: self.manifest.next_wal_seq,
             active_memtables,
             immutable_memtables,
             total_memtable_bytes: self.total_memtable_bytes,
@@ -820,7 +816,6 @@ impl RuntimeState {
         crate::types::StorageLayoutSnapshot {
             health: self.health(),
             manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
-            manifest_next_wal_seq: self.manifest.next_wal_seq,
             levels,
             active_snapshots,
             compacting_ssts: self.compaction.compacting_ssts.clone(),

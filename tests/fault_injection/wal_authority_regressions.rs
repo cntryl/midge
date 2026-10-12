@@ -2,6 +2,7 @@
 //! salvage substituting an intact local segment for a damaged cloud copy.
 use crate::common::crash;
 use cntryl_midge::__internal::simulation::SimulatedClock;
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{
     CloudProviderConfig, CloudStorageLocation, Engine, OpenOptions, RecoveryPolicy,
     TransactionMode, WriteOptions,
@@ -71,7 +72,7 @@ fn should_abort_predecessor_when_audit_child_is_requested() {
 }
 
 #[test]
-#[ignore = "#808 stage 4: predecessor-cache"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache() {
     // Arrange: the predecessor dies with acknowledged but unpublished local WAL.
     let dir = tempfile::tempdir().unwrap();
@@ -200,7 +201,7 @@ fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
         LOCAL_RETIREMENT,
         dir.path(),
     );
-    let catalog: serde_json::Value = serde_json::from_slice(
+    let catalog = WalPublicationCatalog::decode(
         &std::fs::read(
             dir.path()
                 .join("cloud_store/wal/publication-catalog.v1.json"),
@@ -208,17 +209,12 @@ fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
         .unwrap(),
     )
     .unwrap();
-    let (id, entry) = catalog["segments"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .next()
+    let entry = catalog
+        .entries()
+        .first()
         .expect("acknowledged segment cataloged");
-    let id = id.parse::<u64>().unwrap();
-    let remote = dir
-        .path()
-        .join("cloud_store")
-        .join(entry["object_key"].as_str().unwrap());
+    let id = entry.id();
+    let remote = dir.path().join("cloud_store").join(entry.object_key());
     let original = std::fs::read(&remote).unwrap();
     let local = std::fs::read(
         dir.path()

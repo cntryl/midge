@@ -2,6 +2,7 @@ use super::*;
 use crate::io::traits::{DirEntry, FsError, Metadata};
 use crate::io::{
     Durability as FsDurability, File, Fs, FsPath, FsResult, MockFs, OpenOptions as FsOpenOptions,
+    ReadFs,
 };
 use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 #[cfg(feature = "failpoints")]
@@ -358,6 +359,25 @@ impl SegmentCreateFailingFs {
     }
 }
 
+impl ReadFs for SegmentCreateFailingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for SegmentCreateFailingFs {
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
         if self.should_fail_open(path, opts) {
@@ -387,20 +407,8 @@ impl Fs for SegmentCreateFailingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -436,6 +444,25 @@ impl SegmentWriterOpenFailingFs {
     }
 }
 
+impl ReadFs for SegmentWriterOpenFailingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for SegmentWriterOpenFailingFs {
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
         if self.should_fail_open(path, opts) {
@@ -463,20 +490,8 @@ impl Fs for SegmentWriterOpenFailingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -498,21 +513,10 @@ struct RotationPreflightFailingOnceFs {
     fail_once: std::sync::atomic::AtomicBool,
 }
 
-impl Fs for RotationPreflightFailingOnceFs {
-    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.inner.open(path, opts)
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: FsOpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        self.inner.open_persistent_handle(path, opts)
-    }
-
-    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
-        self.inner.remove_file(path)
+impl ReadFs for RotationPreflightFailingOnceFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -531,12 +535,30 @@ impl Fs for RotationPreflightFailingOnceFs {
         self.inner.metadata(path)
     }
 
-    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        self.inner.create_dir_all(path)
-    }
-
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         self.inner.list_dir(path)
+    }
+}
+
+impl Fs for RotationPreflightFailingOnceFs {
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(path, opts)
+    }
+
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        opts: FsOpenOptions,
+    ) -> FsResult<Box<dyn File>> {
+        self.inner.open_persistent_handle(path, opts)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.create_dir_all(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -1981,10 +2003,17 @@ struct DurableSyncCountingFile<'a> {
     durable_syncs: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl File for DurableSyncCountingFile<'_> {
+impl crate::io::ReadFile for DurableSyncCountingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for DurableSyncCountingFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -1994,9 +2023,7 @@ impl File for DurableSyncCountingFile<'_> {
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         self.inner.append(data)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, dur: FsDurability) -> FsResult<()> {
         if dur == FsDurability::Durable {
             self.durable_syncs
@@ -2011,6 +2038,25 @@ impl File for DurableSyncCountingFile<'_> {
 struct DurableSyncCountingFs {
     inner: MockFs,
     durable_syncs: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ReadFs for DurableSyncCountingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
 }
 
 impl Fs for DurableSyncCountingFs {
@@ -2033,17 +2079,8 @@ impl Fs for DurableSyncCountingFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_dir_all(path)
@@ -2265,6 +2302,34 @@ struct SstOpenCountingFs {
     sst_opens: std::sync::atomic::AtomicUsize,
 }
 
+impl crate::io::ReadFs for SstOpenCountingFs {
+    fn open_read(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl crate::io::Fs for SstOpenCountingFs {
     fn open(
         &self,
@@ -2283,23 +2348,8 @@ impl crate::io::Fs for SstOpenCountingFs {
     fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(
-        &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(
-        &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
         self.inner.remove_dir_all(path)

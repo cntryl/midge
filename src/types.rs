@@ -236,7 +236,6 @@ pub struct RuntimeMetricsSnapshot {
     pub health: EngineHealth,
     pub current_sequence: u64,
     pub manifest_last_persisted_sequence: u64,
-    pub manifest_next_wal_seq: u64,
     pub active_memtables: usize,
     pub immutable_memtables: usize,
     pub total_memtable_bytes: usize,
@@ -387,7 +386,6 @@ pub struct StorageLayoutLevel {
 pub struct StorageLayoutSnapshot {
     pub health: EngineHealth,
     pub manifest_last_persisted_sequence: u64,
-    pub manifest_next_wal_seq: u64,
     pub levels: Vec<StorageLayoutLevel>,
     pub active_snapshots: Vec<SnapshotPinSnapshot>,
     pub compacting_ssts: Vec<String>,

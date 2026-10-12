@@ -2,24 +2,18 @@
 //!
 //! The startup planner owns catalog, epoch, and alias selection. This view
 //! exposes its canonical names without copying WAL objects onto local disk.
+//! It implements only [`ReadFs`], so replay cannot mutate through it.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::buffered_read::BufferedReadFile;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions};
+use crate::io::{FsError, FsPath, FsResult, ReadFs};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-const READ_ONLY: OpenOptions = OpenOptions {
-    mode: OpenMode::ReadOnly,
-    create: false,
-    create_new: false,
-    truncate: false,
-};
-
 struct WalSource {
-    fs: Arc<dyn Fs>,
+    fs: Arc<dyn ReadFs>,
     path: FsPath,
 }
 
@@ -40,7 +34,7 @@ impl StreamingWalFs {
     pub(crate) fn insert(
         &mut self,
         canonical_name: String,
-        fs: Arc<dyn Fs>,
+        fs: Arc<dyn ReadFs>,
         backing_path: FsPath,
     ) -> MidgeResult<()> {
         if !canonical_wal_name(&canonical_name) {
@@ -81,37 +75,11 @@ fn replay_directory(path: &FsPath) -> bool {
     matches!(path.0.as_str(), "" | "." | "wal")
 }
 
-fn read_only_error() -> FsError {
-    FsError::Unsupported("streaming WAL replay views are read only".into())
-}
-
-fn require_read_only(options: OpenOptions) -> FsResult<()> {
-    if options == READ_ONLY {
-        Ok(())
-    } else {
-        Err(read_only_error())
-    }
-}
-
-impl Fs for StreamingWalFs {
-    fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-        require_read_only(options)?;
+impl ReadFs for StreamingWalFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         let source = self.source(path)?;
         Ok(Box::new(BufferedReadFile::new(
-            source.fs.open(&source.path, READ_ONLY)?,
-            self.range_buffer_bytes,
-        )?))
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        require_read_only(options)?;
-        let source = self.source(path)?;
-        Ok(Box::new(BufferedReadFile::new(
-            source.fs.open_persistent_handle(&source.path, READ_ONLY)?,
+            source.fs.open_read(&source.path)?,
             self.range_buffer_bytes,
         )?))
     }
@@ -151,22 +119,6 @@ impl Fs for StreamingWalFs {
             })
             .collect())
     }
-
-    fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
-    }
-    fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
-    }
-    fn remove_dir_all(&self, _path: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
-    }
-    fn sync_dir(&self, _path: &FsPath, _durability: Durability) -> FsResult<()> {
-        Err(read_only_error())
-    }
-    fn rename_atomic(&self, _from: &FsPath, _to: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
-    }
 }
 
 fn validate_buffer_size(bytes: usize) -> MidgeResult<()> {
@@ -181,14 +133,14 @@ fn validate_buffer_size(bytes: usize) -> MidgeResult<()> {
 
 /// Check the catalog's complete-object proof while retaining only one chunk.
 pub(crate) fn validate_wal_source(
-    fs: &dyn Fs,
+    fs: &dyn ReadFs,
     path: &FsPath,
     expected_len: u64,
     expected_crc: u32,
     range_buffer_bytes: usize,
 ) -> MidgeResult<()> {
     validate_buffer_size(range_buffer_bytes)?;
-    let file = fs.open(path, READ_ONLY).map_err(FsError::into_midge)?;
+    let file = fs.open_read(path).map_err(FsError::into_midge)?;
     if file.len().map_err(FsError::into_midge)? != expected_len {
         return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match catalog length {expected_len}"
@@ -213,45 +165,11 @@ pub(crate) fn validate_wal_source(
     Ok(())
 }
 
-/// Prove exact alias equality without materializing either complete segment.
-pub(crate) fn wal_sources_equal(
-    left: (&dyn Fs, &FsPath),
-    right: (&dyn Fs, &FsPath),
-    range_buffer_bytes: usize,
-) -> MidgeResult<bool> {
-    validate_buffer_size(range_buffer_bytes)?;
-    let left_file = left
-        .0
-        .open(left.1, READ_ONLY)
-        .map_err(FsError::into_midge)?;
-    let right_file = right
-        .0
-        .open(right.1, READ_ONLY)
-        .map_err(FsError::into_midge)?;
-    let size = left_file.len().map_err(FsError::into_midge)?;
-    if right_file.len().map_err(FsError::into_midge)? != size {
-        return Ok(false);
-    }
-    let mut offset = 0_u64;
-    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("source_equality");
-    while offset < size {
-        let length = (range_buffer_bytes as u64).min(size - offset);
-        if read_exact_range(left_file.as_ref(), offset, length)?
-            != read_exact_range(right_file.as_ref(), offset, length)?
-        {
-            progress.completed(length, 0);
-            progress.finish();
-            return Ok(false);
-        }
-        offset += length;
-        progress.completed(length, 0);
-    }
-    progress.finish();
-    Ok(left_file.len().map_err(FsError::into_midge)? == size
-        && right_file.len().map_err(FsError::into_midge)? == size)
-}
-
-fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<Bytes> {
+fn read_exact_range(
+    file: &dyn crate::io::ReadFile,
+    offset: u64,
+    length: u64,
+) -> MidgeResult<Bytes> {
     let bytes = file.read_at(offset, length).map_err(FsError::into_midge)?;
     if bytes.len() as u64 != length {
         return Err(MidgeError::RecoveryFailed(
@@ -310,7 +228,7 @@ mod tests {
     struct Fixture {
         directory: tempfile::TempDir,
         backend: Arc<RecordingBackend>,
-        source: Arc<dyn Fs>,
+        source: Arc<dyn ReadFs>,
         bytes: Vec<u8>,
         path: FsPath,
     }
@@ -380,7 +298,7 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(format!("wal/{name}"));
-        let file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
+        let file = fs.open_read(&path).map_err(FsError::into_midge)?;
 
         // Act
         let bytes = file.read_at(9, 9_973).map_err(FsError::into_midge)?;
@@ -452,44 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn should_compare_local_aliases_to_pinned_cloud_wal_without_copying_segments() -> MidgeResult<()>
-    {
-        // Arrange
-        let fixture = Fixture::new()?;
-        let local = crate::io::RealFs::new(fixture.directory.path().join("aliases"))
-            .map_err(FsError::into_midge)?;
-        std::fs::write(
-            fixture.directory.path().join("aliases/equal.wal"),
-            &fixture.bytes,
-        )?;
-        let mut different = fixture.bytes.clone();
-        *different.last_mut().expect("nonempty WAL") ^= 1;
-        std::fs::write(
-            fixture.directory.path().join("aliases/different.wal"),
-            different,
-        )?;
-        let remote = (fixture.source.as_ref(), &fixture.path);
-
-        // Act
-        let equal = wal_sources_equal(remote, (&local, &FsPath::new("equal.wal")), 257)?;
-        let divergent = wal_sources_equal(remote, (&local, &FsPath::new("different.wal")), 257)?;
-        let missing = wal_sources_equal(remote, (&local, &FsPath::new("missing.wal")), 257);
-
-        // Assert
-        assert!(equal);
-        assert!(!divergent);
-        assert!(matches!(missing, Err(MidgeError::NotFound)));
-        assert!(fixture
-            .backend
-            .ranges
-            .lock()
-            .iter()
-            .all(|(start, end)| end - start <= 257));
-        Ok(())
-    }
-
-    #[test]
-    fn should_reject_unsupported_access_in_streaming_wal_view() -> MidgeResult<()> {
+    fn should_reject_unplanned_paths_when_streaming_wal_view_is_opened() -> MidgeResult<()> {
         // Arrange
         let fixture = Fixture::new()?;
         let mut fs = StreamingWalFs::new(1_024)?;
@@ -500,17 +381,13 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(name.clone());
-        let mut file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
+        let file = fs.open_read(&path).map_err(FsError::into_midge)?;
 
         // Act
-        let mutation = file.write_at(0, Bytes::from_static(b"invalid"));
-        let remove = fs.remove_file(&path);
-        let escape = fs.open(&FsPath::new(format!("../{name}")), READ_ONLY);
-        let alias = fs.open(&FsPath::new("41.wal"), READ_ONLY);
+        let escape = fs.open_read(&FsPath::new(format!("../{name}")));
+        let alias = fs.open_read(&FsPath::new("41.wal"));
 
         // Assert
-        assert!(matches!(mutation, Err(FsError::Unsupported(_))));
-        assert!(matches!(remove, Err(FsError::Unsupported(_))));
         assert!(matches!(escape, Err(FsError::NotFound(_))));
         assert!(matches!(alias, Err(FsError::NotFound(_))));
         drop(file);

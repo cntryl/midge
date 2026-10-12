@@ -25,14 +25,6 @@ impl EventLoop {
         )
     }
 
-    pub(super) fn mirror_metadata_after_local_commit(
-        &mut self,
-        context: &str,
-    ) -> crate::common::MidgeResult<()> {
-        let deadline = self.event_loop_cloud_deadline();
-        self.mirror_metadata_after_local_commit_within(context, &deadline)
-    }
-
     pub(super) fn mirror_metadata_after_local_commit_within(
         &mut self,
         context: &str,

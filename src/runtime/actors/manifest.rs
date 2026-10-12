@@ -384,7 +384,7 @@ mod tests {
     fn should_keep_foreign_journal_edit_when_runtime_persists_after_racing_append() {
         // Arrange: a flush publish journals an edit from another thread that
         // the runtime manifest has not applied yet, then the runtime journals
-        // and applies its own edit (a backfill) and persists.
+        // and applies its own edit and persists.
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         let mut actor = ManifestActor::new();
@@ -404,7 +404,7 @@ mod tests {
         // Act
         actor
             .compaction_complete(&mut state, &[], &[sst_meta(3)])
-            .expect("backfill-style local edit");
+            .expect("second local edit");
         ManifestActor::persist(&mut state).expect("persist");
 
         // Assert: the snapshot may not skip the edit this manifest never saw

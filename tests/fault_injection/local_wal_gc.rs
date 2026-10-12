@@ -1,4 +1,5 @@
 //! A failed local unlink must retain proof even after cloud authority retires.
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -65,11 +66,12 @@ fn surviving_copy(compact: bool) {
         ]
         .iter()
         .all(|name| {
-            let catalog: serde_json::Value = serde_json::from_slice(
+            WalPublicationCatalog::decode(
                 &std::fs::read(root.join("cloud_store/wal").join(name)).unwrap(),
             )
-            .unwrap();
-            catalog["segments"].as_object().unwrap().is_empty()
+            .unwrap()
+            .entries()
+            .is_empty()
         });
         if retired {
             break;

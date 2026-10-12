@@ -750,6 +750,34 @@ mod tests {
         }
     }
 
+    impl crate::io::ReadFs for PublicationTestFs {
+        fn open_read(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            crate::io::ReadFs::exists(&self.inner, path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            crate::io::ReadFs::metadata(&self.inner, path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            crate::io::ReadFs::list_dir(&self.inner, path)
+        }
+    }
+
     impl crate::io::Fs for PublicationTestFs {
         fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
             crate::io::Fs::host_addressing(&self.inner)
@@ -779,26 +807,8 @@ mod tests {
             crate::io::Fs::remove_file(&self.inner, path)
         }
 
-        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-            crate::io::Fs::exists(&self.inner, path)
-        }
-
-        fn metadata(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-            crate::io::Fs::metadata(&self.inner, path)
-        }
-
         fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             crate::io::Fs::create_dir_all(&self.inner, path)
-        }
-
-        fn list_dir(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-            crate::io::Fs::list_dir(&self.inner, path)
         }
 
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {

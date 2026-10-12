@@ -242,8 +242,8 @@ impl Seed {
 
     fn assert_history(&self) {
         let catalog = authoritative_catalog(&self.path);
-        assert_eq!(self.catalog.segments, catalog.segments);
-        let key = &catalog.segments[&1].object_key;
+        assert_eq!(self.catalog.entries(), catalog.entries());
+        let key = &catalog.entry(1).unwrap().object_key();
         assert_eq!(
             std::fs::read(self.path.join("cloud_store").join(key)).unwrap(),
             self.source

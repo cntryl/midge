@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::hybrid_persistence::{CloudPersistence, CloudStorage, PublishedWalSegment};
+use crate::runtime::hybrid_persistence::{CatalogEntry, CloudPersistence, CloudStorage};
 use std::sync::Arc;
 
 struct PausedHead {
@@ -96,7 +96,7 @@ struct CatalogExpiryFixture {
     validity: Arc<crate::lease::LeaseValidity>,
     provider: Arc<ExpiringCatalogRead>,
     storage: CloudPersistence,
-    segment: PublishedWalSegment,
+    segment: CatalogEntry,
     candidate: super::super::ValidatedWalPruneCandidate,
     publication_path: std::path::PathBuf,
     catalog: WalPublicationCatalog,
@@ -129,15 +129,15 @@ impl CatalogExpiryFixture {
         let primary = crate::wal::cloud_catalog::OBJECT_KEY;
         let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
         let first_wal = sealed_wal_bytes(1);
-        let segment = PublishedWalSegment::from_validated_bytes(1, 1, 7, &first_wal);
+        let segment = CatalogEntry::from_sealed_bytes(&first_wal).unwrap();
         storage
-            .compare_exchange_remote_object(&segment.object_key, None, first_wal)
+            .compare_exchange_remote_object(&segment.object_key(), None, first_wal)
             .unwrap();
         let candidate = super::super::ValidatedWalPruneCandidate {
             segment_id: 1,
             entry: segment.clone(),
             validated: super::super::ValidatedWalObject {
-                proof: storage.remote_object_proof(&segment.object_key).unwrap(),
+                proof: storage.remote_object_proof(&segment.object_key()).unwrap(),
             },
         };
         let second_wal = sealed_wal_bytes(2);
@@ -281,15 +281,24 @@ impl CatalogExpiryFixture {
                 )
                 .map(|_| ())
             }
-            "floor" => storage.raise_wal_sequence_floor_with_authority(7, 11, &validate),
-            "retirement" => storage.retire_unreplayed_wal_segments_with_authority_within(
+            "floor" => storage.set_aside_catalog_suffix_with_authority_within(
                 7,
+                None,
+                &[],
+                11,
+                &validate,
+                &deadline,
+            ),
+            "retirement" => storage.set_aside_catalog_suffix_with_authority_within(
+                7,
+                Some(segment.id()),
                 &[segment],
+                11,
                 &validate,
                 &deadline,
             ),
             "mirror-after-commit" | "prepared-primary" | "prepared-mirror" => {
-                catalog.raise_sequence_floor(7, 11).unwrap();
+                catalog.set_aside_suffix(7, None, &[], 11).unwrap();
                 commit_catalog_with_authority(
                     &storage,
                     expected.as_ref(),
@@ -394,12 +403,18 @@ fn strict_recovery(
     catalog: &WalPublicationCatalog,
 ) -> crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery {
     let wal: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(root.join("wal")).unwrap());
-    let first_open = catalog
-        .segments
-        .keys()
-        .next_back()
-        .map_or(1, |last| last + 1);
-    let history = crate::runtime::wal_history::WalHistory::open(wal, first_open, 0).unwrap();
+    // A cache that joined the catalog: its first segment follows the head.
+    let history = match crate::runtime::wal_history::WalHistory::load(Arc::clone(&wal), 0).unwrap()
+    {
+        Some(history) => history,
+        None => crate::runtime::wal_history::WalHistory::genesis(
+            wal,
+            0,
+            catalog.head(),
+            catalog.next_segment_id(),
+        )
+        .unwrap(),
+    };
     crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
         &crate::io::real::test_root(root),
         Some(history.ledger()),
@@ -504,7 +519,7 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     *fixture.provider.paused_head.lock().unwrap() = Some(PausedHead {
-        key: fixture.segment.object_key.clone(),
+        key: fixture.segment.object_key(),
         started: started_tx,
         release: release_rx,
     });
@@ -516,34 +531,29 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap();
 
-    // Act: successor plans and acknowledges the retained old-epoch seal.
+    // Act: the successor plans over the retained seal of segment 1, which
+    // the catalog already retired, and uploads its identical bytes again.
     fixture.validity.expire_for_test();
     let remote: Arc<dyn crate::storage::StorageBackend> =
         Arc::new(CloudStorage::new(fixture.provider.clone(), String::new()));
     let successor = successor_storage(&remote);
     let catalog = successor.fence_cloud_wal_catalog(8).unwrap();
-    assert!(strict_recovery(&retained, &remote, &catalog)
-        .plan
-        .local_segments
-        .contains_key(&1));
+    assert!(
+        !strict_recovery(&retained, &remote, &catalog)
+            .plan
+            .local_segments
+            .contains_key(&1),
+        "the catalog retired segment 1, so no writer owes it again"
+    );
     assert_eq!(
         successor
             .enqueue_wal_segment(&crate::io::FsLocation::host_file(&seal), 1, 1)
             .unwrap(),
-        fixture.segment.object_key
+        fixture.segment.object_key()
     );
     wait_wal_ack(&successor);
-    successor
-        .publish_remote_wal_segment(
-            1,
-            1,
-            &crate::io::FsLocation::host_file(&seal),
-            8,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-        .unwrap();
     let republished = successor
-        .remote_object_proof(&fixture.segment.object_key)
+        .remote_object_proof(&fixture.segment.object_key())
         .unwrap();
     assert!(republished.metadata().same_version(target.metadata()));
     let wal: Arc<dyn crate::io::Fs> =
@@ -556,7 +566,8 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     release_tx.send(()).unwrap();
     let completion = wait_prune_completion(&fixture.storage);
 
-    // Assert
+    // Assert: the expired predecessor deletes nothing, and the object the
+    // successor wrote again survives.
     assert!(
         matches!(completion, crate::storage::StorageOutcome::Err(_)),
         "{completion:?}"
@@ -569,14 +580,61 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         0
     );
     assert!(successor
-        .remote_object_proof_optional(&fixture.segment.object_key)
+        .remote_object_proof_optional(&fixture.segment.object_key())
         .unwrap()
         .is_some());
     let catalog = successor.fence_cloud_wal_catalog(8).unwrap();
-    assert!(strict_recovery(&retained, &remote, &catalog)
-        .plan
-        .remote_segments
-        .contains_key(&1));
+    assert_eq!(catalog.anchor(), fixture.segment.link());
+    assert_eq!(catalog.entries(), []);
+}
+
+#[test]
+fn should_report_incompatible_catalog_version_without_repairing_from_mirror() {
+    // Arrange: the primary catalog is another format version; the mirror is
+    // a valid catalog of this one.
+    let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
+        Arc::new(CloudStorage::with_mock()),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    let primary = br#"{"format_version":99,"fencing_epoch":7,"segments":{}}"#.to_vec();
+    let mirror = WalPublicationCatalog::empty(7).unwrap().encode().unwrap();
+    storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            None,
+            primary.clone(),
+        )
+        .unwrap();
+    storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            None,
+            mirror.clone(),
+        )
+        .unwrap();
+
+    // Act
+    let result = storage.fence_cloud_wal_catalog(8);
+
+    // Assert: the open refuses before any write; neither copy changes.
+    assert!(
+        matches!(result, Err(MidgeError::CompatibilityError(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .unwrap()
+            .bytes(),
+        primary
+    );
+    assert_eq!(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+            .unwrap()
+            .bytes(),
+        mirror
+    );
 }
 
 #[test]
@@ -644,20 +702,23 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-    for segment_id in 0..128 {
-        catalog
-            .append_run(
-                7,
-                &[PublishedWalSegment {
-                    segment_id,
-                    writer_epoch: 7,
-                    max_sequence: segment_id + 1,
-                    size_bytes: 1,
-                    content_crc32c: 0,
-                    object_key: crate::wal::segment_object_key(segment_id, 7),
-                }],
-            )
-            .unwrap();
+    let mut prev = crate::wal::format::ChainLink::GENESIS;
+    for segment_id in 1..=128_u64 {
+        let link = crate::wal::format::ChainLink {
+            id: segment_id,
+            last_seq: segment_id,
+            digest: [u8::try_from(segment_id).unwrap(); 16],
+        };
+        let entry = CatalogEntry::describing(
+            crate::wal::format::SegmentIdentity {
+                epoch: 7,
+                prev,
+                link,
+            },
+            b"w",
+        );
+        prev = link;
+        catalog.append_run(7, &[entry]).unwrap();
     }
     let original = catalog.encode().unwrap();
     let key = crate::wal::cloud_catalog::OBJECT_KEY;
@@ -685,6 +746,27 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
         std::thread::yield_now();
     }
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn should_map_to_a_non_retriable_error_when_a_catalog_rule_refuses() {
+    // Arrange
+    let fenced = CatalogRefusal::EpochMismatch {
+        catalog: 9,
+        writer: 8,
+    };
+    let contradicted = CatalogRefusal::NotOldestPrefix {
+        segment_id: 2,
+        oldest: Some(1),
+    };
+
+    // Act
+    let fenced = refusal_error(fenced);
+    let contradicted = refusal_error(contradicted);
+
+    // Assert: neither is an error a retry could clear.
+    assert!(matches!(fenced, MidgeError::Fenced(_)));
+    assert!(matches!(contradicted, MidgeError::Corruption(_)));
 }
 
 #[test]

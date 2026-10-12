@@ -15,7 +15,7 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 6 is current. Version 5 named the WAL's history
+Database `FORMAT` version 7 is current. Version 5 named the WAL's history
 with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
@@ -43,13 +43,30 @@ of the records:
   anchor and a durable sequence reservation, so a sequence the engine handed
   out is never handed out again after a crash.
 
-Version 6 is an intentional pre-1.0 break with no in-place upgrade: current
-binaries reject database FORMAT versions 1 through 5 with `CompatibilityError`,
-and leave the marker untouched. Cloud databases are rejected the same way,
-because their hydrated metadata carries the marker; the record v1 segments of
-an older cloud prefix do not decode. FORMAT 6 requires SST V4; current
-binaries also reject SST versions 1 through 3 and unknown future versions.
-There is no legacy decoder or best-effort fallback in the V4 reader.
+Version 7 (#844) chains the cloud WAL publication catalog and drops the
+metadata compatibility paths older databases needed:
+
+- **Catalog v2.** The cloud WAL publication catalog is a chain like the
+  ledger, with an anchor, a next segment id and a sequence floor. Its
+  document is format version 2; see the catalog description below.
+- **No compatibility encodings.** Every manifest journal record must carry
+  its edit envelope; a record without one is corruption. Manifest key bounds
+  decode only as hex strings; the byte-array form written before FORMAT 4 is
+  rejected.
+- **Removed metadata.** The manifest no longer has `next_wal_seq` or
+  `cloud_checkpoint`, and the `SetCloudCheckpoint` journal record is gone.
+  Maintenance no longer re-summarizes SSTs whose manifest entry lacks
+  complete key bounds.
+
+Version 7 is an intentional pre-1.0 break with no in-place upgrade and no
+migration: current binaries reject database FORMAT versions 1 through 6 with
+`CompatibilityError`, and leave the marker untouched. Cloud databases are
+rejected the same way, because their hydrated metadata carries the marker,
+and a publication catalog of any other format version fails with
+`CompatibilityError` and neither catalog copy changes. FORMAT 7 requires SST
+V4; current binaries also reject SST versions 1 through 3 and unknown future
+versions. There is no legacy decoder or best-effort fallback in the V4
+reader.
 
 SST V4 has the following integrity and compatibility boundaries:
 
@@ -91,22 +108,40 @@ errors under the existing decoded-size limit. See the
 - no blanket on-disk compatibility promise
 - any format movement must be called out in the changelog and migration guide
 
-The current cloud WAL layout is publication catalog format v1. Mere object
-presence is not authority: recovery reads only entries in the validated
-publication catalog. Midge stores identical primary and recovery-mirror copies
-at `wal/publication-catalog.v1.json` and
-`wal/publication-catalog.v1.mirror.json`; the mirror is used only when the
-primary is missing or malformed. The pre-v1 segment-only cloud layout is not
+The current cloud WAL layout is publication catalog format version 2 (#844).
+Mere object presence is not authority: recovery reads only entries in the
+validated publication catalog. Midge stores identical primary and
+recovery-mirror copies at `wal/publication-catalog.v1.json` and
+`wal/publication-catalog.v1.mirror.json`; the `v1` in the object names is not
+the document's format version. The mirror is used only when the primary is
+missing or malformed. The pre-v1 segment-only cloud layout is not
 auto-migrated because it cannot prove whether a late stale-writer upload was
 accepted before fencing.
 
-The v1 JSON document contains `format_version`, the current `fencing_epoch`,
-and a segment-id map. Each segment entry records its writer epoch, maximum
-sequence, exact byte length, CRC32C, and canonical epoch-scoped object key.
-Unknown versions, malformed entries, a future writer epoch, or WAL objects
-without the required catalog fail startup explicitly; salvage mode does not
-invent publication authority. If both catalog copies are invalid, startup
-fails closed.
+The version 2 JSON document is a chain, like the WAL ledger. It contains
+`format_version`, the current `fencing_epoch`, an `anchor`, a
+`next_segment_id`, a `seq_floor` and `segments`, oldest first. The anchor is
+the link of the last segment the catalog retired, or the genesis link. Each
+entry records its writer epoch, the link of the segment before it (`prev`),
+its own link (`link`: segment id, last sequence and the digest its footer
+seals), and its object's exact byte length and CRC32C; the epoch-scoped
+object key derives from the id and epoch. The first entry links the anchor
+and each later one links the entry before it. Epochs never fall and none
+passes the fencing epoch. `next_segment_id` passes the head and never falls,
+so retiring entries never loses the chain or hands out a published id again.
+Retirement removes only the oldest entries and moves the anchor; salvage
+removes only a suffix and raises `seq_floor` over what it set aside. A cloud
+object must be the sealed segment its entry names: the same size and CRC32C,
+and a header and footer naming the entry's epoch, `prev` and `link`.
+
+A catalog of any other format version fails startup with `CompatibilityError`;
+Midge neither repairs it from the mirror nor converts it, and older binaries
+cannot read a version 2 catalog. Malformed entries, a broken chain, a future
+writer epoch, or WAL objects without the required catalog fail startup
+explicitly; salvage mode does not invent publication authority. If both
+catalog copies are invalid, startup fails closed. Metadata bootstrap refuses
+any catalog that is not pristine: a catalog whose entries have all retired
+still holds history.
 
 Provider-backed cloud metadata now uses lease document version 2. Its committed
 descriptor names the complete set of mirrored local control files under
@@ -163,6 +198,6 @@ new database, an older binary must not open it.
 ## Fixture Coverage
 
 Repository gates reject the checked-in populated FORMAT 3/SST V4 fixture, a
-prior FORMAT 2 fixture and a synthetic future FORMAT 7 fixture with
+prior FORMAT 2 fixture and a synthetic future FORMAT 8 fixture with
 `CompatibilityError`, without rewriting their markers. Format changes must
 update these fixtures and their CI assertions together.

@@ -134,15 +134,14 @@ impl StorageVerifier {
             };
             MidgeError::Corruption(detail.to_string())
         })?;
-        for segment in catalog.segments.values() {
-            let bytes =
-                Self::read_offline_object(store, &segment.object_key)?.ok_or_else(|| {
-                    MidgeError::RecoveryFailed(format!(
-                        "simulated cloud WAL object '{}' is missing",
-                        segment.object_key
-                    ))
-                })?;
-            segment
+        // Decoding checked the catalog's chain; each object must be the
+        // segment its entry names, at its place in that chain.
+        for entry in catalog.entries() {
+            let key = entry.object_key();
+            let bytes = Self::read_offline_object(store, &key)?.ok_or_else(|| {
+                MidgeError::RecoveryFailed(format!("simulated cloud WAL object '{key}' is missing"))
+            })?;
+            entry
                 .validate_bytes(&bytes)
                 .map_err(MidgeError::Corruption)?;
         }
@@ -296,26 +295,24 @@ fn verify_storage_root(
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
 
-    let wal_stats = crate::runtime::wal_history::WalHistory::read(&crate::io::subdirectory(
-        Arc::clone(fs),
-        crate::wal::WAL_DIR,
-    ))
-    .and_then(|ledger| {
-        let segments =
-            ledger.map_or_else(crate::wal::recovery::ReplaySegments::default, |ledger| {
-                crate::runtime::wal_history::replay_segments(
-                    &ledger,
-                    &FsPath::new(crate::wal::WAL_DIR),
-                )
-            });
-        crate::wal::recovery::validate_wal_with_policy(
-            fs.as_ref(),
-            &segments,
-            crate::wal::recovery::ReplayPolicy::Strict,
-            deadline,
-        )
-    })
-    .map_err(|error| verification_stage_error("WAL verification failed", error))?;
+    let wal: Arc<dyn crate::io::ReadFs> =
+        crate::io::subdirectory(Arc::clone(fs), crate::wal::WAL_DIR);
+    let wal_stats = crate::runtime::wal_history::WalHistory::read(&wal)
+        .and_then(|ledger| {
+            let segments =
+                ledger.map_or_else(crate::wal::recovery::ReplaySegments::default, |ledger| {
+                    crate::wal::recovery::ReplaySegments::from_ledger(&ledger, |id| {
+                        crate::wal::segment_key(id)
+                    })
+                });
+            crate::wal::recovery::validate_wal_with_policy(
+                fs.as_ref(),
+                &segments,
+                crate::wal::recovery::ReplayPolicy::Strict,
+                deadline,
+            )
+        })
+        .map_err(|error| verification_stage_error("WAL verification failed", error))?;
     let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(fs)
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
@@ -567,6 +564,82 @@ mod tests {
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
 
+    /// Write segments `segments`, in order, and a catalog that chains each
+    /// onto the one before whatever its object's header links, as both
+    /// catalog copies of the simulated cloud `store`.
+    fn write_catalog_listing(store: &std::path::Path, segments: &[(u64, Vec<u8>)]) {
+        let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7).unwrap();
+        for (segment_id, bytes) in segments {
+            let link = crate::wal::format::segment::footer_link(bytes)
+                .unwrap()
+                .expect("a sealed segment");
+            assert_eq!(link.id, *segment_id);
+            let entry = crate::wal::cloud_catalog::CatalogEntry::describing(
+                crate::wal::format::SegmentIdentity {
+                    epoch: 7,
+                    prev: catalog.head(),
+                    link,
+                },
+                bytes,
+            );
+            let path = store.join(entry.object_key());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            catalog.append_run(7, &[entry]).unwrap();
+        }
+        let encoded = catalog.encode().unwrap();
+        for key in [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ] {
+            let path = store.join(key);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &encoded).unwrap();
+        }
+    }
+
+    #[test]
+    fn should_fail_simulated_cloud_verification_when_cataloged_segments_do_not_chain() {
+        // Arrange: the catalog lists segments 1 and 2, but segment 2's header
+        // links another segment 1.
+        let directory = tempfile::tempdir().unwrap();
+        let put = |seq| {
+            crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                seq,
+            )
+        };
+        let (first, _) = crate::wal::format::segment::SegmentBuilder::new(
+            1,
+            7,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .record(&put(1))
+        .seal();
+        let stranger = crate::wal::format::ChainLink {
+            id: 1,
+            last_seq: 1,
+            digest: [0x5a; 16],
+        };
+        let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, 7, stranger)
+            .record(&put(2))
+            .seal();
+        write_catalog_listing(directory.path(), &[(1, first), (2, second)]);
+        let store: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+
+        // Act
+        let result = StorageVerifier::verify_simulated_cloud_wal_catalog(&store);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn should_reject_memory_mode_without_constructing_engine() {
         // Arrange
@@ -596,7 +669,7 @@ mod tests {
         }
     }
 
-    impl File for RecordingFile {
+    impl crate::io::ReadFile for RecordingFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.read_lengths
                 .lock()
@@ -613,16 +686,18 @@ mod tests {
             Ok(Bytes::copy_from_slice(&self.bytes[start..end]))
         }
 
+        fn len(&self) -> FsResult<u64> {
+            Ok(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX))
+        }
+    }
+
+    impl File for RecordingFile {
         fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
             unreachable!("verification test file is read-only")
         }
 
         fn append(&mut self, _data: Bytes) -> FsResult<u64> {
             unreachable!("verification test file is read-only")
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            Ok(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX))
         }
 
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {

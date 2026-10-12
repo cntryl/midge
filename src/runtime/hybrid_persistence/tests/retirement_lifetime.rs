@@ -66,9 +66,7 @@ fn should_reclaim_completed_sst_proofs_when_many_disjoint_wal_segments_retire() 
     }
     // Assert
     assert_eq!(progress.retained_bytes(), Some(0));
-    assert!(assert_wal_catalog_copies_match(&storage)
-        .segments
-        .is_empty());
+    assert_eq!(assert_wal_catalog_copies_match(&storage).entries(), []);
     assert_eq!(
         manifest.files.len(),
         32,
@@ -85,13 +83,13 @@ fn should_retire_completed_batch_prefix_when_proof_memory_cannot_hold_all_candid
     // Act
     loop {
         let catalog = assert_wal_catalog_copies_match(&storage);
-        if catalog.segments.is_empty() {
+        if catalog.entries().is_empty() {
             break;
         }
         let candidates = catalog
-            .segments
-            .values()
-            .map(|entry| (entry.segment_id, entry.max_sequence))
+            .entries()
+            .iter()
+            .map(|entry| (entry.id(), entry.max_sequence()))
             .collect::<Vec<_>>();
         let result = storage.prune_cloud_wal_segments_within(
             &candidates,
@@ -107,16 +105,14 @@ fn should_retire_completed_batch_prefix_when_proof_memory_cannot_hold_all_candid
         );
         let remaining = assert_wal_catalog_copies_match(&storage);
         assert!(
-            remaining.segments.len() < candidates.len(),
+            remaining.entries().len() < candidates.len(),
             "each batch must retire a prefix"
         );
         wait_for_retired_segments(
             &storage,
             candidates
                 .iter()
-                .filter_map(|(segment, _)| {
-                    (!remaining.segments.contains_key(segment)).then_some(*segment)
-                })
+                .filter_map(|(segment, _)| remaining.entry(*segment).is_none().then_some(*segment))
                 .collect(),
         );
         batches += 1;

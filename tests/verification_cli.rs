@@ -19,7 +19,8 @@ fn parse_stdout(output: &Output) -> Value {
 
 /// Copy the populated release fixture into `destination` as a database of
 /// the current format: its manifest and SST are what the report verifies.
-/// Its empty pre-ledger `wal.log` goes with the old marker.
+/// Its empty pre-ledger `wal.log` goes with the old marker, and its
+/// manifests' byte-array key bounds become hex strings.
 fn copy_populated_fixture_as_current_format(destination: &Path) {
     let source = fixture_path("tests/fixtures/compatibility/v3_populated_v4_sst_db");
     for directory in ["", "sst", "wal"] {
@@ -34,20 +35,45 @@ fn copy_populated_fixture_as_current_format(destination: &Path) {
     ] {
         std::fs::copy(source.join(file), destination.join(file)).expect("copy fixture file");
     }
-    std::fs::write(destination.join("FORMAT"), "midge-format-version=6\n")
+    std::fs::write(destination.join("FORMAT"), "midge-format-version=7\n")
         .expect("write format marker");
+    for manifest in ["manifest.json", "manifest.snapshot.json"] {
+        hex_encode_key_bounds(&destination.join(manifest));
+    }
+}
+
+/// Rewrite the manifest at `path` with hex key bounds, the only encoding
+/// FORMAT 7 decodes.
+fn hex_encode_key_bounds(path: &Path) {
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read fixture manifest"))
+            .expect("decode fixture manifest");
+    for file in manifest["files"]
+        .as_array_mut()
+        .expect("fixture SST metadata")
+    {
+        for bound in ["smallest_key", "largest_key"] {
+            let bytes: Option<Vec<u8>> =
+                serde_json::from_value(file[bound].take()).expect("byte-array key bound");
+            file[bound] = json!(bytes.map(hex::encode));
+        }
+    }
+    std::fs::write(
+        path,
+        serde_json::to_vec(&manifest).expect("encode manifest"),
+    )
+    .expect("write fixture manifest");
 }
 
 fn write_empty_database(path: &Path) {
     std::fs::create_dir_all(path).expect("create database directory");
-    std::fs::write(path.join("FORMAT"), "midge-format-version=6\n").expect("write format marker");
+    std::fs::write(path.join("FORMAT"), "midge-format-version=7\n").expect("write format marker");
     std::fs::write(
         path.join("manifest.json"),
         serde_json::to_vec_pretty(&json!({
             "last_persisted_sequence": 0,
             "files": [],
             "column_families": [],
-            "next_wal_seq": 1,
             "next_sst_seqs": {},
             "edit_checkpoint_id": 0
         }))
@@ -141,10 +167,10 @@ fn should_emit_v1_storage_error_json_given_missing_database_when_midge_verify_ru
 #[test]
 fn should_emit_v1_corruption_error_json_given_future_format_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/future_v7");
+    let path = fixture_path("tests/fixtures/compatibility/future_v8");
     let output_path = path.to_str().expect("fixture path");
     let expected_message = format!(
-        "Compatibility error: unsupported on-disk format version 7 at '{output_path}'; this build supports versions 6..=6"
+        "Compatibility error: unsupported on-disk format version 8 at '{output_path}'; this build supports versions 7..=7"
     );
     let expected_template = include_str!("fixtures/verification/corruption_error_v1.json").trim();
     let expected: Value = serde_json::from_str(&expected_template.replace(

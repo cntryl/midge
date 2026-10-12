@@ -17,11 +17,10 @@
 //! behind it, so the ledger is the one open-segment authority in every mode.
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::wal::format::{holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan};
 use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
 use crate::wal::ledger_store::{LedgerStore, LEDGER_FILE};
-use crate::wal::recovery::ReplaySegments;
 use std::sync::Arc;
 
 /// Where a [`WalHistory`] persists its ledger edits.
@@ -102,8 +101,8 @@ impl WalHistory {
     ///
     /// Fails, as the writable open would, when segment files hold records
     /// but no ledger names them.
-    pub(crate) fn read(wal: &Arc<dyn Fs>) -> MidgeResult<Option<WalLedger>> {
-        if let Some((ledger, _tail)) = LedgerStore::load(wal)? {
+    pub(crate) fn read(wal: &Arc<dyn ReadFs>) -> MidgeResult<Option<WalLedger>> {
+        if let Some((ledger, _tail)) = LedgerStore::load(wal.as_ref())? {
             return Ok(Some(ledger));
         }
         for (_, name) in segment_files(wal.as_ref())? {
@@ -727,15 +726,6 @@ fn unused_aside_directory(wal: &dyn Fs) -> MidgeResult<FsPath> {
     unreachable!("some salvage directory name below u32::MAX attempts is free")
 }
 
-/// The files `ledger` replays, relative to `wal_dir`: sealed members in
-/// order, then the open segment, each with the facts the ledger holds, the
-/// first linked to the ledger's anchor.
-pub(crate) fn replay_segments(ledger: &WalLedger, wal_dir: &FsPath) -> ReplaySegments {
-    ReplaySegments::from_ledger(ledger, |id| {
-        join(wal_dir, &crate::wal::segment_file_name(id))
-    })
-}
-
 /// Create the segment `header` names, holding only its header, durably:
 /// the header synced, then its directory entry. A file holding no record
 /// that an earlier crash left is rewritten.
@@ -767,7 +757,7 @@ fn create_segment(wal: &dyn Fs, header: &SegmentHeader) -> MidgeResult<()> {
         .map_err(FsError::into_midge)
 }
 
-fn holds_no_records_named(wal: &dyn Fs, name: &str) -> MidgeResult<bool> {
+fn holds_no_records_named(wal: &dyn ReadFs, name: &str) -> MidgeResult<bool> {
     Ok(holds_no_records(
         wal.metadata(&FsPath::new(name))
             .map_err(FsError::into_midge)?
@@ -794,7 +784,7 @@ fn read_write() -> OpenOptions {
 }
 
 /// Every segment file in `wal`, by id. The only listing of `wal/`.
-fn segment_files(wal: &dyn Fs) -> MidgeResult<Vec<(SegmentId, String)>> {
+fn segment_files(wal: &dyn ReadFs) -> MidgeResult<Vec<(SegmentId, String)>> {
     let entries = match wal.list_dir(&FsPath::new("")) {
         Ok(entries) => entries,
         Err(FsError::NotFound(_)) => return Ok(Vec::new()),

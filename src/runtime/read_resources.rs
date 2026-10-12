@@ -231,10 +231,6 @@ impl ReadResources {
         }))
     }
 
-    pub(crate) fn sst_fs(&self) -> Arc<dyn Fs> {
-        Arc::clone(&self.sst_fs)
-    }
-
     #[cfg(test)]
     pub(crate) fn prune_call_count(&self) -> usize {
         self.prune_calls.load(std::sync::atomic::Ordering::Relaxed)

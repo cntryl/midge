@@ -11,6 +11,33 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 
 ### Changed
 
+- **Breaking on-disk format: database FORMAT 7 (#844).** Binaries reject
+  FORMAT 1 through 6 with `CompatibilityError`; there is no migration.
+  Export the logical contents with the old binary and import them into a new
+  database. FORMAT 7 metadata keeps no compatibility encodings: every
+  manifest journal record must carry its edit envelope, and a record without
+  one is corruption; manifest key bounds must be hex strings, and the
+  byte-array form written before FORMAT 4 is rejected. The manifest's
+  `next_wal_seq` and `cloud_checkpoint` fields and the `SetCloudCheckpoint`
+  journal record are gone, and maintenance no longer re-summarizes SSTs
+  whose manifest entry lacks complete key bounds.
+- **Breaking API (#844).** `RuntimeMetricsSnapshot::manifest_next_wal_seq`
+  and `StorageLayoutSnapshot::manifest_next_wal_seq` are removed; the
+  manifest no longer tracks a WAL sequence.
+- **Breaking cloud format: WAL publication catalog v2 (#844).** The catalog
+  keeps its object keys, `wal/publication-catalog.v1.json` and its mirror,
+  but its document is `format_version: 2`: a chain with an anchor, entries
+  that each link the one before, a next segment id that never falls, and a
+  sequence floor. Startup rejects a catalog of any other version with
+  `CompatibilityError`, leaves both copies unchanged and never repairs it
+  from the mirror; there is no migration. Move a cloud database by logical
+  export and import into a new prefix. Metadata bootstrap refuses any
+  catalog that is not pristine, even one whose entries have all retired.
+- **Breaking backup contents (#844).** A backup captures `wal/LEDGER` and the
+  segments the ledger names, read inside the capture barrier, instead of
+  everything under `wal/`. Orphaned segment files, `wal/salvaged-*/`
+  directories and `.salvage-retained` copies are no longer captured, and a
+  ledger that cannot be read fails the backup.
 - **Breaking on-disk format: database FORMAT 6 (#843).** WAL segments are
   linked: each starts with a header naming its writer epoch, first sequence
   and the segment before it, and each sealed segment ends with a footer whose
@@ -33,6 +60,13 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
   (#843).
 - A transaction that spans column families is refused before any sequence
   is allocated (#843).
+- A predecessor that reopens its old cache after a successor took over no
+  longer replays its unpublished WAL tail over the successor's
+  `cloud_strict()` commits, even after the successor's catalog entries
+  retire (#844).
+- A crash during cloud salvage no longer lets the next open replay cataloged
+  segments past the hole: one catalog compare-and-swap sets the suffix aside
+  and raises the sequence floor before the WAL ledger changes (#844).
 
 ## [0.3.3] - 2026-10-07
 

@@ -6,7 +6,7 @@
 
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{FsError, FsPath, ReadFs};
 use crate::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -25,32 +25,7 @@ enum ReplayFileKind {
     FinalActive,
 }
 
-/// What replay checks a file's header and footer against, beyond the chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Expectation {
-    /// A ledger member: its header facts and the ledger's holder, and its
-    /// footer facts once sealed.
-    Member {
-        member: crate::wal::ledger::Member,
-        holder: [u8; 16],
-    },
-    /// A published object: the writer epoch its catalog entry names.
-    Epoch(u64),
-}
-
-impl Expectation {
-    /// What `ledger` expects of its `member`, whose header carries the
-    /// ledger's holder.
-    pub(crate) fn member(
-        ledger: &crate::wal::ledger::WalLedger,
-        member: &crate::wal::ledger::Member,
-    ) -> Self {
-        Self::Member {
-            member: member.clone(),
-            holder: ledger.holder().bytes(),
-        }
-    }
-}
+pub(crate) use crate::wal::planner::Expectation;
 
 #[derive(Debug, Clone)]
 struct ReplayFile {
@@ -81,18 +56,29 @@ impl ReplaySegments {
     }
 
     /// Every member of `ledger` at its path, checked against the facts the
-    /// ledger holds, after the ledger's anchor.
+    /// ledger holds, after the ledger's anchor: the local plan
+    /// ([`crate::wal::planner::local`]).
     pub(crate) fn from_ledger(
         ledger: &crate::wal::ledger::WalLedger,
         path: impl Fn(crate::wal::ledger::SegmentId) -> FsPath,
     ) -> Self {
-        let mut segments = Self::new(Some(ledger.anchor()));
-        for member in ledger.member_facts() {
-            let expect = Expectation::member(ledger, member);
-            if member.sealed.is_some() {
-                segments.push_sealed(member.id(), path(member.id()), expect);
+        let plan = crate::wal::planner::local(ledger);
+        Self::from_plan(plan.anchor, &plan.replay, path)
+    }
+
+    /// The segments a recovery plan replays, in its order, at their paths,
+    /// after `anchor`.
+    pub(crate) fn from_plan(
+        anchor: crate::wal::format::ChainLink,
+        planned: &[crate::wal::planner::PlannedSegment],
+        path: impl Fn(crate::wal::ledger::SegmentId) -> FsPath,
+    ) -> Self {
+        let mut segments = Self::new(Some(anchor));
+        for segment in planned {
+            if segment.sealed {
+                segments.push_sealed(segment.id, path(segment.id), segment.expect.clone());
             } else {
-                segments.push_open(member.id(), path(member.id()), expect);
+                segments.push_open(segment.id, path(segment.id), segment.expect.clone());
             }
         }
         segments
@@ -218,11 +204,6 @@ impl VerifiedWalPrefix {
             .unwrap_or(0)
     }
 
-    /// The writer epoch the segment's header names, or zero before it.
-    pub(crate) fn writer_epoch(&self) -> u64 {
-        self.scan.as_ref().map_or(0, |scan| scan.header().epoch)
-    }
-
     /// The records verified so far.
     pub(crate) fn record_count(&self) -> u64 {
         self.scan
@@ -237,15 +218,15 @@ impl VerifiedWalPrefix {
             .is_some_and(|scan| scan.footer().is_some())
     }
 
-    /// What the segment says it is, once its header was read.
+    /// What the segment says it is, once its footer sealed it.
     pub(crate) fn identity(&self) -> Option<crate::wal::format::SegmentIdentity> {
-        self.scan
-            .as_ref()
-            .map(|scan| crate::wal::format::SegmentIdentity {
-                id: scan.header().id,
-                epoch: scan.header().epoch,
-                last_seq: self.max_sequence(),
-            })
+        let scan = self.scan.as_ref()?;
+        let footer = scan.footer()?;
+        Some(crate::wal::format::SegmentIdentity {
+            epoch: scan.header().epoch,
+            prev: scan.header().prev,
+            link: footer.sealed_facts().link,
+        })
     }
 }
 
@@ -396,7 +377,7 @@ impl RecoveryStats {
 /// fails to replay stops at its frame like a corrupt one. Limits are
 /// unbounded, so no checkpoint is needed.
 fn replay_local(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
@@ -430,7 +411,7 @@ fn replay_local(
 /// Returns the error replay would return, or `Timeout` once `deadline`
 /// expires between frames.
 pub(crate) fn validate_wal_with_policy(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     replay_policy: ReplayPolicy,
     deadline: Option<&crate::common::OperationDeadline>,
@@ -447,7 +428,7 @@ pub(crate) fn validate_wal_with_policy(
 }
 
 pub(crate) fn replay_wal_with_manifest_filter_within(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
@@ -490,24 +471,16 @@ enum NextWalFrame {
 }
 
 fn open_wal_replay_file<'a>(
-    storage: &'a dyn Fs,
+    storage: &'a dyn ReadFs,
     file_path: &FsPath,
     file_read_ns: &mut u128,
-) -> MidgeResult<Option<Box<dyn File + 'a>>> {
+) -> MidgeResult<Option<Box<dyn crate::io::ReadFile + 'a>>> {
     if !storage.exists(file_path).map_err(map_fs_error)? {
         return Ok(None);
     }
 
     let open_start = std::time::Instant::now();
-    let file = match storage.open(
-        file_path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    ) {
+    let file = match storage.open_read(file_path) {
         Ok(file) => file,
         Err(FsError::NotFound(_)) => return Ok(None),
         Err(e) => return Err(map_fs_error(e)),

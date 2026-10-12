@@ -18,7 +18,10 @@ fn should_preserve_gc_pin_when_prune_completion_has_no_matching_admission(
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert_eq!(el.cloud_coordinator.cloud_wal.acked().get(&1), Some(&10));
+    assert_eq!(
+        el.cloud_coordinator.cloud_wal.acks().max_sequence(1),
+        Some(10)
+    );
     Ok(())
 }
 
@@ -39,7 +42,7 @@ fn should_preserve_gc_pin_when_exact_sst_prune_proof_fails() -> crate::common::M
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(1));
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
@@ -64,7 +67,7 @@ fn should_preserve_gc_pin_when_catalog_retirement_uses_a_stale_writer_epoch(
 
     // Assert
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 0);
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(1));
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
@@ -85,7 +88,7 @@ fn should_release_gc_pin_when_ledger_retires_segment_whose_local_unlink_fails(
         .join(crate::wal::segment_file_name(1));
     std::fs::remove_file(&path)?;
     std::fs::create_dir_all(path.join("blocker"))?;
-    el.cloud_coordinator.cloud_wal.prune_inflight.insert(1);
+    el.cloud_coordinator.cloud_wal.admit_prunes([1]);
 
     // Act
     el.handle_storage_event(crate::storage::StorageEvent::CloudWalPruneComplete {
@@ -101,6 +104,6 @@ fn should_release_gc_pin_when_ledger_retires_segment_whose_local_unlink_fails(
         "the leftover waits for the next open's sweep"
     );
     assert_eq!(el.wal_transition.tombstone_gc_cutoff(2), 10);
-    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(1));
     Ok(())
 }

@@ -508,7 +508,7 @@ impl WriterRunner {
 mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, FsError, Metadata};
-    use crate::io::{Fs, FsPath, FsResult, OpenOptions as FsOpenOptions};
+    use crate::io::{Fs, FsPath, FsResult, OpenOptions as FsOpenOptions, ReadFs};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
@@ -522,10 +522,19 @@ mod tests {
         sync_count: Arc<AtomicU64>,
     }
 
-    impl crate::io::File for PartialWriteFile {
+    impl crate::io::ReadFile for PartialWriteFile {
         fn read_at(&self, _offset: u64, _len: u64) -> FsResult<Bytes> {
             Ok(Bytes::new())
         }
+
+        fn len(&self) -> FsResult<u64> {
+            Ok(self
+                .physical_bytes
+                .load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    impl crate::io::File for PartialWriteFile {
         fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
             self.physical_bytes.store(
                 offset + data.len() as u64 / 2,
@@ -553,11 +562,7 @@ mod tests {
         fn append(&mut self, _data: Bytes) -> FsResult<u64> {
             unreachable!("positional writer")
         }
-        fn len(&self) -> FsResult<u64> {
-            Ok(self
-                .physical_bytes
-                .load(std::sync::atomic::Ordering::SeqCst))
-        }
+
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
             self.sync_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -650,11 +655,17 @@ mod tests {
 
     struct NoSpaceSyncFile;
 
-    impl crate::io::File for NoSpaceSyncFile {
+    impl crate::io::ReadFile for NoSpaceSyncFile {
         fn read_at(&self, _offset: u64, _len: u64) -> FsResult<Bytes> {
             Ok(Bytes::new())
         }
 
+        fn len(&self) -> FsResult<u64> {
+            Ok(0)
+        }
+    }
+
+    impl crate::io::File for NoSpaceSyncFile {
         fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
             Ok(())
         }
@@ -663,12 +674,33 @@ mod tests {
             Ok(0)
         }
 
-        fn len(&self) -> FsResult<u64> {
-            Ok(0)
-        }
-
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
             Err(FsError::NoSpace("No space left on device".to_string()))
+        }
+    }
+
+    impl ReadFs for FailingOpenFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, FsOpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
+            Ok(false)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            Err(FsError::Unavailable(format!(
+                "metadata failed for {}",
+                path.0
+            )))
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(format!(
+                "list dir failed for {}",
+                path.0
+            )))
         }
     }
 
@@ -688,27 +720,9 @@ mod tests {
             )))
         }
 
-        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
-            Ok(false)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            Err(FsError::Unavailable(format!(
-                "metadata failed for {}",
-                path.0
-            )))
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             Err(FsError::Unavailable(format!(
                 "create dir failed for {}",
-                path.0
-            )))
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            Err(FsError::Unavailable(format!(
-                "list dir failed for {}",
                 path.0
             )))
         }

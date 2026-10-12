@@ -6,6 +6,7 @@ mod proxy;
 mod read_fencing;
 
 use super::*;
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{MidgeError, Query};
 use proxy::{Boundary, Proxy};
 use serde::{Deserialize, Serialize};
@@ -245,8 +246,7 @@ fn run_schedule(boundary: Boundary) {
         .unwrap()
         .wal_cloud_durable_seq;
     assert!(prefix_frontier > 0);
-    let initial_catalog: serde_json::Value =
-        serde_json::from_slice(&catalog(&bucket, prefix)).unwrap();
+    let initial_catalog = WalPublicationCatalog::decode(&catalog(&bucket, prefix)).unwrap();
     predecessor_proxy.control.arm();
     let writer = Arc::clone(&predecessor);
     let pending = std::thread::spawn(move || {
@@ -344,13 +344,10 @@ fn run_schedule(boundary: Boundary) {
     drop(successor);
 
     let committed_catalog = catalog(&bucket, prefix);
-    let successor_catalog: serde_json::Value = serde_json::from_slice(&committed_catalog).unwrap();
-    assert!(
-        successor_catalog["fencing_epoch"].as_u64().unwrap()
-            > initial_catalog["fencing_epoch"].as_u64().unwrap()
-    );
-    evidence.details["predecessor_epoch"] = initial_catalog["fencing_epoch"].clone();
-    evidence.details["successor_epoch"] = successor_catalog["fencing_epoch"].clone();
+    let successor_catalog = WalPublicationCatalog::decode(&committed_catalog).unwrap();
+    assert!(successor_catalog.fencing_epoch() > initial_catalog.fencing_epoch());
+    evidence.details["predecessor_epoch"] = json!(initial_catalog.fencing_epoch());
+    evidence.details["successor_epoch"] = json!(successor_catalog.fencing_epoch());
     std::fs::write(artifacts.join("successor-catalog.json"), &committed_catalog).unwrap();
     evidence.details["phase"] = json!("late_predecessor_completion");
     let predecessor_release_index = predecessor_proxy.control.observations().len();

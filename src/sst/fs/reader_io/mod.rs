@@ -747,6 +747,7 @@ impl SstFileIo {
     }
 
     /// Stream a summary through the caller's filesystem abstraction.
+    #[cfg(test)]
     pub(crate) fn summarize_with_fs(path: &str, fs: Arc<dyn Fs>) -> MidgeResult<SstFileSummary> {
         Self::open(path, fs)?.into_streaming_summary()
     }

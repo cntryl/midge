@@ -61,10 +61,10 @@ impl CloudPersistence {
         expected_max_sequence: u64,
     ) -> Result<(), String> {
         let (_, entry) = authoritative_wal_entry(self, segment_id)?;
-        if entry.max_sequence != expected_max_sequence {
+        if entry.max_sequence() != expected_max_sequence {
             return Err(format!(
                 "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
-                entry.max_sequence
+                entry.max_sequence()
             ));
         }
         validate_remote_wal(self, &entry, &crate::common::OperationDeadline::unbounded())
@@ -454,7 +454,7 @@ fn should_retain_newer_wal_authority_when_streamed_oldest_segment_is_uncovered()
         .expect("retained catalog");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(proof.bytes())
         .expect("decode catalog");
-    assert_eq!(catalog.segments.len(), 2);
+    assert_eq!(catalog.entries().len(), 2);
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn should_retain_cloud_wal_authority_when_retirement_memory_is_exhausted() {
         .expect("retained catalog");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(proof.bytes())
         .expect("decode catalog");
-    assert!(catalog.segments.contains_key(&1));
+    assert!(catalog.entry(1).is_some());
 }
 
 #[test]
@@ -642,7 +642,7 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
         .expect("read winning WAL catalog");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode winning WAL catalog");
-    assert!(!catalog.segments.contains_key(&segment_id));
+    assert!(catalog.entry(segment_id).is_none());
     assert_cloud_object_exists(&storage, &object_key);
 }
 
@@ -672,8 +672,8 @@ fn should_converge_catalog_copies_after_publication() {
 
     // Assert
     let catalog = assert_wal_catalog_copies_match(&storage);
-    assert_eq!(catalog.fencing_epoch, 2);
-    assert!(catalog.segments.contains_key(&segment_id));
+    assert_eq!(catalog.fencing_epoch(), 2);
+    assert!(catalog.entry(segment_id).is_some());
 }
 
 #[test]
@@ -688,7 +688,7 @@ fn should_converge_catalog_copies_after_takeover() {
 
     // Assert
     let catalog = assert_wal_catalog_copies_match(&storage);
-    assert_eq!(catalog.fencing_epoch, 3);
+    assert_eq!(catalog.fencing_epoch(), 3);
 }
 
 #[test]
@@ -715,8 +715,11 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
         .fence_cloud_wal_catalog(2)
         .expect_err("losing initial catalog CAS must fail");
 
-    // Assert
-    assert!(matches!(error, crate::common::MidgeError::Busy(_)));
+    // Assert: the winner's later epoch owns the catalog.
+    assert!(
+        matches!(error, crate::common::MidgeError::Fenced(_)),
+        "{error:?}"
+    );
     assert_eq!(
         storage
             .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
@@ -730,6 +733,81 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
             .expect("check losing mirror")
             .is_none(),
         "a draft that lost primary authority must never be published to the mirror"
+    );
+}
+
+#[test]
+fn should_refuse_publication_whose_first_segment_does_not_link_the_catalog_head() {
+    // Arrange: the catalog publishes segment 1; this writer's segment 2
+    // links a different segment 1.
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create unchained publisher WAL dir");
+    let put = |seq| {
+        crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            seq,
+        )
+    };
+    let (first, _) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        1,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&put(1))
+    .seal();
+    let stranger = crate::wal::format::ChainLink {
+        id: 1,
+        last_seq: 1,
+        digest: [0x5a; 16],
+    };
+    let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, 1, stranger)
+        .record(&put(2))
+        .seal();
+    let mut locations = Vec::new();
+    for (segment_id, bytes) in [(1, first), (2, second)] {
+        let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+        std::fs::write(&local_path, &bytes).expect("write unchained publisher local WAL");
+        write_cloud_object(
+            &storage,
+            &crate::wal::segment_object_key(segment_id, 1),
+            bytes,
+        );
+        locations.push(crate::io::FsLocation::host_file(&local_path));
+    }
+    storage
+        .publish_remote_wal_segment(
+            1,
+            1,
+            &locations[0],
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .expect("publish the catalog head");
+
+    // Act
+    let result = storage.publish_remote_wal_segment(
+        2,
+        2,
+        &locations[1],
+        2,
+        &crate::common::OperationDeadline::unbounded(),
+    );
+
+    // Assert: no retry can chain it, and the catalog keeps only segment 1.
+    assert!(
+        matches!(&result, Err(crate::common::MidgeError::Corruption(message)) if message.contains("catalog head")),
+        "{result:?}"
+    );
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    assert_eq!(
+        catalog
+            .entries()
+            .iter()
+            .map(crate::wal::cloud_catalog::CatalogEntry::id)
+            .collect::<Vec<_>>(),
+        vec![1]
     );
 }
 
@@ -759,7 +837,12 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
         )
     });
     pausing_cloud.wait_for_catalog_compare_exchange();
-    storage
+    // The successor is another process over the same bucket.
+    let successor = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
+        Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new())),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    successor
         .fence_cloud_wal_catalog(3)
         .expect("takeover must advance catalog authority");
 
@@ -777,8 +860,8 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
         .expect("read takeover catalog");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode takeover catalog");
-    assert_eq!(catalog.fencing_epoch, 3);
-    assert!(!catalog.segments.contains_key(&segment_id));
+    assert_eq!(catalog.fencing_epoch(), 3);
+    assert!(catalog.entry(segment_id).is_none());
     assert_cloud_object_exists(&storage, &object_key);
 }
 
@@ -812,7 +895,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
 
     let published_segment_id = 2;
     let published_max_sequence = 12;
-    let published_bytes = valid_wal_bytes(published_segment_id, published_max_sequence);
+    let published_bytes = chained_wal_bytes(&storage, published_segment_id, published_max_sequence);
     let published_local_path = tmp
         .path()
         .join(crate::wal::segment_file_name(published_segment_id));
@@ -881,8 +964,8 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
         .expect("read catalog after serialized mutations");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode catalog after serialized mutations");
-    assert!(!catalog.segments.contains_key(&retired_segment_id));
-    assert!(catalog.segments.contains_key(&published_segment_id));
+    assert!(catalog.entry(retired_segment_id).is_none());
+    assert!(catalog.entry(published_segment_id).is_some());
     storage
         .verify_remote_wal_segment(published_segment_id, published_max_sequence)
         .expect("newly published segment must remain authoritative");
@@ -1004,7 +1087,7 @@ fn should_reject_stale_catalog_compare_exchange_after_takeover() {
     let winning_catalog =
         crate::wal::cloud_catalog::WalPublicationCatalog::decode(winning_proof.bytes())
             .expect("decode winning WAL catalog");
-    assert_eq!(winning_catalog.fencing_epoch, 3);
+    assert_eq!(winning_catalog.fencing_epoch(), 3);
 }
 
 fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, CloudPersistence) {
@@ -1251,6 +1334,28 @@ fn valid_wal_bytes(segment_id: u64, seq: u64) -> Vec<u8> {
     sealed_wal(segment_id, &frame_wal(&record))
 }
 
+/// A put at `seq` sealed as segment `segment_id` by epoch 1, linked to the
+/// catalog's head as a writer's next segment is (#844).
+fn chained_wal_bytes(storage: &HybridStorage, segment_id: u64, seq: u64) -> Vec<u8> {
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .expect("read test WAL catalog")
+            .bytes(),
+    )
+    .expect("decode test WAL catalog");
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"k"),
+        Some(Bytes::from_static(b"v")),
+        seq,
+    );
+    crate::wal::format::segment::SegmentBuilder::new(segment_id, 1, catalog.head())
+        .bytes(&frame_wal(&record))
+        .seal()
+        .0
+}
+
 /// `record` as one bare WAL frame.
 fn frame_wal(record: &crate::wal::WalRecord) -> Vec<u8> {
     let payload = crate::wal::encoding::encode(record).expect("encode WAL record");
@@ -1273,32 +1378,47 @@ fn sealed_wal(segment_id: u64, body: &[u8]) -> Vec<u8> {
     .0
 }
 
-/// Publish `bytes` as segment `segment_id` in the catalog. Bare frames are
-/// first sealed as that segment (see [`sealed_wal`]).
+/// Publish `bytes` as segment `segment_id` in the catalog, linked to its
+/// head as a writer's next segment is (#844): bare frames, or the body of a
+/// sealed segment, are sealed again after the head. `catalog_max_sequence`
+/// is the last sequence they hold.
 fn write_authoritative_cloud_wal(
     storage: &HybridStorage,
     segment_id: u64,
     catalog_max_sequence: u64,
     bytes: Vec<u8>,
 ) -> String {
-    let bytes = if crate::wal::format::segment::SegmentHeader::decode(&bytes).is_ok() {
-        bytes
-    } else {
-        sealed_wal(segment_id, &bytes)
+    let (epoch, body) = match crate::wal::format::segment::SegmentHeader::decode(&bytes) {
+        Ok(header) => {
+            let end = crate::wal::format::segment::sealed_footer(&bytes)
+                .expect("scan a test WAL segment")
+                .map_or(bytes.len(), |footer| {
+                    usize::try_from(footer.data_len).expect("footer offset")
+                });
+            (
+                header.epoch,
+                bytes[crate::wal::format::HEADER_LEN..end].to_vec(),
+            )
+        }
+        Err(_) => (1, bytes),
     };
-    let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
-        segment_id,
-        catalog_max_sequence,
-        1,
-        &bytes,
-    );
-    write_cloud_object(storage, &publication.object_key, bytes);
     let catalog_proof = storage
         .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
         .expect("read test WAL catalog");
     let mut catalog =
         crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
             .expect("decode test WAL catalog");
+    let (bytes, _) =
+        crate::wal::format::segment::SegmentBuilder::new(segment_id, epoch, catalog.head())
+            .bytes(&body)
+            .seal();
+    let publication = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+        .expect("a sealed test WAL segment");
+    // The catalog names what the object holds: a caller expecting
+    // `catalog_max_sequence` sees any difference when it verifies.
+    let _ = catalog_max_sequence;
+    let object_key = publication.object_key();
+    write_cloud_object(storage, &object_key, bytes);
     catalog
         .append_run(2, std::slice::from_ref(&publication))
         .expect("publish test WAL authority");
@@ -1309,7 +1429,7 @@ fn write_authoritative_cloud_wal(
             catalog.encode().expect("encode test WAL catalog"),
         )
         .expect("update test WAL catalog");
-    publication.object_key
+    object_key
 }
 
 struct AlwaysFailingWriteBackend {
@@ -2615,7 +2735,7 @@ fn assert_sst_identity_change_retains_wal(ephemeral: bool) {
         .expect("read retained WAL catalog");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode retained WAL catalog");
-    assert!(catalog.segments.contains_key(&segment_id));
+    assert!(catalog.entry(segment_id).is_some());
     assert_cloud_object_exists(&storage, &wal_key);
     assert_eq!(read_cloud_object(&storage, &sst_key), replacement);
 }
@@ -2679,7 +2799,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode catalog after prune scheduling");
     assert!(
-        catalog.segments.contains_key(&segment_id),
+        catalog.entry(segment_id).is_some(),
         "catalog authority must remain when a coverage dependency changed"
     );
     // Act
@@ -2762,7 +2882,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode catalog after prune scheduling");
     assert!(
-        !catalog.segments.contains_key(&segment_id),
+        catalog.entry(segment_id).is_none(),
         "catalog authority must retire before physical delete completion"
     );
     assert_wal_catalog_copies_match(&storage);
@@ -2796,7 +2916,7 @@ fn should_reject_remote_wal_segment_with_sequence_beyond_expected_max() {
     // Act
     // Assert
     assert!(
-        error.contains("exceeds expected"),
+        error.contains("max sequence 21 does not match expected 20"),
         "unexpected WAL max-sequence error: {error}"
     );
 }
@@ -3713,7 +3833,7 @@ mod recovery_wal_coverage {
         whole_file_reads: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    impl crate::io::File for WholeFileReadCountingFile<'_> {
+    impl crate::io::ReadFile for WholeFileReadCountingFile<'_> {
         fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
             if offset == 0 && len == self.inner.len()? {
                 self.whole_file_reads
@@ -3722,6 +3842,12 @@ mod recovery_wal_coverage {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> crate::io::FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl crate::io::File for WholeFileReadCountingFile<'_> {
         fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> crate::io::FsResult<()> {
             self.inner.write_at(offset, data)
         }
@@ -3730,12 +3856,36 @@ mod recovery_wal_coverage {
             self.inner.append(data)
         }
 
-        fn len(&self) -> crate::io::FsResult<u64> {
-            self.inner.len()
-        }
-
         fn sync(&mut self, durability: crate::io::Durability) -> crate::io::FsResult<()> {
             self.inner.sync(durability)
+        }
+    }
+
+    impl crate::io::ReadFs for WholeFileReadCountingFs {
+        fn open_read(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
         }
     }
 
@@ -3769,26 +3919,8 @@ mod recovery_wal_coverage {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {

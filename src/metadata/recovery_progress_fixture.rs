@@ -4,7 +4,7 @@ use super::{Manifest, ManifestEdit, ManifestPersistence};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions, ReadFs};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -207,7 +207,7 @@ struct DelayedReadFile<'a> {
     observations: Arc<Observations>,
 }
 
-impl File for DelayedReadFile<'_> {
+impl crate::io::ReadFile for DelayedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let bytes = self.inner.read_at(offset, len)?;
         std::thread::sleep(READ_DELAY);
@@ -215,6 +215,12 @@ impl File for DelayedReadFile<'_> {
         Ok(bytes)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for DelayedReadFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -227,10 +233,6 @@ impl File for DelayedReadFile<'_> {
         self.inner.append(data)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
     }
@@ -239,6 +241,25 @@ impl File for DelayedReadFile<'_> {
 struct DelayedReadFs {
     inner: Arc<dyn Fs>,
     observations: Arc<Observations>,
+}
+
+impl ReadFs for DelayedReadFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
 }
 
 impl Fs for DelayedReadFs {
@@ -257,20 +278,8 @@ impl Fs for DelayedReadFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

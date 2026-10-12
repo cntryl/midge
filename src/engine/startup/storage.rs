@@ -141,7 +141,6 @@ fn recover_cloud_wal(
         lease.writer_epoch,
         catalog,
         cache,
-        streaming.next_remote_id,
         &|| lease.ensure_healthy("during WAL salvage set aside"),
         scope,
     )?;
@@ -187,14 +186,12 @@ fn build_wal_plan(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn commit_wal_plan(
-    plan: &crate::runtime::cloud_startup::CloudWalRecoveryPlan,
+    plan: &crate::wal::planner::RecoveryPlan,
     persistence: &CloudPersistence,
     epoch: u64,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     cache: crate::runtime::cloud_startup::CacheHistory,
-    next_remote_id: crate::wal::ledger::SegmentId,
     validate: &dyn Fn() -> MidgeResult<()>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
@@ -205,12 +202,12 @@ fn commit_wal_plan(
         unbounded = DeadlineScope::new(crate::common::OperationDeadline::unbounded());
         &unbounded
     };
-    plan.commit_within(
+    crate::runtime::cloud_startup::commit_recovery_plan_within(
+        plan,
         persistence,
         epoch,
         catalog,
         cache,
-        next_remote_id,
         validate,
         scope,
     )
@@ -669,7 +666,9 @@ impl RuntimeStorageMaterialization {
             scope,
         )?;
         require_empty_local_cache_for_cloud_bootstrap(path, scope)?;
-        if !wal_catalog.segments.is_empty() || wal_catalog.sequence_floor != 0 {
+        // A catalog that ever published or set anything aside holds history,
+        // even with every entry retired (#844).
+        if !wal_catalog.is_pristine() {
             return Err(MidgeError::RecoveryFailed(
                 "cannot bootstrap empty cloud metadata over existing WAL state".into(),
             ));

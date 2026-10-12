@@ -96,7 +96,7 @@ fn write_ledger_bytes(fs: &Arc<dyn Fs>, bytes: &[u8]) {
 }
 
 fn loaded(fs: &Arc<dyn Fs>) -> (WalLedger, LedgerTail) {
-    LedgerStore::load(fs)
+    LedgerStore::load(fs.as_ref())
         .expect("LEDGER loads")
         .expect("LEDGER exists")
 }
@@ -179,7 +179,7 @@ fn should_return_none_when_ledger_is_absent() {
     let fs = mock_fs();
 
     // Act
-    let result = LedgerStore::load(&fs).expect("absent LEDGER loads");
+    let result = LedgerStore::load(fs.as_ref()).expect("absent LEDGER loads");
 
     // Assert
     assert!(result.is_none());
@@ -396,7 +396,7 @@ fn should_fail_when_middle_frame_is_corrupt() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -412,7 +412,7 @@ fn should_fail_when_frame_length_hides_later_frames() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -427,7 +427,7 @@ fn should_fail_when_snapshot_frame_is_torn() {
     write_ledger_bytes(&fs, &bytes[..starts[0] - 3]);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -443,7 +443,7 @@ fn should_fail_when_ledger_is_shorter_than_header() {
     // Act
     let results = images.map(|image| {
         write_ledger_bytes(&fs, image);
-        LedgerStore::load(&fs)
+        LedgerStore::load(fs.as_ref())
     });
 
     // Assert
@@ -459,7 +459,7 @@ fn should_fail_when_header_has_no_snapshot() {
     write_ledger_bytes(&fs, &header());
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -474,7 +474,7 @@ fn should_fail_when_magic_is_wrong() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -494,7 +494,7 @@ fn should_fail_when_version_is_unsupported() {
     // Act
     let results = [1, VERSION + 1].map(|version| {
         write_ledger_bytes(&fs, &versioned(version));
-        LedgerStore::load(&fs)
+        LedgerStore::load(fs.as_ref())
     });
 
     // Assert
@@ -515,7 +515,7 @@ fn should_fail_when_first_frame_is_edit() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -537,7 +537,7 @@ fn should_fail_when_snapshot_has_no_open_segment() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -551,7 +551,7 @@ fn should_fail_when_edit_does_not_apply() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -566,7 +566,7 @@ fn should_fail_when_later_frame_is_snapshot() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -588,7 +588,7 @@ fn should_fail_when_checksummed_frame_does_not_decode() {
     write_ledger_bytes(&fs, &bytes);
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let result = LedgerStore::load(fs.as_ref());
 
     // Assert
     assert!(is_corruption(&result), "{result:?}");
@@ -838,7 +838,7 @@ fn should_leave_absent_or_created_ledger_when_power_fails_during_create() {
 
         // Assert
         assert!(fault.is_none_or(|fault| fork.fired(fault)), "{scenario:?}");
-        for_each_power_loss(&fork, |fs| match LedgerStore::load(fs) {
+        for_each_power_loss(&fork, |fs| match LedgerStore::load(fs.as_ref()) {
             Ok(None) => assert!(!created, "{scenario:?}: acknowledged create was lost"),
             Ok(Some(state)) => assert_eq!(state, (ledger.clone(), LedgerTail::Clean)),
             Err(error) => panic!("{scenario:?}: unreadable ledger: {error}"),
@@ -881,7 +881,7 @@ fn should_keep_ledger_when_power_fails_during_compact() {
         // Assert: compaction never changes what the ledger holds.
         assert!(fault.is_none_or(|fault| fork.fired(fault)), "{scenario:?}");
         for_each_power_loss(&fork, |fs| {
-            let state = LedgerStore::load(fs)
+            let state = LedgerStore::load(fs.as_ref())
                 .unwrap_or_else(|error| panic!("{scenario:?}: unreadable ledger: {error}"))
                 .unwrap_or_else(|| panic!("{scenario:?}: LEDGER vanished"));
             assert_eq!(state, (kept.clone(), LedgerTail::Clean), "{scenario:?}");
@@ -916,7 +916,7 @@ fn should_leave_old_or_new_ledger_when_power_fails_during_append() {
         // Assert
         assert!(fault.is_none_or(|fault| fork.fired(fault)), "{scenario:?}");
         for_each_power_loss(&fork, |fs| {
-            let (state, _) = LedgerStore::load(fs)
+            let (state, _) = LedgerStore::load(fs.as_ref())
                 .unwrap_or_else(|error| panic!("{scenario:?}: unreadable ledger: {error}"))
                 .unwrap_or_else(|| panic!("{scenario:?}: LEDGER vanished"));
             if appended {

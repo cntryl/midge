@@ -1,6 +1,6 @@
 use super::*;
 use crate::common::MidgeError;
-use crate::io::traits::{DirEntry, Durability, File, FsResult, Metadata, OpenOptions};
+use crate::io::traits::{DirEntry, Durability, File, FsResult, Metadata, OpenOptions, ReadFs};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -18,21 +18,50 @@ struct NoSpaceFile<'a> {
     inner: Box<dyn File + 'a>,
 }
 
-impl File for NoSpaceFile<'_> {
+impl crate::io::ReadFile for NoSpaceFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for NoSpaceFile<'_> {
     fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
         Err(FsError::NoSpace("no space left on device".into()))
     }
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         self.inner.append(data)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
+    }
+}
+
+impl ReadFs for ObservedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        if self.fail_stats_after_journal_write.load(Ordering::SeqCst)
+            && self.journal_written.load(Ordering::SeqCst)
+        {
+            return Err(FsError::Io("stat failed".into()));
+        }
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -57,22 +86,8 @@ impl Fs for ObservedFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        if self.fail_stats_after_journal_write.load(Ordering::SeqCst)
-            && self.journal_written.load(Ordering::SeqCst)
-        {
-            return Err(FsError::Io("stat failed".into()));
-        }
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_dir_all(path)

@@ -25,7 +25,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
             .request_deadline(91_008, el.runtime_response_timeout)
             .unwrap(),
     );
-    el.cloud_coordinator.cloud_wal.prune_inflight.insert(42);
+    el.cloud_coordinator.cloud_wal.admit_prunes([42]);
     el.publication_gate
         .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
     let storage = el.cloud_coordinator.hybrid_storage.clone().unwrap();
@@ -39,7 +39,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     event_ready.recv_timeout(Duration::from_secs(1)).unwrap();
     el.tick_hybrid_storage();
     el.drain_hybrid_storage_events();
-    assert!(el.cloud_coordinator.cloud_wal.prune_inflight.is_empty());
+    assert_eq!(el.cloud_coordinator.cloud_wal.prunes().len(), 0);
     assert!(!el
         .cloud_coordinator
         .cloud_wal_prune_worker

@@ -940,7 +940,6 @@ fn should_initialize_cloud_state() {
 
     // Assert
     assert_eq!(cloud.pending_uploads.len(), 0);
-    assert_eq!(cloud.last_cloud_checkpoint_seq, 0);
 }
 
 // =========== RuntimeState Tests ===========
@@ -2529,11 +2528,17 @@ impl CountingFile {
     }
 }
 
-impl crate::io::File for CountingFile {
+impl crate::io::ReadFile for CountingFile {
     fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> crate::io::FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl crate::io::File for CountingFile {
     fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> crate::io::FsResult<()> {
         self.record(data.len());
         self.inner.write_at(offset, data)
@@ -2546,10 +2551,6 @@ impl crate::io::File for CountingFile {
     fn append(&mut self, data: bytes::Bytes) -> crate::io::FsResult<u64> {
         self.record(data.len());
         self.inner.append(data)
-    }
-
-    fn len(&self) -> crate::io::FsResult<u64> {
-        self.inner.len()
     }
 
     fn sync(&mut self, durability: crate::io::Durability) -> crate::io::FsResult<()> {
@@ -2569,6 +2570,42 @@ impl CountingFs {
             journal: path.0.contains("journal"),
             counters: Arc::clone(&self.counters),
         }
+    }
+}
+
+impl crate::io::ReadFs for CountingFs {
+    fn open_read(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        if matches!(
+            path.0.as_str(),
+            crate::metadata::files::JOURNAL | crate::metadata::files::MANIFEST_SNAPSHOT
+        ) {
+            self.counters
+                .manifest_stats
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -2595,34 +2632,8 @@ impl crate::io::Fs for CountingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(
-        &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-        if matches!(
-            path.0.as_str(),
-            crate::metadata::files::JOURNAL | crate::metadata::files::MANIFEST_SNAPSHOT
-        ) {
-            self.counters
-                .manifest_stats
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(
-        &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
@@ -3523,7 +3534,8 @@ fn state_on_device(
 
 /// The reservation LEDGER holds on `device`.
 fn persisted_reservation(device: &crate::simulation::crash_fs::CrashDevice) -> u64 {
-    let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+    let wal: Arc<dyn crate::io::ReadFs> =
+        crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
     crate::runtime::wal_history::WalHistory::read(&wal)
         .expect("read the WAL ledger")
         .expect("the WAL ledger exists")

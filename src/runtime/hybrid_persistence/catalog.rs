@@ -5,6 +5,7 @@ use super::{
     WalPublicationCatalog,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
+use crate::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
 
 pub(super) struct CatalogAuthority {
     pub(super) primary: ControlObject,
@@ -43,7 +44,13 @@ impl AdmittedCatalog {
             "decoded WAL catalog",
         )?;
         Ok(Self {
-            catalog: WalPublicationCatalog::decode(bytes).map_err(MidgeError::Corruption)?,
+            catalog: WalPublicationCatalog::decode(bytes).map_err(|error| match error {
+                // Another format is no damage a mirror could repair (#844).
+                CatalogDecodeError::Incompatible(_) => {
+                    MidgeError::CompatibilityError(error.to_string())
+                }
+                CatalogDecodeError::Invalid(_) => MidgeError::Corruption(error.to_string()),
+            })?,
             _memory: memory,
         })
     }
@@ -87,6 +94,15 @@ pub(super) fn load_and_repair_catalog_within(
     load_and_repair_catalog_with_authority(storage, deadline, &|| storage.check_write_authority())
 }
 
+/// Whether a copy's decode error rules out repairing it from the other:
+/// memory pressure, or another catalog format (#844).
+fn unrepairable(error: &MidgeError) -> bool {
+    matches!(
+        error,
+        MidgeError::ResourceLimit(_) | MidgeError::CompatibilityError(_)
+    )
+}
+
 pub(super) fn load_and_repair_catalog_with_authority(
     storage: &HybridStorage,
     deadline: &crate::common::OperationDeadline,
@@ -113,7 +129,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
                 )?;
                 return Ok(Some(CatalogAuthority { primary, catalog }));
             }
-            Err(error @ MidgeError::ResourceLimit(_)) => return Err(error),
+            Err(error) if unrepairable(&error) => return Err(error),
             Err(primary_error) => {
                 let mirror = storage
                     .read_control_object(
@@ -134,7 +150,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
                     ))
                 })?;
                 let catalog = AdmittedCatalog::decode(mirror.bytes(), &budget).map_err(|mirror_error| {
-                    if matches!(mirror_error, MidgeError::ResourceLimit(_)) { return mirror_error; }
+                    if unrepairable(&mirror_error) { return mirror_error; }
                     MidgeError::Corruption(format!(
                         "both cloud WAL publication catalogs are invalid; primary: {primary_error}; mirror: {mirror_error}"
                     ))
@@ -172,7 +188,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
         return Ok(None);
     };
     let catalog = AdmittedCatalog::decode(mirror.bytes(), &budget).map_err(|error| {
-        if matches!(error, MidgeError::ResourceLimit(_)) {
+        if unrepairable(&error) {
             return error;
         }
         MidgeError::Corruption(format!(
@@ -193,18 +209,116 @@ pub(super) fn load_and_repair_catalog_with_authority(
     }))
 }
 
-pub(super) fn commit_catalog_within(
-    storage: &HybridStorage,
-    expected_primary: Option<&ControlObject>,
-    catalog: &WalPublicationCatalog,
-    deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<ControlObject> {
-    commit_catalog_with_authority(storage, expected_primary, catalog, deadline, &|| {
-        storage.check_write_authority()
-    })
+/// Whether a catalog mutation changed the catalog, with what it returns.
+pub(super) enum Mutation<T> {
+    /// Nothing to write.
+    Unchanged(T),
+    /// The catalog changed: compare-and-swap it.
+    Changed(T),
 }
 
-pub(super) fn commit_catalog_with_authority(
+impl<T> Mutation<T> {
+    /// `value`, changed when `changed`.
+    pub(super) fn of(changed: bool, value: T) -> Self {
+        if changed {
+            Self::Changed(value)
+        } else {
+            Self::Unchanged(value)
+        }
+    }
+}
+
+/// What a mutation does when no catalog exists yet.
+#[derive(Clone, Copy)]
+pub(super) enum Missing {
+    /// Create an empty one owned by this epoch (lease acquisition).
+    Create(u64),
+    /// Refuse: every other mutation needs an existing catalog.
+    Refuse,
+}
+
+/// The one read-modify-CAS path every catalog mutation takes (#858): under
+/// the local catalog mutation lock, load the catalog (repairing a copy from
+/// the other), apply `mutate`, a pure rule of the catalog's, and when it
+/// changed commit the primary conditioned on the version read, then the
+/// mirror. `validate` is the caller's authority check, run before each
+/// provider call.
+///
+/// A rule refusal writes nothing and comes back as the inner `Err`. A lost
+/// compare-and-swap re-reads the catalog: `Fenced` when a later epoch owns
+/// it, `Busy` otherwise, which a later attempt may retry.
+///
+/// # Errors
+///
+/// The load or commit error.
+pub(super) fn mutate_wal_catalog_within<T, R>(
+    storage: &HybridStorage,
+    label: &'static str,
+    deadline: &crate::common::OperationDeadline,
+    validate: &dyn Fn() -> MidgeResult<()>,
+    missing: Missing,
+    mutate: impl FnOnce(&mut WalPublicationCatalog) -> Result<Mutation<T>, R>,
+) -> MidgeResult<Result<(T, AdmittedCatalog), R>> {
+    validate()?;
+    let _catalog_mutation = storage.lock_wal_catalog_mutation_within(deadline, label)?;
+    let (mut catalog, expected) =
+        match load_and_repair_catalog_with_authority(storage, deadline, validate)? {
+            Some(authority) => (authority.catalog, Some(authority.primary)),
+            None => match missing {
+                Missing::Create(epoch) => (AdmittedCatalog::empty(storage, epoch)?, None),
+                Missing::Refuse => {
+                    return Err(MidgeError::Internal(
+                        "cloud WAL publication catalog is missing".to_string(),
+                    ))
+                }
+            },
+        };
+    let value = match mutate(&mut catalog) {
+        Err(refusal) => return Ok(Err(refusal)),
+        Ok(Mutation::Unchanged(value)) if expected.is_some() => return Ok(Ok((value, catalog))),
+        Ok(Mutation::Unchanged(value) | Mutation::Changed(value)) => value,
+    };
+    match commit_catalog_with_authority(storage, expected.as_ref(), &catalog, deadline, validate) {
+        Ok(_) => Ok(Ok((value, catalog))),
+        Err(MidgeError::Busy(conflict)) => match current_fencing_epoch(storage, deadline)? {
+            Some(winner) if winner > catalog.fencing_epoch() => Err(MidgeError::Fenced(format!(
+                "cloud WAL catalog advanced to fencing epoch {winner}, writer epoch {} rejected during {label}",
+                catalog.fencing_epoch()
+            ))),
+            _ => Err(MidgeError::Busy(conflict)),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+/// The fencing epoch of the catalog the primary holds now, read without
+/// repairing either copy: `None` when it is missing or does not decode.
+fn current_fencing_epoch(
+    storage: &HybridStorage,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<Option<u64>> {
+    let budget = catalog_budget(storage);
+    let primary = storage
+        .read_control_object(crate::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
+        .map_err(|error| {
+            contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
+        })?;
+    Ok(primary
+        .and_then(|primary| AdmittedCatalog::decode(primary.bytes(), &budget).ok())
+        .map(|winner| winner.fencing_epoch()))
+}
+
+/// The engine error for a catalog rule refusal (#858): another epoch owns
+/// the catalog, or the catalog contradicts the writer. No retry fixes
+/// either.
+pub(crate) fn refusal_error(refusal: CatalogRefusal) -> MidgeError {
+    match refusal {
+        CatalogRefusal::EpochMismatch { .. } => MidgeError::Fenced(refusal.to_string()),
+        refusal => MidgeError::Corruption(format!("cloud WAL catalog refused: {refusal}")),
+    }
+}
+
+fn commit_catalog_with_authority(
     storage: &HybridStorage,
     expected_primary: Option<&ControlObject>,
     catalog: &WalPublicationCatalog,

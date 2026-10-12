@@ -59,8 +59,7 @@ fn should_fence_predecessor_reads_when_successor_reclaims_remote_snapshot_files(
     for path in &original_objects {
         assert_ne!(signed_s3_request("GET", path, &[]).unwrap().len(), 0);
     }
-    let original_catalog: serde_json::Value =
-        serde_json::from_slice(&catalog(&bucket, "db")).unwrap();
+    let original_catalog = WalPublicationCatalog::decode(&catalog(&bucket, "db")).unwrap();
     let frozen = predecessor
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .unwrap();
@@ -140,12 +139,8 @@ fn should_fence_predecessor_reads_when_successor_reclaims_remote_snapshot_files(
     }
 
     // Assert: explicit sticky Fenced replaces successful or misleading stale reads.
-    let successor_catalog: serde_json::Value =
-        serde_json::from_slice(&catalog(&bucket, "db")).unwrap();
-    assert!(
-        successor_catalog["fencing_epoch"].as_u64().unwrap()
-            > original_catalog["fencing_epoch"].as_u64().unwrap()
-    );
+    let successor_catalog = WalPublicationCatalog::decode(&catalog(&bucket, "db")).unwrap();
+    assert!(successor_catalog.fencing_epoch() > original_catalog.fencing_epoch());
     for key in [b"row-000".as_slice(), b"row-031", b"missing"] {
         assert!(matches!(frozen.get(key), Err(MidgeError::Fenced(_))));
     }

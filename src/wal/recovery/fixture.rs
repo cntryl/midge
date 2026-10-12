@@ -2,8 +2,8 @@
 //! WAL directory, named by id the way the segment ledger names them, sealed
 //! ids in order and then the open one. Tests state their own lists so they
 //! do not depend on how the runtime decides membership. A list expects of
-//! each file the writer epoch its own header names, which [`wrap_chain`]
-//! settles; replay then checks that the segments chain.
+//! each file the header and footer it holds, which [`wrap_chain`] settles;
+//! replay then checks that the segments chain.
 
 use super::{Expectation, ReplaySegments};
 use crate::io::FsPath;
@@ -15,8 +15,8 @@ pub(crate) fn segments(wal_dir: &FsPath, sealed: &[u64], open: Option<u64>) -> R
     segments_in_epoch(wal_dir, sealed, open, 0)
 }
 
-/// [`segments`] expecting every file to be written by `epoch`, for segment
-/// files a test built whole.
+/// [`segments`] whose files are written by `epoch`; [`wrap_chain`] settles
+/// what each file is expected to hold.
 pub(crate) fn segments_in_epoch(
     wal_dir: &FsPath,
     sealed: &[u64],
@@ -34,12 +34,47 @@ pub(crate) fn segments_in_epoch(
     };
     let mut segments = ReplaySegments::new(None);
     for id in sealed {
-        segments.push_sealed(*id, path(*id), Expectation::Epoch(epoch));
+        segments.push_sealed(*id, path(*id), unread(*id, epoch));
     }
     if let Some(id) = open {
-        segments.push_open(id, path(id), Expectation::Epoch(epoch));
+        segments.push_open(id, path(id), unread(id, epoch));
     }
     segments
+}
+
+/// What a fixture expects of segment `id` by `epoch` before it read the
+/// file: its header facts as a writer would leave them after genesis. A
+/// file [`wrap_chain`] cannot read never reaches the expectation.
+fn unread(id: u64, epoch: u64) -> Expectation {
+    Expectation::Member {
+        member: crate::wal::ledger::Member {
+            open: crate::wal::format::OpenFacts {
+                id,
+                epoch,
+                first_seq: 1,
+                prev: crate::wal::format::ChainLink::GENESIS,
+            },
+            sealed: None,
+        },
+        holder: crate::wal::format::segment::FIXTURE_HOLDER,
+    }
+}
+
+/// What a fixture expects of a file whose bytes are `bytes`: exactly the
+/// header it holds and, when sealed, the footer that seals it.
+fn holding(bytes: &[u8]) -> Option<Expectation> {
+    let header = crate::wal::format::segment::SegmentHeader::decode(bytes).ok()?;
+    let sealed = crate::wal::format::segment::sealed_footer(bytes)
+        .ok()
+        .flatten()
+        .map(|footer| footer.sealed_facts());
+    Some(Expectation::Member {
+        member: crate::wal::ledger::Member {
+            open: header.open_facts(),
+            sealed,
+        },
+        holder: header.holder,
+    })
 }
 
 /// Make every file `segments` names that a test wrote as a bare body of
@@ -67,14 +102,13 @@ pub(crate) fn wrap_chain(
         let Ok(bytes) = crate::io::read_all(storage, &file.path) else {
             continue;
         };
-        if let Ok(header) = SegmentHeader::decode(&bytes) {
-            file.expect = Expectation::Epoch(header.epoch);
+        if let Some(expect) = holding(&bytes) {
+            file.expect = expect;
             if let Ok(Some(link)) = footer_link(&bytes) {
                 prev = link;
             }
             continue;
         }
-        file.expect = Expectation::Epoch(epoch);
         let header = SegmentHeader {
             id: file.id,
             epoch,
@@ -89,6 +123,7 @@ pub(crate) fn wrap_chain(
             prev = footer.sealed_facts().link;
             wrapped.extend(footer.encode_frame().expect("encode fixture footer"));
         }
+        file.expect = holding(&wrapped).unwrap_or_else(|| unread(file.id, epoch));
         let mut handle = storage
             .open(
                 &file.path,

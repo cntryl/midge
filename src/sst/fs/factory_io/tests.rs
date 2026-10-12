@@ -1,5 +1,7 @@
 use super::*;
-use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
+use crate::io::traits::{
+    DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions, ReadFs,
+};
 use crate::io::FsPath;
 use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
@@ -38,11 +40,17 @@ struct RecordingFile<'a> {
     events: Arc<parking_lot::Mutex<Vec<String>>>,
 }
 
-impl File for RecordingFile<'_> {
+impl crate::io::ReadFile for RecordingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for RecordingFile<'_> {
     fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)?;
         self.events.lock().push(format!("write {}", self.name));
@@ -51,10 +59,6 @@ impl File for RecordingFile<'_> {
 
     fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
         self.inner.append(data)
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
     }
 
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -77,6 +81,25 @@ impl RecordingFs {
             events: Arc::new(parking_lot::Mutex::new(Vec::new())),
             fail_directory_sync,
         })
+    }
+}
+
+impl ReadFs for RecordingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -107,20 +130,8 @@ impl Fs for RecordingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

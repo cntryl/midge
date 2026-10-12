@@ -1,5 +1,5 @@
 use super::*;
-use crate::io::{FsPath, RealFs};
+use crate::io::{Fs, FsPath, OpenMode, OpenOptions, RealFs};
 use crate::wal::fs::FsWalWriterIo;
 use crate::wal::types::WalOpKind;
 use crate::wal::WalWriter;
@@ -165,7 +165,18 @@ fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() 
         id: 1,
         path: FsPath::new(crate::wal::segment_file_name(1)),
         kind: ReplayFileKind::FinalActive,
-        expect: super::Expectation::Epoch(0),
+        expect: super::Expectation::Member {
+            member: crate::wal::ledger::Member {
+                open: crate::wal::format::OpenFacts {
+                    id: 1,
+                    epoch: 0,
+                    first_seq: 1,
+                    prev: crate::wal::format::ChainLink::GENESIS,
+                },
+                sealed: None,
+            },
+            holder: crate::wal::format::segment::FIXTURE_HOLDER,
+        },
     };
     let failure = ReplayFailure::Error(MidgeError::Corruption(
         "Incomplete WAL record text alone is not a typed tail".to_string(),

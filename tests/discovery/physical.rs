@@ -1,6 +1,7 @@
 //! Replayable serial process-abort tuples, independent of logical shrinking.
 
 use super::driver::{self, Backend, Fixture, ReadPath};
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{Engine, Query, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -131,34 +132,40 @@ fn assert_remove_only_intent(path: &Path) {
     );
 }
 
-fn cloud_wal_catalogs(path: &Path) -> [serde_json::Value; 2] {
+fn cloud_wal_catalogs(path: &Path) -> [WalPublicationCatalog; 2] {
     [
         "publication-catalog.v1.json",
         "publication-catalog.v1.mirror.json",
     ]
     .map(|name| {
-        serde_json::from_slice(&std::fs::read(path.join("cloud_store/wal").join(name)).unwrap())
-            .unwrap()
+        WalPublicationCatalog::decode(
+            &std::fs::read(path.join("cloud_store/wal").join(name)).unwrap(),
+        )
+        .unwrap()
     })
 }
 
-fn catalogs_are_retired(catalogs: &[serde_json::Value; 2]) -> bool {
-    catalogs.iter().all(|catalog| {
-        catalog["segments"]
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    })
+fn catalogs_are_retired(catalogs: &[WalPublicationCatalog]) -> bool {
+    catalogs.iter().all(|catalog| catalog.entries().is_empty())
+}
+
+/// The catalog documents `evidence` recorded under `key`, decoded.
+fn evidence_catalogs(evidence: &serde_json::Value, key: &str) -> Vec<WalPublicationCatalog> {
+    evidence[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|catalog| {
+            WalPublicationCatalog::decode(&serde_json::to_vec(catalog).unwrap()).unwrap()
+        })
+        .collect()
 }
 
 fn retire_cloud_wal_before_compaction(mut engine: Engine, case: &CrashCase) -> Engine {
     let path = case.root.join("db");
     let retained = cloud_wal_catalogs(&path);
     assert!(
-        retained.iter().all(|catalog| {
-            catalog["segments"]
-                .as_object()
-                .is_some_and(|segments| !segments.is_empty())
-        }),
+        retained.iter().all(|catalog| !catalog.entries().is_empty()),
         "the regression must start with authoritative WAL still retained"
     );
     fail::remove(DEFER_WAL_PRUNE);
@@ -243,16 +250,13 @@ fn assert_empty_compaction_recovery(case: &CrashCase, counters: &mut Counters) {
         let evidence: serde_json::Value =
             serde_json::from_slice(&std::fs::read(case.root.join("wal-retirement.json")).unwrap())
                 .unwrap();
-        assert!(evidence["retained_before"]
-            .as_array()
-            .unwrap()
+        assert!(evidence_catalogs(&evidence, "retained_before")
             .iter()
-            .all(|catalog| { !catalog["segments"].as_object().unwrap().is_empty() }));
-        assert!(evidence["retired_after_reopen"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|catalog| { catalog["segments"].as_object().unwrap().is_empty() }));
+            .all(|catalog| !catalog.entries().is_empty()));
+        assert!(catalogs_are_retired(&evidence_catalogs(
+            &evidence,
+            "retired_after_reopen"
+        )));
     }
     assert_remove_only_intent(&path);
     expire_aborted_local_owner(&path);
@@ -471,7 +475,7 @@ fn should_collect_tombstone_when_live_runtime_receives_cloud_wal_retirement() {
     delete.commit(WriteOptions::cloud_strict()).unwrap();
     engine.flush_cf(&cf).unwrap();
     let retained = cloud_wal_catalogs(path);
-    let expected = retained[0]["segments"].as_object().unwrap().len();
+    let expected = retained[0].entries().len();
     assert!(expected >= 2);
     assert!(!catalogs_are_retired(&retained));
     let delivered = "midge::cloud::after_wal_prune_complete";

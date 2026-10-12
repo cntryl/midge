@@ -4,11 +4,11 @@ use super::super::{NextWalFrame, ReplayFailure, ReplayedWalFrame};
 use super::StreamingReplayLimits;
 use crate::codec::{decompressed_len_hint, CompressionAlgo};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{File, FsPath};
+use crate::io::FsPath;
 use crate::wal::{encoding, frame};
 
 pub(super) fn source<'a>(
-    file: &'a dyn File,
+    file: &'a dyn crate::io::ReadFile,
     path: &'a FsPath,
     limits: StreamingReplayLimits,
 ) -> frame::FileFrames<'a> {

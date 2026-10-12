@@ -1617,6 +1617,36 @@ mod tests {
         inner: crate::io::MockFs,
     }
 
+    impl crate::io::ReadFs for MetadataFailFs {
+        fn open_read(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(
+            &self,
+            _path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            Err(crate::io::FsError::Io(
+                "injected output metadata failure".into(),
+            ))
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl crate::io::Fs for MetadataFailFs {
         fn open(
             &self,
@@ -1628,25 +1658,8 @@ mod tests {
         fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             self.inner.remove_file(path)
         }
-        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-            self.inner.exists(path)
-        }
-        fn metadata(
-            &self,
-            _path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-            Err(crate::io::FsError::Io(
-                "injected output metadata failure".into(),
-            ))
-        }
         fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-        fn list_dir(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-            self.inner.list_dir(path)
         }
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             self.inner.remove_dir_all(path)

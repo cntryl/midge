@@ -84,6 +84,16 @@ pub struct OpenOptions {
     pub truncate: bool,   // Truncate if exists
 }
 
+impl OpenOptions {
+    /// Open an existing file for reading only.
+    pub const READ_ONLY: Self = Self {
+        mode: OpenMode::ReadOnly,
+        create: false,
+        create_new: false,
+        truncate: false,
+    };
+}
+
 /// Metadata for a file or directory
 #[derive(Debug, Clone)]
 pub struct Metadata {
@@ -111,8 +121,8 @@ pub trait ReadObserver: Send + Sync {
     );
 }
 
-/// Individual file handle with read/write operations
-pub trait File: Send {
+/// The read-only operations of an individual file handle.
+pub trait ReadFile: Send {
     /// Read at specific offset
     ///
     /// # Errors
@@ -121,6 +131,26 @@ pub trait File: Send {
     /// filesystem or storage backend.
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes>;
 
+    /// Get file length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file length cannot be queried.
+    fn len(&self) -> FsResult<u64>;
+
+    /// Whether the file contains no bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::len`].
+    #[cfg(feature = "internal-testing")]
+    fn is_empty(&self) -> FsResult<bool> {
+        self.len().map(|len| len == 0)
+    }
+}
+
+/// Individual file handle with read/write operations.
+pub trait File: ReadFile {
     /// Write at specific offset
     ///
     /// # Errors
@@ -151,24 +181,6 @@ pub trait File: Send {
     /// Returns an error when the append cannot be completed by the backing
     /// filesystem or storage backend.
     fn append(&mut self, data: Bytes) -> FsResult<u64>;
-
-    /// Get file length
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file length cannot be queried.
-    fn len(&self) -> FsResult<u64>;
-
-    /// Whether the file contains no bytes. Present where the trait is
-    /// reachable outside the crate, alongside [`Self::len`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Self::len`].
-    #[cfg(feature = "internal-testing")]
-    fn is_empty(&self) -> FsResult<bool> {
-        self.len().map(|len| len == 0)
-    }
 
     /// Sync to storage device according to durability level
     ///
@@ -205,8 +217,49 @@ impl HostAddressing<'_> {
     }
 }
 
+/// The read-only surface of a filesystem: open for reading, check existence,
+/// read metadata and list directories.
+///
+/// A view that only serves reads (WAL replay over authorized sources)
+/// implements this alone, so the type system rather than a runtime error
+/// keeps it from mutating anything. Every [`Fs`] is also a `ReadFs`.
+pub trait ReadFs: Send + Sync + 'static {
+    /// Open an existing file for reading. For an [`Fs`] this is
+    /// [`Fs::open`] with [`OpenOptions::READ_ONLY`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be opened for reading; a missing
+    /// file is `FsError::NotFound`.
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn ReadFile + '_>>;
+
+    /// Check if file exists
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the existence check cannot be completed.
+    fn exists(&self, path: &FsPath) -> FsResult<bool>;
+
+    /// Get file metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata cannot be read.
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata>;
+
+    /// List directory contents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be enumerated.
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>>;
+}
+
 /// Filesystem abstraction - agnostic of domain
-pub trait Fs: Send + Sync + 'static {
+///
+/// Extends [`ReadFs`] with opening for writing, the capability hooks that
+/// views of the same storage share, and every mutator.
+pub trait Fs: ReadFs {
     /// The filesystem that receives writes when this view also reads through
     /// a remote fallback. Fresh SST outputs must be read back from this view
     /// before their remote publication exists.
@@ -287,20 +340,6 @@ pub trait Fs: Send + Sync + 'static {
     /// Returns an error when the file cannot be removed.
     fn remove_file(&self, path: &FsPath) -> FsResult<()>;
 
-    /// Check if file exists
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the existence check cannot be completed.
-    fn exists(&self, path: &FsPath) -> FsResult<bool>;
-
-    /// Get file metadata
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when metadata cannot be read.
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata>;
-
     // --- Directories ---
 
     /// Create directory and all parents
@@ -309,13 +348,6 @@ pub trait Fs: Send + Sync + 'static {
     ///
     /// Returns an error when the directory hierarchy cannot be created.
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()>;
-
-    /// List directory contents
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be enumerated.
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>>;
 
     /// Remove directory and all contents
     ///

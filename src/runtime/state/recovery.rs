@@ -120,29 +120,6 @@ impl RuntimeState {
         )
     }
 
-    /// Load metadata from a host directory before cloud WAL replay.
-    #[cfg(test)]
-    pub(crate) fn try_new_before_cloud_replay(
-        db_path: impl AsRef<std::path::Path>,
-        recovery_policy: crate::config::RecoveryPolicy,
-    ) -> MidgeResult<Self> {
-        let db_path = db_path.as_ref();
-        let root = Self::test_root(db_path, false)?;
-        let history = crate::runtime::wal_history::WalHistory::open(
-            crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR),
-            1,
-            0,
-        )?;
-        Self::recover(
-            db_path,
-            false,
-            root,
-            recovery_policy,
-            RecoveryWal::Deferred(history),
-            None,
-        )
-    }
-
     #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
     fn test_root(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {
         if memory_mode {
@@ -627,10 +604,10 @@ impl RuntimeState {
                 .as_ref()
                 .is_some_and(|coverage| coverage.covers_wal_record(record))),
         };
-        let segments = crate::runtime::wal_history::replay_segments(
-            history.ledger(),
-            &crate::io::FsPath::new(""),
-        );
+        // The local plan replays every ledger member (#844).
+        let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
+            crate::io::FsPath::new(crate::wal::segment_file_name(id))
+        });
         let stats = match crate::wal::recovery::replay_wal_with_manifest_filter_within(
             storage,
             &segments,

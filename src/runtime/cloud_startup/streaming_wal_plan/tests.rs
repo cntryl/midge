@@ -1,8 +1,10 @@
 use super::*;
-use crate::io::FsError;
-use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
+use crate::io::{FsError, OpenOptions};
+use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use crate::wal::format::ChainLink;
+use crate::wal::planner::HistoryAction;
 use bytes::Bytes;
+use std::collections::BTreeSet;
 
 /// The frame of a put at `sequence`: a segment body the fixture wraps.
 fn framed_wal(sequence: u64, value: &[u8]) -> Vec<u8> {
@@ -54,13 +56,14 @@ fn limits() -> StreamingReplayLimits {
 const FIXTURE_EPOCH: u64 = 7;
 
 /// A cloud WAL with local cache. Segment bodies a test hands it become v2
-/// segments chained in id order: each links the newest sealed segment
-/// below it, so a body published and written locally becomes identical
-/// bytes in both places.
+/// segments: one published links the catalog's head, as a writer's
+/// publication must, and one written locally links the newest sealed
+/// segment below it, so a body published and written locally becomes
+/// identical bytes in both places. The catalog lives in the cloud store,
+/// both copies, as startup reads and commits it.
 struct Fixture {
     directory: tempfile::TempDir,
     cloud: Arc<dyn StorageBackend>,
-    catalog: WalPublicationCatalog,
     /// Sealed ledger members the fixture wrote locally.
     sealed: BTreeSet<u64>,
     /// The open ledger member, once the fixture wrote it.
@@ -78,20 +81,66 @@ impl Fixture {
         let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
             directory.path().join("cloud"),
         )?);
-        Ok(Self {
+        let fixture = Self {
             directory,
             cloud,
-            catalog: WalPublicationCatalog::empty(9).expect("catalog"),
             sealed: BTreeSet::new(),
             open: None,
             links: BTreeMap::new(),
             epochs: BTreeMap::new(),
-        })
+        };
+        fixture.save_catalog(&WalPublicationCatalog::empty(9).expect("catalog"))?;
+        Ok(fixture)
+    }
+
+    /// The catalog as the cloud store holds it.
+    fn catalog(&self) -> WalPublicationCatalog {
+        WalPublicationCatalog::decode(
+            &std::fs::read(self.catalog_path()).expect("read the fixture catalog"),
+        )
+        .expect("decode the fixture catalog")
+    }
+
+    fn catalog_path(&self) -> std::path::PathBuf {
+        self.directory
+            .path()
+            .join("cloud")
+            .join(crate::wal::cloud_catalog::OBJECT_KEY)
+    }
+
+    /// Store `catalog` as both catalog copies.
+    fn save_catalog(&self, catalog: &WalPublicationCatalog) -> MidgeResult<()> {
+        let bytes = catalog.encode().map_err(MidgeError::Internal)?;
+        for key in [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ] {
+            let path = self.directory.path().join("cloud").join(key);
+            std::fs::create_dir_all(path.parent().expect("catalog parent"))?;
+            std::fs::write(path, &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Apply `edit` to the stored catalog.
+    fn edit_catalog(&self, edit: impl FnOnce(&mut WalPublicationCatalog)) {
+        let mut catalog = self.catalog();
+        edit(&mut catalog);
+        self.save_catalog(&catalog)
+            .expect("store the fixture catalog");
     }
 
     /// The newest epoch any published segment names.
     fn current_epoch(&self) -> u64 {
         self.epochs.values().copied().max().unwrap_or(FIXTURE_EPOCH)
+    }
+
+    /// The newest sealed link below `id`.
+    fn link_below(&self, id: u64) -> ChainLink {
+        self.links
+            .range(..id)
+            .next_back()
+            .map_or(ChainLink::GENESIS, |(_, link)| *link)
     }
 
     /// Segment `id` holding `body`, written by `epoch` and linked to the
@@ -101,12 +150,9 @@ impl Fixture {
         if crate::wal::format::SegmentHeader::decode(body).is_ok() {
             return body.to_vec();
         }
-        let prev = self
-            .links
-            .range(..id)
-            .next_back()
-            .map_or(ChainLink::GENESIS, |(_, link)| *link);
-        let builder = crate::wal::format::segment::SegmentBuilder::new(id, epoch, prev).bytes(body);
+        let builder =
+            crate::wal::format::segment::SegmentBuilder::new(id, epoch, self.link_below(id))
+                .bytes(body);
         if sealed {
             let (bytes, link) = builder.seal();
             self.links.insert(id, link);
@@ -116,21 +162,44 @@ impl Fixture {
         }
     }
 
-    /// Publish segment `id` holding `body`, written by `epoch`, with the
-    /// catalog naming `sequence` as its last.
+    /// Publish segment `id` holding `body`, written by `epoch` and linked to
+    /// the catalog's head, which must hold sequences through `sequence`.
     fn publish(&mut self, id: u64, sequence: u64, epoch: u64, body: &[u8]) -> MidgeResult<()> {
-        let bytes = self.wrap(id, epoch, body, true);
-        self.epochs.insert(id, epoch);
-        let publication = PublishedWalSegment::from_validated_bytes(id, sequence, epoch, &bytes);
-        let path = self
-            .directory
-            .path()
-            .join("cloud")
-            .join(&publication.object_key);
+        let bytes = if crate::wal::format::SegmentHeader::decode(body).is_ok() {
+            body.to_vec()
+        } else {
+            crate::wal::format::segment::SegmentBuilder::new(id, epoch, self.catalog().head())
+                .bytes(body)
+                .seal()
+                .0
+        };
+        let entry = CatalogEntry::from_sealed_bytes(&bytes).map_err(MidgeError::Corruption)?;
+        assert_eq!(
+            entry.max_sequence(),
+            sequence,
+            "a fixture publication's last sequence"
+        );
+        self.publish_entry(entry, &bytes)
+    }
+
+    /// Publish `entry` naming the object `bytes`, as the catalog's next
+    /// segment.
+    fn publish_entry(&mut self, entry: CatalogEntry, bytes: &[u8]) -> MidgeResult<()> {
+        self.links.insert(entry.id(), entry.link());
+        self.epochs.insert(entry.id(), entry.epoch());
+        let path = self.directory.path().join("cloud").join(entry.object_key());
         std::fs::create_dir_all(path.parent().expect("remote parent"))?;
         std::fs::write(path, bytes)?;
-        self.catalog.segments.insert(id, publication);
-        Ok(())
+        let mut catalog = self.catalog();
+        if entry.epoch() > catalog.fencing_epoch() {
+            catalog
+                .fence_to(entry.epoch())
+                .expect("a later epoch fences the catalog");
+        }
+        catalog
+            .append_run(catalog.fencing_epoch(), &[entry])
+            .map_err(MidgeError::from)?;
+        self.save_catalog(&catalog)
     }
 
     /// The host file of local segment `id`.
@@ -183,24 +252,20 @@ impl Fixture {
         Ok(path)
     }
 
-    /// The open member: unless written, one past every cataloged and
-    /// sealed id, as the writer that published them left it.
+    /// The open member: unless written, past every id the catalog handed
+    /// out and every sealed one, as the writer that published them left it.
     fn open_segment(&self) -> u64 {
         self.open.unwrap_or_else(|| {
-            let remote = self
-                .catalog
-                .segments
-                .keys()
-                .next_back()
-                .map_or(1, |id| id + 1);
             let local = self.sealed.iter().next_back().map_or(1, |id| id + 1);
-            remote.max(local)
+            self.catalog().next_segment_id().max(local)
         })
     }
 
     /// The WAL ledger as startup opens it: recorded from the fixture's
     /// members the first time, then as earlier opens left it, with files it
-    /// does not name swept.
+    /// does not name swept. An open member the fixture never wrote holds
+    /// only its header, linked to the newest sealed segment, as a writer
+    /// leaves it.
     fn history(&self) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
         let wal: Arc<dyn Fs> = Arc::new(
             crate::io::RealFs::new(self.directory.path().join("local/wal"))
@@ -211,13 +276,59 @@ impl Fixture {
             .map_err(FsError::into_midge)?
         {
             let open = self.open_segment();
+            if self.open.is_none() && !self.segment(open).exists() {
+                let header = crate::wal::format::segment::SegmentBuilder::new(
+                    open,
+                    self.current_epoch(),
+                    self.link_below(open),
+                )
+                .open();
+                std::fs::write(self.segment(open), header)?;
+            }
             let sealed: Vec<u64> = self.sealed.iter().copied().collect();
             crate::runtime::wal_history::fixture::record(&wal, &sealed, open)?;
         }
         // Startup opens the ledger under its lease, at least the catalog's
         // fencing epoch and never below an epoch the members name.
-        let epoch = self.catalog.fencing_epoch.max(self.current_epoch());
+        let epoch = self.catalog().fencing_epoch().max(self.current_epoch());
         crate::runtime::wal_history::WalHistory::open(wal, 1, epoch)
+    }
+
+    /// Retire every cataloged segment through `id`, as pruning does once
+    /// SSTs cover them.
+    fn retire_through(&mut self, id: u64) {
+        self.edit_catalog(|catalog| {
+            let retired: Vec<CatalogEntry> = catalog
+                .entries()
+                .iter()
+                .filter(|entry| entry.id() <= id)
+                .cloned()
+                .collect();
+            catalog
+                .retire_prefix(catalog.fencing_epoch(), &retired)
+                .expect("retire the catalog's oldest segments");
+        });
+    }
+
+    /// Roll the catalog back to its segments through `id`, as a stale copy
+    /// would: the later ones vanish with no sequence floor covering them.
+    fn roll_back_to(&mut self, id: u64) {
+        self.edit_catalog(|catalog| {
+            let lost: Vec<CatalogEntry> = catalog
+                .entries()
+                .iter()
+                .filter(|entry| entry.id() > id)
+                .cloned()
+                .collect();
+            catalog
+                .set_aside_suffix(
+                    catalog.fencing_epoch(),
+                    lost.first().map(CatalogEntry::id),
+                    &lost,
+                    0,
+                )
+                .expect("drop the catalog's newest segments");
+        });
     }
 
     /// Where salvage copied segment `id` aside, if it did.
@@ -234,41 +345,28 @@ impl Fixture {
         self.build_with_limits(policy, limits())
     }
 
-    /// Plans recovery and sets aside the local WAL it drops, as startup does
-    /// once the sequence floor is durable.
+    /// Plans recovery and makes the plan durable, as startup does.
     fn build_with_limits(
         &self,
         policy: RecoveryPolicy,
         limits: StreamingReplayLimits,
     ) -> MidgeResult<StreamingCloudWalRecovery> {
-        let mut history = self.history()?;
+        let history = self.history()?;
         let recovered = StreamingCloudWalRecovery::build(
             &crate::io::real::test_root(self.directory.path().join("local")),
             Some(history.ledger()),
             &self.cloud,
-            &self.catalog,
+            &self.catalog(),
             policy,
             Duration::from_secs(5),
             127,
             limits,
         )?;
-        if recovered.plan.failed_back
-            || recovered
-                .plan
-                .set_aside_from
-                .is_some_and(|from| from <= history.ledger().log_start())
-        {
-            let anchor = recovered
-                .plan
-                .catalog_head_link
-                .unwrap_or_else(|| history.ledger().anchor());
-            history.rebase(anchor, recovered.next_remote_id)?;
-        } else if let Some(from) = recovered.plan.set_aside_from {
-            history.set_aside(
-                crate::runtime::wal_history::SetAside::From(from),
-                recovered.next_remote_id,
-            )?;
-        }
+        drop(commit_as_startup(
+            self,
+            &recovered,
+            crate::runtime::cloud_startup::CacheHistory::Existing(history),
+        )?);
         Ok(recovered)
     }
 
@@ -283,7 +381,7 @@ impl Fixture {
             local,
             Some(history.ledger()),
             &self.cloud,
-            &self.catalog,
+            &self.catalog(),
             policy,
             Duration::from_secs(5),
             127,
@@ -301,7 +399,7 @@ impl Fixture {
             &crate::io::real::test_root(self.directory.path().join("local")),
             Some(history.ledger()),
             &self.cloud,
-            &self.catalog,
+            &self.catalog(),
             policy,
             Duration::from_secs(5),
             127,
@@ -361,7 +459,7 @@ fn should_serve_planned_wal_sources_without_staging_copies() -> MidgeResult<()> 
     );
     let file = recovered
         .fs
-        .open(&FsPath::new(crate::wal::segment_file_name(2)), READ_ONLY)
+        .open_read(&FsPath::new(crate::wal::segment_file_name(2)))
         .map_err(FsError::into_midge)?;
     assert_eq!(
         file.read_at(0, second.len() as u64)
@@ -369,26 +467,6 @@ fn should_serve_planned_wal_sources_without_staging_copies() -> MidgeResult<()> 
             .as_ref(),
         second
     );
-    Ok(())
-}
-
-#[test]
-fn should_reject_local_remote_wal_divergence_even_during_salvage() -> MidgeResult<()> {
-    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
-        // Arrange
-        let mut fixture = Fixture::new()?;
-        fixture.publish(1, 1, 7, &framed_wal(1, b"remote"))?;
-        let local = fixture.local(1, &framed_wal(1, b"local!"))?;
-
-        // Act
-        let result = fixture.build(policy);
-
-        // Assert
-        assert!(
-            matches!(result, Err(MidgeError::RecoveryFailed(message)) if message.contains("diverge"))
-        );
-        assert!(local.exists());
-    }
     Ok(())
 }
 
@@ -456,16 +534,11 @@ fn should_reject_resource_limits_without_salvaging_or_truncating_wal_data() -> M
 fn should_validate_catalog_authority_before_exposing_replay_sources() -> MidgeResult<()> {
     // Arrange
     let mut fixture = Fixture::new()?;
-    fixture.publish(1, 1, 8, &framed_wal(1, b"newer epoch"))?;
-    fixture.publish(2, 2, 7, &framed_wal(2, b"stale epoch"))?;
-    fixture.publish(3, 3, 9, &framed_wal(3, b"invalid checksum"))?;
-    fixture
-        .catalog
-        .segments
-        .get_mut(&3)
-        .expect("publication")
-        .content_crc32c ^= 1;
-    let active = fixture.active(&framed_wal(4, b"stale active"))?;
+    fixture.publish(1, 1, 8, &framed_wal(1, b"first"))?;
+    fixture.publish(2, 2, 8, &framed_wal(2, b"invalid checksum"))?;
+    fixture.publish(3, 3, 9, &framed_wal(3, b"after the hole"))?;
+    corrupt_publication(&mut fixture, 2);
+    let active = fixture.active(&framed_wal(4, b"after the hole"))?;
     assert!(fixture.build(RecoveryPolicy::Strict).is_err());
 
     // Act
@@ -493,7 +566,13 @@ fn should_validate_catalog_authority_before_exposing_replay_sources() -> MidgeRe
     );
     assert!(!active.exists());
     assert!(fixture.salvaged(4).is_some());
-    assert_eq!(recovered.next_remote_id, 4);
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            open_at_least: 4,
+            ..
+        }
+    ));
     assert_eq!(fixture.history()?.ledger().open_segment(), 5);
     Ok(())
 }
@@ -503,12 +582,7 @@ fn should_preserve_skipped_wal_sources_for_safe_salvage() -> MidgeResult<()> {
     // Arrange
     let mut fixture = Fixture::new()?;
     fixture.publish(42, 1, 7, &framed_wal(1, b"catalog source"))?;
-    fixture
-        .catalog
-        .segments
-        .get_mut(&42)
-        .expect("publication")
-        .content_crc32c ^= 1;
+    corrupt_publication(&mut fixture, 42);
     let sealed = fixture.local(77, b"invalid sealed WAL")?;
     let mut invalid_active = framed_wal(2, b"invalid active source");
     invalid_active[8] ^= 1;
@@ -521,8 +595,15 @@ fn should_preserve_skipped_wal_sources_for_safe_salvage() -> MidgeResult<()> {
     // Act
     let recovered = fixture.build(RecoveryPolicy::Salvage)?;
 
-    // Assert
-    assert_eq!(recovered.next_remote_id, 43);
+    // Assert: the hole is the catalog's object 42, so every member is set
+    // aside whole, the open one included, and nothing is cut.
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            open_at_least: 43,
+            ..
+        }
+    ));
     assert_eq!(fixture.history()?.ledger().open_segment(), 79);
     assert!(recovered.plan.remote_segments.is_empty());
     assert!(recovered.plan.local_segments.is_empty());
@@ -534,10 +615,7 @@ fn should_preserve_skipped_wal_sources_for_safe_salvage() -> MidgeResult<()> {
         sealed_bytes
     );
     assert_eq!(
-        std::fs::read(active.with_file_name(format!(
-            "{}.salvage-retained",
-            crate::wal::segment_file_name(78)
-        )))?,
+        std::fs::read(fixture.salvaged(78).expect("open member set aside"))?,
         active_bytes
     );
     Ok(())
@@ -559,17 +637,9 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
             .map_err(FsError::into_midge)?,
         fail_from: (crate::wal::format::HEADER_LEN + first.len()) as u64,
     });
-    let mut plan = CloudWalRecoveryPlan::new(0, false);
 
     // Act
-    let result = active_local_source(
-        &fs,
-        1,
-        Expectation::Epoch(FIXTURE_EPOCH),
-        RecoveryPolicy::Salvage,
-        limits(),
-        &mut plan,
-    );
+    let result = fixture.plan_with_fs(RecoveryPolicy::Salvage, &fs);
 
     // Assert
     assert!(result.is_err(), "a transient read error must fail the open");
@@ -582,12 +652,17 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
 }
 
 fn corrupt_publication(fixture: &mut Fixture, id: u64) {
-    fixture
-        .catalog
-        .segments
-        .get_mut(&id)
+    // Damage a record inside the published object, so its bytes no longer
+    // match the catalog's checksum.
+    let key = fixture
+        .catalog()
+        .entry(id)
         .expect("publication")
-        .content_crc32c ^= 1;
+        .object_key();
+    let path = fixture.directory.path().join("cloud").join(key);
+    let mut bytes = std::fs::read(&path).expect("read publication");
+    bytes[crate::wal::format::HEADER_LEN + 8] ^= 1;
+    std::fs::write(path, bytes).expect("damage publication");
 }
 
 #[test]
@@ -626,9 +701,9 @@ fn should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one
     assert_eq!(
         recovered
             .plan
-            .unreplayed_segments
+            .set_aside_entries
             .iter()
-            .map(|segment| segment.segment_id)
+            .map(CatalogEntry::id)
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
@@ -636,7 +711,24 @@ fn should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one
     assert!(!active.exists());
     assert!(fixture.salvaged(4).is_some());
     assert_eq!(recovered.plan.max_unreplayed_sequence, 4);
-    assert_eq!(recovered.next_remote_id, 4);
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            open_at_least: 4,
+            ..
+        }
+    ));
+    // One catalog change set 2 and 3 aside behind a floor over all of it.
+    let catalog = fixture.catalog();
+    assert_eq!(
+        catalog
+            .entries()
+            .iter()
+            .map(CatalogEntry::id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(catalog.seq_floor(), 4);
     Ok(())
 }
 
@@ -743,7 +835,13 @@ fn should_not_set_local_wal_aside_before_startup_persists_its_floor() -> MidgeRe
     assert!(segment.exists());
     assert!(active.exists());
     assert_eq!(recovered.plan.max_unreplayed_sequence, 8);
-    assert_eq!(recovered.plan.set_aside_from, Some(2));
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            open_at_least: 3,
+            ..
+        }
+    ));
     assert_eq!(
         fixture.history()?.ledger().members().collect::<Vec<_>>(),
         vec![3, 4],
@@ -777,8 +875,18 @@ fn should_replay_every_segment_when_valid_local_copy_fills_cloud_hole() -> Midge
             .len(),
         3
     );
-    assert_eq!(recovered.plan.unreplayed_segments.len(), 0);
-    assert_eq!(recovered.plan.max_unreplayed_sequence, 0);
+    assert_eq!(recovered.plan.retire_catalog_from, None);
+    assert_eq!(
+        recovered
+            .plan
+            .local_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    // New writes start past the catalog's head.
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 3);
     Ok(())
 }
 
@@ -835,7 +943,7 @@ fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog(
             .len(),
         2
     );
-    assert_eq!(recovered.plan.unreplayed_segments.len(), 0);
+    assert_eq!(recovered.plan.retire_catalog_from, None);
     assert!(recovered.plan.local_segments.is_empty());
     assert!(!recovered.plan.opened_in_salvage_mode);
     Ok(())
@@ -853,7 +961,7 @@ fn should_reject_strict_recovery_when_later_segment_has_lower_writer_epoch() -> 
 
     // Assert
     assert!(
-        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("below epoch")),
         "unexpected result: {:?}",
         result.as_ref().err()
     );
@@ -873,7 +981,7 @@ fn should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch() -> Mid
 
     // Assert
     assert!(
-        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("below epoch")),
         "unexpected result: {:?}",
         result.as_ref().err()
     );
@@ -940,7 +1048,11 @@ fn should_fail_strict_recovery_naming_object_when_cataloged_segment_is_missing()
     let mut fixture = Fixture::new()?;
     fixture.publish(1, 1, 7, &framed_wal(1, b"present"))?;
     fixture.publish(2, 2, 7, &framed_wal(2, b"missing"))?;
-    let key = fixture.catalog.segments[&2].object_key.clone();
+    let key = fixture
+        .catalog()
+        .entry(2)
+        .expect("publication")
+        .object_key();
     std::fs::remove_file(fixture.directory.path().join("cloud").join(&key))?;
 
     // Act
@@ -965,11 +1077,17 @@ struct TruncateFailingFile<'a> {
     inner: Box<dyn crate::io::File + 'a>,
 }
 
-impl crate::io::File for TruncateFailingFile<'_> {
+impl crate::io::ReadFile for TruncateFailingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> crate::io::FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl crate::io::File for TruncateFailingFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> crate::io::FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -984,12 +1102,27 @@ impl crate::io::File for TruncateFailingFile<'_> {
         self.inner.append(data)
     }
 
-    fn len(&self) -> crate::io::FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, dur: crate::io::Durability) -> crate::io::FsResult<()> {
         self.inner.sync(dur)
+    }
+}
+
+impl ReadFs for TruncateFailingFs {
+    fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -1016,20 +1149,8 @@ impl Fs for TruncateFailingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
@@ -1087,40 +1208,6 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_stop_replay_at_epoch_regressed_sealed_segment() -> MidgeResult<()> {
-    // Arrange
-    let mut fixture = Fixture::new()?;
-    for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
-        fixture.publish(id, id, epoch, &framed_wal(id, b"value"))?;
-    }
-
-    // Act
-    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
-
-    // Assert
-    assert_eq!(
-        recovered
-            .plan
-            .remote_segments
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
-    assert_eq!(
-        recovered
-            .plan
-            .unreplayed_segments
-            .iter()
-            .map(|segment| segment.segment_id)
-            .collect::<Vec<_>>(),
-        vec![2, 3]
-    );
-    assert_eq!(recovered.plan.max_unreplayed_sequence, 3);
-    Ok(())
-}
-
-#[test]
 fn should_stage_stale_active_wal_until_sequence_floor_is_durable() -> MidgeResult<()> {
     // Arrange
     let mut fixture = Fixture::new()?;
@@ -1136,90 +1223,15 @@ fn should_stage_stale_active_wal_until_sequence_floor_is_durable() -> MidgeResul
         active.exists(),
         "planning must preserve the only durable sequence evidence"
     );
-    assert_eq!(recovered.plan.set_aside_from, Some(2));
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            open_at_least: 2,
+            ..
+        }
+    ));
     assert!(recovered.segments.open_segment().is_none());
     Ok(())
-}
-
-#[test]
-fn should_combine_quarantine_plans_when_sealed_and_active_epochs_regress() -> MidgeResult<()> {
-    // Arrange
-    // A ledger never holds a falling epoch, so only the catalog regresses.
-    let mut fixture = Fixture::new()?;
-    for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
-        fixture.publish(id, id, epoch, &framed_wal(id, b"value"))?;
-    }
-    fixture.active_in_epoch(8, &framed_wal(4, b"four"))?;
-
-    // Act
-    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
-
-    // Assert
-    assert_eq!(
-        recovered
-            .plan
-            .remote_segments
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
-    assert_eq!(recovered.plan.max_unreplayed_sequence, 4);
-    let from = recovered
-        .plan
-        .set_aside_from
-        .expect("salvage sets WAL aside");
-    let set_aside: Vec<u64> = fixture
-        .history()?
-        .ledger()
-        .members()
-        .filter(|id| *id >= from)
-        .collect();
-    assert_eq!(set_aside, vec![4]);
-    assert!(set_aside.iter().all(|id| fixture.segment(*id).exists()));
-    Ok(())
-}
-
-#[test]
-fn should_preserve_wal_files_when_strict_recovery_rejects_epoch_regression() -> MidgeResult<()> {
-    // Arrange
-    // A ledger never holds a falling epoch, so only the catalog regresses.
-    let mut fixture = Fixture::new()?;
-    for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
-        fixture.publish(id, id, epoch, &framed_wal(id, b"value"))?;
-    }
-    let active = fixture.active(&framed_wal(4, b"four"))?;
-    let bytes = std::fs::read(&active)?;
-    // Act
-    let result = fixture.plan_only(RecoveryPolicy::Strict, limits());
-    // Assert
-    assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
-    assert_eq!(std::fs::read(active)?, bytes);
-    Ok(())
-}
-
-proptest::proptest! {
-    #![proptest_config(proptest::test_runner::Config { cases: 256, rng_seed: proptest::test_runner::RngSeed::Fixed(0x4d49_4447_4530_3331), ..proptest::test_runner::Config::default() })]
-    #[test]
-    fn should_preserve_prefix_when_generated_epochs_regress(epochs in proptest::collection::vec(1_u64..=9, 1..12), active_epoch in 1_u64..=9) {
-        // Arrange
-        let mut fixture = Fixture::new().unwrap();
-        for (index, &epoch) in epochs.iter().enumerate() {
-            let id = u64::try_from(index).unwrap() + 1;
-            fixture.publish(id, id, epoch, &framed_wal(id, b"value")).unwrap();
-        }
-        let active_sequence = u64::try_from(epochs.len()).unwrap() + 1;
-        fixture.active_in_epoch(active_epoch, &framed_wal(active_sequence, b"active")).unwrap();
-        let first_hole = epochs.iter().enumerate().find(|(index, epoch)| epochs[..*index].iter().any(|earlier| earlier > *epoch)).map_or(epochs.len(), |(index, _)| index);
-        // Act
-        let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits()).unwrap();
-        // Assert
-        proptest::prop_assert_eq!(recovered.plan.remote_segments.keys().copied().collect::<Vec<_>>(), (1..=u64::try_from(first_hole).unwrap()).collect::<Vec<_>>());
-        let set_aside = first_hole < epochs.len() || active_epoch < *epochs.iter().max().unwrap();
-        proptest::prop_assert_eq!(recovered.plan.max_unreplayed_sequence, if set_aside { active_sequence } else { 0 });
-        let ledger = fixture.history().unwrap().ledger().clone();
-        proptest::prop_assert!(ledger.members().filter(|id| recovered.plan.set_aside_from.is_some_and(|from| *id >= from)).all(|id| fixture.segment(id).exists()));
-    }
 }
 
 #[cfg(feature = "failpoints")]
@@ -1351,7 +1363,7 @@ fn run_planner_with_expiring_second_head(
             &local,
             Some(history.ledger()),
             &remote,
-            &fixture.catalog,
+            &fixture.catalog(),
             policy,
             Duration::from_secs(5),
             127,
@@ -1381,7 +1393,11 @@ fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
         fixture
             .publish(id, id, 7, &framed_wal(id, b"acknowledged value"))
             .unwrap();
-        let key = fixture.catalog.segments[&id].object_key.clone();
+        let key = fixture
+            .catalog()
+            .entry(id)
+            .expect("publication")
+            .object_key();
         let bytes = std::fs::read(fixture.directory.path().join("cloud").join(&key)).unwrap();
         objects.push((key, bytes));
     }
@@ -1391,7 +1407,7 @@ fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
     let local_bytes = std::fs::read(&local_path).unwrap();
     drop(fixture.history().unwrap());
     let local_before = wal_directory_listing(&fixture);
-    let catalog_before = fixture.catalog.encode().unwrap();
+    let catalog_before = fixture.catalog().encode().unwrap();
     // Act: the real planner owns checksum/inspection and receives real HEADs;
     // a completed successful submission is not free aggregate time.
     let (result, evidence, deadline) = run_planner_with_expiring_second_head(&fixture, policy);
@@ -1424,7 +1440,7 @@ fn assert_planner_aggregate_timeout(policy: RecoveryPolicy) {
             .load(std::sync::atomic::Ordering::Acquire),
         0
     );
-    assert_eq!(fixture.catalog.encode().unwrap(), catalog_before);
+    assert_eq!(fixture.catalog().encode().unwrap(), catalog_before);
     assert_eq!(std::fs::read(local_path).unwrap(), local_bytes);
     assert_eq!(wal_directory_listing(&fixture), local_before);
     for (key, bytes) in objects {
@@ -1518,8 +1534,9 @@ fn should_continue_past_successor_history_when_clean_cache_fails_back() -> Midge
     Ok(())
 }
 
-/// Make `recovered`'s plan durable as startup does under lease 9, over
-/// `history`. Plans that salvage nothing never touch the cloud.
+/// Make `recovered`'s plan durable as startup does under the catalog's
+/// lease epoch, over `history`. Plans that salvage nothing never touch the
+/// cloud.
 fn commit_as_startup(
     fixture: &Fixture,
     recovered: &StreamingCloudWalRecovery,
@@ -1531,12 +1548,13 @@ fn commit_as_startup(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ),
     ));
-    recovered.plan.commit_within(
+    let catalog = fixture.catalog();
+    crate::runtime::cloud_startup::commit_recovery_plan_within(
+        &recovered.plan,
         &persistence,
-        9,
-        &fixture.catalog,
+        catalog.fencing_epoch(),
+        &catalog,
         history,
-        recovered.next_remote_id,
         &|| Ok(()),
         &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
     )
@@ -1544,7 +1562,11 @@ fn commit_as_startup(
 
 /// The link the footer of published segment `id` names.
 fn published_link(fixture: &Fixture, id: u64) -> MidgeResult<ChainLink> {
-    let key = &fixture.catalog.segments[&id].object_key;
+    let key = fixture
+        .catalog()
+        .entry(id)
+        .expect("publication")
+        .object_key();
     let bytes = std::fs::read(fixture.directory.path().join("cloud").join(key))?;
     Ok(crate::wal::format::segment::footer_link(&bytes)?.expect("a published segment is sealed"))
 }
@@ -1596,14 +1618,17 @@ fn should_link_rejoined_cache_to_catalog_head_when_failing_back() -> MidgeResult
 
     // Assert: the cache continues after the catalog head, and a strict
     // reopen replays the catalog into the rebased open segment.
-    assert!(recovered.plan.failed_back);
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase { .. }
+    ));
     assert_eq!(history.ledger().anchor(), head);
     assert_eq!(history.ledger().open_member().open.prev, head);
     assert_eq!(history.ledger().open_segment(), 4);
     drop(history);
     append_local(&fixture, 4, 4)?;
     let reopened = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
-    assert!(!reopened.plan.failed_back);
+    assert!(matches!(reopened.plan.history, HistoryAction::Keep { .. }));
     assert_eq!(reopened.segments.open_segment(), Some(4));
     replay_strictly(&reopened)
 }
@@ -1634,7 +1659,10 @@ fn should_link_reopened_cache_to_catalog_head_when_a_successor_takes_its_next_id
 
     // Assert: the successor took over, so the cache continues after its
     // segment rather than forking the chain at segment 1.
-    assert!(recovered.plan.failed_back);
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase { .. }
+    ));
     let open = history.ledger().open_member().open;
     assert_eq!(open.prev, head);
     // A write in the rebased segment publishes after the successor's, and
@@ -1645,7 +1673,7 @@ fn should_link_reopened_cache_to_catalog_head_when_a_successor_takes_its_next_id
     let sealed = std::fs::read(fixture.segment(open.id))?;
     fixture.publish(open.id, head.last_seq + 1, 9, &sealed)?;
     let reopened = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
-    assert!(!reopened.plan.failed_back);
+    assert!(matches!(reopened.plan.history, HistoryAction::Keep { .. }));
     assert_eq!(
         reopened
             .plan
@@ -1689,8 +1717,55 @@ fn should_rebase_cache_when_a_successor_published_its_unpublished_segment_id() -
 
     // Assert: the catalog's segment 2 is the successor's, so this cache's
     // segment 2 was never published; it rejoins after the successor.
-    assert!(recovered.plan.failed_back);
+    assert!(matches!(
+        recovered.plan.history,
+        HistoryAction::Rebase { .. }
+    ));
     assert_eq!(history.ledger().open_member().open.prev, head);
+    Ok(())
+}
+
+#[test]
+fn should_set_aside_cache_tail_when_the_catalog_set_aside_a_successor_segment_at_its_id(
+) -> MidgeResult<()> {
+    // Arrange: as above, but a salvage later set the successor's segment 2
+    // aside, so the catalog's head is segment 1 again while its next id has
+    // passed 2: this cache's segment 2 is still not history.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &framed_wal(2, b"unpublished"))?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    let head = published_link(&fixture, 1)?;
+    let mut header = crate::wal::format::segment::SegmentBuilder::new(2, 9, head).header();
+    header.holder = [0x42; 16];
+    let (successor, _) = crate::wal::format::segment::SegmentBuilder::from_header(header)
+        .bytes(&framed_wal(2, b"successor"))
+        .seal();
+    fixture.publish(2, 2, 9, &successor)?;
+    fixture.edit_catalog(|catalog| {
+        let set_aside = catalog.entries()[1..].to_vec();
+        catalog
+            .set_aside_suffix(catalog.fencing_epoch(), Some(2), &set_aside, 2)
+            .expect("set the successor's segment aside");
+    });
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+
+    // Assert: this cache's segment 2 is neither replayed nor owed, and the
+    // cache continues after the catalog at an id it never handed out.
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(recovered.segments.open_segment().is_none());
+    assert_eq!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            anchor: head,
+            open_at_least: 3
+        }
+    );
     Ok(())
 }
 
@@ -1705,7 +1780,7 @@ fn should_link_fresh_cache_first_segment_to_catalog_head() -> MidgeResult<()> {
         &local,
         None,
         &fixture.cloud,
-        &fixture.catalog,
+        &fixture.catalog(),
         RecoveryPolicy::Strict,
         Duration::from_secs(5),
         127,
@@ -1783,7 +1858,7 @@ fn should_not_replay_unpublished_segment_below_catalog_when_successor_took_over(
     drop(fixture.history()?);
     fixture.publish(3, 3, 8, &framed_wal(3, b"three"))?;
     fixture.publish(4, 4, 8, &framed_wal(4, b"four"))?;
-    fixture.catalog.segments.remove(&1);
+    fixture.retire_through(1);
 
     // Act
     let recovered = fixture.build(RecoveryPolicy::Strict)?;
@@ -1870,5 +1945,260 @@ fn should_stop_salvage_at_local_member_whose_file_is_missing() -> MidgeResult<()
     assert!(salvaged.segments.open_segment().is_none());
     assert!(salvaged.plan.max_unreplayed_sequence >= 3);
     assert!(fixture.salvaged(3).is_some());
+    Ok(())
+}
+
+#[test]
+fn should_continue_past_retired_catalog_history_when_fresh_cache_takes_over() -> MidgeResult<()> {
+    // Arrange: a writer published segments 1 and 2, then retired both once
+    // SSTs covered them; a new cache takes over.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, b"two"))?;
+    let head = published_link(&fixture, 2)?;
+    fixture.retire_through(2);
+    let local = crate::io::real::test_root(fixture.directory.path().join("local"));
+    let recovered = StreamingCloudWalRecovery::build(
+        &local,
+        None,
+        &fixture.cloud,
+        &fixture.catalog(),
+        RecoveryPolicy::Strict,
+        Duration::from_secs(5),
+        127,
+        limits(),
+    )?;
+    let wal = crate::io::subdirectory(Arc::clone(&local), crate::wal::WAL_DIR);
+
+    // Act
+    let history = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Fresh(wal),
+    )?;
+
+    // Assert: the new history continues after the retired segment 2, under
+    // an id the catalog never handed out.
+    assert_eq!(history.ledger().anchor(), head);
+    assert_eq!(history.ledger().open_segment(), 3);
+    Ok(())
+}
+
+#[test]
+fn should_set_aside_cache_tail_when_successor_retired_its_published_history() -> MidgeResult<()> {
+    // Arrange: this cache published segment 1 and wrote an unpublished
+    // record into its open segment 2. A successor published its own
+    // segment 2, then retired both segments from the catalog.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    let stale = std::fs::read(fixture.active(&framed_wal(2, b"stale"))?)?;
+    drop(fixture.history()?);
+    fixture.publish(2, 2, 8, &framed_wal(2, b"successor"))?;
+    let head = published_link(&fixture, 2)?;
+    fixture.retire_through(2);
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert: nothing local replays; the stale tail is kept aside and the
+    // cache continues after the successor's segment.
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(recovered.segments.open_segment().is_none());
+    assert_eq!(
+        std::fs::read(fixture.salvaged(2).expect("stale tail kept aside"))?,
+        stale
+    );
+    assert_eq!(fixture.history()?.ledger().open_member().open.prev, head);
+    Ok(())
+}
+
+#[test]
+fn should_set_aside_cache_tail_when_successor_published_into_a_reopened_id_gap() -> MidgeResult<()>
+{
+    // Arrange: this cache published segment 1 and left an empty open
+    // segment 2; an idle restart reopened it as 3, which then took a write.
+    // A successor with a new cache started at the catalog's next id, 2, and
+    // published it.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
+    fixture.active(b"")?;
+    let mut history = fixture.history()?;
+    history.start_epoch(8, 2)?;
+    let reopened = history.ledger().open_segment();
+    drop(history);
+    append_local(&fixture, reopened, 2)?;
+    let stale = std::fs::read(fixture.segment(reopened))?;
+    fixture.publish(2, 2, 9, &framed_wal(2, b"successor"))?;
+    let head = published_link(&fixture, 2)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert: the successor's segment 2 replays and stays cataloged; this
+    // cache's write after the reopen is kept aside, not replayed.
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(recovered.segments.open_segment().is_none());
+    assert_eq!(
+        std::fs::read(fixture.salvaged(reopened).expect("stale tail kept aside"))?,
+        stale
+    );
+    assert_eq!(fixture.history()?.ledger().open_member().open.prev, head);
+    Ok(())
+}
+
+#[test]
+fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<()> {
+    // Arrange: this cache published segments 1 and 2; the catalog then
+    // retired 1, and the cache stopped before retiring its local copy.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    let second = framed_wal(2, b"two");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &second)?;
+    fixture.publish(2, 2, 7, &second)?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    fixture.retire_through(1);
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+
+    // Act
+    let history = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
+    )?;
+
+    // Assert: segment 1 is neither replayed nor owed again, and startup
+    // retires its local copy.
+    assert!(recovered.plan.local_segments.is_empty());
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(history.ledger().log_start(), 2);
+    assert!(!fixture.segment(1).exists());
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_open_when_the_catalog_lost_history_this_cache_retired() -> MidgeResult<()> {
+    // Arrange: this cache published segments 1 and 2 and holds no copy of
+    // them; it wrote local segment 3 and open segment 4 after them. The
+    // catalog then lost segment 2, as a stale copy would, with no sequence
+    // floor covering it.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, b"two"))?;
+    let third = fixture.local(3, &framed_wal(3, b"three"))?;
+    let active = fixture.active(&framed_wal(4, b"four"))?;
+    drop(fixture.history()?);
+    let (third_bytes, active_bytes) = (std::fs::read(&third)?, std::fs::read(&active)?);
+    fixture.roll_back_to(1);
+
+    // Act
+    let result = fixture.plan_only(RecoveryPolicy::Strict, limits());
+
+    // Assert: strict recovery refuses before touching the cache.
+    assert!(
+        matches!(&result, Err(MidgeError::Corruption(_))),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert_eq!(std::fs::read(&third)?, third_bytes);
+    assert_eq!(std::fs::read(&active)?, active_bytes);
+    assert_eq!(
+        fixture.history()?.ledger().members().collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    Ok(())
+}
+
+#[test]
+fn should_set_aside_local_tail_when_its_cataloged_segment_differs() -> MidgeResult<()> {
+    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+        // Arrange: the catalog's segment 1 holds other bytes than this
+        // cache's segment 1, so another writer published it.
+        let mut fixture = Fixture::new()?;
+        fixture.publish(1, 1, 7, &framed_wal(1, b"remote"))?;
+        let head = published_link(&fixture, 1)?;
+        let local = fixture.local(1, &framed_wal(1, b"local!"))?;
+        drop(fixture.history()?);
+        let local_bytes = std::fs::read(&local)?;
+
+        // Act
+        let recovered = fixture.build(policy)?;
+
+        // Assert: the catalog's history replays and the cache continues
+        // after it, keeping its own segment aside.
+        assert_eq!(
+            recovered
+                .plan
+                .remote_segments
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(recovered.plan.local_segments.is_empty());
+        assert!(!recovered.plan.opened_in_salvage_mode);
+        assert_eq!(
+            std::fs::read(fixture.salvaged(1).expect("local tail kept aside"))?,
+            local_bytes
+        );
+        assert_eq!(fixture.history()?.ledger().open_member().open.prev, head);
+    }
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry() -> MidgeResult<()>
+{
+    // Arrange: the catalog's first object links a segment the catalog
+    // never held.
+    let mut fixture = Fixture::new()?;
+    let stranger = ChainLink {
+        id: 0,
+        last_seq: 0,
+        digest: [0x5a; 16],
+    };
+    let (bytes, link) = crate::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
+        .bytes(&framed_wal(1, b"one"))
+        .seal();
+    let entry = CatalogEntry::describing(
+        crate::wal::format::SegmentIdentity {
+            epoch: 7,
+            prev: ChainLink::GENESIS,
+            link,
+        },
+        &bytes,
+    );
+    fixture.publish_entry(entry, &bytes)?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(_))),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
     Ok(())
 }

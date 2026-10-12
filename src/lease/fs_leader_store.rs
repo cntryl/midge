@@ -471,7 +471,7 @@ impl FsLeaderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::MockFs;
+    use crate::io::{MockFs, ReadFs};
     use std::sync::Barrier;
     use std::thread;
 
@@ -932,26 +932,31 @@ mod tests {
 mod lock_init_failure_tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
-    use crate::io::{File, FsResult, MockFs};
+    use crate::io::{File, FsResult, MockFs, ReadFs};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct FailingLockWriteFile<'a> {
         inner: Box<dyn File + 'a>,
     }
 
-    impl File for FailingLockWriteFile<'_> {
+    impl crate::io::ReadFile for FailingLockWriteFile<'_> {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
             self.inner.read_at(offset, len)
         }
+
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for FailingLockWriteFile<'_> {
         fn write_at(&mut self, _offset: u64, _data: bytes::Bytes) -> FsResult<()> {
             Err(crate::io::FsError::Io("No space left on device".into()))
         }
         fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
             self.inner.append(data)
         }
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
-        }
+
         fn sync(&mut self, dur: Durability) -> FsResult<()> {
             self.inner.sync(dur)
         }
@@ -964,6 +969,25 @@ mod lock_init_failure_tests {
         /// Opening the leader record fails with an I/O error whose path
         /// happens to contain "not found".
         fail_record_open: AtomicBool,
+    }
+
+    impl ReadFs for LockWriteFaultFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
     }
 
     impl Fs for LockWriteFaultFs {
@@ -982,17 +1006,8 @@ mod lock_init_failure_tests {
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_file(path)
         }
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_dir_all(path)

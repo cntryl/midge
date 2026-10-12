@@ -6,7 +6,7 @@ use super::{
     ReplaySegments, ToleratedActiveTail, WalSalvageStop,
 };
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsPath};
+use crate::io::{FsPath, ReadFs};
 use crate::memtable::{size_bound, SkipListMemtable};
 use crate::wal::format::{Chain, SegmentScan, HEADER_LEN};
 use crate::wal::{types::WalOpRole, WalRecord};
@@ -21,7 +21,7 @@ mod tests;
 /// any of them. Candidate headers are found in bounded chunks; a candidate
 /// counts only after its complete payload passes CRC and record decoding.
 pub(crate) fn max_verified_suffix_sequence(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     start: u64,
     limits: StreamingReplayLimits,
@@ -245,7 +245,7 @@ struct ReplayState<'a> {
 /// publish checkpoints durably before removing entries from the memtable map.
 #[cfg(test)]
 pub(crate) fn replay_wal_with_checkpoint(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
@@ -268,7 +268,7 @@ pub(crate) fn replay_wal_with_checkpoint(
 /// `replay_wal_with_checkpoint` with local-recovery behaviour selected.
 #[allow(clippy::too_many_arguments)] // Each input is a distinct replay contract.
 pub(crate) fn replay_wal_with_options(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
@@ -324,7 +324,7 @@ fn ensure_deadline(deadline: Option<&crate::common::OperationDeadline>) -> Midge
 /// Highest sequence among verified frames beginning at `offset`. Used only to
 /// keep new writes above sequences that salvage set aside unreplayed.
 fn max_verified_sequence_from_offset(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     path: &FsPath,
     limits: StreamingReplayLimits,
     offset: u64,
@@ -365,7 +365,7 @@ fn max_verified_sequence_from_offset(
 /// Inspect one stable WAL segment, open or sealed, without reading the
 /// complete object: its header, then every frame, accepting a footer.
 pub(crate) fn inspect_wal_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
@@ -375,7 +375,7 @@ pub(crate) fn inspect_wal_file(
 /// A sealed segment must hold whole frames and at least one record, and end
 /// in the footer that matches them.
 pub(crate) fn inspect_sealed_wal_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<super::VerifiedWalPrefix> {
@@ -385,7 +385,7 @@ pub(crate) fn inspect_sealed_wal_file(
 /// Visit one validated record at a time without retaining a complete segment.
 /// The caller must keep the file identity pinned until the returned proof is used.
 pub(crate) fn visit_sealed_wal_records(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
@@ -409,7 +409,7 @@ fn require_sealed_records(path: &FsPath, prefix: &super::VerifiedWalPrefix) -> M
 }
 
 fn inspect_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
@@ -425,7 +425,7 @@ fn inspect_file(
 }
 
 pub(crate) fn visit_sealed_wal_records_from(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     progress: &mut super::VerifiedWalPrefix,
@@ -459,7 +459,7 @@ pub(crate) fn visit_sealed_wal_records_from(
 ///
 /// The read, frame, decode or scan error.
 pub(crate) fn scan_segment_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     until: Option<u64>,
 ) -> MidgeResult<SegmentScan> {
@@ -511,7 +511,7 @@ fn read_header(source: &crate::wal::frame::FileFrames<'_>) -> MidgeResult<bytes:
 }
 
 fn inspect_file_from(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     prefix: super::VerifiedWalPrefix,
@@ -653,7 +653,7 @@ fn validate_record_contents(record: &WalRecord, max_bytes: usize) -> MidgeResult
 }
 
 fn replay_paths(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     policy: ReplayPolicy,
     state: &mut ReplayState<'_>,
@@ -774,12 +774,25 @@ fn admit_segment(
                 Ok(())
             }
         }
-        Expectation::Epoch(epoch) => (header.epoch == *epoch).then_some(()).ok_or_else(|| {
-            format!(
-                "its header names writer epoch {}, not {epoch}",
-                header.epoch
-            )
-        }),
+        Expectation::Published(entry) => {
+            if header.epoch != entry.epoch() {
+                Err(format!(
+                    "its header names writer epoch {}, not the catalog's {}",
+                    header.epoch,
+                    entry.epoch()
+                ))
+            } else if header.prev != entry.prev() {
+                Err(format!(
+                    "its header links segment {} (last sequence {}), not the catalog's segment {} (last sequence {})",
+                    header.prev.id,
+                    header.prev.last_seq,
+                    entry.prev().id,
+                    entry.prev().last_seq
+                ))
+            } else {
+                Ok(())
+            }
+        }
     };
     expected.map_err(|reason| {
         MidgeError::Corruption(format!(
@@ -790,22 +803,27 @@ fn admit_segment(
     Ok(scan)
 }
 
-/// A sealed member's footer must seal what the ledger recorded.
+/// A sealed segment's footer must seal what its history recorded: the
+/// ledger's facts for a member, the catalog's link for a published object.
 fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
-    let Expectation::Member { member, .. } = &path.expect else {
-        return Ok(());
-    };
-    let Some(expected) = &member.sealed else {
-        return Ok(());
-    };
     let actual = scan.footer().map(crate::wal::format::Footer::sealed_facts);
-    if actual.as_ref() == Some(expected) {
-        Ok(())
-    } else {
-        Err(MidgeError::Corruption(format!(
-            "WAL segment {} seals {actual:?}, not the ledger's {expected:?}",
+    let disagreement = match &path.expect {
+        Expectation::Member { member, .. } => match &member.sealed {
+            Some(expected) if actual.as_ref() != Some(expected) => {
+                Some(format!("the ledger's {expected:?}"))
+            }
+            _ => None,
+        },
+        Expectation::Published(entry) => (actual.as_ref().map(|facts| facts.link)
+            != Some(entry.link()))
+        .then(|| format!("the catalog's {:?}", entry.link())),
+    };
+    match disagreement {
+        None => Ok(()),
+        Some(expected) => Err(MidgeError::Corruption(format!(
+            "WAL segment {} seals {actual:?}, not {expected}",
             path.path
-        )))
+        ))),
     }
 }
 
@@ -815,7 +833,7 @@ impl ReplayState<'_> {
     /// in its footer.
     fn end_segment(
         &mut self,
-        storage: &dyn Fs,
+        storage: &dyn ReadFs,
         paths: &[ReplayFile],
         (index, pos): (usize, u64),
         (scan, chain): (&SegmentScan, &mut Chain),
@@ -846,7 +864,7 @@ impl ReplayState<'_> {
     /// or fail.
     fn stop_at(
         &mut self,
-        storage: &dyn Fs,
+        storage: &dyn ReadFs,
         paths: &[ReplayFile],
         (index, valid_bytes): (usize, u64),
         policy: ReplayPolicy,

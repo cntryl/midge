@@ -1,7 +1,7 @@
 //! Cooperative filesystem views for a shared ownership-transfer deadline.
 
 use super::traits::{DirEntry, Metadata, ReadObserver};
-use super::{Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenOptions};
+use super::{Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use crate::common::DeadlineScope;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -10,14 +10,39 @@ pub(crate) fn scope_fs(inner: Arc<dyn Fs>, scope: DeadlineScope) -> Arc<dyn Fs> 
     Arc::new(ScopedFs { inner, scope })
 }
 
-struct ScopedFs {
-    inner: Arc<dyn Fs>,
+/// [`scope_fs`] for a read-only view: every read, and every file it opens,
+/// fails with `Timeout` once `scope` ends.
+pub(crate) fn scope_read_fs(inner: Arc<dyn ReadFs>, scope: DeadlineScope) -> Arc<dyn ReadFs> {
+    Arc::new(ScopedFs { inner, scope })
+}
+
+/// `inner`, a writable [`Fs`] or a read-only [`ReadFs`], checked against
+/// `scope` before and after every operation.
+struct ScopedFs<F: ?Sized> {
+    inner: Arc<F>,
     scope: DeadlineScope,
 }
 
 struct ScopedFile<'a> {
     inner: Box<dyn File + 'a>,
     scope: DeadlineScope,
+}
+
+struct ScopedReadFile<'a> {
+    inner: Box<dyn super::ReadFile + 'a>,
+    scope: DeadlineScope,
+}
+
+impl super::ReadFile for ScopedReadFile<'_> {
+    fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        checked(&self.scope, "filesystem read", || {
+            self.inner.read_at(offset, len)
+        })
+    }
+
+    fn len(&self) -> FsResult<u64> {
+        checked(&self.scope, "filesystem length", || self.inner.len())
+    }
 }
 
 fn check(scope: &DeadlineScope, context: &str) -> FsResult<()> {
@@ -37,7 +62,37 @@ fn checked<T>(
     Ok(value)
 }
 
-impl Fs for ScopedFs {
+impl<F: ReadFs + ?Sized> ReadFs for ScopedFs<F> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        let inner = checked(&self.scope, "filesystem open", || {
+            self.inner.open_read(path)
+        })?;
+        Ok(Box::new(ScopedReadFile {
+            inner,
+            scope: self.scope.clone(),
+        }))
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        checked(&self.scope, "filesystem existence", || {
+            self.inner.exists(path)
+        })
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        checked(&self.scope, "filesystem metadata", || {
+            self.inner.metadata(path)
+        })
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        checked(&self.scope, "filesystem directory listing", || {
+            self.inner.list_dir(path)
+        })
+    }
+}
+
+impl Fs for ScopedFs<dyn Fs> {
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -95,27 +150,9 @@ impl Fs for ScopedFs {
         })
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        checked(&self.scope, "filesystem existence", || {
-            self.inner.exists(path)
-        })
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        checked(&self.scope, "filesystem metadata", || {
-            self.inner.metadata(path)
-        })
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         checked(&self.scope, "filesystem directory creation", || {
             self.inner.create_dir_all(path)
-        })
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        checked(&self.scope, "filesystem directory listing", || {
-            self.inner.list_dir(path)
         })
     }
 
@@ -138,13 +175,19 @@ impl Fs for ScopedFs {
     }
 }
 
-impl File for ScopedFile<'_> {
+impl crate::io::ReadFile for ScopedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         checked(&self.scope, "filesystem file read", || {
             self.inner.read_at(offset, len)
         })
     }
 
+    fn len(&self) -> FsResult<u64> {
+        checked(&self.scope, "filesystem length", || self.inner.len())
+    }
+}
+
+impl File for ScopedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         checked(&self.scope, "filesystem file write", || {
             self.inner.write_at(offset, data)
@@ -161,10 +204,6 @@ impl File for ScopedFile<'_> {
         checked(&self.scope, "filesystem append", || self.inner.append(data))
     }
 
-    fn len(&self) -> FsResult<u64> {
-        checked(&self.scope, "filesystem length", || self.inner.len())
-    }
-
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         checked(&self.scope, "filesystem sync", || {
             self.inner.sync(durability)
@@ -176,7 +215,7 @@ impl File for ScopedFile<'_> {
 mod tests {
     use super::*;
     use crate::common::OperationDeadline;
-    use crate::io::OpenMode;
+    use crate::io::{OpenMode, ReadFile};
 
     fn read_write() -> OpenOptions {
         OpenOptions {
@@ -208,6 +247,36 @@ mod tests {
         // Assert: cancellation prevents calling the create operation at all.
         assert!(matches!(result, Err(FsError::Timeout(_))));
         assert!(!directory.path().join("cancelled.wal").exists());
+    }
+
+    #[test]
+    fn should_reject_reads_when_read_only_view_scope_was_cancelled() {
+        // Arrange: a real file behind a scoped read-only view, opened while
+        // the scope is still active.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("segment.wal"), b"replayed bytes").unwrap();
+        let inner: Arc<dyn ReadFs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let scope = active_scope();
+        let view = scope_read_fs(inner, scope.clone());
+        let path = FsPath::new("segment.wal");
+        let file = view.open_read(&path).unwrap();
+        let before = file.read_at(0, 14).unwrap();
+
+        // Act
+        scope.cancel();
+        let read = file.read_at(0, 14);
+        let open = view.open_read(&path).map(|_| ());
+        let exists = view.exists(&path);
+        let metadata = view.metadata(&path);
+        let listing = view.list_dir(&FsPath::new(""));
+
+        // Assert: the open file and every later read consult the scope.
+        assert_eq!(before, Bytes::from_static(b"replayed bytes"));
+        assert!(matches!(read, Err(FsError::Timeout(_))));
+        assert!(matches!(open, Err(FsError::Timeout(_))));
+        assert!(matches!(exists, Err(FsError::Timeout(_))));
+        assert!(matches!(metadata, Err(FsError::Timeout(_))));
+        assert!(matches!(listing, Err(FsError::Timeout(_))));
     }
 
     #[test]
@@ -245,23 +314,25 @@ mod tests {
         scope: DeadlineScope,
     }
 
-    impl File for CancelAfterRead<'_> {
+    impl crate::io::ReadFile for CancelAfterRead<'_> {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             let bytes = self.inner.read_at(offset, len)?;
             self.scope.cancel();
             Ok(bytes)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for CancelAfterRead<'_> {
         fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
             self.inner.write_at(offset, bytes)
         }
 
         fn append(&mut self, bytes: Bytes) -> FsResult<u64> {
             self.inner.append(bytes)
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
         }
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -342,6 +413,25 @@ mod tests {
 
     struct CapabilityFs(Arc<dyn Fs>);
 
+    impl ReadFs for CapabilityFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.0.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.0.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.0.list_dir(path)
+        }
+    }
+
     impl Fs for CapabilityFs {
         fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
             Some(Arc::clone(&self.0))
@@ -371,17 +461,8 @@ mod tests {
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.0.remove_file(path)
         }
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.0.exists(path)
-        }
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.0.metadata(path)
-        }
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.0.create_dir_all(path)
-        }
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.0.list_dir(path)
         }
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.0.remove_dir_all(path)

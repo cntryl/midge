@@ -1,6 +1,6 @@
 use crate::codec::{CompressionAlgo, CompressionPolicy};
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
+use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use crate::sst::fs::FsSstFactoryIo;
 use crate::sst::traits::SstFactory;
 use crate::types::EntryType;
@@ -248,6 +248,25 @@ impl AddressingDelegatingFs {
     }
 }
 
+impl ReadFs for AddressingDelegatingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for AddressingDelegatingFs {
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         self.inner.host_addressing()
@@ -265,20 +284,8 @@ impl Fs for AddressingDelegatingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

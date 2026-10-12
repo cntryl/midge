@@ -332,7 +332,7 @@
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 57,
+          "line": 58,
           "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
           "claim": "Native S3 predecessor loses real lease validity; a higher epoch successor publishes and reclaims WAL/SST state before held immutable WAL completion. Strict predecessor write is fenced and no subsequent control mutation is forwarded.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
@@ -343,12 +343,12 @@
               "helper": "run_schedule"
             },
             {
-              "line": 371,
-              "marker": "assert!(",
+              "line": 348,
+              "marker": "assert!(successor_catalog.fencing_epoch() > initial_catalog.fencing_epoch());",
               "helper": "run_schedule"
             },
             {
-              "line": 404,
+              "line": 401,
               "marker": "assert!(predecessor_proxy.control.observations()[predecessor_release_index..]",
               "helper": "run_schedule"
             }
@@ -514,17 +514,17 @@
         },
         {
           "path": "tests/solid_governance.rs",
-          "line": 555,
+          "line": 553,
           "symbol": "should_route_manifest_file_list_mutation_through_runtime_owner",
           "claim": "Source-governance control rejects mutable manifest dereferencing and selected direct file-list bypass spellings in production owner modules; this is a source-structure check, not an executed publication schedule.",
           "scope": "source-string governance check; no executed runtime/data proof",
           "assertions": [
             {
-              "line": 582,
+              "line": 580,
               "marker": "assert!("
             },
             {
-              "line": 586,
+              "line": 584,
               "marker": "assert!("
             }
           ]
@@ -552,7 +552,7 @@
         },
         {
           "path": "src/metadata/manifest.rs",
-          "line": 244,
+          "line": 205,
           "symbol": "Manifest::next_cf_id",
           "kind": "function",
           "marker": "pub fn next_cf_id(&self) -> crate::common::MidgeResult<u32> {"
@@ -811,53 +811,53 @@
               "marker": "assert_ne!(signed_s3_request(\"GET\", path, &[]).unwrap().len(), 0);"
             },
             {
-              "line": 67,
+              "line": 66,
               "marker": "assert_eq!("
             },
             {
-              "line": 83,
+              "line": 82,
               "marker": "assert!(matches!("
             },
             {
-              "line": 135,
+              "line": 134,
               "marker": "assert!("
+            },
+            {
+              "line": 143,
+              "marker": "assert!(successor_catalog.fencing_epoch() > original_catalog.fencing_epoch());"
             },
             {
               "line": 145,
-              "marker": "assert!("
-            },
-            {
-              "line": 150,
               "marker": "assert!(matches!(frozen.get(key), Err(MidgeError::Fenced(_))));"
             },
             {
-              "line": 152,
+              "line": 147,
               "marker": "assert!(matches!("
             },
             {
-              "line": 158,
+              "line": 153,
               "marker": "assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));"
             },
             {
-              "line": 159,
+              "line": 154,
               "marker": "assert_eq!(scan.state(), IteratorState::Failed);"
             },
             {
-              "line": 163,
+              "line": 158,
               "marker": "assert!(matches!("
             },
             {
-              "line": 191,
+              "line": 186,
               "marker": "assert_eq!(actual, expected);",
               "helper": "assert_successor_rows"
             },
             {
-              "line": 193,
+              "line": 188,
               "marker": "assert_eq!(read.get(&key).unwrap(), Some(value));",
               "helper": "assert_successor_rows"
             },
             {
-              "line": 195,
+              "line": 190,
               "marker": "assert_eq!(read.get(b\"rejected\").unwrap(), None);",
               "helper": "assert_successor_rows"
             }
@@ -1197,7 +1197,7 @@
         },
         {
           "path": "src/wal/recovery/streaming.rs",
-          "line": 283,
+          "line": 270,
           "symbol": "replay_wal_with_options",
           "kind": "function",
           "marker": "pub(crate) fn replay_wal_with_options("
@@ -1227,17 +1227,17 @@
         },
         {
           "path": "src/wal/recovery/tests.rs",
-          "line": 863,
+          "line": 1021,
           "symbol": "should_recover_only_committed_transaction_given_split_wal_records_when_commit_marker_is_missing",
           "claim": "Real WAL with synced TxnBegin and Put but no commit marker reports two decoded records and creates no recovered CF memtable.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 899,
+              "line": 1065,
               "marker": "assert_eq!(stats.record_count, 2);"
             },
             {
-              "line": 900,
+              "line": 1066,
               "marker": "assert!("
             }
           ]
@@ -1632,45 +1632,45 @@
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5767,
+          "line": 5697,
           "symbol": "should_not_advance_cloud_durability_across_unacked_segment_gap",
           "claim": "Cloud frontier stays zero for later ACK alone, retains local WAL and buffered ACK; preceding ACK advances contiguous frontier and drains covered WAL bookkeeping.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5788,
+              "line": 5718,
               "marker": "assert!(first_deferred, \"CloudAsync first append should defer\");"
             },
             {
-              "line": 5808,
+              "line": 5738,
               "marker": "assert!(second_deferred, \"CloudAsync second append should defer\");"
             },
             {
-              "line": 5815,
+              "line": 5745,
               "marker": "assert!(second_segment > first_segment);"
             },
             {
-              "line": 5826,
+              "line": 5756,
               "marker": "assert_eq!("
             },
             {
-              "line": 5831,
+              "line": 5761,
               "marker": "assert!("
             },
             {
-              "line": 5838,
+              "line": 5768,
               "marker": "assert!("
             },
             {
-              "line": 5848,
+              "line": 5778,
               "marker": "assert_eq!("
             },
             {
-              "line": 5853,
+              "line": 5783,
               "marker": "assert!("
             },
             {
-              "line": 5859,
+              "line": 5789,
               "marker": "assert!("
             }
           ]
@@ -1807,86 +1807,142 @@
       "id": "WAL-3",
       "production": [
         {
-          "path": "src/wal/recovery.rs",
-          "line": 436,
-          "symbol": "collect_replay_paths",
+          "path": "src/wal/planner.rs",
+          "line": 307,
+          "symbol": "local",
           "kind": "function",
-          "marker": "fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<ReplayFile>> {"
+          "marker": "pub(crate) fn local(ledger: &WalLedger) -> RecoveryPlan {"
         },
         {
-          "path": "src/wal/recovery/streaming.rs",
-          "line": 283,
-          "symbol": "replay_wal_with_options",
+          "path": "src/wal/planner.rs",
+          "line": 531,
+          "symbol": "Planner::admit_open",
           "kind": "function",
-          "marker": "pub(crate) fn replay_wal_with_options("
+          "marker": "fn admit_open("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 593,
-          "symbol": "active_local_source",
+          "line": 462,
+          "symbol": "apply_open_cut",
           "kind": "function",
-          "marker": "fn active_local_source("
+          "marker": "fn apply_open_cut(local: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {"
+        },
+        {
+          "path": "src/wal/recovery/streaming.rs",
+          "line": 270,
+          "symbol": "replay_wal_with_options",
+          "kind": "function",
+          "marker": "pub(crate) fn replay_wal_with_options("
         }
       ],
       "tests": [
         {
           "path": "tests/durability.rs",
-          "line": 672,
+          "line": 675,
           "symbol": "should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mode",
           "claim": "Actual synced prefix plus truncated/torn active record reopens strictly with prefix present and torn key absent.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 717,
+              "line": 720,
               "marker": "assert_eq!("
             },
             {
-              "line": 721,
+              "line": 724,
               "marker": "assert_eq!(tx.get(b\"torn\").expect(\"get torn key\"), None);"
             }
           ]
         },
         {
           "path": "src/wal/recovery/tests.rs",
-          "line": 863,
+          "line": 1021,
           "symbol": "should_recover_only_committed_transaction_given_split_wal_records_when_commit_marker_is_missing",
           "claim": "Synced transaction begin/put without marker decodes but materializes no recovered memtable.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 899,
+              "line": 1065,
               "marker": "assert_eq!(stats.record_count, 2);"
             },
             {
-              "line": 900,
+              "line": 1066,
               "marker": "assert!("
+            }
+          ]
+        },
+        {
+          "path": "src/wal/planner/tests.rs",
+          "line": 170,
+          "symbol": "should_plan_every_ledger_member_after_its_anchor",
+          "claim": "A ledger with sealed members 1 and 2 and open member 3 plans replay from its anchor in that order, sealed first and the open member last, each checked against its ledger facts.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 179,
+              "marker": "assert_eq!(plan.anchor, ChainLink::GENESIS);"
+            },
+            {
+              "line": 180,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 187,
+              "marker": "assert!(plan"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/planner/tests.rs",
+          "line": 521,
+          "symbol": "should_cut_a_torn_open_member_without_keeping_a_copy",
+          "claim": "An open member holding one record and then a torn frame is cut back to its 160 verified bytes without a retained copy and replays; strict recovery is not flagged as salvage.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 543,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 551,
+              "marker": "assert_eq!(ids(&plan), vec![(1, Source::Local)]);"
+            },
+            {
+              "line": 552,
+              "marker": "assert!(!plan.opened_in_salvage_mode);"
             }
           ]
         }
       ],
-      "preconditions": "Actual local filesystem WAL and public strict reopen; split record test directly drives real recovery.",
-      "uncovered": "These selected assertions prove retained prefix and transaction atomicity, not directly the truncation+fsync-before-next-append sequence. That ordering must also remain source-backed; individual frame/crash variants are bounded schedules."
+      "preconditions": "Actual local filesystem WAL and public strict reopen; split record test directly drives real recovery. Planner tests use real sealed segment bytes, a real ledger and constructed probes.",
+      "uncovered": "These selected assertions prove the replay order, the retained prefix, the planned cut and transaction atomicity, not directly the truncation+fsync-before-next-append sequence. That ordering must also remain source-backed; individual frame/crash variants are bounded schedules."
     },
     {
       "id": "WAL-4",
       "production": [
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 351,
-          "symbol": "recover_or_salvage",
+          "path": "src/wal/planner.rs",
+          "line": 355,
+          "symbol": "plan",
           "kind": "function",
-          "marker": "fn recover_or_salvage<T>("
+          "marker": "pub(crate) fn plan("
         },
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 795,
-          "symbol": "stop_at_first_hole",
+          "path": "src/wal/planner.rs",
+          "line": 592,
+          "symbol": "Planner::finish",
           "kind": "function",
-          "marker": "fn stop_at_first_hole("
+          "marker": "fn finish("
+        },
+        {
+          "path": "src/runtime/cloud_startup/mod.rs",
+          "line": 93,
+          "symbol": "commit_recovery_plan_within",
+          "kind": "function",
+          "marker": "pub(crate) fn commit_recovery_plan_within("
         },
         {
           "path": "src/wal/recovery.rs",
-          "line": 410,
+          "line": 430,
           "symbol": "replay_wal_with_manifest_filter_within",
           "kind": "function",
           "marker": "pub(crate) fn replay_wal_with_manifest_filter_within("
@@ -1895,129 +1951,255 @@
       "tests": [
         {
           "path": "tests/durability.rs",
-          "line": 803,
+          "line": 822,
           "symbol": "should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening",
           "claim": "Genuine corrupted first WAL frame fails strict recovery and salvage exposes no corrupted key.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 849,
+              "line": 868,
               "marker": "assert!("
             },
             {
-              "line": 862,
+              "line": 881,
               "marker": "assert_eq!(tx.get(b\"first\").expect(\"get first\"), None);"
             }
           ]
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 452,
+          "line": 669,
           "symbol": "should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one",
-          "claim": "Real catalog fixture corruption at segment 2 yields salvage flag, remote replay only [1], unreplayed [2,3], active WAL quarantined, floor=4 and next segment=4.",
+          "claim": "Real catalog fixture corruption at segment 2 with no local copy yields the salvage flag, remote replay only [1], set-aside catalog entries [2,3] and open segment kept aside, max_unreplayed_sequence=4, a rebase at segment 4 or later, and one catalog change leaving entries [1] with seq_floor=4.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 466,
+              "line": 683,
               "marker": "assert!(recovered.plan.opened_in_salvage_mode);"
             },
             {
-              "line": 467,
+              "line": 684,
               "marker": "assert_eq!("
             },
             {
-              "line": 476,
+              "line": 693,
               "marker": "assert_eq!("
             },
             {
-              "line": 484,
+              "line": 701,
               "marker": "assert_eq!("
             },
             {
-              "line": 493,
-              "marker": "assert!(recovered.plan.active_wal.is_none());"
+              "line": 710,
+              "marker": "assert!(recovered.segments.open_segment().is_none());"
             },
             {
-              "line": 494,
+              "line": 711,
               "marker": "assert!(!active.exists());"
             },
             {
-              "line": 495,
-              "marker": "assert!(active.with_file_name(\"wal.log.salvage-retained\").exists());"
+              "line": 712,
+              "marker": "assert!(fixture.salvaged(4).is_some());"
             },
             {
-              "line": 496,
+              "line": 713,
               "marker": "assert_eq!(recovered.plan.max_unreplayed_sequence, 4);"
             },
             {
-              "line": 497,
-              "marker": "assert_eq!(recovered.next_segment_id, 4);"
+              "line": 714,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 723,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 731,
+              "marker": "assert_eq!(catalog.seq_floor(), 4);"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/planner/tests.rs",
+          "line": 558,
+          "symbol": "should_replay_only_the_chain_prefix_before_the_first_hole",
+          "claim": "Seeded property over published and unpublished segments with damaged objects or members: strict planning fails exactly when a hole precedes the open segment, salvage replays exactly the segments before the first hole, and salvage is flagged exactly when a hole exists.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 581,
+              "marker": "proptest::prop_assert_eq!(strict.is_err(), hole.is_some());"
+            },
+            {
+              "line": 584,
+              "marker": "proptest::prop_assert_eq!(replayed, expected);"
+            },
+            {
+              "line": 585,
+              "marker": "proptest::prop_assert_eq!(salvage.opened_in_salvage_mode, hole.is_some());"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs",
+          "line": 298,
+          "symbol": "should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_catalog_commit",
+          "claim": "A salvage child aborts at midge::recovery::after_salvage_floor_before_quarantine after its catalog commit; a strict reopen replays only remote segment 1, owes no local segment, replays no open segment, keeps new writes above sequence 5 and links its new open segment to the catalog head.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 324,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 333,
+              "marker": "assert!(reopened.plan.local_segments.is_empty());"
+            },
+            {
+              "line": 334,
+              "marker": "assert!(reopened.segments.open_segment().is_none());"
+            },
+            {
+              "line": 335,
+              "marker": "assert_eq!(reopened.plan.max_unreplayed_sequence, 5);"
+            },
+            {
+              "line": 336,
+              "marker": "assert_eq!(history.ledger().open_member().open.prev, head);"
             }
           ]
         }
       ],
-      "preconditions": "Explicit RecoveryPolicy::Strict versus Salvage; real catalog/segment bytes and actual corrupted publication identity.",
+      "preconditions": "Explicit RecoveryPolicy::Strict versus Salvage; real catalog/segment bytes and actual corrupted publication identity. The crash case aborts a real child process at the named failpoint. The property test uses real sealed segments with constructed damage probes.",
       "uncovered": "Salvage is degraded recovery, not normal complete-history success. These schedules do not license skipping a hole or guarantee every damaged format is salvageable."
     },
     {
       "id": "WAL-5",
       "production": [
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 694,
-          "symbol": "enforce_epoch_order",
+          "path": "src/wal/format/link.rs",
+          "line": 135,
+          "symbol": "Chain::admit",
           "kind": "function",
-          "marker": "fn enforce_epoch_order("
+          "marker": "pub(crate) fn admit(&mut self, header: &SegmentHeader, id: SegmentId) -> MidgeResult<()> {"
         },
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 795,
-          "symbol": "stop_at_first_hole",
+          "path": "src/wal/planner.rs",
+          "line": 592,
+          "symbol": "Planner::finish",
           "kind": "function",
-          "marker": "fn stop_at_first_hole("
+          "marker": "fn finish("
+        },
+        {
+          "path": "src/wal/cloud_catalog.rs",
+          "line": 519,
+          "symbol": "WalPublicationCatalog::set_aside_suffix",
+          "kind": "function",
+          "marker": "pub(crate) fn set_aside_suffix("
+        },
+        {
+          "path": "src/runtime/cloud_startup/mod.rs",
+          "line": 93,
+          "symbol": "commit_recovery_plan_within",
+          "kind": "function",
+          "marker": "pub(crate) fn commit_recovery_plan_within("
         }
       ],
       "tests": [
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 1027,
-          "symbol": "should_stop_replay_at_epoch_regressed_sealed_segment",
-          "claim": "Published epochs 8,7,9 give replay segments [1], set-aside [2,3] and max_unreplayed_sequence=3.",
+          "path": "src/wal/planner/tests.rs",
+          "line": 395,
+          "symbol": "should_stop_at_the_first_segment_whose_header_breaks_the_chain",
+          "claim": "A cache segment written by epoch 7 after the catalog's epoch-8 segment breaks the chain: strict planning refuses it naming the lower epoch; salvage replays only segment 1, rebases onto it and lifts the catalog floor over the set-aside segment.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1038,
+              "line": 410,
+              "marker": "assert!("
+            },
+            {
+              "line": 414,
+              "marker": "assert_eq!(ids(&salvage), vec![(1, Source::Remote)]);"
+            },
+            {
+              "line": 415,
               "marker": "assert_eq!("
             },
             {
-              "line": 1047,
-              "marker": "assert_eq!("
-            },
-            {
-              "line": 1056,
-              "marker": "assert_eq!(recovered.plan.max_unreplayed_sequence, 3);"
+              "line": 422,
+              "marker": "assert!(salvage.catalog_floor >= tail[0].link().last_seq);"
             }
           ]
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 1120,
-          "symbol": "should_preserve_wal_files_when_strict_recovery_rejects_epoch_regression",
-          "claim": "Strict rejection preserves input files rather than quarantining/deleting them.",
+          "line": 953,
+          "symbol": "should_reject_strict_recovery_when_later_segment_has_lower_writer_epoch",
+          "claim": "Real catalog fixture: a local sealed segment by epoch 7 after published epoch-8 history fails strict recovery with the epoch-regression reason and stays in place.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1135,
-              "marker": "assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));"
+              "line": 963,
+              "marker": "assert!("
             },
             {
-              "line": 1137,
-              "marker": "assert_eq!(std::fs::read(path)?, bytes);"
+              "line": 968,
+              "marker": "assert!(stale.exists());"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
+          "line": 973,
+          "symbol": "should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch",
+          "claim": "An open segment by epoch 7 after published epoch-8 history fails strict recovery; the file stays in place and no salvage copy is made.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 983,
+              "marker": "assert!("
+            },
+            {
+              "line": 988,
+              "marker": "assert!(active.exists());"
+            },
+            {
+              "line": 989,
+              "marker": "assert!(!active"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/planner/tests.rs",
+          "line": 337,
+          "symbol": "should_rebase_strictly_when_the_catalog_set_this_history_aside",
+          "claim": "A catalog that set segments 2 and 3 aside with floor 5 is Behind this ledger and covers it: strict planning replays segment 1, rebases onto it, keeps new writes above sequence 5 and needs no further catalog change.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 354,
+              "marker": "assert_eq!(lineage, Lineage::Behind { covered: true });"
+            },
+            {
+              "line": 355,
+              "marker": "assert_eq!(ids(&plan), vec![(1, Source::Remote)]);"
+            },
+            {
+              "line": 356,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 363,
+              "marker": "assert!(plan.max_unreplayed_sequence >= 5);"
+            },
+            {
+              "line": 364,
+              "marker": "assert!(!plan.changes_catalog(&catalog));"
             }
           ]
         }
       ],
-      "preconditions": "Actual planner/catalog fixture with deliberate epoch regression; salvage and strict paths are distinct.",
+      "preconditions": "Real sealed segment bytes and catalog entries with a deliberate epoch regression; planner tests use a real ledger and constructed probes, and the streaming fixtures read real local files. Salvage and strict paths are distinct.",
       "uncovered": "The selected planner assertions establish ordering and floor inputs, not every public post-recovery sequence allocator path or epoch overflow boundary."
     },
     {
@@ -2110,7 +2292,7 @@
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 755,
+          "line": 710,
           "symbol": "prune_cloud_wal_segments_within",
           "kind": "function",
           "marker": "pub(crate) fn prune_cloud_wal_segments_within("
@@ -2167,17 +2349,17 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 225,
+          "line": 240,
           "symbol": "should_require_full_range_coverage_for_wal_tombstones",
           "claim": "Constructed authoritative [a,m] coverage covers [c,k) but rejects [c,z).",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 254,
+              "line": 269,
               "marker": "assert!(covered_result);"
             },
             {
-              "line": 255,
+              "line": 270,
               "marker": "assert!(!uncovered_result);"
             }
           ]
@@ -2773,33 +2955,33 @@
         },
         {
           "path": "src/runtime/state/tests.rs",
-          "line": 1509,
+          "line": 1511,
           "symbol": "should_replay_every_compaction_publication_crash_point_to_complete_authority",
           "claim": "Recovered manifest resolves the constructed crash-phase matrix to complete authority.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1564,
+              "line": 1566,
               "marker": "assert_eq!(mirrored_names.len(), mirrored_output_count);"
             },
             {
-              "line": 1565,
+              "line": 1567,
               "marker": "assert!(mirrored_names.is_subset(&new_authority));"
             },
             {
-              "line": 1591,
+              "line": 1593,
               "marker": "assert_eq!("
-            },
-            {
-              "line": 1595,
-              "marker": "assert!(recovered_authority == old_authority || recovered_authority == new_authority);"
             },
             {
               "line": 1597,
+              "marker": "assert!(recovered_authority == old_authority || recovered_authority == new_authority);"
+            },
+            {
+              "line": 1599,
               "marker": "assert_eq!("
             },
             {
-              "line": 1603,
+              "line": 1605,
               "marker": "assert_eq!("
             }
           ]
@@ -3039,53 +3221,53 @@
               "marker": "assert_ne!(signed_s3_request(\"GET\", path, &[]).unwrap().len(), 0);"
             },
             {
-              "line": 67,
+              "line": 66,
               "marker": "assert_eq!("
             },
             {
-              "line": 83,
+              "line": 82,
               "marker": "assert!(matches!("
             },
             {
-              "line": 135,
+              "line": 134,
               "marker": "assert!("
+            },
+            {
+              "line": 143,
+              "marker": "assert!(successor_catalog.fencing_epoch() > original_catalog.fencing_epoch());"
             },
             {
               "line": 145,
-              "marker": "assert!("
-            },
-            {
-              "line": 150,
               "marker": "assert!(matches!(frozen.get(key), Err(MidgeError::Fenced(_))));"
             },
             {
-              "line": 152,
+              "line": 147,
               "marker": "assert!(matches!("
             },
             {
-              "line": 158,
+              "line": 153,
               "marker": "assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));"
             },
             {
-              "line": 159,
+              "line": 154,
               "marker": "assert_eq!(scan.state(), IteratorState::Failed);"
             },
             {
-              "line": 163,
+              "line": 158,
               "marker": "assert!(matches!("
             },
             {
-              "line": 191,
+              "line": 186,
               "marker": "assert_eq!(actual, expected);",
               "helper": "assert_successor_rows"
             },
             {
-              "line": 193,
+              "line": 188,
               "marker": "assert_eq!(read.get(&key).unwrap(), Some(value));",
               "helper": "assert_successor_rows"
             },
             {
-              "line": 195,
+              "line": 190,
               "marker": "assert_eq!(read.get(b\"rejected\").unwrap(), None);",
               "helper": "assert_successor_rows"
             }
@@ -3326,21 +3508,21 @@
       "production": [
         {
           "path": "src/metadata/journal.rs",
-          "line": 315,
+          "line": 305,
           "symbol": "replay_identified_edits_after_with_fs_unlocked_within",
           "kind": "function",
           "marker": "pub(crate) fn replay_identified_edits_after_with_fs_unlocked_within("
         },
         {
           "path": "src/metadata/persistence.rs",
-          "line": 434,
+          "line": 418,
           "symbol": "save_snapshot_and_truncate_journal_with_fs",
           "kind": "function",
           "marker": "pub fn save_snapshot_and_truncate_journal_with_fs("
         },
         {
           "path": "src/metadata/persistence.rs",
-          "line": 450,
+          "line": 434,
           "symbol": "save_snapshot_unlocked",
           "kind": "function",
           "marker": "pub(crate) fn save_snapshot_unlocked("
@@ -3349,62 +3531,62 @@
       "tests": [
         {
           "path": "src/metadata/persistence.rs",
-          "line": 1152,
+          "line": 1140,
           "symbol": "should_preserve_concurrent_journal_edit_when_checkpoint_uses_stale_manifest",
           "claim": "Actual concurrent journal append survives stale snapshot checkpoint; loaded file and edit frontier remain included.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1181,
+              "line": 1169,
               "marker": "assert!("
             },
             {
-              "line": 1188,
+              "line": 1176,
               "marker": "assert_eq!(loaded.edit_checkpoint_id, 1);"
             }
           ]
         },
         {
           "path": "src/metadata/persistence.rs",
-          "line": 1241,
+          "line": 1229,
           "symbol": "should_replay_only_post_checkpoint_edits_given_crash_after_snapshot_rename",
           "claim": "Real post-rename failpoint leaves journal; next edit replays once, snapshot edit ID 1/loaded 2, exact two files and one post-checkpoint edit.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1266,
+              "line": 1254,
               "marker": "assert!(checkpoint_error.contains(\"snapshot rename\"));"
             },
             {
-              "line": 1267,
+              "line": 1255,
               "marker": "assert!("
             },
             {
-              "line": 1300,
+              "line": 1288,
               "marker": "assert_eq!(snapshot_checkpoint, 1);"
             },
             {
-              "line": 1301,
+              "line": 1289,
               "marker": "assert_eq!("
             },
             {
-              "line": 1305,
+              "line": 1293,
               "marker": "assert_eq!(loaded.files.len(), 2);"
             },
             {
-              "line": 1306,
+              "line": 1294,
               "marker": "assert_eq!(replayed.len(), 1);"
             },
             {
-              "line": 1307,
+              "line": 1295,
               "marker": "assert!(matches!("
             },
             {
-              "line": 1312,
+              "line": 1300,
               "marker": "assert_eq!("
             },
             {
-              "line": 1321,
+              "line": 1309,
               "marker": "assert_eq!("
             }
           ]
@@ -3464,29 +3646,29 @@
       "id": "CLOUD-1",
       "production": [
         {
-          "path": "src/wal/cloud_segment.rs",
-          "line": 39,
-          "symbol": "object_key",
+          "path": "src/wal/cloud_catalog.rs",
+          "line": 108,
+          "symbol": "CatalogEntry::object_key",
           "kind": "function",
-          "marker": "pub(crate) fn object_key(segment_id: u64, writer_epoch: u64) -> String {"
+          "marker": "pub fn object_key(&self) -> String {"
         },
         {
           "path": "src/wal/cloud_catalog.rs",
-          "line": 190,
+          "line": 560,
           "symbol": "WalPublicationCatalog::validate",
           "kind": "function",
           "marker": "pub(crate) fn validate(&self) -> Result<(), String> {"
         },
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 333,
-          "symbol": "validate_publication_identity",
+          "path": "src/wal/cloud_catalog.rs",
+          "line": 119,
+          "symbol": "CatalogEntry::validate_bytes",
           "kind": "function",
-          "marker": "fn validate_publication_identity("
+          "marker": "pub(crate) fn validate_bytes(&self, bytes: &[u8]) -> Result<(), String> {"
         },
         {
           "path": "src/runtime/cloud_startup/cloud_recovery/mod.rs",
-          "line": 321,
+          "line": 316,
           "symbol": "reject_cloud_wal_without_catalog",
           "kind": "function",
           "marker": "pub(crate) fn reject_cloud_wal_without_catalog("
@@ -3495,74 +3677,100 @@
       "tests": [
         {
           "path": "src/engine/tests.rs",
-          "line": 961,
+          "line": 927,
           "symbol": "should_reject_epoch_scoped_simulated_cloud_wal_without_catalog",
           "claim": "Actual orphan epoch-scoped valid WAL bytes are rejected without the publication catalog.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 979,
+              "line": 949,
               "marker": "assert!(matches!("
             }
           ]
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 321,
+          "line": 534,
           "symbol": "should_validate_catalog_authority_before_exposing_replay_sources",
-          "claim": "Strict rejects regressed/checksum-invalid catalog history; salvage flags degraded and exposes only first validated segment, no active WAL.",
+          "claim": "Strict rejects checksum-invalid catalog history; salvage flags degraded recovery, exposes only the first validated segment and no open segment, keeps the open segment aside and rebases at segment 4 or later.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 337,
+              "line": 542,
               "marker": "assert!(fixture.build(RecoveryPolicy::Strict).is_err());"
             },
             {
-              "line": 343,
+              "line": 548,
               "marker": "assert!(recovered.plan.opened_in_salvage_mode);"
             },
             {
-              "line": 344,
+              "line": 549,
               "marker": "assert_eq!("
             },
             {
-              "line": 353,
-              "marker": "assert!(recovered.plan.active_wal.is_none());"
+              "line": 558,
+              "marker": "assert!(recovered.segments.open_segment().is_none());"
             },
             {
-              "line": 354,
+              "line": 559,
               "marker": "assert_eq!("
             },
             {
-              "line": 362,
-              "marker": "assert!(!fixture.directory.path().join(\"local/wal/wal.log\").exists());"
+              "line": 567,
+              "marker": "assert!(!active.exists());"
             },
             {
-              "line": 363,
-              "marker": "assert!(fixture"
+              "line": 568,
+              "marker": "assert!(fixture.salvaged(4).is_some());"
             },
             {
-              "line": 368,
-              "marker": "assert_eq!(recovered.next_segment_id, 4);"
+              "line": 569,
+              "marker": "assert!(matches!("
             }
           ]
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 57,
+          "line": 58,
           "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
           "claim": "Held native immutable WAL PUT succeeds, remains an uncatalogued orphan, and cannot alter the successor catalog. Two absent-cache fresh-process recoveries exclude its complete transaction.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 411,
+              "line": 408,
               "marker": "assert_eq!(",
               "helper": "run_schedule"
             }
           ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
+          "line": 2171,
+          "symbol": "should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry",
+          "claim": "A cataloged object whose header links another segment than its entry names fails strict recovery.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 2198,
+              "marker": "assert!("
+            }
+          ]
+        },
+        {
+          "path": "src/wal/cloud_catalog.rs",
+          "line": 718,
+          "symbol": "should_reject_catalog_whose_first_entry_does_not_link_the_anchor",
+          "claim": "A decoded catalog whose first entry does not link its anchor is invalid.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 728,
+              "marker": "assert!("
+            }
+          ]
         }
       ],
-      "preconditions": "Actual filesystem CloudSimulated object and real catalog planner; explicit epoch/checksum faults.",
+      "preconditions": "Actual filesystem CloudSimulated objects and real catalog bytes through the recovery planner; explicit checksum and chain-link faults.",
       "uncovered": "These prove object existence is insufficient and catalog identity is checked. They do not simulate every late native upload schedule or establish provider-side immutable-object retention settings."
     },
     {
@@ -3577,14 +3785,14 @@
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 730,
+          "line": 622,
           "symbol": "verify_uploaded_wal_segment",
           "kind": "function",
           "marker": "pub(crate) fn verify_uploaded_wal_segment("
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 785,
+          "line": 681,
           "symbol": "publish_wal_segments",
           "kind": "function",
           "marker": "pub(crate) fn publish_wal_segments("
@@ -3600,17 +3808,17 @@
       "tests": [
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2912,
+          "line": 3066,
           "symbol": "should_readback_remote_wal_before_upload_worker_emits_ack",
           "claim": "Actual upload worker emits ACK for segment 9/sequence 13 only with recorded GET download of exact epoch/segment key.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2946,
+              "line": 3100,
               "marker": "assert!("
             },
             {
-              "line": 2956,
+              "line": 3110,
               "marker": "assert!("
             }
           ]
@@ -3642,58 +3850,58 @@
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests.rs",
-          "line": 5710,
+          "line": 5697,
           "symbol": "should_not_advance_cloud_durability_across_unacked_segment_gap",
           "claim": "Out-of-order ACK stays buffered and WAL retained; earlier ACK permits exact contiguous cloud frontier and drains covered tracking.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 5731,
+              "line": 5718,
               "marker": "assert!(first_deferred, \"CloudAsync first append should defer\");"
             },
             {
-              "line": 5751,
+              "line": 5738,
               "marker": "assert!(second_deferred, \"CloudAsync second append should defer\");"
             },
             {
-              "line": 5758,
+              "line": 5745,
               "marker": "assert!(second_segment > first_segment);"
             },
             {
-              "line": 5769,
+              "line": 5756,
               "marker": "assert_eq!("
             },
             {
-              "line": 5774,
+              "line": 5761,
               "marker": "assert!("
             },
             {
-              "line": 5781,
+              "line": 5768,
               "marker": "assert!("
             },
             {
-              "line": 5791,
+              "line": 5778,
               "marker": "assert_eq!("
             },
             {
-              "line": 5796,
+              "line": 5783,
               "marker": "assert!("
             },
             {
-              "line": 5802,
+              "line": 5789,
               "marker": "assert!("
             }
           ]
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 57,
+          "line": 58,
           "symbol": "should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup",
           "claim": "Late native upload completion after real takeover leaves the predecessor cloud frontier unchanged. A deliberate early-frontier mutation is rejected by the fixture.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 387,
+              "line": 384,
               "marker": "assert_eq!(",
               "helper": "run_schedule"
             }
@@ -3884,28 +4092,42 @@
       "production": [
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 118,
-          "symbol": "build_with_local_fs_within",
+          "line": 71,
+          "symbol": "StreamingCloudWalRecovery::build_within",
           "kind": "function",
-          "marker": "pub(crate) fn build_with_local_fs_within("
+          "marker": "pub(crate) fn build_within("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 373,
-          "symbol": "remote_source",
+          "line": 204,
+          "symbol": "PublishedObject::probe",
           "kind": "function",
-          "marker": "fn remote_source("
+          "marker": "fn probe(&self, entry: &CatalogEntry) -> MidgeResult<(RemoteSource, Probe)> {"
+        },
+        {
+          "path": "src/wal/planner.rs",
+          "line": 54,
+          "symbol": "lineage",
+          "kind": "function",
+          "marker": "pub(crate) fn lineage(catalog: &WalPublicationCatalog, ledger: Option<&WalLedger>) -> Lineage {"
+        },
+        {
+          "path": "src/wal/planner.rs",
+          "line": 492,
+          "symbol": "Planner::admit_tail",
+          "kind": "function",
+          "marker": "fn admit_tail("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 593,
-          "symbol": "active_local_source",
+          "line": 480,
+          "symbol": "assemble_planned_sources",
           "kind": "function",
-          "marker": "fn active_local_source("
+          "marker": "fn assemble_planned_sources("
         },
         {
           "path": "src/wal/recovery/streaming.rs",
-          "line": 283,
+          "line": 270,
           "symbol": "replay_wal_with_options",
           "kind": "function",
           "marker": "pub(crate) fn replay_wal_with_options("
@@ -3976,30 +4198,80 @@
         },
         {
           "path": "tests/cloud_provider_engine_qualification/authority_publication.rs",
-          "line": 504,
+          "line": 501,
           "symbol": "should_verify_acknowledged_state_in_fresh_recovery_process",
           "claim": "Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation.",
           "scope": "Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.",
           "assertions": [
             {
-              "line": 125,
+              "line": 126,
               "marker": "assert_eq!(",
               "helper": "assert_exact"
             },
             {
-              "line": 130,
+              "line": 131,
               "marker": "assert_eq!(",
               "helper": "assert_exact"
             },
             {
-              "line": 136,
+              "line": 137,
               "marker": "assert_eq!(",
               "helper": "assert_exact"
             }
           ]
+        },
+        {
+          "path": "src/wal/planner/tests.rs",
+          "line": 258,
+          "symbol": "should_replay_the_tail_after_the_catalog_head_from_the_cache",
+          "claim": "The catalog holds segment 1; the cache sealed unpublished segment 2 and opened 3. Replay reads 1 from the catalog and 2 and 3 from the cache, 2 stays owed to the catalog, and 3 replays last, unsealed.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 276,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 276,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 280,
+              "marker": "assert!(!plan.replay[2].sealed);"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/planner/tests.rs",
+          "line": 426,
+          "symbol": "should_fall_back_to_the_cached_copy_when_a_shared_object_is_damaged",
+          "claim": "A damaged shared object 2 fails strict planning; salvage replays the cache's identical copy instead, flags degraded recovery, sets no catalog entry aside and owes segment 2 again.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 446,
+              "marker": "assert!(matches!(strict, Err(PlanError::Unreplayable(_))));"
+            },
+            {
+              "line": 447,
+              "marker": "assert_eq!(ids(&salvage), vec![(1, Source::Remote), (2, Source::Local)]);"
+            },
+            {
+              "line": 448,
+              "marker": "assert!(salvage.opened_in_salvage_mode);"
+            },
+            {
+              "line": 449,
+              "marker": "assert_eq!(salvage.retire_catalog_from, None);"
+            },
+            {
+              "line": 450,
+              "marker": "assert_eq!("
+            }
+          ]
         }
       ],
-      "preconditions": "Ignored native suite requires cloud-all, sqrzl-tests, failpoints and an explicitly qualified Sqrzl environment; exact campaign source/process receipts bind qualification.",
+      "preconditions": "Ignored native suite requires cloud-all, sqrzl-tests, failpoints and an explicitly qualified Sqrzl environment; exact campaign source/process receipts bind qualification. Planner tests use real sealed segment bytes, a real ledger and constructed probes.",
       "uncovered": "No native campaign was executed during this preparation. Qualification at a historical source revision does not qualify a later source revision. Emulator protocol success does not establish IAM, quotas, real-cloud availability or optional 128 MiB release-cost evidence."
     },
     {
@@ -4014,14 +4286,14 @@
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 755,
+          "line": 710,
           "symbol": "prune_cloud_wal_segments_within",
           "kind": "function",
           "marker": "pub(crate) fn prune_cloud_wal_segments_within("
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 876,
+          "line": 826,
           "symbol": "authoritative_wal_entry_within",
           "kind": "function",
           "marker": "fn authoritative_wal_entry_within("
@@ -4037,17 +4309,17 @@
       "tests": [
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2446,
+          "line": 2483,
           "symbol": "should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs",
           "claim": "Actual cloud object proof is captured, same bytes are republished with a new ETag; guarded delete errors and object still exists.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2465,
+              "line": 2502,
               "marker": "assert!("
             },
             {
-              "line": 2469,
+              "line": 2506,
               "marker": "assert_cloud_object_exists(&storage, &key);"
             }
           ]
@@ -4191,7 +4463,7 @@
         },
         {
           "path": "src/metadata/manifest.rs",
-          "line": 311,
+          "line": 272,
           "symbol": "delete_column_family_with_reclamation",
           "kind": "function",
           "marker": "pub fn delete_column_family_with_reclamation("
@@ -4255,7 +4527,7 @@
         },
         {
           "path": "src/metadata/manifest.rs",
-          "line": 366,
+          "line": 327,
           "symbol": "mark_column_family_reclaimed",
           "kind": "function",
           "marker": "pub fn mark_column_family_reclaimed(&mut self, cf_id: u32, names: &[String]) -> bool {"
@@ -4498,7 +4770,7 @@
         },
         {
           "path": "src/engine/verification.rs",
-          "line": 242,
+          "line": 265,
           "symbol": "verify_storage_path",
           "kind": "function",
           "marker": "pub(super) fn verify_storage_path("
@@ -5522,42 +5794,42 @@
       "tests": [
         {
           "path": "src/runtime/retry_schedule.rs",
-          "line": 93,
+          "line": 88,
           "symbol": "should_wake_when_retry_deadline_arrives",
           "claim": "Controlled clock leaves deferred retry not ready with 1s remaining; advancing original clock gives ready and zero remaining.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 101,
+              "line": 96,
               "marker": "assert!(!schedule.is_ready());"
             },
             {
-              "line": 102,
+              "line": 97,
               "marker": "assert_eq!(schedule.remaining(), Some(Duration::from_secs(1)));"
             },
             {
-              "line": 106,
+              "line": 101,
               "marker": "assert!(schedule.is_ready());"
             },
             {
-              "line": 107,
+              "line": 102,
               "marker": "assert_eq!(schedule.remaining(), Some(Duration::ZERO));"
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 3002,
+          "line": 3156,
           "symbol": "should_keep_retrying_failed_wal_upload_when_every_attempt_fails",
           "claim": "Actual queued valid local WAL with always-failing storage and an injected zero-delay retry policy reports failures 1 through 6 in order and stays queued.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 3024,
+              "line": 3178,
               "marker": "assert_eq!("
             },
             {
-              "line": 3035,
+              "line": 3189,
               "marker": "assert_eq!("
             }
           ]
@@ -6374,33 +6646,33 @@
       "tests": [
         {
           "path": "src/runtime/state/tests.rs",
-          "line": 733,
+          "line": 753,
           "symbol": "should_stall_next_write_after_active_generation_reserves_last_l0_slot",
           "claim": "Constructed published/queued capacity plus actual active put reaches hard ceiling and sets slot unavailable/hard stall.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 749,
+              "line": 769,
               "marker": "assert_eq!(state.l0_hard_ceiling(), 3);"
             },
             {
-              "line": 750,
+              "line": 770,
               "marker": "assert!(!state.l0_write_slot_unavailable(0));"
             },
             {
-              "line": 762,
+              "line": 782,
               "marker": "assert_eq!(usage, state.l0_hard_ceiling());"
             },
             {
-              "line": 763,
+              "line": 783,
               "marker": "assert!(state.l0_write_slot_unavailable(0));"
             },
             {
-              "line": 764,
+              "line": 784,
               "marker": "assert!(state.should_hard_stall_writes(0));"
             },
             {
-              "line": 765,
+              "line": 785,
               "marker": "assert!(state.has_any_hard_write_stall());"
             }
           ]
@@ -6578,23 +6850,6 @@
               "line": 250,
               "marker": "assert_eq!(std::fs::read_dir(scratch)?.count(), 0);",
               "helper": "healthy_repair_case"
-            }
-          ]
-        },
-        {
-          "path": "tests/solid_governance.rs",
-          "line": 659,
-          "symbol": "should_bound_legacy_sst_backfill_work_when_persisting",
-          "claim": "Source-governance control requires the legacy-bound worker spelling and the current batched Administration-origin append_batch_for path. It does not execute a backfill, prove service time or replace the real SST repair controls.",
-          "scope": "source-string governance check; no executed runtime/data proof",
-          "assertions": [
-            {
-              "line": 669,
-              "marker": "assert!(uses_worker);"
-            },
-            {
-              "line": 670,
-              "marker": "assert!(batches_edits);"
             }
           ]
         },
@@ -7184,7 +7439,7 @@
         },
         {
           "path": "src/wal/frame.rs",
-          "line": 524,
+          "line": 528,
           "symbol": "next_frame",
           "kind": "function",
           "marker": "pub(crate) fn next_frame<S: FrameBytes>("
@@ -7354,14 +7609,14 @@
       "production": [
         {
           "path": "src/engine/verification.rs",
-          "line": 58,
+          "line": 65,
           "symbol": "StorageVerifier::verify_path",
           "kind": "function",
           "marker": "pub fn verify_path("
         },
         {
           "path": "src/engine/verification.rs",
-          "line": 242,
+          "line": 265,
           "symbol": "verify_storage_path",
           "kind": "function",
           "marker": "pub(super) fn verify_storage_path("
@@ -7668,7 +7923,7 @@
         },
         {
           "path": "src/metadata/store.rs",
-          "line": 81,
+          "line": 141,
           "symbol": "new_with_accounting",
           "kind": "function",
           "marker": "pub(crate) fn new_with_accounting(fs: Arc<dyn Fs>, accounting: Owner, medium: Medium) -> Self {"
@@ -7682,17 +7937,10 @@
         },
         {
           "path": "src/engine/startup/storage.rs",
-          "line": 538,
+          "line": 587,
           "symbol": "bootstrap_staging_fs",
           "kind": "function",
           "marker": "fn bootstrap_staging_fs() -> MidgeResult<Arc<dyn crate::io::Fs>> {"
-        },
-        {
-          "path": "src/runtime/event_loop/read_path.rs",
-          "line": 87,
-          "symbol": "publish_backfilled_bounds",
-          "kind": "function",
-          "marker": "fn publish_backfilled_bounds("
         }
       ],
       "tests": [
@@ -7933,14 +8181,14 @@
       "production": [
         {
           "path": "src/metadata/accounted_fs.rs",
-          "line": 134,
+          "line": 151,
           "symbol": "write_at",
           "kind": "function",
           "marker": "fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {"
         },
         {
           "path": "src/metadata/accounted_fs.rs",
-          "line": 148,
+          "line": 165,
           "symbol": "append",
           "kind": "function",
           "marker": "fn append(&mut self, data: Bytes) -> FsResult<u64> {"

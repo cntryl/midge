@@ -3,7 +3,7 @@
 //! observes every effect (#808).
 
 use cntryl_midge::__internal::io::{
-    Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, RealFs,
+    Fs, FsPath, MockFs, OpenMode, OpenOptions as FileOptions, ReadFs, RealFs,
 };
 use cntryl_midge::__internal::simulation::{
     CrashDevice, Operation, SimulatedClock, SimulatedObjectStore,

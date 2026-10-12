@@ -197,17 +197,13 @@ impl EventLoop {
         if !self.publication_gate.try_acquire(publication_owner.clone()) {
             return;
         }
-        for (segment_id, _) in &candidates {
-            self.cloud_coordinator
-                .cloud_wal
-                .prune_inflight
-                .insert(*segment_id);
-        }
-
         let candidate_ids = candidates
             .iter()
             .map(|(segment_id, _)| *segment_id)
             .collect::<Vec<_>>();
+        self.cloud_coordinator
+            .cloud_wal
+            .admit_prunes(candidate_ids.iter().copied());
         let worker_name = format!(
             "midge-wal-prune-preflight-{}-{}",
             candidate_ids.first().copied().unwrap_or_default(),
@@ -232,10 +228,7 @@ impl EventLoop {
             Ok(worker) => self.cloud_coordinator.set_prune_worker(worker),
             Err(error) => {
                 for segment_id in candidate_ids {
-                    self.cloud_coordinator
-                        .cloud_wal
-                        .prune_inflight
-                        .remove(&segment_id);
+                    self.cloud_coordinator.cloud_wal.release_prune(segment_id);
                 }
                 self.publication_gate.release(&publication_owner);
                 self.state.mark_persistence_anomaly();
@@ -256,22 +249,17 @@ impl EventLoop {
         // record may mask an older authoritative WAL record for the same key;
         // removing the newer segment across a gap can resurrect that older
         // state after a later tombstone/TTL compaction.
-        self.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .iter()
-            .take_while(|(segment_id, max_sequence)| {
-                **segment_id < recovery_floor_segment
-                    && **max_sequence <= self.state.wal.frontiers.cloud_durable()
-                    && **max_sequence <= persisted_sequence
-                    && !self
-                        .cloud_coordinator
-                        .cloud_wal
-                        .prune_inflight
-                        .contains(segment_id)
+        let tracker = &self.cloud_coordinator.cloud_wal;
+        tracker
+            .acks()
+            .published()
+            .take_while(|&(segment_id, max_sequence)| {
+                segment_id < recovery_floor_segment
+                    && max_sequence <= self.state.wal.frontiers.cloud_durable()
+                    && max_sequence <= persisted_sequence
+                    && !tracker.prunes().contains(segment_id)
             })
             .take(CLOUD_WAL_PRUNE_BATCH_SIZE)
-            .map(|(segment_id, max_sequence)| (*segment_id, *max_sequence))
             .collect()
     }
 
@@ -341,14 +329,9 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         self.cloud_coordinator
             .cloud_wal
-            .local_retirement
-            .queue(segment_id, release);
+            .queue_local_retirement(segment_id, release);
         let ledger = self.state.wal.history.ledger();
-        let to = self
-            .cloud_coordinator
-            .cloud_wal
-            .local_retirement
-            .retire_point(ledger);
+        let to = self.cloud_coordinator.cloud_wal.local_retire_point(ledger);
         if to > ledger.log_start() {
             crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
             if let Some(retired) = self.retire_wal_below_or_retain(to) {
@@ -366,8 +349,7 @@ impl EventLoop {
         let released = self
             .cloud_coordinator
             .cloud_wal
-            .local_retirement
-            .drain_below(log_start);
+            .drain_local_retirements_below(log_start);
         for (segment_id, release) in released {
             if release.cloud_durable {
                 self.wal_transition.retire_cloud_durable(segment_id)?;

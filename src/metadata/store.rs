@@ -315,11 +315,6 @@ impl ManifestStore {
             Err(error) => Err(error.into_midge()),
         }
     }
-
-    // Keep legacy names ONLY under cfg(any(test, feature="internal-testing")); they
-    // forward to *_for(Origin::Unclassified, ...). Production calls must be explicit.
-    // Writer-lock/cache-update/error ordering is retained, including the unchanged
-    // missing-file length0 and post-success failed-stat cache invalidation behavior.
 }
 
 #[cfg(test)]

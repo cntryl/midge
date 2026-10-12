@@ -49,16 +49,26 @@ fn publish_segments(path: &std::path::Path, segments: &[(u64, Vec<u8>, u64)]) {
     )
     .expect("decode catalog");
     for (id, bytes, maximum) in segments {
-        let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
-            *id,
-            *maximum,
-            catalog.fencing_epoch,
+        // The catalog chains each entry onto its head, whatever the object's
+        // own header links.
+        let link = crate::wal::format::segment::footer_link(bytes)
+            .expect("scan a published segment")
+            .expect("a published segment is sealed");
+        assert_eq!((link.id, link.last_seq), (*id, *maximum));
+        let publication = crate::wal::cloud_catalog::CatalogEntry::describing(
+            crate::wal::format::SegmentIdentity {
+                epoch: catalog.fencing_epoch(),
+                prev: catalog.head(),
+                link,
+            },
             bytes,
         );
-        let object = path.join("cloud_store").join(&publication.object_key);
+        let object = path.join("cloud_store").join(publication.object_key());
         std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
         std::fs::write(object, bytes).expect("publish WAL");
-        catalog.segments.insert(*id, publication);
+        catalog
+            .append_run(catalog.fencing_epoch(), &[publication])
+            .expect("publish to the catalog");
     }
     let encoded = catalog.encode().expect("encode catalog");
     std::fs::write(catalog_path, &encoded).expect("publish catalog");
@@ -71,10 +81,10 @@ fn publish_segments(path: &std::path::Path, segments: &[(u64, Vec<u8>, u64)]) {
 }
 
 #[test]
-fn should_refuse_salvage_open_when_cloud_replay_finds_a_broken_link() {
-    // Arrange: segment 2 of the catalog links a segment 1 other than the
-    // published one, a break only replay sees. Salvage cannot yet set aside
-    // what replay alone stops at (#821).
+fn should_set_aside_cataloged_segment_that_breaks_the_chain_when_salvaging() {
+    // Arrange: the catalog chains segment 2 onto segment 1, but segment 2's
+    // object links another segment 1. Planning admits the chain before
+    // anything replays (#844), so salvage never replays past the break.
     let dir = tempfile::tempdir().expect("database directory");
     let opts = options(dir.path(), 1024 * 1024);
     let mut engine = Engine::open(opts).expect("initialize metadata");
@@ -90,7 +100,7 @@ fn should_refuse_salvage_open_when_cloud_replay_finds_a_broken_link() {
         .expect("read catalog"),
     )
     .expect("decode catalog")
-    .fencing_epoch;
+    .fencing_epoch();
     let (first, link) = crate::wal::format::segment::SegmentBuilder::new(
         1,
         epoch,
@@ -117,12 +127,14 @@ fn should_refuse_salvage_open_when_cloud_replay_finds_a_broken_link() {
     // Act
     let result = Engine::open(salvage);
 
-    // Assert
-    assert!(
-        matches!(result, Err(crate::MidgeError::RecoveryFailed(_))),
-        "{:?}",
-        result.as_ref().err()
-    );
+    // Assert: segment 1 replays; segment 2 is set aside, not replayed.
+    let engine = result.expect("salvage sets the break aside");
+    let cf = engine.get_column_family("default").expect("default family");
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("read transaction");
+    assert!(tx.get(&1_u64.to_be_bytes()).expect("read 1").is_some());
+    assert!(tx.get(&2_u64.to_be_bytes()).expect("read 2").is_none());
 }
 
 fn publish_records(
@@ -142,23 +154,22 @@ fn publish_records(
         .expect("records");
     let mut segment = crate::wal::format::segment::SegmentBuilder::new(
         1,
-        catalog.fencing_epoch,
+        catalog.fencing_epoch(),
         crate::wal::format::ChainLink::GENESIS,
     );
     for record in &records {
         segment = segment.record(record);
     }
     let (bytes, _) = segment.seal();
-    let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
-        1,
-        maximum,
-        catalog.fencing_epoch,
-        &bytes,
-    );
-    let object = path.join("cloud_store").join(&publication.object_key);
+    let publication =
+        crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).expect("sealed WAL");
+    assert_eq!(publication.max_sequence(), maximum);
+    let object = path.join("cloud_store").join(publication.object_key());
     std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
     std::fs::write(object, &bytes).expect("publish WAL");
-    catalog.segments.insert(1, publication);
+    catalog
+        .append_run(catalog.fencing_epoch(), &[publication])
+        .expect("publish to the catalog");
     let encoded = catalog.encode().expect("encode catalog");
     std::fs::write(catalog_path, &encoded).expect("publish catalog");
     std::fs::write(
@@ -314,14 +325,15 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
     )
     .expect("decode");
     assert_eq!(
-        before.segments, after.segments,
+        before.entries(),
+        after.entries(),
         "checkpoints cannot retire source WAL"
     );
     assert_eq!(
         std::fs::read(
             dir.path()
                 .join("cloud_store")
-                .join(&after.segments[&1].object_key)
+                .join(after.entry(1).unwrap().object_key())
         )
         .expect("source WAL"),
         source
@@ -561,14 +573,15 @@ fn should_recover_every_family_after_only_first_family_checkpoint_is_published()
     )
     .expect("decode catalog");
     assert_eq!(
-        before.segments, after.segments,
+        before.entries(),
+        after.entries(),
         "partial family checkpoint cannot retire source WAL"
     );
     assert_eq!(
         std::fs::read(
             dir.path()
                 .join("cloud_store")
-                .join(&after.segments[&1].object_key)
+                .join(after.entry(1).unwrap().object_key())
         )
         .expect("source WAL"),
         source
@@ -665,7 +678,7 @@ fn should_recover_accepted_spilled_transaction_above_configured_spill_threshold(
     )
     .expect("decode catalog");
     assert!(
-        !catalog.segments.is_empty(),
+        !catalog.entries().is_empty(),
         "accepted transaction must have replayable remote WAL"
     );
     let manifest = crate::metadata::ManifestPersistence::load(dir.path()).expect("manifest");

@@ -52,7 +52,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.cloud_coordinator.cloud_wal.uploads_ready() {
+        if self.cloud_coordinator.cloud_wal.backlog().ready() {
             return true;
         }
 
@@ -129,9 +129,7 @@ impl EventLoop {
             self.durability
                 .cloud_seal_deadline_timeout(self.state.wal.pending_writes),
             self.gc_actor.retry_deadline_timeout(),
-            self.cloud_coordinator
-                .cloud_wal
-                .upload_retry_deadline_timeout(),
+            self.cloud_coordinator.cloud_wal.backlog().retry_timeout(),
             self.state.flush_retry_deadline_timeout(),
             Some(self.background_maintenance_timeout()),
         ]
