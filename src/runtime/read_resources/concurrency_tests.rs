@@ -15,8 +15,9 @@ struct ControlledFs {
 }
 
 impl ReadFs for ControlledFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

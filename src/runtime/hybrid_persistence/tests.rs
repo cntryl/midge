@@ -3833,7 +3833,7 @@ mod recovery_wal_coverage {
         whole_file_reads: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    impl crate::io::File for WholeFileReadCountingFile<'_> {
+    impl crate::io::ReadFile for WholeFileReadCountingFile<'_> {
         fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
             if offset == 0 && len == self.inner.len()? {
                 self.whole_file_reads
@@ -3842,16 +3842,18 @@ mod recovery_wal_coverage {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> crate::io::FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl crate::io::File for WholeFileReadCountingFile<'_> {
         fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> crate::io::FsResult<()> {
             self.inner.write_at(offset, data)
         }
 
         fn append(&mut self, data: bytes::Bytes) -> crate::io::FsResult<u64> {
             self.inner.append(data)
-        }
-
-        fn len(&self) -> crate::io::FsResult<u64> {
-            self.inner.len()
         }
 
         fn sync(&mut self, durability: crate::io::Durability) -> crate::io::FsResult<()> {
@@ -3863,8 +3865,9 @@ mod recovery_wal_coverage {
         fn open_read(
             &self,
             path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
             crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {

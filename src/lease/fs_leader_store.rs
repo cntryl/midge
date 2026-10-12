@@ -939,19 +939,24 @@ mod lock_init_failure_tests {
         inner: Box<dyn File + 'a>,
     }
 
-    impl File for FailingLockWriteFile<'_> {
+    impl crate::io::ReadFile for FailingLockWriteFile<'_> {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
             self.inner.read_at(offset, len)
         }
+
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for FailingLockWriteFile<'_> {
         fn write_at(&mut self, _offset: u64, _data: bytes::Bytes) -> FsResult<()> {
             Err(crate::io::FsError::Io("No space left on device".into()))
         }
         fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
             self.inner.append(data)
         }
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
-        }
+
         fn sync(&mut self, dur: Durability) -> FsResult<()> {
             self.inner.sync(dur)
         }
@@ -967,8 +972,9 @@ mod lock_init_failure_tests {
     }
 
     impl ReadFs for LockWriteFaultFs {
-        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {

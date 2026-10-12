@@ -16,30 +16,36 @@ struct TransientReadFile<'a> {
     fail_from: u64,
 }
 
-impl File for TransientReadFile<'_> {
+impl crate::io::ReadFile for TransientReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         if offset + len > self.fail_from {
             return Err(FsError::Io("transient EIO".into()));
         }
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for TransientReadFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         self.inner.append(data)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
     }
 }
 
 impl ReadFs for TransientReadFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

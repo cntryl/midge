@@ -411,8 +411,9 @@ mod tests {
         fn open_read(
             &self,
             path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
             crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
@@ -806,8 +807,9 @@ mod validity_anchor_tests {
     }
 
     impl ReadFs for SlowRenameFs {
-        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {

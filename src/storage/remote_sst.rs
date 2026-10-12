@@ -205,7 +205,7 @@ fn immutable_sst_error() -> FsError {
     FsError::Unsupported("remote SST views are read only".into())
 }
 
-impl File for Arc<RemoteSstFile> {
+impl crate::io::ReadFile for Arc<RemoteSstFile> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let end = offset
             .checked_add(len)
@@ -261,23 +261,29 @@ impl File for Arc<RemoteSstFile> {
         observation.failed = false;
         Ok(Bytes::from(bytes))
     }
+
+    fn len(&self) -> FsResult<u64> {
+        Ok(self.metadata.size)
+    }
+}
+
+impl File for Arc<RemoteSstFile> {
     fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
         Err(immutable_sst_error())
     }
     fn append(&mut self, _data: Bytes) -> FsResult<u64> {
         Err(immutable_sst_error())
     }
-    fn len(&self) -> FsResult<u64> {
-        Ok(self.metadata.size)
-    }
+
     fn sync(&mut self, _dur: Durability) -> FsResult<()> {
         Ok(())
     }
 }
 
 impl ReadFs for RemoteSstFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
@@ -414,8 +420,9 @@ impl Fs for RemoteSstFs {
 }
 
 impl ReadFs for VerifiedLocalSstFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn metadata(&self, _path: &FsPath) -> FsResult<Metadata> {
@@ -958,8 +965,9 @@ mod tests {
     }
 
     impl ReadFs for PublicationRecordingFs {
-        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {

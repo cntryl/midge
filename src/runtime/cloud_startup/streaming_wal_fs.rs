@@ -7,7 +7,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::buffered_read::BufferedReadFile;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{File, FsError, FsPath, FsResult, ReadFs};
+use crate::io::{FsError, FsPath, FsResult, ReadFs};
 use bytes::Bytes;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ fn replay_directory(path: &FsPath) -> bool {
 }
 
 impl ReadFs for StreamingWalFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         let source = self.source(path)?;
         Ok(Box::new(BufferedReadFile::new(
             source.fs.open_read(&source.path)?,
@@ -165,7 +165,11 @@ pub(crate) fn validate_wal_source(
     Ok(())
 }
 
-fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<Bytes> {
+fn read_exact_range(
+    file: &dyn crate::io::ReadFile,
+    offset: u64,
+    length: u64,
+) -> MidgeResult<Bytes> {
     let bytes = file.read_at(offset, length).map_err(FsError::into_midge)?;
     if bytes.len() as u64 != length {
         return Err(MidgeError::RecoveryFailed(
@@ -366,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_unsupported_access_in_streaming_wal_view() -> MidgeResult<()> {
+    fn should_reject_unplanned_paths_when_streaming_wal_view_is_opened() -> MidgeResult<()> {
         // Arrange
         let fixture = Fixture::new()?;
         let mut fs = StreamingWalFs::new(1_024)?;
@@ -377,15 +381,13 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(name.clone());
-        let mut file = fs.open_read(&path).map_err(FsError::into_midge)?;
+        let file = fs.open_read(&path).map_err(FsError::into_midge)?;
 
         // Act
-        let mutation = file.write_at(0, Bytes::from_static(b"invalid"));
         let escape = fs.open_read(&FsPath::new(format!("../{name}")));
         let alias = fs.open_read(&FsPath::new("41.wal"));
 
         // Assert
-        assert!(matches!(mutation, Err(FsError::Unsupported(_))));
         assert!(matches!(escape, Err(FsError::NotFound(_))));
         assert!(matches!(alias, Err(FsError::NotFound(_))));
         drop(file);

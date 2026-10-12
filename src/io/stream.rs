@@ -200,12 +200,18 @@ mod tests {
     /// Fails the test if any single positional call exceeds one chunk.
     struct ChunkBoundFile(Box<dyn File>);
 
-    impl File for ChunkBoundFile {
+    impl crate::io::ReadFile for ChunkBoundFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             assert!(len <= CHUNK_BYTES as u64, "read of {len} bytes");
             self.0.read_at(offset, len)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.0.len()
+        }
+    }
+
+    impl File for ChunkBoundFile {
         fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
             assert!(data.len() <= CHUNK_BYTES, "write of {} bytes", data.len());
             self.0.write_at(offset, data)
@@ -213,10 +219,6 @@ mod tests {
 
         fn append(&mut self, data: Bytes) -> FsResult<u64> {
             self.0.append(data)
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            self.0.len()
         }
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {

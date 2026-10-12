@@ -50,8 +50,9 @@ fn payload(path: &FsPath) -> Payload {
 }
 
 impl ReadFs for AccountedFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -136,10 +137,17 @@ impl Fs for AccountedFs {
     }
 }
 
-impl File for AccountedFile<'_> {
+impl crate::io::ReadFile for AccountedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for AccountedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let bytes = data.len();
         self.ledger.lock().issued(self.payload, bytes);
@@ -165,9 +173,7 @@ impl File for AccountedFile<'_> {
         }
         result
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.sync(durability))
     }

@@ -1077,11 +1077,17 @@ struct TruncateFailingFile<'a> {
     inner: Box<dyn crate::io::File + 'a>,
 }
 
-impl crate::io::File for TruncateFailingFile<'_> {
+impl crate::io::ReadFile for TruncateFailingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> crate::io::FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl crate::io::File for TruncateFailingFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> crate::io::FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -1096,18 +1102,15 @@ impl crate::io::File for TruncateFailingFile<'_> {
         self.inner.append(data)
     }
 
-    fn len(&self) -> crate::io::FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, dur: crate::io::Durability) -> crate::io::FsResult<()> {
         self.inner.sync(dur)
     }
 }
 
 impl ReadFs for TruncateFailingFs {
-    fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+    fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {

@@ -28,6 +28,23 @@ struct ScopedFile<'a> {
     scope: DeadlineScope,
 }
 
+struct ScopedReadFile<'a> {
+    inner: Box<dyn super::ReadFile + 'a>,
+    scope: DeadlineScope,
+}
+
+impl super::ReadFile for ScopedReadFile<'_> {
+    fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        checked(&self.scope, "filesystem read", || {
+            self.inner.read_at(offset, len)
+        })
+    }
+
+    fn len(&self) -> FsResult<u64> {
+        checked(&self.scope, "filesystem length", || self.inner.len())
+    }
+}
+
 fn check(scope: &DeadlineScope, context: &str) -> FsResult<()> {
     scope
         .check(context)
@@ -46,11 +63,11 @@ fn checked<T>(
 }
 
 impl<F: ReadFs + ?Sized> ReadFs for ScopedFs<F> {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         let inner = checked(&self.scope, "filesystem open", || {
             self.inner.open_read(path)
         })?;
-        Ok(Box::new(ScopedFile {
+        Ok(Box::new(ScopedReadFile {
             inner,
             scope: self.scope.clone(),
         }))
@@ -158,13 +175,19 @@ impl Fs for ScopedFs<dyn Fs> {
     }
 }
 
-impl File for ScopedFile<'_> {
+impl crate::io::ReadFile for ScopedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         checked(&self.scope, "filesystem file read", || {
             self.inner.read_at(offset, len)
         })
     }
 
+    fn len(&self) -> FsResult<u64> {
+        checked(&self.scope, "filesystem length", || self.inner.len())
+    }
+}
+
+impl File for ScopedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         checked(&self.scope, "filesystem file write", || {
             self.inner.write_at(offset, data)
@@ -181,10 +204,6 @@ impl File for ScopedFile<'_> {
         checked(&self.scope, "filesystem append", || self.inner.append(data))
     }
 
-    fn len(&self) -> FsResult<u64> {
-        checked(&self.scope, "filesystem length", || self.inner.len())
-    }
-
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         checked(&self.scope, "filesystem sync", || {
             self.inner.sync(durability)
@@ -196,7 +215,7 @@ impl File for ScopedFile<'_> {
 mod tests {
     use super::*;
     use crate::common::OperationDeadline;
-    use crate::io::OpenMode;
+    use crate::io::{OpenMode, ReadFile};
 
     fn read_write() -> OpenOptions {
         OpenOptions {
@@ -295,23 +314,25 @@ mod tests {
         scope: DeadlineScope,
     }
 
-    impl File for CancelAfterRead<'_> {
+    impl crate::io::ReadFile for CancelAfterRead<'_> {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             let bytes = self.inner.read_at(offset, len)?;
             self.scope.cancel();
             Ok(bytes)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for CancelAfterRead<'_> {
         fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
             self.inner.write_at(offset, bytes)
         }
 
         fn append(&mut self, bytes: Bytes) -> FsResult<u64> {
             self.inner.append(bytes)
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
         }
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -393,8 +414,9 @@ mod tests {
     struct CapabilityFs(Arc<dyn Fs>);
 
     impl ReadFs for CapabilityFs {
-        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {

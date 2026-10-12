@@ -623,21 +623,23 @@ mod tests {
         durable_sync_count: Arc<AtomicUsize>,
     }
 
-    impl File for SyncCountingFile {
+    impl crate::io::ReadFile for SyncCountingFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for SyncCountingFile {
         fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
             self.inner.write_at(offset, data)
         }
 
         fn append(&mut self, data: Bytes) -> FsResult<u64> {
             self.inner.append(data)
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
         }
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -662,8 +664,9 @@ mod tests {
     }
 
     impl ReadFs for SyncCountingFs {
-        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -746,11 +749,17 @@ mod tests {
         }
     }
 
-    impl File for GatedNoSpaceFile {
+    impl crate::io::ReadFile for GatedNoSpaceFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for GatedNoSpaceFile {
         fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
             Err(self.fail_after_release())
         }
@@ -759,18 +768,15 @@ mod tests {
             Err(self.fail_after_release())
         }
 
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
-        }
-
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
             self.inner.sync(durability)
         }
     }
 
     impl ReadFs for GatedNoSpaceFs {
-        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {

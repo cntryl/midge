@@ -21,7 +21,7 @@ mod tests;
 /// any of them. Candidate headers are found in bounded chunks; a candidate
 /// counts only after its complete payload passes CRC and record decoding.
 pub(crate) fn max_verified_suffix_sequence(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     start: u64,
     limits: StreamingReplayLimits,
@@ -365,7 +365,7 @@ fn max_verified_sequence_from_offset(
 /// Inspect one stable WAL segment, open or sealed, without reading the
 /// complete object: its header, then every frame, accepting a footer.
 pub(crate) fn inspect_wal_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
@@ -375,7 +375,7 @@ pub(crate) fn inspect_wal_file(
 /// A sealed segment must hold whole frames and at least one record, and end
 /// in the footer that matches them.
 pub(crate) fn inspect_sealed_wal_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<super::VerifiedWalPrefix> {
@@ -385,7 +385,7 @@ pub(crate) fn inspect_sealed_wal_file(
 /// Visit one validated record at a time without retaining a complete segment.
 /// The caller must keep the file identity pinned until the returned proof is used.
 pub(crate) fn visit_sealed_wal_records(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
@@ -409,7 +409,7 @@ fn require_sealed_records(path: &FsPath, prefix: &super::VerifiedWalPrefix) -> M
 }
 
 fn inspect_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
@@ -425,7 +425,7 @@ fn inspect_file(
 }
 
 pub(crate) fn visit_sealed_wal_records_from(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     progress: &mut super::VerifiedWalPrefix,
@@ -459,7 +459,7 @@ pub(crate) fn visit_sealed_wal_records_from(
 ///
 /// The read, frame, decode or scan error.
 pub(crate) fn scan_segment_file(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     until: Option<u64>,
 ) -> MidgeResult<SegmentScan> {
@@ -511,7 +511,7 @@ fn read_header(source: &crate::wal::frame::FileFrames<'_>) -> MidgeResult<bytes:
 }
 
 fn inspect_file_from(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
     prefix: super::VerifiedWalPrefix,

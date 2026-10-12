@@ -360,8 +360,9 @@ impl SegmentCreateFailingFs {
 }
 
 impl ReadFs for SegmentCreateFailingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -444,8 +445,9 @@ impl SegmentWriterOpenFailingFs {
 }
 
 impl ReadFs for SegmentWriterOpenFailingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -512,8 +514,9 @@ struct RotationPreflightFailingOnceFs {
 }
 
 impl ReadFs for RotationPreflightFailingOnceFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -2000,10 +2003,17 @@ struct DurableSyncCountingFile<'a> {
     durable_syncs: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl File for DurableSyncCountingFile<'_> {
+impl crate::io::ReadFile for DurableSyncCountingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for DurableSyncCountingFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -2013,9 +2023,7 @@ impl File for DurableSyncCountingFile<'_> {
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         self.inner.append(data)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, dur: FsDurability) -> FsResult<()> {
         if dur == FsDurability::Durable {
             self.durable_syncs
@@ -2033,8 +2041,9 @@ struct DurableSyncCountingFs {
 }
 
 impl ReadFs for DurableSyncCountingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -2297,8 +2306,9 @@ impl crate::io::ReadFs for SstOpenCountingFs {
     fn open_read(
         &self,
         path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
         crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {

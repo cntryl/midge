@@ -6,7 +6,7 @@
 
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{File, FsError, FsPath, ReadFs};
+use crate::io::{FsError, FsPath, ReadFs};
 use crate::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -474,7 +474,7 @@ fn open_wal_replay_file<'a>(
     storage: &'a dyn ReadFs,
     file_path: &FsPath,
     file_read_ns: &mut u128,
-) -> MidgeResult<Option<Box<dyn File + 'a>>> {
+) -> MidgeResult<Option<Box<dyn crate::io::ReadFile + 'a>>> {
     if !storage.exists(file_path).map_err(map_fs_error)? {
         return Ok(None);
     }

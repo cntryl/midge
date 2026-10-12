@@ -207,7 +207,7 @@ struct DelayedReadFile<'a> {
     observations: Arc<Observations>,
 }
 
-impl File for DelayedReadFile<'_> {
+impl crate::io::ReadFile for DelayedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let bytes = self.inner.read_at(offset, len)?;
         std::thread::sleep(READ_DELAY);
@@ -215,6 +215,12 @@ impl File for DelayedReadFile<'_> {
         Ok(bytes)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for DelayedReadFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -225,10 +231,6 @@ impl File for DelayedReadFile<'_> {
 
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         self.inner.append(data)
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
     }
 
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -242,8 +244,9 @@ struct DelayedReadFs {
 }
 
 impl ReadFs for DelayedReadFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

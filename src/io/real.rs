@@ -178,8 +178,9 @@ impl RealFs {
 }
 
 impl ReadFs for RealFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -377,7 +378,7 @@ impl RealFile {
     }
 }
 
-impl File for RealFile {
+impl crate::io::ReadFile for RealFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         let len = Self::len_usize_u64(len)?;
         let mut buf = vec![0u8; len];
@@ -408,6 +409,16 @@ impl File for RealFile {
         }
     }
 
+    fn len(&self) -> FsResult<u64> {
+        let meta = self
+            .file
+            .metadata()
+            .map_err(|e| io_error("metadata(len)", &e))?;
+        Ok(meta.len())
+    }
+}
+
+impl File for RealFile {
     fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> FsResult<()> {
         let bytes = data.as_ref();
 
@@ -457,14 +468,6 @@ impl File for RealFile {
             .map_err(|e| io_error(format!("write_all(append) len={}", data.len()), &e))?;
 
         Ok(pos)
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        let meta = self
-            .file
-            .metadata()
-            .map_err(|e| io_error("metadata(len)", &e))?;
-        Ok(meta.len())
     }
 
     fn sync(&mut self, dur: Durability) -> FsResult<()> {

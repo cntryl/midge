@@ -168,8 +168,9 @@ fn snapshot_temporary(path: &FsPath) -> bool {
 }
 
 impl ReadFs for ObservedFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -267,11 +268,17 @@ impl Fs for ObservedFs {
     }
 }
 
-impl File for ObservedFile<'_> {
+impl crate::io::ReadFile for ObservedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for ObservedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let offered = data.len();
         let result = if snapshot_temporary(&self.path)
@@ -301,10 +308,6 @@ impl File for ObservedFile<'_> {
             self.observations.complete_payload(PayloadKind::Append)?;
             Ok(offset)
         })
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
     }
 
     fn sync(&mut self, durability: Durability) -> FsResult<()> {

@@ -164,8 +164,12 @@ mod tests {
     struct HandlelessFs(crate::io::MockFs);
 
     impl ReadFs for HandlelessFs {
-        fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn File + '_>> {
+        fn open_read(
+            &self,
+            path: &FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
             self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {

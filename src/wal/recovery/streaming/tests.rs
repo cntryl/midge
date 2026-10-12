@@ -21,7 +21,7 @@ struct BoundedFile<'a> {
     len_calls: Arc<AtomicUsize>,
 }
 
-impl File for BoundedFile<'_> {
+impl crate::io::ReadFile for BoundedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.read_calls.fetch_add(1, Ordering::SeqCst);
         self.largest_read
@@ -31,24 +31,30 @@ impl File for BoundedFile<'_> {
         }
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.len_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.len()
+    }
+}
+
+impl File for BoundedFile<'_> {
     fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, bytes)
     }
     fn append(&mut self, bytes: Bytes) -> FsResult<u64> {
         self.inner.append(bytes)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.len_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
     }
 }
 
 impl ReadFs for BoundedFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

@@ -1,11 +1,7 @@
 //! Bounded read-ahead over a stable read-only file handle.
 
-use super::{Durability, File, FsError, FsResult};
+use super::{FsError, FsResult, ReadFile};
 use bytes::{Bytes, BytesMut};
-
-fn immutable_handle_error() -> FsError {
-    FsError::Unsupported("buffered immutable read handles are read only".into())
-}
 
 #[derive(Default)]
 struct ReadWindow {
@@ -14,14 +10,14 @@ struct ReadWindow {
 }
 
 pub(crate) struct BufferedReadFile<'a> {
-    inner: Box<dyn File + 'a>,
+    inner: Box<dyn ReadFile + 'a>,
     file_len: u64,
     range_buffer_bytes: usize,
     window: parking_lot::Mutex<ReadWindow>,
 }
 
 impl<'a> BufferedReadFile<'a> {
-    pub(crate) fn new(inner: Box<dyn File + 'a>, range_buffer_bytes: usize) -> FsResult<Self> {
+    pub(crate) fn new(inner: Box<dyn ReadFile + 'a>, range_buffer_bytes: usize) -> FsResult<Self> {
         if range_buffer_bytes == 0 {
             return Err(FsError::Io("read window must be positive".into()));
         }
@@ -58,7 +54,7 @@ impl<'a> BufferedReadFile<'a> {
     }
 }
 
-impl File for BufferedReadFile<'_> {
+impl ReadFile for BufferedReadFile<'_> {
     fn read_at(&self, offset: u64, length: u64) -> FsResult<Bytes> {
         let length = usize::try_from(length.min(self.file_len.saturating_sub(offset)))
             .map_err(|_| FsError::Io("file read exceeds addressable memory".into()))?;
@@ -82,14 +78,5 @@ impl File for BufferedReadFile<'_> {
 
     fn len(&self) -> FsResult<u64> {
         Ok(self.file_len)
-    }
-    fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
-        Err(immutable_handle_error())
-    }
-    fn append(&mut self, _data: Bytes) -> FsResult<u64> {
-        Err(immutable_handle_error())
-    }
-    fn sync(&mut self, _durability: Durability) -> FsResult<()> {
-        Err(immutable_handle_error())
     }
 }

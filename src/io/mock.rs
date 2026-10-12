@@ -94,8 +94,9 @@ fn checked_write_start(offset: u64) -> FsResult<usize> {
 }
 
 impl ReadFs for MockFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -276,7 +277,7 @@ pub struct MockFile<'a> {
     fs: &'a MockFs,
 }
 
-impl File for MockFile<'_> {
+impl crate::io::ReadFile for MockFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let files = self.fs.files.lock();
         if let Some(data) = files.get(&self.path) {
@@ -288,6 +289,17 @@ impl File for MockFile<'_> {
         }
     }
 
+    fn len(&self) -> FsResult<u64> {
+        let files = self.fs.files.lock();
+        if let Some(data) = files.get(&self.path) {
+            Ok(data.data.len() as u64)
+        } else {
+            Err(FsError::NotFound(self.path.clone()))
+        }
+    }
+}
+
+impl File for MockFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let mut files = self.fs.files.lock();
         if let Some(file_data) = files.get_mut(&self.path) {
@@ -329,15 +341,6 @@ impl File for MockFile<'_> {
         }
     }
 
-    fn len(&self) -> FsResult<u64> {
-        let files = self.fs.files.lock();
-        if let Some(data) = files.get(&self.path) {
-            Ok(data.data.len() as u64)
-        } else {
-            Err(FsError::NotFound(self.path.clone()))
-        }
-    }
-
     fn sync(&mut self, _dur: Durability) -> FsResult<()> {
         Ok(())
     }
@@ -350,7 +353,7 @@ pub struct MockPersistentFile {
     readonly_snapshot: Option<Vec<u8>>,
 }
 
-impl File for MockPersistentFile {
+impl crate::io::ReadFile for MockPersistentFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         if let Some(snapshot) = &self.readonly_snapshot {
             let (start, end) = checked_range(offset, len, snapshot.len())?;
@@ -366,6 +369,20 @@ impl File for MockPersistentFile {
         }
     }
 
+    fn len(&self) -> FsResult<u64> {
+        if let Some(snapshot) = &self.readonly_snapshot {
+            return Ok(snapshot.len() as u64);
+        }
+        let files = self.files.lock();
+        if let Some(data) = files.get(&self.path) {
+            Ok(data.data.len() as u64)
+        } else {
+            Err(FsError::NotFound(self.path.clone()))
+        }
+    }
+}
+
+impl File for MockPersistentFile {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         if self.readonly_snapshot.is_some() {
             return Err(FsError::Unsupported(
@@ -417,18 +434,6 @@ impl File for MockPersistentFile {
             let pos = file_data.data.len() as u64;
             file_data.data.extend_from_slice(&data);
             Ok(pos)
-        } else {
-            Err(FsError::NotFound(self.path.clone()))
-        }
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        if let Some(snapshot) = &self.readonly_snapshot {
-            return Ok(snapshot.len() as u64);
-        }
-        let files = self.files.lock();
-        if let Some(data) = files.get(&self.path) {
-            Ok(data.data.len() as u64)
         } else {
             Err(FsError::NotFound(self.path.clone()))
         }

@@ -121,8 +121,8 @@ pub trait ReadObserver: Send + Sync {
     );
 }
 
-/// Individual file handle with read/write operations
-pub trait File: Send {
+/// The read-only operations of an individual file handle.
+pub trait ReadFile: Send {
     /// Read at specific offset
     ///
     /// # Errors
@@ -131,6 +131,26 @@ pub trait File: Send {
     /// filesystem or storage backend.
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes>;
 
+    /// Get file length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file length cannot be queried.
+    fn len(&self) -> FsResult<u64>;
+
+    /// Whether the file contains no bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::len`].
+    #[cfg(feature = "internal-testing")]
+    fn is_empty(&self) -> FsResult<bool> {
+        self.len().map(|len| len == 0)
+    }
+}
+
+/// Individual file handle with read/write operations.
+pub trait File: ReadFile {
     /// Write at specific offset
     ///
     /// # Errors
@@ -161,24 +181,6 @@ pub trait File: Send {
     /// Returns an error when the append cannot be completed by the backing
     /// filesystem or storage backend.
     fn append(&mut self, data: Bytes) -> FsResult<u64>;
-
-    /// Get file length
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file length cannot be queried.
-    fn len(&self) -> FsResult<u64>;
-
-    /// Whether the file contains no bytes. Present where the trait is
-    /// reachable outside the crate, alongside [`Self::len`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Self::len`].
-    #[cfg(feature = "internal-testing")]
-    fn is_empty(&self) -> FsResult<bool> {
-        self.len().map(|len| len == 0)
-    }
 
     /// Sync to storage device according to durability level
     ///
@@ -229,7 +231,7 @@ pub trait ReadFs: Send + Sync + 'static {
     ///
     /// Returns an error when the path cannot be opened for reading; a missing
     /// file is `FsError::NotFound`.
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>>;
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn ReadFile + '_>>;
 
     /// Check if file exists
     ///

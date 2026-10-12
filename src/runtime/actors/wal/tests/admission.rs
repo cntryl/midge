@@ -82,10 +82,17 @@ struct PartialAppendFile {
     fail_next: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl File for PartialAppendFile {
+impl crate::io::ReadFile for PartialAppendFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for PartialAppendFile {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         if self
             .fail_next
@@ -103,17 +110,16 @@ impl File for PartialAppendFile {
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         self.inner.append(data)
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: FsDurability) -> FsResult<()> {
         self.inner.sync(durability)
     }
 }
 
 impl ReadFs for PartialAppendFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

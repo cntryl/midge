@@ -1201,8 +1201,9 @@ impl CrashFs {
 }
 
 impl ReadFs for CrashFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -1393,7 +1394,7 @@ fn checked_range(offset: u64, len: u64) -> FsResult<(usize, usize)> {
     Ok((start, end))
 }
 
-impl File for CrashFile {
+impl crate::io::ReadFile for CrashFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let (start, end) = checked_range(offset, len)?;
         let inode = self.inode;
@@ -1413,6 +1414,17 @@ impl File for CrashFile {
         })
     }
 
+    fn len(&self) -> FsResult<u64> {
+        let inode = self.inode;
+        self.fs
+            .state()?
+            .faulted(FaultOp::Stat, &[&self.path], |state| {
+                Ok(state.data(inode)?.live.len() as u64)
+            })
+    }
+}
+
+impl File for CrashFile {
     fn write_at(&mut self, offset: u64, bytes: Bytes) -> FsResult<()> {
         let (start, _) = checked_range(offset, bytes.len() as u64)?;
         if bytes.is_empty() {
@@ -1436,15 +1448,6 @@ impl File for CrashFile {
         checked_range(offset, bytes.len() as u64)?;
         self.write_at(offset, bytes)?;
         Ok(offset)
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        let inode = self.inode;
-        self.fs
-            .state()?
-            .faulted(FaultOp::Stat, &[&self.path], |state| {
-                Ok(state.data(inode)?.live.len() as u64)
-            })
     }
 
     fn sync(&mut self, dur: Durability) -> FsResult<()> {

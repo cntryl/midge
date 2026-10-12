@@ -413,7 +413,7 @@ impl FrameBytes for &[u8] {
 
 /// Frame source over an open WAL file, accumulating read time.
 pub(crate) struct FileFrames<'a> {
-    file: &'a dyn crate::io::File,
+    file: &'a dyn crate::io::ReadFile,
     path: &'a crate::io::FsPath,
     read_ns: std::cell::Cell<u128>,
     file_len: std::cell::Cell<Option<u64>>,
@@ -422,7 +422,7 @@ pub(crate) struct FileFrames<'a> {
 }
 
 impl<'a> FileFrames<'a> {
-    pub(crate) fn new(file: &'a dyn crate::io::File, path: &'a crate::io::FsPath) -> Self {
+    pub(crate) fn new(file: &'a dyn crate::io::ReadFile, path: &'a crate::io::FsPath) -> Self {
         Self {
             file,
             path,
@@ -434,7 +434,7 @@ impl<'a> FileFrames<'a> {
     }
 
     pub(crate) fn with_read_ahead(
-        file: &'a dyn crate::io::File,
+        file: &'a dyn crate::io::ReadFile,
         path: &'a crate::io::FsPath,
         bytes: usize,
     ) -> Self {

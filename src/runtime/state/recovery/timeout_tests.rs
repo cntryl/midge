@@ -40,7 +40,7 @@ struct TimedReadFile<'a> {
     delivery: ReadDelivery,
 }
 
-impl File for TimedReadFile<'_> {
+impl crate::io::ReadFile for TimedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         let started = Instant::now();
         let bytes = self.inner.read_at(offset, len)?;
@@ -71,6 +71,12 @@ impl File for TimedReadFile<'_> {
         Ok(bytes)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for TimedReadFile<'_> {
     fn write_at(&mut self, offset: u64, bytes: bytes::Bytes) -> FsResult<()> {
         self.evidence.mutations.fetch_add(1, Ordering::AcqRel);
         self.inner.write_at(offset, bytes)
@@ -86,10 +92,6 @@ impl File for TimedReadFile<'_> {
         self.inner.append(bytes)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.evidence.mutations.fetch_add(1, Ordering::AcqRel);
         self.inner.sync(durability)
@@ -97,8 +99,9 @@ impl File for TimedReadFile<'_> {
 }
 
 impl ReadFs for TimedReadFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -464,8 +467,9 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
 struct ListingFailsFs(crate::io::RealFs);
 
 impl ReadFs for ListingFailsFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {

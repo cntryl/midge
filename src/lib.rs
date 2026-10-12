@@ -132,11 +132,37 @@ pub mod __internal {
             enable_transaction_commit_timing_for_benchmarks, TransactionCommitTimingSample,
         };
     }
+    /// Read clients can open and inspect files without receiving mutators.
+    ///
+    /// ```compile_fail,E0599
+    /// use cntryl_midge::__internal::io::{FsPath, ReadFs};
+    ///
+    /// fn truncate_read(fs: &dyn ReadFs, path: &FsPath) {
+    ///     fs.open_read(path).unwrap().truncate(0).unwrap();
+    /// }
+    /// ```
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use cntryl_midge::__internal::io::{Fs, FsPath, MockFs, OpenMode, OpenOptions, ReadFs};
+    ///
+    /// let fs = MockFs::new();
+    /// let path = FsPath::new("read-control");
+    /// let mut writable = fs.open(&path, OpenOptions {
+    ///     mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: false,
+    /// }).unwrap();
+    /// writable.append(Bytes::from_static(b"readable")).unwrap();
+    /// drop(writable);
+    /// let reader: &dyn ReadFs = &fs;
+    /// let file = reader.open_read(&path).unwrap();
+    /// assert_eq!(file.len().unwrap(), 8);
+    /// assert_eq!(file.read_at(0, 8).unwrap(), Bytes::from_static(b"readable"));
+    /// ```
     pub mod io {
         pub use crate::io::traits::{DirEntry, Metadata};
         pub use crate::io::{
             Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, MockFs, OpenMode,
-            OpenOptions, ReadFs, RealFs,
+            OpenOptions, ReadFile, ReadFs, RealFs,
         };
     }
     pub mod memtable {

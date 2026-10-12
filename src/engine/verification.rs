@@ -669,7 +669,7 @@ mod tests {
         }
     }
 
-    impl File for RecordingFile {
+    impl crate::io::ReadFile for RecordingFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.read_lengths
                 .lock()
@@ -686,16 +686,18 @@ mod tests {
             Ok(Bytes::copy_from_slice(&self.bytes[start..end]))
         }
 
+        fn len(&self) -> FsResult<u64> {
+            Ok(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX))
+        }
+    }
+
+    impl File for RecordingFile {
         fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
             unreachable!("verification test file is read-only")
         }
 
         fn append(&mut self, _data: Bytes) -> FsResult<u64> {
             unreachable!("verification test file is read-only")
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            Ok(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX))
         }
 
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
