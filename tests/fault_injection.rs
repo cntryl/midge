@@ -7318,9 +7318,11 @@ mod cloud_crash_recovery {
         let fenced = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
             metrics.health == EngineHealth::Degraded
         });
+        // The ledger, the open segment's only authority (#851), recorded the
+        // rotation; only the writer for segment 2 is missing.
         assert_eq!(
-            fenced.wal_current_segment_id, 1,
-            "rotation must not advance the segment without a replacement writer"
+            fenced.wal_current_segment_id, 2,
+            "the ledger recorded the rotation before the writer was lost"
         );
         assert!(
             db_path
