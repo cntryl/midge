@@ -344,6 +344,12 @@ impl DurabilityCoordinator {
         self.inflight.get(&segment_id).map(|info| info.max_sequence)
     }
 
+    /// The newest inflight segment: the last whose acknowledgement the
+    /// contiguous cloud frontier waits for.
+    pub fn newest_inflight_segment(&self) -> Option<u64> {
+        self.inflight.keys().max().copied()
+    }
+
     pub fn inflight_segment_for_sequence(&self, sequence: u64) -> Option<u64> {
         self.inflight
             .iter()

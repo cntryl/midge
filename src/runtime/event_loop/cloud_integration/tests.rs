@@ -9981,3 +9981,74 @@ fn should_extend_cloud_frontier_over_reserved_sequences_without_records(
     assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1000);
     Ok(())
 }
+
+#[test]
+fn should_wait_for_recovered_tail_when_cloud_durability_targets_a_reserved_sequence(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a restart recovers a tail holding sequence 1 after an earlier
+    // process reserved through 1000. Opening seals the tail and starts its
+    // upload, which has not been acknowledged yet.
+    let directory = tempfile::tempdir()?;
+    let db_path = directory.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"recovered"),
+        Some(Bytes::from_static(b"value")),
+        1,
+    );
+    let mut body = Vec::new();
+    crate::wal::frame::append_frame(&mut body, &crate::wal::encoding::encode(&record)?)?;
+    let segment = state.host_wal_dir().join(crate::wal::segment_file_name(1));
+    let mut bytes = std::fs::read(&segment)?;
+    bytes.extend(body);
+    std::fs::write(&segment, bytes)?;
+    state.raise_sequence_to(1);
+    state.wal.frontiers.advance_local_to(1);
+    state.wal.history.reserve(1000)?;
+    state.wal.frontiers.reset_cloud_for_recovery(0);
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+                .expect("create cloud backend"),
+        ),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        hybrid_storage: Some(hybrid_storage),
+        writer_epoch: 1,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+    assert_eq!(event_loop.state.sequence, 1000);
+    let request_id = 90_901;
+    let response = event_loop.router.register(request_id, "CloudDurability");
+
+    // Act: an assertion-only cloud_strict commit returns the sequence it
+    // read at, the reservation's end, and asks the cloud to hold it.
+    WalCoordinator::seal_for_cloud(&mut event_loop, request_id, 1000, true);
+
+    // Assert: it waits for the tail rather than failing, and the tail's
+    // acknowledgement completes it.
+    if let Ok(early) = response.try_recv() {
+        panic!("the request must wait for the recovered tail, not answer {early:?}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while event_loop.state.wal.frontiers.cloud_durable() < 1000 && Instant::now() < deadline {
+        event_loop.tick_hybrid_storage();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Ok { request_id: id }) if id == request_id
+    ));
+    Ok(())
+}
