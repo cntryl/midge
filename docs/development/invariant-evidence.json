@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "2a240c221ed81667ea7b655672ccb8cdcceb9fc6",
+  "source_revision": "741b7c980a7a08aa8ac13b0d4ab3888c6c568009",
   "source_revision_status": "References and SHA256 postimages bind the current #819 frontier cutover working tree based on this commit. Removed SST coverage/proof references are replaced by family frontier, whole-unit replay and shared-generation retirement controls. This inventory is source/reference evidence; test execution and qualification remain separate.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
@@ -1227,21 +1227,21 @@
       "tests": [
         {
           "path": "tests/durability.rs",
-          "line": 2330,
+          "line": 2333,
           "symbol": "should_maintain_atomicity_given_concurrent_reads_when_transaction_commits",
           "claim": "Actual concurrent two-key memory transaction exposes only initial or updated pair, then both updated values.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2400,
+              "line": 2403,
               "marker": "assert!("
             },
             {
-              "line": 2415,
+              "line": 2418,
               "marker": "assert_eq!(final1.unwrap().as_ref(), b\"updated1\");"
             },
             {
-              "line": 2416,
+              "line": 2419,
               "marker": "assert_eq!(final2.unwrap().as_ref(), b\"updated2\");"
             }
           ]
@@ -1978,11 +1978,11 @@
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 868,
+              "line": 871,
               "marker": "assert!("
             },
             {
-              "line": 881,
+              "line": 884,
               "marker": "assert_eq!(tx.get(b\"first\").expect(\"get first\"), None);"
             }
           ]

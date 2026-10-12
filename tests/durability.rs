@@ -920,7 +920,10 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        corrupt_byte(&open_wal_segment(db_path), 4);
+        let first_frame_payload = (cntryl_midge::__internal::wal::segment::HEADER_LEN
+            + cntryl_midge::__internal::wal::frame::WAL_FRAME_HEADER_LEN)
+            as u64;
+        corrupt_byte(&open_wal_segment(db_path), first_frame_payload);
 
         // Act
         let Err(strict_error) = Engine::open(
@@ -2858,7 +2861,7 @@ mod recovery_policy_api {
     }
 
     #[test]
-    fn should_retain_sst_files_when_salvage_opens_with_unreadable_manifest() {
+    fn should_retain_sst_files_when_salvage_rejects_unreadable_manifest() {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
@@ -2893,31 +2896,24 @@ mod recovery_policy_api {
         }
 
         // Act
-        let engine = Engine::open(
+        let Err(MidgeError::Corruption(message)) = Engine::open(
             OpenOptions::local(db_path)
                 .recovery_policy(RecoveryPolicy::Salvage)
                 .build()
                 .expect("build options"),
-        )
-        .expect("salvage open");
+        ) else {
+            panic!("salvage must reject a database without readable manifest authority");
+        };
 
         // Assert
-        assert_eq!(
-            engine
-                .metrics()
-                .get_runtime_metrics()
-                .expect("metrics")
-                .health,
-            EngineHealth::SalvageMode
+        assert!(
+            message.contains("manifest snapshot"),
+            "unexpected error: {message}"
         );
         assert_eq!(
             sst_file_names(db_path),
             before,
-            "salvage must retain SSTs the unreadable manifest no longer lists"
-        );
-        assert!(
-            db_path.join("salvage-retained").is_dir(),
-            "retained SSTs are quarantined out of the SST directory"
+            "failed salvage must leave every SST in place when manifest authority is unreadable"
         );
     }
 
@@ -2968,14 +2964,14 @@ mod recovery_policy_api {
 
         // Assert
         match result {
-            Err(MidgeError::RecoveryFailed(message)) => {
+            Err(MidgeError::Corruption(message)) => {
                 assert!(
                     message.contains("WAL"),
-                    "expected WAL recovery context, got: {message}"
+                    "expected WAL corruption context, got: {message}"
                 );
             }
-            Ok(_) => panic!("expected strict WAL recovery failure, got successful open"),
-            Err(other) => panic!("expected RecoveryFailed, got: {other}"),
+            Ok(_) => panic!("expected strict WAL corruption error, got successful open"),
+            Err(other) => panic!("expected Corruption, got: {other}"),
         }
     }
 

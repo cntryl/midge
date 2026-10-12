@@ -133,6 +133,11 @@ Salvage mode:
   moves them into `salvage-retained/<millis>/` and logs them for operator
   review. Startup cleanup never deletes anything under `salvage-retained/`,
   so a later strict open cannot remove them either
+- for an existing database, requires a readable persisted manifest snapshot
+  (or the legacy manifest when no snapshot exists) as family and frontier
+  authority. If that base is unreadable, salvage returns `Corruption` and
+  leaves SST files in place; it does not infer family IDs or frontiers from
+  filenames
 - marks the engine degraded or in salvage mode for diagnostics
 
 ## Flush Recovery
