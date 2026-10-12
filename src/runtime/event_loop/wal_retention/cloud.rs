@@ -137,17 +137,21 @@ impl EventLoop {
             candidate_ids.last().copied().unwrap_or_default()
         );
         let worker_candidate_ids = candidate_ids.clone();
+        // `EventLoop::drop` joins this worker, possibly inside a failpoint test.
+        let failpoint_gate = crate::failpoints::worker_gate();
         let worker = std::thread::Builder::new()
             .name(worker_name)
             .spawn(move || {
-                run_cloud_wal_retirement(
-                    &CloudPersistence::new(storage),
-                    &candidates,
-                    worker_candidate_ids,
-                    &metadata_snapshot,
-                    writer_epoch,
-                    attempt_budget,
-                );
+                failpoint_gate.run(|| {
+                    run_cloud_wal_retirement(
+                        &CloudPersistence::new(storage),
+                        &candidates,
+                        worker_candidate_ids,
+                        &metadata_snapshot,
+                        writer_epoch,
+                        attempt_budget,
+                    );
+                });
             });
 
         match worker {

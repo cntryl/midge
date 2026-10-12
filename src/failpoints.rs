@@ -45,15 +45,66 @@ use parking_lot::{RwLock, RwLockReadGuard};
 #[cfg(feature = "failpoints")]
 use std::cell::Cell;
 #[cfg(feature = "failpoints")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "failpoints")]
 use std::sync::OnceLock;
 
 #[cfg(feature = "failpoints")]
 static FAILPOINT_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 
+/// Identifies the current holder of the gate's write side. Every test guard
+/// changes it on acquire and again before release.
+#[cfg(feature = "failpoints")]
+static GATE_OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(feature = "failpoints")]
 thread_local! {
     static OWNS_FAILPOINT_GATE: Cell<bool> = const { Cell::new(false) };
     static FAILPOINT_READ_SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static INHERITED_GATE_OWNER: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+#[cfg(feature = "failpoints")]
+fn skips_gate() -> bool {
+    OWNS_FAILPOINT_GATE.with(Cell::get)
+        || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0
+        || INHERITED_GATE_OWNER.with(Cell::get)
+            == Some(GATE_OWNER_GENERATION.load(Ordering::Acquire))
+}
+
+/// Failpoint-gate ownership a worker inherits from the thread that spawns it.
+///
+/// A failpoint test holds the gate's write side for its whole body. A worker
+/// its runtime joins before that guard drops (for example in
+/// `EventLoop::drop`) would wait on the read side forever. The inherited
+/// ownership lapses as soon as that test's guard is released.
+#[derive(Clone, Copy)]
+pub(crate) struct WorkerGate {
+    #[cfg(feature = "failpoints")]
+    owner: Option<u64>,
+}
+
+/// Capture the calling thread's gate ownership for a worker it will spawn.
+#[must_use]
+pub(crate) fn worker_gate() -> WorkerGate {
+    WorkerGate {
+        #[cfg(feature = "failpoints")]
+        owner: if OWNS_FAILPOINT_GATE.with(Cell::get) {
+            Some(GATE_OWNER_GENERATION.load(Ordering::Acquire))
+        } else {
+            INHERITED_GATE_OWNER.with(Cell::get)
+        },
+    }
+}
+
+impl WorkerGate {
+    /// Run a worker body under the spawner's gate ownership, if any.
+    #[cfg_attr(not(feature = "failpoints"), allow(clippy::unused_self))]
+    pub(crate) fn run<T>(self, operation: impl FnOnce() -> T) -> T {
+        #[cfg(feature = "failpoints")]
+        INHERITED_GATE_OWNER.with(|owner| owner.set(self.owner));
+        operation()
+    }
 }
 
 #[cfg(feature = "failpoints")]
@@ -69,7 +120,7 @@ fn gate() -> &'static RwLock<()> {
 /// because it already holds the write side.
 #[cfg(feature = "failpoints")]
 pub(crate) fn read_gate() -> Option<RwLockReadGuard<'static, ()>> {
-    if OWNS_FAILPOINT_GATE.with(Cell::get) || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0 {
+    if skips_gate() {
         None
     } else {
         // `read_recursive` never waits behind a queued writer. A reader that
@@ -106,7 +157,7 @@ impl Drop for FailpointReadScope {
 pub(crate) fn with_read_gate<T>(operation: impl FnOnce() -> T) -> T {
     #[cfg(feature = "failpoints")]
     {
-        if OWNS_FAILPOINT_GATE.with(Cell::get) || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0 {
+        if skips_gate() {
             return operation();
         }
         let _guard = gate().read_recursive();
@@ -129,6 +180,8 @@ pub(crate) struct TestFailpointGuard {
 #[cfg(all(test, feature = "failpoints"))]
 impl Drop for TestFailpointGuard {
     fn drop(&mut self) {
+        // Revoke inherited worker ownership before another test can acquire.
+        GATE_OWNER_GENERATION.fetch_add(1, Ordering::AcqRel);
         self.guard.take();
         OWNS_FAILPOINT_GATE.with(|owner| owner.set(false));
     }
@@ -143,6 +196,7 @@ impl Drop for TestFailpointGuard {
 #[cfg(all(test, feature = "failpoints"))]
 pub(crate) fn test_failpoint_guard() -> TestFailpointGuard {
     let guard = gate().write();
+    GATE_OWNER_GENERATION.fetch_add(1, Ordering::AcqRel);
     OWNS_FAILPOINT_GATE.with(|owner| owner.set(true));
     TestFailpointGuard { guard: Some(guard) }
 }
@@ -152,6 +206,39 @@ mod tests {
     fn injected_result() -> Result<(), &'static str> {
         super::fail_point!("midge::adapter::return_error", |_| Err("injected"));
         Ok(())
+    }
+
+    #[test]
+    fn should_not_deadlock_when_failpoint_test_joins_worker_that_evaluates_failpoint() {
+        // Arrange: the test thread holds the write side, as a failpoint test
+        // does while its runtime joins a worker on drop.
+        let guard = super::test_failpoint_guard();
+        let inherited = super::worker_gate();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        // Act
+        let worker = std::thread::spawn(move || {
+            inherited.run(|| {
+                let _gate = super::read_gate();
+                done_tx.send(()).expect("report worker completion");
+            });
+        });
+        let completed = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+
+        // Assert
+        assert!(
+            completed.is_ok(),
+            "a worker of the gate owner must not wait on the owner's write side"
+        );
+        worker.join().expect("join worker");
+        drop(guard);
+        let gated = std::thread::spawn(move || inherited.run(|| super::read_gate().is_some()))
+            .join()
+            .expect("join late worker");
+        assert!(
+            gated,
+            "inherited ownership must lapse once the owning test releases the gate"
+        );
     }
 
     #[test]
