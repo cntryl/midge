@@ -236,6 +236,13 @@ pub mod __internal {
                 SegmentHeader, HEADER_LEN,
             };
         }
+        /// The cloud WAL publication catalog (v2, #844): the only reader
+        /// and editor of catalog JSON for integration fixtures.
+        pub mod catalog {
+            pub use crate::wal::cloud_catalog::{
+                CatalogDecodeError, CatalogEntry, WalPublicationCatalog,
+            };
+        }
         pub mod frame {
             pub use crate::wal::frame::{
                 append_frame, decode_frame_header, verify_frame_crc, WAL_FRAME_HEADER_LEN,

@@ -1616,6 +1616,10 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("Expectation::Chain", "#843"),
     ("OpenTail", "#843"),
     ("cloud_segment::object_key", "#843"),
+    ("candidates_are_oldest_catalog_prefix", "#844"),
+    ("PublishedWalSegment", "#844"),
+    ("from_validated_bytes", "#844"),
+    ("validate_publication_identity", "#844"),
     ("read_only_error", "#844"),
     ("require_read_only", "#844"),
 ];

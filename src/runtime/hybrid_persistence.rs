@@ -9,7 +9,7 @@ use crate::metadata::{FileMeta, Manifest};
 use crate::storage::cloud::CloudStorage;
 use crate::storage::hybrid::backend::{GuardedObjectProof, HybridStorage, RemoteObjectProof};
 use crate::storage::{StorageBackend, StorageObjectMetadata};
-use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
+use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use crate::wal::cloud_segment::DataCoverageRecord;
 use std::path::Path;
 use std::sync::Arc;
@@ -264,7 +264,7 @@ struct ValidatedWalObject {
 
 struct ValidatedWalPruneCandidate {
     segment_id: u64,
-    entry: PublishedWalSegment,
+    entry: CatalogEntry,
     validated: ValidatedWalObject,
 }
 
@@ -357,7 +357,7 @@ fn retire_covered_wal_catalog_prefix_within(
     deadline: &crate::common::OperationDeadline,
     results: &mut CloudWalPruneBatchResults,
 ) -> MidgeResult<Vec<ValidatedWalPruneCandidate>> {
-    let expected: Vec<PublishedWalSegment> = covered_candidates
+    let expected: Vec<CatalogEntry> = covered_candidates
         .iter()
         .map(|candidate| candidate.entry.clone())
         .collect();
@@ -528,24 +528,16 @@ impl CloudPersistence {
         .map_err(MidgeError::Corruption)?;
         // The object is named for the epoch of the writer that wrote it,
         // which its header records (#843).
-        let entry = PublishedWalSegment::from_validated_bytes(
-            segment_id,
-            max_sequence,
-            readback.validation.writer_epoch,
-            &bytes,
-        );
-        entry
-            .check(&readback.validation.identity())
-            .map_err(|detail| {
-                MidgeError::Corruption(format!("local WAL segment '{source}': {detail}"))
-            })?;
-        self.enqueue_object_upload(
-            segment_id,
-            entry.object_key.clone(),
-            source.clone(),
-            max_sequence,
-        )?;
-        Ok(entry.object_key)
+        let entry = CatalogEntry::describing(readback.validation.identity(), &bytes);
+        if entry.id() != segment_id {
+            return Err(MidgeError::Corruption(format!(
+                "local WAL segment '{source}' holds segment {}, not {segment_id}",
+                entry.id()
+            )));
+        }
+        let object_key = entry.object_key();
+        self.enqueue_object_upload(segment_id, object_key.clone(), source.clone(), max_sequence)?;
+        Ok(object_key)
     }
 
     pub(crate) fn fence_cloud_wal_catalog(
@@ -587,7 +579,7 @@ impl CloudPersistence {
     pub(crate) fn retire_unreplayed_wal_segments_with_authority_within(
         &self,
         writer_epoch: u64,
-        segments: &[PublishedWalSegment],
+        segments: &[CatalogEntry],
         validate: &dyn Fn() -> MidgeResult<()>,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
@@ -599,7 +591,12 @@ impl CloudPersistence {
             Missing::Refuse,
             |catalog| {
                 catalog
-                    .set_aside(writer_epoch, segments)
+                    .set_aside_suffix(
+                        writer_epoch,
+                        segments.first().map(CatalogEntry::id),
+                        segments,
+                        0,
+                    )
                     .map(|changed| Mutation::of(changed, ()))
             },
         )?
@@ -648,7 +645,7 @@ impl CloudPersistence {
             Missing::Refuse,
             |catalog| {
                 catalog
-                    .raise_sequence_floor(writer_epoch, sequence_floor)
+                    .set_aside_suffix(writer_epoch, None, &[], sequence_floor)
                     .map(|changed| Mutation::of(changed, ()))
             },
         )?
@@ -674,7 +671,7 @@ impl CloudPersistence {
         expected_max_sequence: u64,
         source: &crate::io::FsLocation,
         deadline: &crate::common::OperationDeadline,
-    ) -> Result<PublishedWalSegment, PublicationError> {
+    ) -> Result<CatalogEntry, PublicationError> {
         let local_bytes = source.read_all().map_err(|error| {
             let error = error.into_io();
             MidgeError::Io(std::io::Error::new(
@@ -690,18 +687,16 @@ impl CloudPersistence {
             expected_max_sequence,
         )
         .map_err(MidgeError::Internal)?;
-        let entry = PublishedWalSegment::from_validated_bytes(
-            segment_id,
-            expected_max_sequence,
-            local_readback.writer_epoch,
-            &local_bytes,
-        );
-        entry
-            .check(&local_readback.identity())
-            .map_err(|detail| PublicationError::Mismatch {
+        let entry = CatalogEntry::describing(local_readback.identity(), &local_bytes);
+        if entry.id() != segment_id {
+            return Err(PublicationError::Mismatch {
                 segment_id,
-                detail: format!("local WAL segment '{source}': {detail}"),
-            })?;
+                detail: format!(
+                    "local WAL segment '{source}' holds segment {}, not {segment_id}",
+                    entry.id()
+                ),
+            });
+        }
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
             return Err(PublicationError::Mismatch {
@@ -731,7 +726,7 @@ impl CloudPersistence {
     /// for a failure a later attempt may not repeat.
     pub(crate) fn publish_wal_segments(
         &self,
-        run: &[PublishedWalSegment],
+        run: &[CatalogEntry],
         fencing_epoch: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> Result<(), PublicationError> {
@@ -787,7 +782,7 @@ impl CloudPersistence {
             return Ok(ordered_candidates
                 .into_iter()
                 .map(|(segment_id, _)| {
-                    if catalog.segments.contains_key(&segment_id) {
+                    if catalog.entry(segment_id).is_some() {
                         (segment_id, Err(MidgeError::Busy(refusal.to_string())))
                     } else {
                         (segment_id, Ok(()))
@@ -862,7 +857,7 @@ impl CloudPersistence {
 fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
-) -> Result<(ControlObject, PublishedWalSegment), String> {
+) -> Result<(ControlObject, CatalogEntry), String> {
     authoritative_wal_entry_within(
         storage,
         segment_id,
@@ -876,9 +871,9 @@ fn authoritative_wal_entry_within(
     storage: &HybridStorage,
     segment_id: u64,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<(ControlObject, PublishedWalSegment)> {
+) -> MidgeResult<(ControlObject, CatalogEntry)> {
     let (proof, catalog) = authoritative_wal_catalog_within(storage, deadline)?;
-    let entry = catalog.segments.get(&segment_id).cloned().ok_or_else(|| {
+    let entry = catalog.entry(segment_id).cloned().ok_or_else(|| {
         MidgeError::Internal(format!(
             "cloud WAL segment {segment_id} is not authoritative in the publication catalog"
         ))
@@ -900,15 +895,15 @@ fn authoritative_wal_catalog_within(
 
 fn validate_remote_wal(
     storage: &HybridStorage,
-    entry: &PublishedWalSegment,
+    entry: &CatalogEntry,
     deadline: &crate::common::OperationDeadline,
 ) -> Result<ValidatedWalObject, PublicationError> {
-    let proof = storage.remote_object_proof_within(&entry.object_key, deadline)?;
+    let proof = storage.remote_object_proof_within(&entry.object_key(), deadline)?;
     // The object exists but holds other bytes than the segment it names.
     entry
         .validate_bytes(proof.bytes())
         .map_err(|detail| PublicationError::Mismatch {
-            segment_id: entry.segment_id,
+            segment_id: entry.id(),
             detail,
         })?;
     Ok(ValidatedWalObject { proof })

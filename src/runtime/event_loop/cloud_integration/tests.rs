@@ -1506,6 +1506,10 @@ fn seal_and_publish_for_test(el: &mut EventLoop, segment_id: u64, max_sequence: 
     let sealed = std::fs::read(&local_path).expect("read the sealed candidate segment");
     write_test_file(remote_wal_path_for_test(el, segment_id), &sealed);
     if let Some(storage) = el.cloud_coordinator.hybrid_storage.as_ref() {
+        let prev = crate::wal::format::SegmentHeader::decode(&sealed)
+            .expect("the sealed candidate's header")
+            .prev;
+        anchor_catalog_for_test(storage, prev);
         cloud_persistence(storage)
             .publish_remote_wal_segment(
                 segment_id,
@@ -1515,6 +1519,50 @@ fn seal_and_publish_for_test(el: &mut EventLoop, segment_id: u64, max_sequence: 
                 &crate::common::OperationDeadline::unbounded(),
             )
             .expect("publish authoritative remote WAL for test");
+    }
+}
+
+/// Make the catalog, while it publishes nothing, continue from `prev` as if
+/// a writer had published and retired every segment through it (#844):
+/// ledger fixtures seal empty segments, which no writer publishes, so a
+/// candidate's predecessor never reaches the catalog.
+fn anchor_catalog_for_test(
+    storage: &crate::storage::HybridStorage,
+    prev: crate::wal::format::ChainLink,
+) {
+    for key in [
+        crate::wal::cloud_catalog::OBJECT_KEY,
+        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+    ] {
+        let Some(proof) = storage
+            .remote_object_proof_optional(key)
+            .expect("read the test WAL catalog")
+        else {
+            continue;
+        };
+        let mut json: serde_json::Value =
+            serde_json::from_slice(proof.bytes()).expect("catalog JSON");
+        if json["segments"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty())
+        {
+            continue;
+        }
+        let next = json["next_segment_id"]
+            .as_u64()
+            .unwrap_or(1)
+            .max(prev.id + 1);
+        json["anchor"] = serde_json::to_value(prev).expect("encode the anchor");
+        json["next_segment_id"] = serde_json::json!(next);
+        let catalog: crate::wal::cloud_catalog::WalPublicationCatalog =
+            serde_json::from_value(json).expect("an anchored catalog");
+        storage
+            .compare_exchange_remote_object(
+                key,
+                Some(proof.metadata()),
+                catalog.encode().expect("a valid anchored catalog"),
+            )
+            .expect("anchor the test WAL catalog");
     }
 }
 
@@ -3086,7 +3134,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode catalog after ambiguous retirement");
     assert!(
-        !catalog.segments.contains_key(&segment_id),
+        catalog.entry(segment_id).is_none(),
         "the first catalog CAS must have committed before its readback timed out"
     );
     el.prune_cloud_wal_segments_covered_by_manifest();
@@ -3467,7 +3515,7 @@ fn should_not_retire_wal_authority_without_cloud_manifest_base() -> crate::commo
         .expect("read WAL catalog after refused cleanup");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode WAL catalog after refused cleanup");
-    assert!(catalog.segments.contains_key(&segment_id));
+    assert!(catalog.entry(segment_id).is_some());
     Ok(())
 }
 
@@ -5085,7 +5133,11 @@ fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::M
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode catalog after bounded batch retirement");
     assert_eq!(
-        catalog.segments.keys().copied().collect::<Vec<_>>(),
+        catalog
+            .entries()
+            .iter()
+            .map(crate::wal::cloud_catalog::CatalogEntry::id)
+            .collect::<Vec<_>>(),
         vec![33],
         "the authoritative catalog must retire the same bounded batch as local ACK state"
     );
@@ -5155,7 +5207,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     );
     assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
     assert!(
-        !catalog.segments.contains_key(&segment_id),
+        catalog.entry(segment_id).is_none(),
         "catalog authority must be retired before physical cleanup"
     );
     assert!(remote_wal_path_for_test(&el, segment_id).exists());
@@ -5284,7 +5336,7 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
     );
     assert_eq!(failing_cloud.delete_attempts(), 1);
     assert!(
-        !catalog.segments.contains_key(&segment_id),
+        catalog.entry(segment_id).is_none(),
         "failed physical cleanup must not restore retired catalog authority"
     );
     assert!(
@@ -5393,8 +5445,8 @@ fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
             .bytes(),
     )
     .expect("decode WAL catalog");
-    assert!(catalog.segments.contains_key(&1));
-    assert!(catalog.segments.contains_key(&2));
+    assert!(catalog.entry(1).is_some());
+    assert!(catalog.entry(2).is_some());
     Ok(())
 }
 
@@ -9213,9 +9265,13 @@ fn should_not_publish_later_upload_when_preceding_segment_is_unacknowledged(
 
     // Assert: publication itself, not just the acknowledgement frontier, waits.
     assert!(
-        catalog.segments.is_empty(),
+        catalog.entries().is_empty(),
         "catalog published across an unacknowledged predecessor: {:?}",
-        catalog.segments.keys().collect::<Vec<_>>()
+        catalog
+            .entries()
+            .iter()
+            .map(crate::wal::cloud_catalog::CatalogEntry::id)
+            .collect::<Vec<_>>()
     );
     Ok(())
 }
@@ -9228,8 +9284,12 @@ fn published_wal_segments_for_test(el: &EventLoop) -> crate::common::MidgeResult
         .join(crate::wal::cloud_catalog::OBJECT_KEY);
     let catalog =
         crate::wal::cloud_catalog::WalPublicationCatalog::decode(&std::fs::read(catalog_path)?)
-            .map_err(crate::common::MidgeError::Corruption)?;
-    Ok(catalog.segments.keys().copied().collect())
+            .map_err(|error| crate::common::MidgeError::Corruption(error.to_string()))?;
+    Ok(catalog
+        .entries()
+        .iter()
+        .map(crate::wal::cloud_catalog::CatalogEntry::id)
+        .collect())
 }
 
 #[test]
@@ -9437,9 +9497,46 @@ fn should_withdraw_first_upload_when_publishing_its_run_fails() -> crate::common
 
 /// Publish `entry` straight into the catalog, as a writer before #841 could
 /// have, bypassing the runtime's contiguous selection.
+/// A sealed segment `segment_id`, by the event loop's writer epoch and
+/// linked to `prev`, holding one put at `sequence` of `value`, as the
+/// catalog entry publishing it.
+fn sealed_entry_for_test(
+    el: &EventLoop,
+    segment_id: u64,
+    prev: crate::wal::format::ChainLink,
+    sequence: u64,
+    value: &'static [u8],
+) -> crate::wal::cloud_catalog::CatalogEntry {
+    let (bytes, _) =
+        crate::wal::format::segment::SegmentBuilder::new(segment_id, el.state.writer_epoch, prev)
+            .record(&crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"key"),
+                Some(bytes::Bytes::from_static(value)),
+                sequence,
+            ))
+            .seal();
+    crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).expect("a sealed segment")
+}
+
+/// The catalog's head as the event loop's cloud store holds it.
+fn catalog_head_for_test(
+    el: &EventLoop,
+) -> crate::common::MidgeResult<crate::wal::format::ChainLink> {
+    let catalog_path = el
+        .state
+        .db_path
+        .join("cloud_store")
+        .join(crate::wal::cloud_catalog::OBJECT_KEY);
+    let catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&std::fs::read(catalog_path)?)
+            .map_err(|error| crate::common::MidgeError::Corruption(error.to_string()))?;
+    Ok(catalog.head())
+}
+
 fn publish_catalog_entry_for_test(
     el: &EventLoop,
-    entry: crate::wal::cloud_catalog::PublishedWalSegment,
+    entry: crate::wal::cloud_catalog::CatalogEntry,
 ) -> crate::common::MidgeResult<()> {
     let storage = Arc::clone(
         el.cloud_coordinator
@@ -9473,12 +9570,14 @@ fn should_fence_writer_when_catalog_publishes_past_an_owed_segment(
     }
     append_cloud_async_put(&mut el)?;
     let (third, third_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let head = catalog_head_for_test(&el)?;
     publish_catalog_entry_for_test(
         &el,
-        crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+        sealed_entry_for_test(
+            &el,
             third + 1,
+            head,
             third_max_sequence + 1,
-            el.state.writer_epoch,
             b"a later segment",
         ),
     )?;
@@ -9524,13 +9623,15 @@ fn should_fence_with_conflicting_segment_when_a_later_run_member_conflicts(
         &crate::io::FsLocation::new(Arc::clone(&el.state.fs), crate::wal::segment_key(first)),
         &crate::common::OperationDeadline::unbounded(),
     )?;
+    let first_link = first_upload.link();
     publish_catalog_entry_for_test(&el, first_upload)?;
     publish_catalog_entry_for_test(
         &el,
-        crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+        sealed_entry_for_test(
+            &el,
             second,
+            first_link,
             second_max_sequence,
-            el.state.writer_epoch,
             b"another object",
         ),
     )?;

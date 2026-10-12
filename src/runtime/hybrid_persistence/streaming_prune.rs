@@ -2,9 +2,9 @@
 
 use super::{
     file_may_contain_record_key, file_may_overlap_record_range,
-    verify_sst_summary_matches_manifest, CloudWalPruneBatchResults, CloudWalPruneGuard,
-    DataCoverageRecord, ExactCoverageState, FileMeta, GuardedObjectProof, HybridStorage, Manifest,
-    MidgeError, MidgeResult, PublishedWalSegment, RemoteObjectProof, StorageBackend,
+    verify_sst_summary_matches_manifest, CatalogEntry, CloudWalPruneBatchResults,
+    CloudWalPruneGuard, DataCoverageRecord, ExactCoverageState, FileMeta, GuardedObjectProof,
+    HybridStorage, Manifest, MidgeError, MidgeResult, RemoteObjectProof, StorageBackend,
     StorageObjectMetadata, ValidatedWalObject, ValidatedWalPruneCandidate, WalPublicationCatalog,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
@@ -79,7 +79,7 @@ pub(super) fn validate(
     };
     let mut blocked_by = None;
     for &(segment_id, expected_sequence) in candidates {
-        let Some(entry) = catalog.segments.get(&segment_id) else {
+        let Some(entry) = catalog.entry(segment_id) else {
             output.results.push((segment_id, Ok(())));
             continue;
         };
@@ -92,7 +92,7 @@ pub(super) fn validate(
             ));
             continue;
         }
-        let result = if entry.max_sequence == expected_sequence {
+        let result = if entry.max_sequence() == expected_sequence {
             validate_segment(&mut coverage, entry, limits)
         } else {
             Err(MidgeError::Corruption(format!(
@@ -168,16 +168,16 @@ fn proof_bytes(key: &str, metadata: &StorageObjectMetadata) -> usize {
 
 fn validate_segment(
     coverage: &mut Coverage<'_>,
-    entry: &PublishedWalSegment,
+    entry: &CatalogEntry,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<(RemoteObjectProof, bool, ResourceReservation)> {
     let metadata = coverage
         .storage
-        .remote_range_metadata_within(&entry.object_key, coverage.deadline)?;
-    if metadata.size != entry.size_bytes {
+        .remote_range_metadata_within(&entry.object_key(), coverage.deadline)?;
+    if metadata.size != entry.size_bytes() {
         return Err(MidgeError::Corruption(format!(
             "cloud WAL segment {} size differs from catalog",
-            entry.segment_id
+            entry.id()
         )));
     }
     let previous = coverage.progress.segment.take();
@@ -193,7 +193,7 @@ fn validate_segment(
             operation: 0,
             record: RecordProgress::default(),
             _reservation: coverage.budget.reserve(
-                proof_bytes(&entry.object_key, &metadata),
+                proof_bytes(&entry.object_key(), &metadata),
                 "resumable WAL proof",
             )?,
         },
@@ -202,10 +202,10 @@ fn validate_segment(
     coverage.progress.segment = Some(segment);
     result?;
     Ok((
-        RemoteObjectProof::from_validated_ranges(entry.object_key.clone(), metadata.clone()),
+        RemoteObjectProof::from_validated_ranges(entry.object_key(), metadata.clone()),
         true,
         coverage.budget.reserve(
-            proof_bytes(&entry.object_key, &metadata),
+            proof_bytes(&entry.object_key(), &metadata),
             "WAL retirement target proof",
         )?,
     ))
@@ -220,19 +220,19 @@ fn validate_segment_progress(
     let fs = pinned_fs(
         coverage.storage,
         coverage.storage.remote_wal_backend(),
-        entry.object_key.clone(),
+        entry.object_key(),
         segment.metadata.clone(),
         coverage.deadline,
     );
     segment.crc.verify(
         fs.as_ref(),
-        &entry.object_key,
+        &entry.object_key(),
         segment.metadata.size,
-        entry.content_crc32c,
+        entry.crc32c(),
         coverage.window,
         &mut || coverage.work.checkpoint(),
     )?;
-    let path = FsPath::new(&entry.object_key);
+    let path = FsPath::new(entry.object_key());
     let file = fs
         .open(
             &path,
@@ -267,7 +267,7 @@ fn validate_segment_progress(
                 limits.max_pending_txn_bytes,
                 operation,
                 record,
-                entry.segment_id,
+                entry.id(),
             )? {
                 return Err(MidgeError::Busy(
                     "WAL frame is not exactly covered by committed SSTs".into(),
@@ -280,10 +280,7 @@ fn validate_segment_progress(
         &mut || work.checkpoint(),
     )?;
     let identity = prefix.identity().ok_or_else(|| {
-        MidgeError::Corruption(format!(
-            "cloud WAL segment {} has no header",
-            entry.segment_id
-        ))
+        MidgeError::Corruption(format!("cloud WAL segment {} is not sealed", entry.id()))
     })?;
     entry.check(&identity).map_err(MidgeError::Corruption)
 }

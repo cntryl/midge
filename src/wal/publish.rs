@@ -12,15 +12,15 @@
 //! acknowledged ([`uploaded_run`] over an [`AckSet`]), appended past the
 //! catalog's head ([`additions`]).
 
-use super::cloud_catalog::PublishedWalSegment;
-use super::format::SegmentId;
+use super::cloud_catalog::CatalogEntry;
+use super::format::{ChainLink, SegmentId};
 use std::collections::BTreeMap;
 
 /// What the writer knows the cloud holds of one segment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ack {
     /// A verified upload the catalog does not publish yet.
-    Uploaded(PublishedWalSegment),
+    Uploaded(CatalogEntry),
     /// A segment the catalog publishes, holding sequences through
     /// `max_sequence`.
     Published { max_sequence: u64 },
@@ -30,7 +30,7 @@ impl Ack {
     /// The last sequence the acknowledged segment holds.
     fn max_sequence(&self) -> u64 {
         match self {
-            Self::Uploaded(entry) => entry.max_sequence,
+            Self::Uploaded(entry) => entry.max_sequence(),
             Self::Published { max_sequence } => *max_sequence,
         }
     }
@@ -59,14 +59,19 @@ impl AckSet {
         }
     }
 
+    /// Acknowledge `segment_id` as published through `max_sequence`, as
+    /// recovery would.
+    #[cfg(test)]
+    pub(crate) fn acknowledge(&mut self, segment_id: SegmentId, max_sequence: u64) {
+        self.acks
+            .insert(segment_id, Ack::Published { max_sequence });
+    }
+
     /// Acknowledge a verified upload. A segment the catalog already
     /// publishes stays published.
-    pub(crate) fn record_upload(&mut self, entry: PublishedWalSegment) {
-        if !matches!(
-            self.acks.get(&entry.segment_id),
-            Some(Ack::Published { .. })
-        ) {
-            self.acks.insert(entry.segment_id, Ack::Uploaded(entry));
+    pub(crate) fn record_upload(&mut self, entry: CatalogEntry) {
+        if !matches!(self.acks.get(&entry.id()), Some(Ack::Published { .. })) {
+            self.acks.insert(entry.id(), Ack::Uploaded(entry));
         }
     }
 
@@ -87,7 +92,7 @@ impl AckSet {
             if let Some(ack) = self.acks.get_mut(&segment.segment_id) {
                 if let Ack::Uploaded(entry) = ack {
                     *ack = Ack::Published {
-                        max_sequence: entry.max_sequence,
+                        max_sequence: entry.max_sequence(),
                     };
                 }
             }
@@ -110,7 +115,7 @@ impl AckSet {
 
     /// What publishing `run` adds: its verified uploads, oldest first.
     /// Segments the catalog already publishes add nothing.
-    pub(crate) fn unpublished(&self, run: &[OwedSegment]) -> Vec<PublishedWalSegment> {
+    pub(crate) fn unpublished(&self, run: &[OwedSegment]) -> Vec<CatalogEntry> {
         run.iter()
             .filter_map(|segment| match self.acks.get(&segment.segment_id) {
                 Some(Ack::Uploaded(entry)) => Some(entry.clone()),
@@ -125,7 +130,7 @@ impl AckSet {
         self.acks
             .values()
             .filter_map(|ack| match ack {
-                Ack::Uploaded(entry) => Some(entry.size_bytes),
+                Ack::Uploaded(entry) => Some(entry.size_bytes()),
                 Ack::Published { .. } => None,
             })
             .fold((0, 0), |(count, bytes), size| {
@@ -174,6 +179,9 @@ pub(crate) enum Refusal {
     /// The catalog already publishes a later segment, so adding this one
     /// would publish out of order.
     BehindHead { segment_id: u64, head: u64 },
+    /// The segment does not link the catalog's head, or lowers its epoch:
+    /// it continues another history (#844).
+    Unchained { segment_id: u64, head: ChainLink },
     /// Another writer epoch owns the catalog.
     EpochMismatch { catalog: u64, writer: u64 },
 }
@@ -185,7 +193,8 @@ impl Refusal {
             Self::Unordered { next, .. } => Some(*next),
             Self::SequenceMismatch { segment_id, .. }
             | Self::Conflict { segment_id }
-            | Self::BehindHead { segment_id, .. } => Some(*segment_id),
+            | Self::BehindHead { segment_id, .. }
+            | Self::Unchained { segment_id, .. } => Some(*segment_id),
             Self::EpochMismatch { .. } => None,
         }
     }
@@ -214,6 +223,11 @@ impl std::fmt::Display for Refusal {
                 f,
                 "cloud WAL segment {segment_id} cannot be published behind catalog head {head}"
             ),
+            Self::Unchained { segment_id, head } => write!(
+                f,
+                "cloud WAL segment {segment_id} does not link the catalog head, segment {} (last sequence {})",
+                head.id, head.last_seq
+            ),
             Self::EpochMismatch { catalog, writer } => write!(
                 f,
                 "cloud WAL catalog mutation requires fencing epoch {catalog}, writer epoch {writer} rejected"
@@ -227,7 +241,7 @@ impl From<Refusal> for crate::common::MidgeError {
     /// writer's own bookkeeping is inconsistent, or the writer is fenced.
     fn from(refusal: Refusal) -> Self {
         match refusal {
-            Refusal::Conflict { .. } | Refusal::BehindHead { .. } => {
+            Refusal::Conflict { .. } | Refusal::BehindHead { .. } | Refusal::Unchained { .. } => {
                 Self::Corruption(format!("cloud WAL publication refused: {refusal}"))
             }
             Refusal::Unordered { .. } | Refusal::SequenceMismatch { .. } => {
@@ -270,42 +284,48 @@ pub(crate) fn uploaded_run(
     Ok(run)
 }
 
-/// What publishing `run` adds to a catalog that publishes `published`.
+/// What publishing `run` adds to a catalog whose head is `head` and which
+/// publishes `published`, oldest first.
 ///
 /// A segment the catalog already publishes identically, as after a
 /// publication whose acknowledgement was lost, adds nothing. Every other
-/// segment must land past the catalog's head, so the catalog stays a prefix
-/// of what its writers sealed.
+/// segment must chain onto the head (#844): link it, pass its id, and not
+/// lower the epoch of the newest published segment, so the catalog stays
+/// one history.
 ///
 /// # Errors
 ///
 /// Refuses a run that is not strictly ascending, a segment the catalog
-/// publishes with another object, and a segment behind the catalog's head.
+/// publishes with another object, a segment behind the catalog's head, and
+/// one that does not chain onto it.
 pub(crate) fn additions(
-    published: &BTreeMap<u64, PublishedWalSegment>,
-    run: &[PublishedWalSegment],
-) -> Result<Vec<PublishedWalSegment>, Refusal> {
-    ascending(run.iter().map(|segment| segment.segment_id))?;
-    let mut head = published.keys().next_back().copied();
+    head: ChainLink,
+    published: &[CatalogEntry],
+    run: &[CatalogEntry],
+) -> Result<Vec<CatalogEntry>, Refusal> {
+    ascending(run.iter().map(CatalogEntry::id))?;
+    let mut head = head;
+    let mut epoch = published.last().map(CatalogEntry::epoch);
     let mut added = Vec::new();
-    for segment in run {
-        match published.get(&segment.segment_id) {
-            Some(existing) if existing == segment => continue,
-            Some(_) => {
-                return Err(Refusal::Conflict {
-                    segment_id: segment.segment_id,
-                })
-            }
-            None => {}
+    for entry in run {
+        let segment_id = entry.id();
+        match published.binary_search_by_key(&segment_id, CatalogEntry::id) {
+            Ok(index) if published[index] == *entry => continue,
+            Ok(_) => return Err(Refusal::Conflict { segment_id }),
+            Err(_) => {}
         }
-        if let Some(head) = head.filter(|head| *head > segment.segment_id) {
+        if segment_id <= head.id {
             return Err(Refusal::BehindHead {
-                segment_id: segment.segment_id,
-                head,
+                segment_id,
+                head: head.id,
             });
         }
-        head = Some(segment.segment_id);
-        added.push(segment.clone());
+        if entry.prev() != head || epoch.is_some_and(|epoch| entry.epoch() < epoch) {
+            return Err(Refusal::Unchained { segment_id, head });
+        }
+        head = entry.link();
+        epoch = Some(entry.epoch());
+        added.push(entry.clone());
     }
     Ok(added)
 }
@@ -335,22 +355,40 @@ mod tests {
             .collect()
     }
 
-    fn segment(segment_id: u64) -> PublishedWalSegment {
-        PublishedWalSegment {
-            segment_id,
-            writer_epoch: 1,
-            max_sequence: segment_id * 10,
-            size_bytes: 64,
-            content_crc32c: u32::try_from(segment_id).unwrap(),
-            object_key: crate::wal::segment_object_key(segment_id, 1),
+    /// Segment `segment_id` of a chain written by `epoch`: segment `n`
+    /// holds a put at `10 * n` and links segment `n - 1`.
+    fn chained(epoch: u64, segment_id: u64) -> CatalogEntry {
+        let mut prev = ChainLink::GENESIS;
+        let mut bytes = Vec::new();
+        for id in 1..=segment_id {
+            let record = crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"key"),
+                Some(bytes::Bytes::from_static(b"value")),
+                id * 10,
+            );
+            (bytes, prev) = crate::wal::format::segment::SegmentBuilder::new(id, epoch, prev)
+                .record(&record)
+                .seal();
         }
+        CatalogEntry::from_sealed_bytes(&bytes).expect("a chained segment publishes")
     }
 
-    fn catalog(segment_ids: &[u64]) -> BTreeMap<u64, PublishedWalSegment> {
+    fn segment(segment_id: u64) -> CatalogEntry {
+        chained(1, segment_id)
+    }
+
+    fn catalog(segment_ids: &[u64]) -> Vec<CatalogEntry> {
         segment_ids
             .iter()
-            .map(|&segment_id| (segment_id, segment(segment_id)))
+            .map(|&segment_id| segment(segment_id))
             .collect()
+    }
+
+    fn head(published: &[CatalogEntry]) -> ChainLink {
+        published
+            .last()
+            .map_or(ChainLink::GENESIS, CatalogEntry::link)
     }
 
     /// An acknowledgement set holding a verified upload of each segment.
@@ -461,7 +499,7 @@ mod tests {
         let run = [segment(3), segment(4)];
 
         // Act
-        let added = additions(&published, &run);
+        let added = additions(head(&published), &published, &run);
 
         // Assert
         assert_eq!(added, Ok(run.to_vec()));
@@ -474,7 +512,7 @@ mod tests {
         let run = [segment(2), segment(3)];
 
         // Act
-        let added = additions(&published, &run);
+        let added = additions(head(&published), &published, &run);
 
         // Assert
         assert_eq!(added, Ok(Vec::new()));
@@ -487,20 +525,20 @@ mod tests {
         let run = [segment(2), segment(3)];
 
         // Act
-        let added = additions(&published, &run);
+        let added = additions(head(&published), &published, &run);
 
         // Assert
         assert_eq!(added, Ok(vec![segment(3)]));
     }
 
     #[test]
-    fn should_append_run_when_catalog_is_empty() {
-        // Arrange
-        let published = catalog(&[]);
+    fn should_append_run_when_catalog_retired_every_segment() {
+        // Arrange: the catalog retired segments through 6.
+        let anchor = segment(6).link();
         let run = [segment(7)];
 
         // Act
-        let added = additions(&published, &run);
+        let added = additions(anchor, &[], &run);
 
         // Assert
         assert_eq!(added, Ok(vec![segment(7)]));
@@ -509,11 +547,11 @@ mod tests {
     #[test]
     fn should_refuse_segment_behind_head_when_catalog_publishes_a_later_one() {
         // Arrange
-        let published = catalog(&[1, 4]);
-        let run = [segment(2), segment(3)];
+        let published = catalog(&[3, 4]);
+        let run = [segment(2)];
 
         // Act
-        let added = additions(&published, &run);
+        let added = additions(head(&published), &published, &run);
 
         // Assert
         assert_eq!(
@@ -529,14 +567,32 @@ mod tests {
     fn should_refuse_segment_when_catalog_publishes_a_different_object() {
         // Arrange
         let published = catalog(&[1, 2]);
-        let mut different = segment(2);
-        different.content_crc32c ^= 1;
+        let different = chained(2, 2);
 
         // Act
-        let added = additions(&published, &[different, segment(3)]);
+        let added = additions(head(&published), &published, &[different, segment(3)]);
 
         // Assert
         assert_eq!(added, Err(Refusal::Conflict { segment_id: 2 }));
+    }
+
+    #[test]
+    fn should_refuse_run_that_does_not_link_the_head() {
+        // Arrange: the catalog's segment 1 is another history's.
+        let published = vec![chained(2, 1)];
+        let run = [segment(2)];
+
+        // Act
+        let added = additions(head(&published), &published, &run);
+
+        // Assert
+        assert_eq!(
+            added,
+            Err(Refusal::Unchained {
+                segment_id: 2,
+                head: published[0].link(),
+            })
+        );
     }
 
     #[test]
@@ -546,7 +602,7 @@ mod tests {
         let run = [segment(3), segment(3)];
 
         // Act
-        let added = additions(&published, &run);
+        let added = additions(head(&published), &published, &run);
 
         // Assert
         assert_eq!(

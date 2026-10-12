@@ -5,7 +5,7 @@ use super::{
     WalPublicationCatalog,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::wal::cloud_catalog::CatalogRefusal;
+use crate::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
 
 pub(super) struct CatalogAuthority {
     pub(super) primary: ControlObject,
@@ -44,7 +44,13 @@ impl AdmittedCatalog {
             "decoded WAL catalog",
         )?;
         Ok(Self {
-            catalog: WalPublicationCatalog::decode(bytes).map_err(MidgeError::Corruption)?,
+            catalog: WalPublicationCatalog::decode(bytes).map_err(|error| match error {
+                // Another format is no damage a mirror could repair (#844).
+                CatalogDecodeError::Incompatible(_) => {
+                    MidgeError::CompatibilityError(error.to_string())
+                }
+                CatalogDecodeError::Invalid(_) => MidgeError::Corruption(error.to_string()),
+            })?,
             _memory: memory,
         })
     }
@@ -88,6 +94,15 @@ pub(super) fn load_and_repair_catalog_within(
     load_and_repair_catalog_with_authority(storage, deadline, &|| storage.check_write_authority())
 }
 
+/// Whether a copy's decode error rules out repairing it from the other:
+/// memory pressure, or another catalog format (#844).
+fn unrepairable(error: &MidgeError) -> bool {
+    matches!(
+        error,
+        MidgeError::ResourceLimit(_) | MidgeError::CompatibilityError(_)
+    )
+}
+
 pub(super) fn load_and_repair_catalog_with_authority(
     storage: &HybridStorage,
     deadline: &crate::common::OperationDeadline,
@@ -114,7 +129,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
                 )?;
                 return Ok(Some(CatalogAuthority { primary, catalog }));
             }
-            Err(error @ MidgeError::ResourceLimit(_)) => return Err(error),
+            Err(error) if unrepairable(&error) => return Err(error),
             Err(primary_error) => {
                 let mirror = storage
                     .read_control_object(
@@ -135,7 +150,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
                     ))
                 })?;
                 let catalog = AdmittedCatalog::decode(mirror.bytes(), &budget).map_err(|mirror_error| {
-                    if matches!(mirror_error, MidgeError::ResourceLimit(_)) { return mirror_error; }
+                    if unrepairable(&mirror_error) { return mirror_error; }
                     MidgeError::Corruption(format!(
                         "both cloud WAL publication catalogs are invalid; primary: {primary_error}; mirror: {mirror_error}"
                     ))
@@ -173,7 +188,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
         return Ok(None);
     };
     let catalog = AdmittedCatalog::decode(mirror.bytes(), &budget).map_err(|error| {
-        if matches!(error, MidgeError::ResourceLimit(_)) {
+        if unrepairable(&error) {
             return error;
         }
         MidgeError::Corruption(format!(

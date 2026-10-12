@@ -1,13 +1,31 @@
 use super::*;
-use crate::wal::cloud_catalog::PublishedWalSegment;
+use crate::wal::cloud_catalog::CatalogEntry;
+use crate::wal::format::{ChainLink, SegmentIdentity};
 
 fn populated_catalog() -> WalPublicationCatalog {
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-    for segment_id in 1..=4096 {
-        let segment = PublishedWalSegment::from_validated_bytes(segment_id, segment_id, 7, b"wal");
-        catalog.append_run(7, &[segment]).unwrap();
-    }
-    catalog.raise_sequence_floor(7, 123).unwrap();
+    let mut prev = ChainLink::GENESIS;
+    let entries: Vec<CatalogEntry> = (1..=4096_u64)
+        .map(|segment_id| {
+            let link = ChainLink {
+                id: segment_id,
+                last_seq: segment_id,
+                digest: segment_id.to_le_bytes().repeat(2).try_into().unwrap(),
+            };
+            let entry = CatalogEntry::describing(
+                SegmentIdentity {
+                    epoch: 7,
+                    prev,
+                    link,
+                },
+                b"wal",
+            );
+            prev = link;
+            entry
+        })
+        .collect();
+    catalog.append_run(7, &entries).unwrap();
+    catalog.set_aside_suffix(7, None, &[], 123).unwrap();
     catalog
 }
 
@@ -108,8 +126,9 @@ fn should_repair_corrupt_mirror_from_compact_authority() {
 #[test]
 fn should_reject_invalid_catalog_before_admitting_encoded_storage() {
     // Arrange
-    let mut catalog = populated_catalog();
-    catalog.segments.get_mut(&1).unwrap().object_key = "foreign".to_string();
+    let mut json = serde_json::to_value(populated_catalog()).unwrap();
+    json["next_segment_id"] = serde_json::json!(1);
+    let catalog: WalPublicationCatalog = serde_json::from_value(json).unwrap();
     let budget = ResourceBudget::new(1024 * 1024);
 
     // Act

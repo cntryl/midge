@@ -1,8 +1,8 @@
 //! Reusable, process-local proof work. Provider identities are the invalidation boundary.
 
 use super::{
-    Arc, BTreeMap, CloudWalPruneGuard, ExactCoverageState, FileMeta, Fs, FsPath, HybridStorage,
-    Manifest, MidgeError, MidgeResult, OpenMode, OpenOptions, PublishedWalSegment, ResourceBudget,
+    Arc, BTreeMap, CatalogEntry, CloudWalPruneGuard, ExactCoverageState, FileMeta, Fs, FsPath,
+    HybridStorage, Manifest, MidgeError, MidgeResult, OpenMode, OpenOptions, ResourceBudget,
     ResourceReservation, StorageObjectMetadata, ValidatedWalPruneCandidate, WalPublicationCatalog,
 };
 use crate::io::FsError;
@@ -51,7 +51,7 @@ impl Default for Progress {
 }
 
 pub(super) struct SegmentProgress {
-    pub(super) entry: PublishedWalSegment,
+    pub(super) entry: CatalogEntry,
     pub(super) metadata: StorageObjectMetadata,
     pub(super) crc: CrcProgress,
     pub(super) prefix: crate::wal::recovery::VerifiedWalPrefix,
@@ -215,9 +215,11 @@ impl Progress {
         // Only the authoritative oldest segment can resume. A prior batch may
         // have lost its CAS or been retired by another caller; do not let its
         // unrelated proof cache consume the next segment's workspace.
-        if self.segment.as_ref().is_some_and(|segment| {
-            catalog.segments.first_key_value().map(|(_, entry)| entry) != Some(&segment.entry)
-        }) {
+        if self
+            .segment
+            .as_ref()
+            .is_some_and(|segment| catalog.entries().first() != Some(&segment.entry))
+        {
             self.segment = None;
             self.ssts.clear();
         }
@@ -281,7 +283,7 @@ impl Progress {
                 && added.largest_key.is_some()
                 && added
                     .smallest_seq
-                    .is_some_and(|sequence| sequence > segment.entry.max_sequence)
+                    .is_some_and(|sequence| sequence > segment.entry.max_sequence())
                 && self.ssts.values().all(|proof| {
                     if added.cf_id != proof.expected.cf_id {
                         return true;
@@ -329,7 +331,7 @@ impl Progress {
         self.ssts.retain(|_, proof| {
             self.segment
                 .as_ref()
-                .is_some_and(|segment| proof.last_used_segment == segment.entry.segment_id)
+                .is_some_and(|segment| proof.last_used_segment == segment.entry.id())
         });
         if self.segment.is_none() {
             self.manifest = None;
@@ -350,6 +352,23 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The catalog entry of a one-record segment 1.
+    fn test_entry() -> CatalogEntry {
+        let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+            1,
+            1,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .record(&crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            1,
+        ))
+        .seal();
+        CatalogEntry::from_sealed_bytes(&bytes).expect("a sealed segment")
+    }
 
     fn old_coverage() -> (Progress, FileMeta) {
         let budget = ResourceBudget::new(64 * 1024);
@@ -382,7 +401,7 @@ mod tests {
         };
         let progress = Progress {
             segment: Some(SegmentProgress {
-                entry: PublishedWalSegment::from_validated_bytes(1, 1, 1, b"test"),
+                entry: test_entry(),
                 metadata: StorageObjectMetadata::content_crc(4, b"test"),
                 crc: CrcProgress::default(),
                 prefix: crate::wal::recovery::VerifiedWalPrefix::default(),
@@ -489,10 +508,10 @@ mod tests {
         ));
         let entry = progress.segment.as_ref().unwrap().entry.clone();
         let candidate = ValidatedWalPruneCandidate {
-            segment_id: entry.segment_id,
+            segment_id: entry.id(),
             validated: super::super::ValidatedWalObject {
                 proof: super::super::RemoteObjectProof::from_validated_ranges(
-                    entry.object_key.clone(),
+                    entry.object_key(),
                     StorageObjectMetadata::content_crc(4, b"test"),
                 ),
             },

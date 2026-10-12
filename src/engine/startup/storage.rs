@@ -669,7 +669,9 @@ impl RuntimeStorageMaterialization {
             scope,
         )?;
         require_empty_local_cache_for_cloud_bootstrap(path, scope)?;
-        if !wal_catalog.segments.is_empty() || wal_catalog.sequence_floor != 0 {
+        // A catalog that ever published or set anything aside holds history,
+        // even with every entry retired (#844).
+        if !wal_catalog.is_pristine() {
             return Err(MidgeError::RecoveryFailed(
                 "cannot bootstrap empty cloud metadata over existing WAL state".into(),
             ));

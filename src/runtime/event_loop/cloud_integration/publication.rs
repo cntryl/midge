@@ -5,7 +5,7 @@
 use super::super::EventLoop;
 use crate::common::{MidgeError, OperationDeadline};
 use crate::runtime::hybrid_persistence::{CloudPersistence, PublicationError};
-use crate::wal::cloud_catalog::PublishedWalSegment;
+use crate::wal::cloud_catalog::CatalogEntry;
 use crate::wal::publish::OwedSegment;
 
 impl EventLoop {
@@ -106,8 +106,8 @@ impl EventLoop {
             .acks()
             .unpublished(ready_segments);
         let first_upload = run.first().map_or(acknowledged, |upload| OwedSegment {
-            segment_id: upload.segment_id,
-            max_sequence: upload.max_sequence,
+            segment_id: upload.id(),
+            max_sequence: upload.max_sequence(),
         });
         if !run.is_empty() {
             if let Err(error) = self.publish_cloud_wal_run(&run, deadline) {
@@ -206,7 +206,7 @@ impl EventLoop {
         &self,
         segment: OwedSegment,
         deadline: &OperationDeadline,
-    ) -> Result<PublishedWalSegment, PublicationError> {
+    ) -> Result<CatalogEntry, PublicationError> {
         let source = crate::io::FsLocation::new(
             std::sync::Arc::clone(&self.state.fs),
             crate::wal::segment_key(segment.segment_id),
@@ -221,7 +221,7 @@ impl EventLoop {
 
     fn publish_cloud_wal_run(
         &self,
-        run: &[PublishedWalSegment],
+        run: &[CatalogEntry],
         deadline: &OperationDeadline,
     ) -> Result<(), PublicationError> {
         self.cloud_persistence()?

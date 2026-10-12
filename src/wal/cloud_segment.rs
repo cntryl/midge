@@ -16,25 +16,30 @@ pub(crate) struct DataCoverageRecord {
     pub(crate) seq: u64,
 }
 
-/// What a sealed segment's header and footer prove about it (#843).
+/// What a sealed segment's header and footer prove about it (#843, #844).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SegmentValidation {
-    /// The footer's last sequence.
-    pub(crate) max_sequence: u64,
     /// The header's writer epoch.
     pub(crate) writer_epoch: u64,
-    /// The header's segment id.
-    pub(crate) id: u64,
+    /// The link before it, which its header names.
+    pub(crate) prev: crate::wal::format::ChainLink,
+    /// The link its footer seals: its id, last sequence and digest.
+    pub(crate) link: crate::wal::format::ChainLink,
 }
 
 impl SegmentValidation {
     /// What the segment says it is.
     pub(crate) fn identity(self) -> crate::wal::format::SegmentIdentity {
         crate::wal::format::SegmentIdentity {
-            id: self.id,
             epoch: self.writer_epoch,
-            last_seq: self.max_sequence,
+            prev: self.prev,
+            link: self.link,
         }
+    }
+
+    /// The last sequence the segment holds.
+    pub(crate) fn max_sequence(self) -> u64 {
+        self.link.last_seq
     }
 }
 
@@ -54,7 +59,7 @@ pub(crate) fn validate_bytes(
     expected_max_sequence: u64,
 ) -> Result<SegmentValidation, String> {
     let validation = validate_segment_bytes(key, data)?;
-    check_expected_max_sequence(key, validation.max_sequence, expected_max_sequence)?;
+    check_expected_max_sequence(key, validation.max_sequence(), expected_max_sequence)?;
     Ok(validation)
 }
 
@@ -65,7 +70,11 @@ pub(crate) fn validate_bytes_with_coverage(
     expected_max_sequence: u64,
 ) -> Result<SegmentReadback, String> {
     let readback = inspect_bytes(key, data)?;
-    check_expected_max_sequence(key, readback.validation.max_sequence, expected_max_sequence)?;
+    check_expected_max_sequence(
+        key,
+        readback.validation.max_sequence(),
+        expected_max_sequence,
+    )?;
     Ok(readback)
 }
 
@@ -151,9 +160,9 @@ fn inspect(
     }
     Ok(SegmentReadback {
         validation: SegmentValidation {
-            max_sequence: footer.last_seq,
             writer_epoch: scan.header().epoch,
-            id: scan.header().id,
+            prev: scan.header().prev,
+            link: footer.sealed_facts().link,
         },
         data_records,
     })
@@ -251,7 +260,7 @@ mod tests {
     #[test]
     fn should_report_segment_identity_when_validating() {
         // Arrange
-        let (bytes, _) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
+        let (bytes, link) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
             .record(&put(1))
             .record(&put(2))
             .seal();
@@ -263,34 +272,42 @@ mod tests {
         assert_eq!(
             validation,
             SegmentValidation {
-                max_sequence: 2,
                 writer_epoch: 41,
-                id: 4,
+                prev: ChainLink::GENESIS,
+                link,
             }
         );
+        assert_eq!(link.id, 4);
+        assert_eq!(validation.max_sequence(), 2);
     }
 
     #[test]
-    fn should_reject_object_whose_header_epoch_differs_from_catalog() {
-        // Arrange: the catalog says epoch 42; the object's header says 41.
-        let (bytes, _) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
+    fn should_reject_object_whose_header_differs_from_catalog() {
+        // Arrange: the catalog names another epoch, then another link
+        // before it, than the object's header.
+        let (bytes, link) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
             .record(&put(1))
             .seal();
-
-        let entry = |id, epoch| {
-            crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
-                id, 1, epoch, &bytes,
+        let entry = |epoch, prev| {
+            crate::wal::cloud_catalog::CatalogEntry::describing(
+                crate::wal::format::SegmentIdentity { epoch, prev, link },
+                &bytes,
             )
+        };
+        let stranger = ChainLink {
+            id: 0,
+            last_seq: 0,
+            digest: [0x5a; 16],
         };
 
         // Act
-        let wrong_epoch = entry(4, 42).validate_bytes(&bytes);
-        let wrong_id = entry(5, 41).validate_bytes(&bytes);
-        let matching = entry(4, 41).validate_bytes(&bytes);
+        let wrong_epoch = entry(42, ChainLink::GENESIS).validate_bytes(&bytes);
+        let wrong_prev = entry(41, stranger).validate_bytes(&bytes);
+        let matching = entry(41, ChainLink::GENESIS).validate_bytes(&bytes);
 
         // Assert
         assert!(wrong_epoch.unwrap_err().contains("writer epoch 41"));
-        assert!(wrong_id.unwrap_err().contains("segment 4"));
+        assert!(wrong_prev.unwrap_err().contains("links segment 0"));
         assert!(matching.is_ok());
     }
 

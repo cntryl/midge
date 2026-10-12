@@ -140,17 +140,17 @@ impl StreamingCloudWalRecovery {
     ) -> MidgeResult<Self> {
         scope.check("cloud WAL planning")?;
         let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
-        let catalog_head = catalog.segments.keys().copied().max();
-        let next_remote_id = next_segment_id(catalog_head)?;
+        let catalog_head = Some(catalog.head().id).filter(|head| *head > 0);
+        let next_remote_id = catalog.next_segment_id();
         let mut replay_fs = StreamingWalFs::new(read_window)?;
-        let mut plan = CloudWalRecoveryPlan::new(catalog.sequence_floor, false);
+        let mut plan = CloudWalRecoveryPlan::new(catalog.seq_floor(), false);
         let mut catalog_holders = BTreeMap::new();
         let mut catalog_links = BTreeMap::new();
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
-        for (segment_id, publication) in &catalog.segments {
+        for publication in catalog.entries() {
+            let segment_id = &publication.id();
             scope.check("cloud WAL catalog segment")?;
-            validate_publication_identity(*segment_id, publication, catalog.fencing_epoch)?;
             let result = remote_source(
                 Arc::clone(local),
                 Arc::clone(remote),
@@ -172,8 +172,8 @@ impl StreamingCloudWalRecovery {
             plan.remote_segments.insert(
                 *segment_id,
                 crate::runtime::RecoveredCloudWalSegment {
-                    max_sequence: publication.max_sequence,
-                    writer_epoch: publication.writer_epoch,
+                    max_sequence: publication.max_sequence(),
+                    writer_epoch: publication.epoch(),
                 },
             );
         }
@@ -220,11 +220,8 @@ impl StreamingCloudWalRecovery {
             &mut sources,
             &mut active_source,
         )?;
-        plan.catalog_head_link = plan
-            .remote_segments
-            .keys()
-            .next_back()
-            .and_then(|id| catalog_links.get(id).copied().flatten());
+        // The newest catalog segment replay reads, else the anchor (#844).
+        plan.catalog_head_link = Some(head_link(&plan, &catalog_links, catalog));
         let segments = assemble_planned_sources(
             &mut replay_fs,
             sources,
@@ -239,6 +236,20 @@ impl StreamingCloudWalRecovery {
             next_remote_id,
         })
     }
+}
+
+/// The link of the newest catalog segment replay reads, or the catalog's
+/// anchor when it reads none: a retired catalog keeps its chain (#844).
+fn head_link(
+    plan: &CloudWalRecoveryPlan,
+    links: &BTreeMap<u64, Option<ChainLink>>,
+    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+) -> ChainLink {
+    plan.remote_segments
+        .keys()
+        .next_back()
+        .and_then(|id| links.get(id).copied().flatten())
+        .unwrap_or_else(|| catalog.anchor())
 }
 
 /// Expose the planned sources as one WAL directory and return the order
@@ -269,13 +280,6 @@ fn assemble_planned_sources(
         );
     }
     Ok(segments)
-}
-
-fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {
-    highest
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| MidgeError::ResourceLimit("WAL segment identity space exhausted".into()))
 }
 
 struct WalPlanningContext<'a> {
@@ -390,24 +394,6 @@ fn open_member<'a>(fs: &'a dyn Fs, path: &FsPath) -> MidgeResult<Box<dyn crate::
     })
 }
 
-fn validate_publication_identity(
-    segment_id: u64,
-    publication: &crate::wal::cloud_catalog::PublishedWalSegment,
-    fencing_epoch: u64,
-) -> MidgeResult<()> {
-    if segment_id != publication.segment_id
-        || publication.object_key
-            != crate::wal::segment_object_key(segment_id, publication.writer_epoch)
-        || publication.writer_epoch > fencing_epoch
-        || publication.size_bytes == 0
-    {
-        return Err(MidgeError::RecoveryFailed(
-            "invalid cloud WAL publication identity".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn recover_or_salvage<T>(
     result: MidgeResult<T>,
     policy: RecoveryPolicy,
@@ -441,7 +427,7 @@ struct PublishedSource {
 fn remote_source(
     local: Arc<dyn Fs>,
     remote: Arc<dyn StorageBackend>,
-    publication: &crate::wal::cloud_catalog::PublishedWalSegment,
+    publication: &crate::wal::cloud_catalog::CatalogEntry,
     timeout: Duration,
     read_window: usize,
     limits: StreamingReplayLimits,
@@ -455,7 +441,7 @@ fn remote_source(
     };
     let (tx, rx) = std::sync::mpsc::channel();
     remote.submit_range_head_request(
-        crate::storage::StorageRequest::new(&publication.object_key, deadline, timeout),
+        crate::storage::StorageRequest::new(publication.object_key(), deadline, timeout),
         tx,
     );
     scope.check("cloud WAL HEAD wait")?;
@@ -468,7 +454,7 @@ fn remote_source(
             result: StorageOutcome::Err(error),
             ..
         }) => {
-            let message = format!("cloud WAL {} HEAD: {error}", publication.object_key);
+            let message = format!("cloud WAL {} HEAD: {error}", publication.object_key());
             // A cataloged segment that no longer exists is lost data, not a
             // transient failure, so salvage may skip it.
             return Err(
@@ -500,7 +486,7 @@ fn remote_source(
         crate::storage::remote_sst::RemoteSstFs::for_object(
             local,
             remote,
-            publication.object_key.clone(),
+            publication.object_key(),
             metadata,
             timeout,
         )
@@ -508,17 +494,17 @@ fn remote_source(
     );
     let fs =
         crate::telemetry::recovery_progress::observe_reads(crate::io::scope_fs(fs, scope.clone()));
-    let path = FsPath::new(publication.object_key.clone());
+    let path = FsPath::new(publication.object_key());
     validate_wal_source(
         fs.as_ref(),
         &path,
-        publication.size_bytes,
-        publication.content_crc32c,
+        publication.size_bytes(),
+        publication.crc32c(),
         read_window,
     )?;
     // Inspection also uses the bounded range window even for a large frame.
     let mut buffered = StreamingWalFs::new(read_window)?;
-    let canonical = crate::wal::segment_file_name(publication.segment_id);
+    let canonical = crate::wal::segment_file_name(publication.id());
     buffered.insert(canonical.clone(), fs.clone(), path.clone())?;
     let file = buffered
         .open_read(&FsPath::new(canonical))
@@ -528,7 +514,7 @@ fn remote_source(
     let identity = prefix.identity().ok_or_else(|| {
         MidgeError::Corruption(format!(
             "cloud WAL {} has no header",
-            publication.object_key
+            publication.object_key()
         ))
     })?;
     publication
@@ -540,7 +526,7 @@ fn remote_source(
         source: ReplaySource {
             fs,
             path,
-            expect: Expectation::Epoch(publication.writer_epoch),
+            expect: Expectation::Epoch(publication.epoch()),
         },
     })
 }
@@ -761,7 +747,7 @@ fn stop_at_first_hole(
     // Segments upload and retire in id order, so a local file below the
     // oldest cataloged segment was already retired, meaning SSTs cover it.
     // A leaked, corrupt copy of it is not a hole.
-    let oldest_needed = catalog.segments.keys().next().copied().unwrap_or(0);
+    let oldest_needed = catalog.anchor().id.saturating_add(1);
     let Some(&hole) = skipped
         .range(oldest_needed..)
         .find(|segment_id| !sources.contains_key(segment_id))
@@ -800,12 +786,13 @@ fn stop_at_first_hole(
         }
     }
     plan.unreplayed_segments = catalog
-        .segments
-        .range(hole..)
-        .map(|(_, publication)| publication.clone())
+        .entries()
+        .iter()
+        .filter(|publication| publication.id() >= hole)
+        .cloned()
         .collect();
     for publication in &plan.unreplayed_segments {
-        max_sequence = max_sequence.max(publication.max_sequence);
+        max_sequence = max_sequence.max(publication.max_sequence());
     }
     // Dropped from the ledger only after startup persists the floor that
     // covers them; see `CloudWalRecoveryPlan::commit_within`.

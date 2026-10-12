@@ -1,4 +1,5 @@
 //! Public baseline reproducers for #808 cloud retention pins.
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use std::time::{Duration, Instant};
 
@@ -12,10 +13,9 @@ enum Pin {
 fn retained_segments(root: &std::path::Path) -> usize {
     let bytes = std::fs::read(root.join("cloud_store/wal/publication-catalog.v1.json"))
         .expect("published catalog");
-    let catalog: serde_json::Value = serde_json::from_slice(&bytes).expect("catalog JSON");
-    catalog["segments"]
-        .as_object()
-        .expect("catalog segments")
+    WalPublicationCatalog::decode(&bytes)
+        .expect("catalog")
+        .entries()
         .len()
 }
 

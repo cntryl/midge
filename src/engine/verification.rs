@@ -134,15 +134,14 @@ impl StorageVerifier {
             };
             MidgeError::Corruption(detail.to_string())
         })?;
-        for segment in catalog.segments.values() {
-            let bytes =
-                Self::read_offline_object(store, &segment.object_key)?.ok_or_else(|| {
-                    MidgeError::RecoveryFailed(format!(
-                        "simulated cloud WAL object '{}' is missing",
-                        segment.object_key
-                    ))
-                })?;
-            segment
+        // Decoding checked the catalog's chain; each object must be the
+        // segment its entry names, at its place in that chain.
+        for entry in catalog.entries() {
+            let key = entry.object_key();
+            let bytes = Self::read_offline_object(store, &key)?.ok_or_else(|| {
+                MidgeError::RecoveryFailed(format!("simulated cloud WAL object '{key}' is missing"))
+            })?;
+            entry
                 .validate_bytes(&bytes)
                 .map_err(MidgeError::Corruption)?;
         }
@@ -566,19 +565,25 @@ mod tests {
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
 
-    /// Write segments `segments`, in order, and a catalog listing them
-    /// whether or not they chain, as both catalog copies of the simulated
-    /// cloud `store`.
+    /// Write segments `segments`, in order, and a catalog that chains each
+    /// onto the one before whatever its object's header links, as both
+    /// catalog copies of the simulated cloud `store`.
     fn write_catalog_listing(store: &std::path::Path, segments: &[(u64, Vec<u8>)]) {
         let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7).unwrap();
         for (segment_id, bytes) in segments {
-            let entry = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
-                *segment_id,
-                *segment_id,
-                7,
+            let link = crate::wal::format::segment::footer_link(bytes)
+                .unwrap()
+                .expect("a sealed segment");
+            assert_eq!(link.id, *segment_id);
+            let entry = crate::wal::cloud_catalog::CatalogEntry::describing(
+                crate::wal::format::SegmentIdentity {
+                    epoch: 7,
+                    prev: catalog.head(),
+                    link,
+                },
                 bytes,
             );
-            let path = store.join(&entry.object_key);
+            let path = store.join(entry.object_key());
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, bytes).unwrap();
             catalog.append_run(7, &[entry]).unwrap();
@@ -595,7 +600,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "#844: R10 verification checks the catalog chain"]
     fn should_fail_simulated_cloud_verification_when_cataloged_segments_do_not_chain() {
         // Arrange: the catalog lists segments 1 and 2, but segment 2's header
         // links another segment 1.

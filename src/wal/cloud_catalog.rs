@@ -1,115 +1,197 @@
-//! Lease-fenced authority for remotely published WAL segments.
+//! Lease-fenced authority for remotely published WAL segments (catalog v2,
+//! #844).
 //!
 //! Immutable WAL objects are not authoritative merely because they exist.
-//! Only entries in this catalog are eligible for recovery. Every mutation is
-//! conditioned on both the catalog object's provider identity and the current
-//! lease epoch.
+//! Only entries in this catalog are eligible for recovery. The catalog is a
+//! chain, like the segment ledger: its `anchor` is the link of the last
+//! segment it retired (the genesis link before any), each entry links the
+//! one before it, and `next_segment_id` passes every id a writer ever
+//! published. Retiring entries therefore never loses the chain or reuses an
+//! id, however much of the catalog retires.
+//!
+//! Every mutation is conditioned on the catalog object's provider identity
+//! and on the lease epoch. The mutators here are pure: each checks
+//! everything before it changes anything and leaves a valid catalog, or
+//! refuses and leaves it as it was.
 
+use crate::wal::format::{ChainLink, SegmentId, SegmentIdentity};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
-pub(crate) const FORMAT_VERSION: u32 = 1;
+/// The catalog format this build reads and writes. Any other version is a
+/// compatibility error; nothing migrates it.
+pub(crate) const FORMAT_VERSION: u32 = 2;
 pub(crate) const OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::WAL_CATALOG_OBJECT_KEY;
 pub(crate) const MIRROR_OBJECT_KEY: &str =
     crate::cloud_layout::CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY;
 
+/// One published segment: the epoch of the writer that wrote it, where it
+/// sits in the chain, and the size and checksum of its object.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct PublishedWalSegment {
-    pub(crate) segment_id: u64,
-    pub(crate) writer_epoch: u64,
-    pub(crate) max_sequence: u64,
-    pub(crate) size_bytes: u64,
-    pub(crate) content_crc32c: u32,
-    pub(crate) object_key: String,
+#[serde(deny_unknown_fields)]
+pub struct CatalogEntry {
+    epoch: u64,
+    prev: ChainLink,
+    link: ChainLink,
+    size_bytes: u64,
+    crc32c: u32,
 }
 
-impl PublishedWalSegment {
-    pub(crate) fn from_validated_bytes(
-        segment_id: u64,
-        max_sequence: u64,
-        writer_epoch: u64,
-        bytes: &[u8],
-    ) -> Self {
+impl CatalogEntry {
+    /// The entry publishing `bytes`, a sealed segment holding at least one
+    /// record.
+    ///
+    /// # Errors
+    ///
+    /// Why the bytes are not such a segment.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn from_sealed_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let validation =
+            crate::wal::cloud_segment::validate_segment_bytes("sealed segment", bytes)?;
+        Ok(Self::describing(validation.identity(), bytes))
+    }
+
+    /// The entry for `bytes`, a segment that says it is `identity`.
+    pub(crate) fn describing(identity: SegmentIdentity, bytes: &[u8]) -> Self {
         Self {
-            segment_id,
-            writer_epoch,
-            max_sequence,
+            epoch: identity.epoch,
+            prev: identity.prev,
+            link: identity.link,
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            content_crc32c: crc32c::crc32c(bytes),
-            object_key: crate::wal::segment_object_key(segment_id, writer_epoch),
+            crc32c: crc32c::crc32c(bytes),
         }
     }
 
+    /// The segment's id.
+    #[must_use]
+    pub fn id(&self) -> SegmentId {
+        self.link.id
+    }
+
+    /// The last sequence the segment holds.
+    #[must_use]
+    pub fn max_sequence(&self) -> u64 {
+        self.link.last_seq
+    }
+
+    /// The epoch of the writer that wrote the segment.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The link of the segment before it.
+    #[must_use]
+    pub fn prev(&self) -> ChainLink {
+        self.prev
+    }
+
+    /// The link the segment's footer seals.
+    #[must_use]
+    pub fn link(&self) -> ChainLink {
+        self.link
+    }
+
+    /// The size of the segment's object.
+    #[must_use]
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    /// The crc32c of the segment's object.
+    #[must_use]
+    pub fn crc32c(&self) -> u32 {
+        self.crc32c
+    }
+
+    /// The object holding the segment, named for its id and epoch.
+    #[must_use]
+    pub fn object_key(&self) -> String {
+        crate::wal::segment_object_key(self.id(), self.epoch)
+    }
+
+    /// Whether `bytes`, read from [`Self::object_key`], are the segment this
+    /// entry publishes: its size and crc32c, and a sealed segment whose
+    /// header and footer name this entry's epoch and chain position.
+    ///
+    /// # Errors
+    ///
+    /// What differs, naming the object.
     pub(crate) fn validate_bytes(&self, bytes: &[u8]) -> Result<(), String> {
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != self.size_bytes {
             return Err(format!(
                 "published cloud WAL segment {} size {} does not match catalog {}",
-                self.segment_id,
+                self.id(),
                 bytes.len(),
                 self.size_bytes
             ));
         }
         let actual_crc = crc32c::crc32c(bytes);
-        if actual_crc != self.content_crc32c {
+        if actual_crc != self.crc32c {
             return Err(format!(
                 "published cloud WAL segment {} crc32c {actual_crc:08x} does not match catalog {:08x}",
-                self.segment_id, self.content_crc32c
+                self.id(),
+                self.crc32c
             ));
         }
         let validation =
-            crate::wal::cloud_segment::validate_bytes(&self.object_key, bytes, self.max_sequence)?;
+            crate::wal::cloud_segment::validate_segment_bytes(&self.object_key(), bytes)?;
         self.check(&validation.identity())
     }
 
     /// Whether a segment that says it is `identity` is the one this entry
-    /// names (#843): the same id, writer epoch and last sequence. The one
-    /// identity check every reader of a published or publishing segment
-    /// applies.
+    /// names (#843, #844): the same writer epoch, the same link before it
+    /// and the same sealed link. The one identity check every reader of a
+    /// published or publishing segment applies.
     ///
     /// # Errors
     ///
     /// What differs, naming the object.
-    pub(crate) fn check(
-        &self,
-        identity: &crate::wal::format::SegmentIdentity,
-    ) -> Result<(), String> {
-        let key = &self.object_key;
-        if identity.id != self.segment_id {
+    pub(crate) fn check(&self, identity: &SegmentIdentity) -> Result<(), String> {
+        let key = self.object_key();
+        if identity.link.id != self.id() {
             return Err(format!(
                 "cloud WAL segment '{key}' header names segment {}, not {}",
-                identity.id, self.segment_id
+                identity.link.id,
+                self.id()
             ));
         }
-        if identity.epoch != self.writer_epoch {
+        if identity.epoch != self.epoch {
             return Err(format!(
                 "cloud WAL segment '{key}' header names writer epoch {}, not {}",
-                identity.epoch, self.writer_epoch
+                identity.epoch, self.epoch
             ));
         }
-        if identity.last_seq != self.max_sequence {
+        if identity.prev != self.prev {
             return Err(format!(
-                "cloud WAL segment '{key}' holds sequences through {}, not {}",
-                identity.last_seq, self.max_sequence
+                "cloud WAL segment '{key}' links segment {} (last sequence {}), not the catalog's segment {} (last sequence {})",
+                identity.prev.id, identity.prev.last_seq, self.prev.id, self.prev.last_seq
+            ));
+        }
+        if identity.link != self.link {
+            return Err(format!(
+                "cloud WAL segment '{key}' seals sequences through {} with another digest than the catalog's, through {}",
+                identity.link.last_seq, self.link.last_seq
             ));
         }
         Ok(())
     }
 }
 
-/// Why a catalog mutation is refused (#858). A refusal changes nothing,
-/// and no retry fixes it.
+/// Why a catalog mutation is refused. A refusal changes nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogRefusal {
     /// Another writer epoch owns the catalog.
     EpochMismatch { catalog: u64, writer: u64 },
-    /// Only the catalog's oldest segments may retire, in order.
+    /// Only the catalog's oldest entries may retire, in order.
     NotOldestPrefix {
-        segment_id: u64,
-        oldest: Option<u64>,
+        segment_id: SegmentId,
+        oldest: Option<SegmentId>,
     },
     /// The catalog publishes something else for this segment than the
-    /// caller saw.
-    Changed { segment_id: u64 },
+    /// caller expected.
+    Changed { segment_id: SegmentId },
+    /// Only a suffix of the catalog may be set aside, as the caller saw it.
+    NotSuffix { from: SegmentId },
 }
 
 impl std::fmt::Display for CatalogRefusal {
@@ -128,56 +210,172 @@ impl std::fmt::Display for CatalogRefusal {
                 f,
                 "cloud WAL catalog segment {segment_id} changed before the mutation"
             ),
+            Self::NotSuffix { from } => write!(
+                f,
+                "cloud WAL catalog segments from {from} changed before they were set aside"
+            ),
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct WalPublicationCatalog {
-    pub(crate) format_version: u32,
-    pub(crate) fencing_epoch: u64,
-    pub(crate) segments: BTreeMap<u64, PublishedWalSegment>,
-    /// Every sequence at or below this may belong to WAL that salvage set
-    /// aside unreplayed, so a later open must not assign it again (#529).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub(crate) sequence_floor: u64,
+/// Why catalog bytes do not decode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogDecodeError {
+    /// Another format version.
+    Incompatible(u32),
+    /// Not a valid catalog of this format.
+    Invalid(String),
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes fields by reference
-fn is_zero(value: &u64) -> bool {
-    *value == 0
+impl std::fmt::Display for CatalogDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Incompatible(version) => write!(
+                f,
+                "cloud WAL publication catalog format version {version} is not supported; this build reads version {FORMAT_VERSION}"
+            ),
+            Self::Invalid(reason) => {
+                write!(f, "invalid cloud WAL publication catalog: {reason}")
+            }
+        }
+    }
+}
+
+/// The catalog. See the module documentation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalPublicationCatalog {
+    format_version: u32,
+    fencing_epoch: u64,
+    /// The link the first entry names: the last retired segment's, or the
+    /// genesis link.
+    anchor: ChainLink,
+    /// Past every id any writer published.
+    next_segment_id: SegmentId,
+    /// Every sequence at or below this may belong to WAL salvage set aside
+    /// unreplayed, so a later open must not assign it again (#529).
+    seq_floor: u64,
+    /// Oldest first; each links the one before it.
+    segments: Vec<CatalogEntry>,
+}
+
+/// Only the version, read before the rest so another format is reported as
+/// such rather than as an invalid document.
+#[derive(Deserialize)]
+struct VersionProbe {
+    format_version: Option<u32>,
 }
 
 impl WalPublicationCatalog {
+    /// A catalog nothing was ever published to, owned by `fencing_epoch`.
+    ///
+    /// # Errors
+    ///
+    /// Refuses the zero epoch.
     pub(crate) fn empty(fencing_epoch: u64) -> Result<Self, String> {
-        if fencing_epoch == 0 {
-            return Err("cloud WAL catalog fencing epoch must be non-zero".to_string());
-        }
-        Ok(Self {
+        let catalog = Self {
             format_version: FORMAT_VERSION,
             fencing_epoch,
-            segments: BTreeMap::new(),
-            sequence_floor: 0,
-        })
-    }
-
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let catalog: Self = serde_json::from_slice(bytes)
-            .map_err(|error| format!("invalid cloud WAL publication catalog JSON: {error}"))?;
+            anchor: ChainLink::GENESIS,
+            next_segment_id: 1,
+            seq_floor: 0,
+            segments: Vec::new(),
+        };
         catalog.validate()?;
         Ok(catalog)
     }
 
-    #[cfg(test)]
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+    /// Decode and validate catalog bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogDecodeError::Incompatible`] for another format version, and
+    /// [`CatalogDecodeError::Invalid`] for anything else that is not a valid
+    /// catalog.
+    pub fn decode(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {
+        let probe: VersionProbe = serde_json::from_slice(bytes)
+            .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
+        match probe.format_version {
+            Some(FORMAT_VERSION) => {}
+            Some(version) => return Err(CatalogDecodeError::Incompatible(version)),
+            None => {
+                return Err(CatalogDecodeError::Invalid(
+                    "the document names no format version".into(),
+                ))
+            }
+        }
+        let catalog: Self = serde_json::from_slice(bytes)
+            .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
+        catalog.validate().map_err(CatalogDecodeError::Invalid)?;
+        Ok(catalog)
+    }
+
+    /// The catalog's bytes.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an invalid catalog, which no mutator produces.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
-        serde_json::to_vec_pretty(self)
+        serde_json::to_vec(self)
             .map_err(|error| format!("serialize cloud WAL publication catalog: {error}"))
     }
 
     /// The epoch that owns the catalog.
-    pub(crate) fn fencing_epoch(&self) -> u64 {
+    #[must_use]
+    pub fn fencing_epoch(&self) -> u64 {
         self.fencing_epoch
+    }
+
+    /// The link of the last retired segment, or the genesis link.
+    #[must_use]
+    pub fn anchor(&self) -> ChainLink {
+        self.anchor
+    }
+
+    /// The link of the newest published segment, or the anchor when the
+    /// catalog publishes none.
+    #[must_use]
+    pub fn head(&self) -> ChainLink {
+        self.segments.last().map_or(self.anchor, |entry| entry.link)
+    }
+
+    /// The least id a new segment may take: past every published id.
+    #[must_use]
+    pub fn next_segment_id(&self) -> SegmentId {
+        self.next_segment_id
+    }
+
+    /// Every sequence at or below it may belong to set-aside WAL.
+    #[must_use]
+    pub fn seq_floor(&self) -> u64 {
+        self.seq_floor
+    }
+
+    /// The published segments, oldest first.
+    #[must_use]
+    pub fn entries(&self) -> &[CatalogEntry] {
+        &self.segments
+    }
+
+    /// The entry publishing segment `id`, if any.
+    #[must_use]
+    pub fn entry(&self, id: SegmentId) -> Option<&CatalogEntry> {
+        self.segments
+            .binary_search_by_key(&id, CatalogEntry::id)
+            .ok()
+            .map(|index| &self.segments[index])
+    }
+
+    /// Whether nothing was ever published or set aside: the catalog a new
+    /// database starts with.
+    #[must_use]
+    pub fn is_pristine(&self) -> bool {
+        self.segments.is_empty()
+            && self.anchor == ChainLink::GENESIS
+            && self.next_segment_id == 1
+            && self.seq_floor == 0
     }
 
     /// Hand the catalog to `writer_epoch`. Returns whether it changed.
@@ -192,14 +390,12 @@ impl WalPublicationCatalog {
                 writer: writer_epoch,
             });
         }
-        if writer_epoch == self.fencing_epoch {
-            return Ok(false);
-        }
+        let changed = writer_epoch != self.fencing_epoch;
         self.fencing_epoch = writer_epoch;
-        Ok(true)
+        Ok(changed)
     }
 
-    /// Append `run`, verified uploads oldest first, past the catalog's head
+    /// Append `run`, verified uploads oldest first, after the catalog's head
     /// ([`crate::wal::publish::additions`]). Segments the catalog already
     /// publishes identically add nothing. Returns whether the catalog
     /// changed.
@@ -212,7 +408,7 @@ impl WalPublicationCatalog {
     pub(crate) fn append_run(
         &mut self,
         fencing_epoch: u64,
-        run: &[PublishedWalSegment],
+        run: &[CatalogEntry],
     ) -> Result<bool, crate::wal::publish::Refusal> {
         if fencing_epoch != self.fencing_epoch {
             return Err(crate::wal::publish::Refusal::EpochMismatch {
@@ -220,126 +416,147 @@ impl WalPublicationCatalog {
                 writer: fencing_epoch,
             });
         }
-        let added = crate::wal::publish::additions(&self.segments, run)?;
-        let changed = !added.is_empty();
-        for segment in added {
-            self.segments.insert(segment.segment_id, segment);
+        let added = crate::wal::publish::additions(self.head(), &self.segments, run)?;
+        let Some(last) = added.last() else {
+            return Ok(false);
+        };
+        if let Some(entry) = added.iter().find(|entry| entry.epoch > self.fencing_epoch) {
+            return Err(crate::wal::publish::Refusal::EpochMismatch {
+                catalog: self.fencing_epoch,
+                writer: entry.epoch,
+            });
         }
-        Ok(changed)
+        let next = self.next_segment_id.max(last.id().saturating_add(1));
+        self.segments.extend(added);
+        self.next_segment_id = next;
+        Ok(true)
     }
 
-    /// Retire the catalog's oldest segments, which must be `expected`, as
-    /// the caller saw them; expected segments the catalog no longer
-    /// publishes are skipped. Returns the ids retired.
+    /// [`Self::append_run`] for fixtures outside the crate, with the
+    /// refusal as text.
+    ///
+    /// # Errors
+    ///
+    /// The refusal [`Self::append_run`] returns.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn append(&mut self, fencing_epoch: u64, run: &[CatalogEntry]) -> Result<bool, String> {
+        self.append_run(fencing_epoch, run)
+            .map_err(|refusal| refusal.to_string())
+    }
+
+    /// Retire the oldest entries `expected` names, as the caller saw them.
+    /// The anchor becomes the last retired entry's link; the next id stays.
+    /// Expected segments the catalog already retired are skipped. Returns
+    /// the ids retired.
     ///
     /// # Errors
     ///
     /// Refuses another writer epoch, a segment that is not among the
-    /// catalog's oldest, in order, and a segment that changed. A refusal
-    /// changes nothing.
+    /// catalog's oldest, in order, and an entry that changed.
     pub(crate) fn retire_prefix(
         &mut self,
         fencing_epoch: u64,
-        expected: &[PublishedWalSegment],
-    ) -> Result<Vec<u64>, CatalogRefusal> {
+        expected: &[CatalogEntry],
+    ) -> Result<Vec<SegmentId>, CatalogRefusal> {
         self.require_epoch(fencing_epoch)?;
-        let pending = self.oldest_prefix(expected.iter().map(|entry| entry.segment_id))?;
-        for entry in expected
-            .iter()
-            .filter(|entry| pending.contains(&entry.segment_id))
-        {
-            if self.segments.get(&entry.segment_id) != Some(entry) {
+        let pending = self.oldest_prefix(expected.iter().map(CatalogEntry::id))?;
+        for (actual, entry) in self.segments.iter().zip(
+            expected
+                .iter()
+                .filter(|entry| pending.contains(&entry.id())),
+        ) {
+            if actual != entry {
                 return Err(CatalogRefusal::Changed {
-                    segment_id: entry.segment_id,
+                    segment_id: entry.id(),
                 });
             }
         }
-        for segment_id in &pending {
-            self.segments.remove(segment_id);
+        let retired: Vec<CatalogEntry> = self.segments.drain(..pending.len()).collect();
+        if let Some(last) = retired.last() {
+            self.anchor = last.link;
         }
         Ok(pending)
     }
 
-    /// The segments of `candidates` the catalog still publishes, when they
-    /// are its oldest, in order: what [`Self::retire_prefix`] would retire.
+    /// The segments of `candidates`, ascending, that the catalog still
+    /// publishes, when they are its oldest, in order: what
+    /// [`Self::retire_prefix`] retires. Candidates at or below the anchor
+    /// already retired.
     ///
     /// # Errors
     ///
     /// Refuses a candidate that is not among the catalog's oldest, in order.
     pub(crate) fn oldest_prefix(
         &self,
-        candidates: impl IntoIterator<Item = u64>,
-    ) -> Result<Vec<u64>, CatalogRefusal> {
-        let pending: Vec<u64> = candidates
+        candidates: impl IntoIterator<Item = SegmentId>,
+    ) -> Result<Vec<SegmentId>, CatalogRefusal> {
+        let pending: Vec<SegmentId> = candidates
             .into_iter()
-            .filter(|segment_id| self.segments.contains_key(segment_id))
+            .filter(|id| *id > self.anchor.id)
             .collect();
-        for (oldest, segment_id) in self.segments.keys().zip(&pending) {
-            if oldest != segment_id {
-                return Err(CatalogRefusal::NotOldestPrefix {
-                    segment_id: *segment_id,
-                    oldest: Some(*oldest),
-                });
+        for (index, id) in pending.iter().enumerate() {
+            match self.segments.get(index) {
+                Some(entry) if entry.id() == *id => {}
+                entry => {
+                    return Err(CatalogRefusal::NotOldestPrefix {
+                        segment_id: *id,
+                        oldest: entry.or(self.segments.first()).map(CatalogEntry::id),
+                    })
+                }
             }
         }
         Ok(pending)
     }
 
-    /// Salvage: stop publishing `segments`, the cataloged segments a salvage
-    /// open did not replay, as the caller saw them. Segments already gone
-    /// are skipped. Returns whether the catalog changed.
+    /// Salvage (#844): set aside every entry from `from` on, which must be
+    /// exactly `expected`, and raise the sequence floor to at least `floor`.
+    /// The next id stays, so no set-aside id is handed out again. Returns
+    /// whether the catalog changed.
     ///
     /// # Errors
     ///
-    /// Refuses another writer epoch, and a segment that changed.
-    pub(crate) fn set_aside(
+    /// Refuses another writer epoch, and a suffix other than `expected`.
+    pub(crate) fn set_aside_suffix(
         &mut self,
         fencing_epoch: u64,
-        segments: &[PublishedWalSegment],
-    ) -> Result<bool, CatalogRefusal> {
-        self.require_epoch(fencing_epoch)?;
-        for segment in segments {
-            if self
-                .segments
-                .get(&segment.segment_id)
-                .is_some_and(|actual| actual != segment)
-            {
-                return Err(CatalogRefusal::Changed {
-                    segment_id: segment.segment_id,
-                });
-            }
-        }
-        let before = self.segments.len();
-        for segment in segments {
-            self.segments.remove(&segment.segment_id);
-        }
-        Ok(self.segments.len() != before)
-    }
-
-    /// Raises the sequence floor; it never falls.
-    pub(crate) fn raise_sequence_floor(
-        &mut self,
-        fencing_epoch: u64,
+        from: Option<SegmentId>,
+        expected: &[CatalogEntry],
         floor: u64,
     ) -> Result<bool, CatalogRefusal> {
         self.require_epoch(fencing_epoch)?;
-        if floor <= self.sequence_floor {
-            return Ok(false);
+        let kept = from.map_or(self.segments.len(), |from| {
+            self.segments.partition_point(|entry| entry.id() < from)
+        });
+        if self.segments[kept..] != *expected {
+            return Err(CatalogRefusal::NotSuffix {
+                from: from.unwrap_or(self.next_segment_id),
+            });
         }
-        self.sequence_floor = floor;
-        Ok(true)
+        let changed = kept < self.segments.len() || floor > self.seq_floor;
+        self.segments.truncate(kept);
+        self.seq_floor = self.seq_floor.max(floor);
+        Ok(changed)
     }
 
     fn require_epoch(&self, writer_epoch: u64) -> Result<(), CatalogRefusal> {
         if writer_epoch == self.fencing_epoch {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(CatalogRefusal::EpochMismatch {
+                catalog: self.fencing_epoch,
+                writer: writer_epoch,
+            })
         }
-        Err(CatalogRefusal::EpochMismatch {
-            catalog: self.fencing_epoch,
-            writer: writer_epoch,
-        })
     }
 
+    /// Whether the catalog is one the mutators can reach: this format, a
+    /// non-zero epoch no entry passes, entries that chain from the anchor
+    /// with rising ids and sequences and non-decreasing epochs, objects that
+    /// are not empty, and a next id past the head.
+    ///
+    /// # Errors
+    ///
+    /// The first rule the catalog breaks.
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.format_version != FORMAT_VERSION {
             return Err(format!(
@@ -350,31 +567,46 @@ impl WalPublicationCatalog {
         if self.fencing_epoch == 0 {
             return Err("cloud WAL catalog fencing epoch must be non-zero".to_string());
         }
-        for (segment_id, segment) in &self.segments {
-            if *segment_id != segment.segment_id {
+        let mut prev = self.anchor;
+        let mut epoch = 0;
+        for entry in &self.segments {
+            let id = entry.id();
+            if entry.prev != prev {
                 return Err(format!(
-                    "cloud WAL catalog key {segment_id} does not match embedded segment id {}",
-                    segment.segment_id
+                    "cloud WAL catalog segment {id} links segment {} (last sequence {}), not segment {} (last sequence {}) before it",
+                    entry.prev.id, entry.prev.last_seq, prev.id, prev.last_seq
                 ));
             }
-            if segment.size_bytes == 0 {
+            if id <= prev.id || entry.link.last_seq <= prev.last_seq {
                 return Err(format!(
-                    "cloud WAL catalog segment {segment_id} has invalid size"
+                    "cloud WAL catalog segment {id} does not follow segment {}",
+                    prev.id
                 ));
             }
-            if segment.writer_epoch > self.fencing_epoch {
+            if entry.epoch < epoch {
                 return Err(format!(
-                    "cloud WAL catalog segment {segment_id} writer epoch {} exceeds fencing epoch {}",
-                    segment.writer_epoch, self.fencing_epoch
+                    "cloud WAL catalog segment {id} lowers the writer epoch from {epoch} to {}",
+                    entry.epoch
                 ));
             }
-            let expected_key = crate::wal::segment_object_key(*segment_id, segment.writer_epoch);
-            if segment.object_key != expected_key {
+            if entry.epoch > self.fencing_epoch {
                 return Err(format!(
-                    "cloud WAL catalog segment {segment_id} object key '{}' does not match '{}'",
-                    segment.object_key, expected_key
+                    "cloud WAL catalog segment {id} writer epoch {} exceeds fencing epoch {}",
+                    entry.epoch, self.fencing_epoch
                 ));
             }
+            if entry.size_bytes == 0 {
+                return Err(format!("cloud WAL catalog segment {id} has invalid size"));
+            }
+            prev = entry.link;
+            epoch = entry.epoch;
+        }
+        if self.next_segment_id <= self.head().id {
+            return Err(format!(
+                "cloud WAL catalog next segment id {} does not pass its head, segment {}",
+                self.next_segment_id,
+                self.head().id
+            ));
         }
         Ok(())
     }
@@ -383,16 +615,73 @@ impl WalPublicationCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::format::segment::SegmentBuilder;
 
-    fn segment(segment_id: u64, writer_epoch: u64) -> PublishedWalSegment {
-        PublishedWalSegment {
-            segment_id,
-            writer_epoch,
-            max_sequence: segment_id * 10,
-            size_bytes: 42,
-            content_crc32c: 7,
-            object_key: crate::wal::segment_object_key(segment_id, writer_epoch),
-        }
+    fn put(seq: u64) -> crate::wal::WalRecord {
+        crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            seq,
+        )
+    }
+
+    /// Sealed segments `ids`, in order, by `epoch`, each holding one record
+    /// and linking the one before, from `prev`.
+    fn sealed(
+        prev: ChainLink,
+        ids: std::ops::RangeInclusive<SegmentId>,
+        epoch: u64,
+    ) -> Vec<Vec<u8>> {
+        let mut prev = prev;
+        ids.map(|id| {
+            let (bytes, link) = SegmentBuilder::new(id, epoch, prev)
+                .record(&put(prev.last_seq + 1))
+                .seal();
+            prev = link;
+            bytes
+        })
+        .collect()
+    }
+
+    fn entries(segments: &[Vec<u8>]) -> Vec<CatalogEntry> {
+        segments
+            .iter()
+            .map(|bytes| CatalogEntry::from_sealed_bytes(bytes).unwrap())
+            .collect()
+    }
+
+    /// `catalog`'s JSON with `edit` applied, decoded.
+    fn edited(
+        catalog: &WalPublicationCatalog,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<WalPublicationCatalog, CatalogDecodeError> {
+        let mut json = serde_json::to_value(catalog).unwrap();
+        edit(&mut json);
+        WalPublicationCatalog::decode(&serde_json::to_vec(&json).unwrap())
+    }
+
+    fn published(epoch: u64, count: u64) -> (WalPublicationCatalog, Vec<CatalogEntry>) {
+        let mut catalog = WalPublicationCatalog::empty(epoch).unwrap();
+        let entries = entries(&sealed(ChainLink::GENESIS, 1..=count, epoch));
+        catalog.append_run(epoch, &entries).unwrap();
+        (catalog, entries)
+    }
+
+    #[test]
+    fn should_derive_object_key_and_max_sequence_from_the_entry_link() {
+        // Arrange
+        let bytes = sealed(ChainLink::GENESIS, 4..=4, 7).remove(0);
+
+        // Act
+        let entry = CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+
+        // Assert
+        assert_eq!(entry.id(), 4);
+        assert_eq!(entry.max_sequence(), 1);
+        assert_eq!(entry.object_key(), crate::wal::segment_object_key(4, 7));
+        assert_eq!(entry.prev(), ChainLink::GENESIS);
+        assert!(entry.validate_bytes(&bytes).is_ok());
     }
 
     #[test]
@@ -400,98 +689,159 @@ mod tests {
         // Arrange
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
         catalog.fence_to(8).unwrap();
+        let run = entries(&sealed(ChainLink::GENESIS, 1..=1, 7));
 
         // Act
-        let result = catalog.append_run(7, &[segment(1, 7)]);
+        let result = catalog.append_run(7, &run);
 
         // Assert
         let error = result.unwrap_err().to_string();
         assert!(error.contains("requires fencing epoch 8"), "{error}");
-        assert!(catalog.segments.is_empty());
+        assert_eq!(catalog.entries(), []);
     }
 
     #[test]
     fn should_retain_publications_when_fencing_catalog_to_new_epoch() {
         // Arrange
-        let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-        catalog.append_run(7, &[segment(1, 7)]).unwrap();
+        let (mut catalog, entries) = published(7, 1);
 
         // Act
         let changed = catalog.fence_to(8).unwrap();
 
         // Assert
         assert!(changed);
-        assert_eq!(catalog.fencing_epoch, 8);
-        assert_eq!(catalog.segments.get(&1), Some(&segment(1, 7)));
+        assert_eq!(catalog.fencing_epoch(), 8);
+        assert_eq!(catalog.entries(), entries.as_slice());
     }
 
     #[test]
-    fn should_reject_catalog_entry_with_noncanonical_epoch_scoped_key() {
+    fn should_reject_catalog_whose_first_entry_does_not_link_the_anchor() {
         // Arrange
-        let mut invalid = segment(1, 7);
-        invalid.object_key = "wal/00000000000000000001.wal".to_string();
-        let catalog = WalPublicationCatalog {
-            format_version: FORMAT_VERSION,
-            fencing_epoch: 7,
-            segments: BTreeMap::from([(1, invalid)]),
-            sequence_floor: 0,
-        };
-        let bytes = serde_json::to_vec(&catalog).unwrap();
+        let (catalog, _) = published(7, 2);
 
         // Act
-        let result = WalPublicationCatalog::decode(&bytes);
+        let result = edited(&catalog, |json| {
+            json["anchor"]["last_seq"] = serde_json::json!(9);
+        });
 
         // Assert
-        assert!(result.unwrap_err().contains("object key"));
+        assert!(
+            matches!(&result, Err(CatalogDecodeError::Invalid(reason)) if reason.contains("links")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_catalog_whose_entries_lower_the_epoch() {
+        // Arrange
+        let (catalog, _) = published(7, 2);
+
+        // Act
+        let result = edited(&catalog, |json| {
+            json["segments"][0]["epoch"] = serde_json::json!(7);
+            json["segments"][1]["epoch"] = serde_json::json!(6);
+        });
+
+        // Assert
+        assert!(
+            matches!(&result, Err(CatalogDecodeError::Invalid(reason)) if reason.contains("lowers the writer epoch")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_catalog_whose_next_segment_id_does_not_pass_the_head() {
+        // Arrange
+        let (catalog, _) = published(7, 2);
+
+        // Act
+        let result = edited(&catalog, |json| {
+            json["next_segment_id"] = serde_json::json!(2);
+        });
+
+        // Assert
+        assert!(
+            matches!(&result, Err(CatalogDecodeError::Invalid(reason)) if reason.contains("next segment id")),
+            "{result:?}"
+        );
     }
 
     #[test]
     fn should_reject_catalog_entry_from_future_writer_epoch() {
         // Arrange
-        let catalog = WalPublicationCatalog {
-            format_version: FORMAT_VERSION,
-            fencing_epoch: 7,
-            segments: BTreeMap::from([(1, segment(1, 8))]),
-            sequence_floor: 0,
-        };
-        let bytes = serde_json::to_vec(&catalog).unwrap();
+        let (catalog, _) = published(7, 1);
 
         // Act
-        let result = WalPublicationCatalog::decode(&bytes);
+        let result = edited(&catalog, |json| {
+            json["segments"][0]["epoch"] = serde_json::json!(8);
+        });
 
         // Assert
-        assert!(result.unwrap_err().contains("exceeds fencing epoch"));
+        assert!(
+            matches!(&result, Err(CatalogDecodeError::Invalid(reason)) if reason.contains("exceeds fencing epoch")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_another_format_version_as_incompatible() {
+        // Arrange
+        let v1 = br#"{"format_version":1,"fencing_epoch":7,"segments":{}}"#;
+
+        // Act
+        let result = WalPublicationCatalog::decode(v1);
+
+        // Assert
+        assert_eq!(result, Err(CatalogDecodeError::Incompatible(1)));
+    }
+
+    #[test]
+    fn should_refuse_a_run_that_does_not_link_the_head() {
+        // Arrange
+        let (mut catalog, _) = published(7, 1);
+        let stranger = ChainLink {
+            id: 1,
+            last_seq: 1,
+            digest: [0x5a; 16],
+        };
+        let run = entries(&sealed(stranger, 2..=2, 7));
+
+        // Act
+        let result = catalog.append_run(7, &run);
+
+        // Assert
+        assert!(
+            matches!(
+                result,
+                Err(crate::wal::publish::Refusal::Unchained { segment_id: 2, .. })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(catalog.entries().len(), 1);
     }
 
     #[test]
     fn should_retire_only_exact_catalog_entry() {
         // Arrange
-        let expected = segment(1, 7);
-        let mut catalog = WalPublicationCatalog::empty(8).unwrap();
-        catalog
-            .append_run(8, std::slice::from_ref(&expected))
-            .unwrap();
-        let mut stale = expected.clone();
-        stale.content_crc32c = 99;
+        let (mut catalog, entries) = published(8, 1);
+        let mut stale = entries[0].clone();
+        stale.crc32c ^= 1;
 
         // Act
         let result = catalog.retire_prefix(8, &[stale]);
 
         // Assert
         assert_eq!(result, Err(CatalogRefusal::Changed { segment_id: 1 }));
-        assert_eq!(catalog.segments.get(&1), Some(&expected));
+        assert_eq!(catalog.entries(), entries.as_slice());
     }
 
     #[test]
     fn should_refuse_retirement_of_a_segment_behind_an_older_one() {
         // Arrange
-        let mut catalog = WalPublicationCatalog::empty(8).unwrap();
-        catalog
-            .append_run(8, &[segment(1, 7), segment(2, 7)])
-            .unwrap();
+        let (mut catalog, entries) = published(8, 2);
 
         // Act
-        let result = catalog.retire_prefix(8, &[segment(2, 7)]);
+        let result = catalog.retire_prefix(8, &entries[1..]);
 
         // Assert
         assert_eq!(
@@ -501,24 +851,71 @@ mod tests {
                 oldest: Some(1)
             })
         );
-        assert_eq!(catalog.segments.len(), 2);
+        assert_eq!(catalog.entries().len(), 2);
+    }
+
+    #[test]
+    fn should_keep_anchor_and_next_segment_id_when_every_entry_retires() {
+        // Arrange
+        let (mut catalog, entries) = published(8, 2);
+
+        // Act
+        let retired = catalog.retire_prefix(8, &entries).unwrap();
+
+        // Assert: the chain and the ids outlive the entries.
+        assert_eq!(retired, vec![1, 2]);
+        assert_eq!(catalog.entries(), []);
+        assert_eq!(catalog.anchor(), entries[1].link());
+        assert_eq!(catalog.head(), entries[1].link());
+        assert_eq!(catalog.next_segment_id(), 3);
+        assert!(!catalog.is_pristine());
+        let decoded = WalPublicationCatalog::decode(&catalog.encode().unwrap()).unwrap();
+        assert_eq!(decoded, catalog);
     }
 
     #[test]
     fn should_skip_segments_the_catalog_already_retired_when_retiring_a_prefix() {
         // Arrange
-        let mut catalog = WalPublicationCatalog::empty(8).unwrap();
-        catalog
-            .append_run(8, &[segment(1, 7), segment(2, 7)])
-            .unwrap();
-        catalog.retire_prefix(8, &[segment(1, 7)]).unwrap();
+        let (mut catalog, entries) = published(8, 2);
+        catalog.retire_prefix(8, &entries[..1]).unwrap();
 
         // Act
-        let retired = catalog.retire_prefix(8, &[segment(1, 7), segment(2, 7)]);
+        let retired = catalog.retire_prefix(8, &entries);
 
         // Assert
         assert_eq!(retired, Ok(vec![2]));
-        assert!(catalog.segments.is_empty());
+        assert_eq!(catalog.entries(), []);
+    }
+
+    #[test]
+    fn should_set_aside_a_suffix_keeping_the_next_segment_id() {
+        // Arrange
+        let (mut catalog, entries) = published(8, 3);
+
+        // Act
+        let changed = catalog
+            .set_aside_suffix(8, Some(2), &entries[1..], 9)
+            .unwrap();
+
+        // Assert
+        assert!(changed);
+        assert_eq!(catalog.entries(), &entries[..1]);
+        assert_eq!(catalog.seq_floor(), 9);
+        assert_eq!(catalog.next_segment_id(), 4);
+    }
+
+    #[test]
+    fn should_refuse_to_set_aside_a_suffix_that_changed() {
+        // Arrange
+        let (mut catalog, entries) = published(8, 3);
+
+        // Act
+        let result = catalog.set_aside_suffix(8, Some(2), &entries[2..], 9);
+
+        // Assert
+        assert_eq!(result, Err(CatalogRefusal::NotSuffix { from: 2 }));
+        assert_eq!(catalog.entries(), entries.as_slice());
+        assert_eq!(catalog.seq_floor(), 0);
     }
 
     #[test]
@@ -527,9 +924,9 @@ mod tests {
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
 
         // Act
-        let raised = catalog.raise_sequence_floor(7, 9).unwrap();
-        let lowered = catalog.raise_sequence_floor(7, 4).unwrap();
-        let stale = catalog.raise_sequence_floor(6, 12);
+        let raised = catalog.set_aside_suffix(7, None, &[], 9).unwrap();
+        let lowered = catalog.set_aside_suffix(7, None, &[], 4).unwrap();
+        let stale = catalog.set_aside_suffix(6, None, &[], 12);
 
         // Assert
         assert!(raised);
@@ -541,32 +938,20 @@ mod tests {
                 writer: 6
             })
         );
-        assert_eq!(catalog.sequence_floor, 9);
+        assert_eq!(catalog.seq_floor(), 9);
     }
 
     #[test]
     fn should_round_trip_sequence_floor_when_encoded() {
         // Arrange
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-        catalog.raise_sequence_floor(7, 9).unwrap();
+        catalog.set_aside_suffix(7, None, &[], 9).unwrap();
 
         // Act
         let decoded = WalPublicationCatalog::decode(&catalog.encode().unwrap()).unwrap();
 
         // Assert
-        assert_eq!(decoded.sequence_floor, 9);
-    }
-
-    #[test]
-    fn should_read_zero_sequence_floor_when_catalog_was_written_without_one() {
-        // Arrange
-        let bytes = serde_json::to_vec(&WalPublicationCatalog::empty(7).unwrap()).unwrap();
-
-        // Act
-        let decoded = WalPublicationCatalog::decode(&bytes).unwrap();
-
-        // Assert
-        assert!(!String::from_utf8(bytes).unwrap().contains("sequence_floor"));
-        assert_eq!(decoded.sequence_floor, 0);
+        assert_eq!(decoded.seq_floor(), 9);
+        assert!(!decoded.is_pristine());
     }
 }

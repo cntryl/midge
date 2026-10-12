@@ -9,7 +9,7 @@ use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::memtable::SkipListMemtable;
 use crate::storage::StorageBackend;
 use crate::types::{EntryType, KeyState};
-use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
+use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use crate::wal::recovery::streaming::{
     replay_wal_with_options, ReplayOptions, StreamingReplayLimits,
 };
@@ -141,12 +141,19 @@ pub fn prepare_recovery_progress_fixture(
             // a real cache, so the measured recovery never writes locally.
             let local_root: Arc<dyn Fs> =
                 Arc::new(crate::io::RealFs::new(&local).map_err(FsError::into_midge)?);
-            let first_open = wal.catalog.segments.keys().max().map_or(1, |last| last + 1);
-            drop(crate::runtime::wal_history::WalHistory::open(
-                crate::io::subdirectory(local_root, crate::wal::WAL_DIR),
-                first_open,
-                SEGMENT_EPOCH,
-            )?);
+            // A cache that joined the catalog: its first segment follows the
+            // catalog's head, at its next id.
+            let local_wal = crate::io::subdirectory(local_root, crate::wal::WAL_DIR);
+            if crate::runtime::wal_history::WalHistory::load(Arc::clone(&local_wal), SEGMENT_EPOCH)?
+                .is_none()
+            {
+                drop(crate::runtime::wal_history::WalHistory::genesis(
+                    local_wal,
+                    SEGMENT_EPOCH,
+                    wal.catalog.head(),
+                    wal.catalog.next_segment_id(),
+                )?);
+            }
             observations.set_expected_records(wal.records.len())?;
             let coverage = if mode == RecoveryProgressFixtureMode::CachedCoverage {
                 Some(Box::new(cached_coverage(root, &wal.records, &remote)?))
@@ -289,9 +296,9 @@ fn wal_fixture(
         // Replay checked the segment header against the catalog's epoch.
         max_epoch: wal
             .catalog
-            .segments
-            .values()
-            .map(|segment| segment.writer_epoch)
+            .entries()
+            .iter()
+            .map(CatalogEntry::epoch)
             .max()
             .unwrap_or_default(),
         completed_range_reads: observed.completed_range_reads,
@@ -460,13 +467,8 @@ fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<Fixtu
     )
     .bytes(&bytes)
     .seal();
-    let publication = PublishedWalSegment::from_validated_bytes(
-        1,
-        u64::try_from(records.len()).unwrap_or(u64::MAX),
-        SEGMENT_EPOCH,
-        &bytes,
-    );
-    let remote_path = root.join("cloud").join(&publication.object_key);
+    let publication = CatalogEntry::from_sealed_bytes(&bytes).map_err(MidgeError::Corruption)?;
+    let remote_path = root.join("cloud").join(publication.object_key());
     if let Some(parent) = remote_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

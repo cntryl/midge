@@ -1,14 +1,14 @@
 //! Bounded fixture construction. Source data is deterministic and independent
 //! of Midge reads; no complete backlog or expected-value ledger is kept in RAM.
 
-use cntryl_midge::__internal::wal::segment::{footer_link, ChainLink, SegmentBuilder};
-use cntryl_midge::__internal::wal::{segment_object_key, WalOpKind, WalRecord};
+use cntryl_midge::__internal::wal::catalog::{CatalogEntry, WalPublicationCatalog};
+use cntryl_midge::__internal::wal::segment::SegmentBuilder;
+use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
 use cntryl_midge::{
     CloudObjectLayout, CloudProviderConfig, CloudStorageLocation, Engine, MemoryBudget,
     OpenOptions, TransactionMode, WriteOptions,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -195,23 +195,6 @@ impl Campaign {
             .expect("campaign request timeout")
     }
 
-    /// The link of the newest segment `catalog` names, read from its
-    /// object's footer, or the genesis link for an empty catalog.
-    fn catalog_head_link(&self, catalog: &Value) -> ChainLink {
-        let head = catalog["segments"]
-            .as_object()
-            .expect("segments")
-            .values()
-            .max_by_key(|segment| segment["segment_id"].as_u64().expect("segment id"));
-        let Some(head) = head else {
-            return ChainLink::GENESIS;
-        };
-        let object = self.request("GET", head["object_key"].as_str().expect("object key"), &[]);
-        footer_link(&object)
-            .expect("cataloged WAL segment")
-            .expect("cataloged WAL segment is sealed")
-    }
-
     fn request(&self, method: &str, key: &str, body: &[u8]) -> Vec<u8> {
         super::super::signed_s3_request(
             method,
@@ -222,23 +205,17 @@ impl Campaign {
     }
 
     fn publish_backlog(&mut self, mut sequence: u64, next_segment: u64) {
-        let mut catalog: Value = serde_json::from_slice(&self.request(
+        let mut catalog = WalPublicationCatalog::decode(&self.request(
             "GET",
             CloudObjectLayout::WAL_CATALOG_OBJECT_KEY,
             &[],
         ))
-        .expect("native catalog JSON");
-        let epoch = catalog["fencing_epoch"].as_u64().expect("catalog epoch");
-        // Each published segment links the catalog's head (#843).
-        let mut prev = self.catalog_head_link(&catalog);
-        let segments = catalog["segments"].as_object_mut().expect("segments");
-        let mut segment_id = (segments
-            .keys()
-            .map(|key| key.parse::<u64>().expect("segment id"))
-            .max()
-            .unwrap_or(0)
-            + 1)
-        .max(next_segment);
+        .expect("native catalog");
+        let epoch = catalog.fencing_epoch();
+        // Each published segment links the catalog's head (#843), and takes
+        // an id past every id the catalog ever published (#844).
+        let mut prev = catalog.head();
+        let mut segment_id = catalog.next_segment_id().max(next_segment);
         while self.actual_wal_bytes < self.profile.wal_bytes {
             let mut segment = SegmentBuilder::new(segment_id, epoch, prev);
             while segment.body_len() < self.profile.segment_bytes
@@ -256,16 +233,15 @@ impl Campaign {
             }
             let (bytes, link) = segment.seal();
             prev = link;
-            let object_key = segment_object_key(segment_id, epoch);
-            self.request("PUT", &object_key, &bytes);
-            segments.insert(segment_id.to_string(), json!({
-                "segment_id": segment_id, "writer_epoch": epoch, "max_sequence": sequence - 1,
-                "size_bytes": bytes.len(), "content_crc32c": crc32c::crc32c(&bytes), "object_key": object_key,
-            }));
+            let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("sealed backlog segment");
+            self.request("PUT", &entry.object_key(), &bytes);
+            assert!(catalog
+                .append(epoch, &[entry])
+                .expect("chain backlog segment onto the catalog"));
             self.actual_wal_bytes += bytes.len() as u64;
             segment_id += 1;
         }
-        let bytes = serde_json::to_vec_pretty(&catalog).expect("catalog encoding");
+        let bytes = catalog.encode().expect("catalog encoding");
         self.request("PUT", CloudObjectLayout::WAL_CATALOG_OBJECT_KEY, &bytes);
         self.request(
             "PUT",

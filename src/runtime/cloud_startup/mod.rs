@@ -68,7 +68,7 @@ pub(crate) struct CloudWalRecoveryPlan {
     /// Cataloged segments at and after the first hole that salvage stopped
     /// at. They are not replayed; startup retires them from the catalog and
     /// keeps their objects.
-    pub(crate) unreplayed_segments: Vec<crate::wal::cloud_catalog::PublishedWalSegment>,
+    pub(crate) unreplayed_segments: Vec<crate::wal::cloud_catalog::CatalogEntry>,
     /// Highest sequence held by WAL salvage set aside, now or on an earlier
     /// open (the catalog's persisted floor), so new writes never reuse one.
     /// Zero when nothing was ever set aside.
@@ -150,7 +150,7 @@ impl CloudWalRecoveryPlan {
             validate()
         };
         validate()?;
-        if self.max_unreplayed_sequence > catalog.sequence_floor {
+        if self.max_unreplayed_sequence > catalog.seq_floor() {
             persistence.raise_wal_sequence_floor_with_authority_within(
                 writer_epoch,
                 self.max_unreplayed_sequence,

@@ -154,7 +154,7 @@ impl StartupEpochFloor {
             if let Ok(catalog) =
                 crate::wal::cloud_catalog::WalPublicationCatalog::decode(object.bytes())
             {
-                floor = floor.max(catalog.fencing_epoch);
+                floor = floor.max(catalog.fencing_epoch());
             }
         }
         Ok(floor)

@@ -237,15 +237,15 @@ impl VerifiedWalPrefix {
             .is_some_and(|scan| scan.footer().is_some())
     }
 
-    /// What the segment says it is, once its header was read.
+    /// What the segment says it is, once its footer sealed it.
     pub(crate) fn identity(&self) -> Option<crate::wal::format::SegmentIdentity> {
-        self.scan
-            .as_ref()
-            .map(|scan| crate::wal::format::SegmentIdentity {
-                id: scan.header().id,
-                epoch: scan.header().epoch,
-                last_seq: self.max_sequence(),
-            })
+        let scan = self.scan.as_ref()?;
+        let footer = scan.footer()?;
+        Some(crate::wal::format::SegmentIdentity {
+            epoch: scan.header().epoch,
+            prev: scan.header().prev,
+            link: footer.sealed_facts().link,
+        })
     }
 }
 

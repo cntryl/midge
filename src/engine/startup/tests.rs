@@ -375,7 +375,9 @@ fn should_grant_epoch_above_catalog_fencing_epoch_when_cloud_lease_object_is_del
         &std::fs::read(&catalog_path).expect("read catalog"),
     )
     .expect("decode catalog");
-    catalog.fencing_epoch = catalog_epoch;
+    catalog
+        .fence_to(catalog_epoch)
+        .expect("a later epoch fences the catalog");
     let encoded = catalog.encode().expect("encode catalog");
     std::fs::write(&catalog_path, &encoded).expect("write catalog");
     std::fs::write(
@@ -832,7 +834,7 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
     );
     persistence.raise_wal_sequence_floor(fixture.lease.epoch(), 7)?;
     let catalog = persistence.fence_cloud_wal_catalog(fixture.lease.epoch())?;
-    assert_eq!(catalog.sequence_floor, 7);
+    assert_eq!(catalog.seq_floor(), 7);
 
     // Act
     let result = fixture.bootstrap_with_catalog(&catalog);
@@ -849,7 +851,6 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
 }
 
 #[test]
-#[ignore = "#844: D25 a fully retired catalog is history"]
 fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeResult<()> {
     use crate::lease::PrimaryLease as _;
 
@@ -871,8 +872,8 @@ fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeR
         1,
     ))
     .seal();
-    let entry =
-        crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(1, 1, epoch, &bytes);
+    let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+        .map_err(MidgeError::Corruption)?;
     let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
         .map_err(MidgeError::Internal)?;
     catalog

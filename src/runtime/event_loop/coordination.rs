@@ -1,5 +1,5 @@
 use super::RuntimeMsg;
-use crate::wal::cloud_catalog::PublishedWalSegment;
+use crate::wal::cloud_catalog::CatalogEntry;
 use crate::wal::publish::{AckSet, OwedSegment};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -269,22 +269,11 @@ impl CloudWalUploadTracker {
     /// Acknowledge `segment_id` as published, as recovery would.
     #[cfg(test)]
     pub(super) fn acknowledge_for_test(&mut self, segment_id: u64, max_sequence: u64) {
-        self.acks.record_upload(PublishedWalSegment {
-            segment_id,
-            writer_epoch: 0,
-            max_sequence,
-            size_bytes: 0,
-            content_crc32c: 0,
-            object_key: String::new(),
-        });
-        self.acks.mark_published(&[OwedSegment {
-            segment_id,
-            max_sequence,
-        }]);
+        self.acks.acknowledge(segment_id, max_sequence);
     }
 
     /// Acknowledge a verified upload. It is not published yet.
-    pub(super) fn record_upload(&mut self, upload: PublishedWalSegment) {
+    pub(super) fn record_upload(&mut self, upload: CatalogEntry) {
         self.acks.record_upload(upload);
     }
 

@@ -7589,6 +7589,7 @@ mod cloud_crash_recovery {
 mod cloud_persistence_hardening {
     use crate::common::{crash, opts_for_mode, MidgeOptions, StorageMode};
     use bytes::Bytes;
+    use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
     use cntryl_midge::{
         Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode,
         WriteOptions,
@@ -7606,8 +7607,10 @@ mod cloud_persistence_hardening {
     const CORRUPT_WAL_ENV_DB_PATH: &str = "MIDGE_CORRUPT_REMOTE_WAL_DB_PATH";
     const CORRUPT_WAL_SCENARIO: &str = "remote_wal_corruption_after_strict_ack";
     const CORRUPT_WAL_TRIGGER: &str = "manual::remote_wal_corruption_after_strict_ack";
-    const TRUNCATED_PRIMARY_CATALOG: &[u8] = b"{\"format_version\":1";
-    const TRUNCATED_MIRROR_CATALOG: &[u8] = b"{\"format_version\":1,\"fencing_epoch\":";
+    // Damaged copies of a current-format (v2) catalog: torn JSON, not
+    // another format version.
+    const TRUNCATED_PRIMARY_CATALOG: &[u8] = b"{\"format_version\":2";
+    const TRUNCATED_MIRROR_CATALOG: &[u8] = b"{\"format_version\":2,\"fencing_epoch\":";
 
     #[test]
     fn should_abort_in_child_process_when_remote_wal_corruption_scenario_requested() {
@@ -7688,10 +7691,11 @@ mod cloud_persistence_hardening {
         );
         let primary_path = db_path.join("cloud_store/wal/publication-catalog.v1.json");
         let mirror_path = db_path.join("cloud_store/wal/publication-catalog.v1.mirror.json");
-        let before: serde_json::Value =
-            serde_json::from_slice(&fs::read(&primary_path).expect("read published catalog"))
-                .expect("decode published catalog");
-        assert_eq!(before["segments"].as_object().unwrap().len(), 1);
+        let before = WalPublicationCatalog::decode(
+            &fs::read(&primary_path).expect("read published catalog"),
+        )
+        .expect("decode published catalog");
+        assert_eq!(before.entries().len(), 1);
         let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
         let (resume_tx, resume_rx) = crossbeam::channel::bounded(1);
         let callback_primary = primary_path.clone();
@@ -7700,11 +7704,11 @@ mod cloud_persistence_hardening {
         fail::cfg_callback(
             "midge::cloud::after_catalog_primary_before_mirror",
             move || {
-                let primary: serde_json::Value = serde_json::from_slice(
+                let primary = WalPublicationCatalog::decode(
                     &fs::read(&callback_primary).expect("read primary at publication boundary"),
                 )
                 .expect("decode primary at publication boundary");
-                if primary["segments"].as_object().unwrap().is_empty()
+                if primary.entries().is_empty()
                     && first_retirement.swap(false, std::sync::atomic::Ordering::AcqRel)
                 {
                     entered_tx.send(()).expect("signal paused retirement");
@@ -7735,12 +7739,12 @@ mod cloud_persistence_hardening {
             // Assert
             assert_eq!(value, Some(Bytes::from_static(b"catalog-retirement-value")));
             assert_ne!(primary, mirror, "retirement is paused before mirror sync");
-            let primary: serde_json::Value = serde_json::from_slice(&primary).unwrap();
-            let mirror: serde_json::Value = serde_json::from_slice(&mirror).unwrap();
-            assert_eq!(primary["fencing_epoch"], before["fencing_epoch"]);
-            assert_eq!(mirror["fencing_epoch"], before["fencing_epoch"]);
-            assert!(primary["segments"].as_object().unwrap().is_empty());
-            assert_eq!(mirror["segments"], before["segments"]);
+            let primary = WalPublicationCatalog::decode(&primary).unwrap();
+            let mirror = WalPublicationCatalog::decode(&mirror).unwrap();
+            assert_eq!(primary.fencing_epoch(), before.fencing_epoch());
+            assert_eq!(mirror.fencing_epoch(), before.fencing_epoch());
+            assert!(primary.entries().is_empty());
+            assert_eq!(mirror.entries(), before.entries());
         });
         fail::remove("midge::cloud::after_catalog_primary_before_mirror");
         scenario.teardown();
@@ -7809,14 +7813,12 @@ mod cloud_persistence_hardening {
             .shutdown(Duration::from_secs(5))
             .expect("quiesce recovered engine before comparing catalog copies");
         let repaired = fs::read(&primary_catalog).expect("read repaired primary WAL catalog");
-        let fenced: serde_json::Value =
-            serde_json::from_slice(&repaired).expect("decode repaired WAL catalog");
-        let previous: serde_json::Value =
-            serde_json::from_slice(&valid_catalog).expect("decode original WAL catalog");
-        assert_eq!(fenced["format_version"], previous["format_version"]);
-        assert!(
-            fenced["fencing_epoch"].as_u64().unwrap() > previous["fencing_epoch"].as_u64().unwrap()
-        );
+        // Decoding succeeds only for this build's catalog format version, so
+        // both copies share it.
+        let fenced = WalPublicationCatalog::decode(&repaired).expect("decode repaired WAL catalog");
+        let previous =
+            WalPublicationCatalog::decode(&valid_catalog).expect("decode original WAL catalog");
+        assert!(fenced.fencing_epoch() > previous.fencing_epoch());
         assert_eq!(
             repaired,
             fs::read(&mirror_catalog).expect("read converged WAL catalog mirror"),
