@@ -167,6 +167,14 @@ impl WalState {
         }
     }
 
+    /// Record cloud durability through `sequence`, and over the sequences
+    /// no record holds below the open segment (#843).
+    pub(crate) fn advance_cloud_through(&mut self, sequence: u64) {
+        let open = self.history.ledger().open_member().open;
+        self.frontiers
+            .advance_cloud_over(sequence, open.prev.last_seq, open.first_seq);
+    }
+
     /// The segment the WAL writer appends to: the ledger's open segment.
     pub(crate) fn open_segment(&self) -> crate::wal::ledger::SegmentId {
         self.history.ledger().open_segment()
@@ -1289,21 +1297,6 @@ impl RuntimeState {
         Ok(sealed)
     }
 
-    /// Extend the cloud durability frontier over sequences no WAL record
-    /// holds (#843): those after the last record before the open segment and
-    /// below the open segment's first sequence, which an earlier process
-    /// reserved or no record took before a rotation. Once the cloud holds
-    /// every record through the segment before the open one, it holds every
-    /// record below the open one.
-    pub(crate) fn extend_cloud_frontier_over_unwritten_sequences(&mut self) {
-        let open = self.wal.history.ledger().open_member().open;
-        if self.wal.frontiers.cloud_durable() >= open.prev.last_seq {
-            self.wal
-                .frontiers
-                .advance_cloud_to(open.first_seq.saturating_sub(1));
-        }
-    }
-
     pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
         self.raise_sequence_to(self.compaction_output_generation);
         let generation = *self.allocate_sequences(1)?.end();
@@ -1320,7 +1313,7 @@ impl RuntimeState {
             self.sequence = sequence_floor;
         }
         self.wal.frontiers.advance_local_to(sequence_floor);
-        self.wal.frontiers.advance_cloud_to(sequence_floor);
+        self.wal.advance_cloud_through(sequence_floor);
         self.compaction_output_generation =
             self.compaction_output_generation.max(self.sequence).max(
                 Self::manifest_compaction_output_generation_floor(&self.manifest),

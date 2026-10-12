@@ -391,7 +391,10 @@ impl EventLoop {
         }
         self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)?;
         if self.cloud_coordinator.hybrid_storage.is_some() {
-            self.state.extend_cloud_frontier_over_unwritten_sequences();
+            // Nothing owed may already cover every record below the open
+            // segment.
+            let durable = self.state.wal.frontiers.cloud_durable();
+            self.state.wal.advance_cloud_through(durable);
         }
         Ok(())
     }
@@ -520,10 +523,7 @@ impl EventLoop {
             .map_err(|refusal| crate::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some(durable) = initially_durable.last() {
-            self.state
-                .wal
-                .frontiers
-                .advance_cloud_to(durable.max_sequence);
+            self.state.wal.advance_cloud_through(durable.max_sequence);
         }
         for crate::wal::publish::OwedSegment { segment_id, .. } in initially_durable {
             check_startup_scope(startup_scope, "recovered durable cloud WAL")?;

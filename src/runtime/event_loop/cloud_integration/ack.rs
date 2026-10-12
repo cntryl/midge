@@ -234,11 +234,7 @@ impl EventLoop {
             return;
         }
 
-        self.state
-            .wal
-            .frontiers
-            .advance_cloud_to(durable.max_sequence);
-        self.state.extend_cloud_frontier_over_unwritten_sequences();
+        self.state.wal.advance_cloud_through(durable.max_sequence);
         tracing::debug!(
             segment_id = durable.segment_id,
             cloud_durable_seq = self.state.wal.frontiers.cloud_durable(),
