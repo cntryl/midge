@@ -370,4 +370,66 @@ mod tests {
         );
         assert_eq!(io.list("metadata/").unwrap(), ["metadata/test"]);
     }
+
+    #[test]
+    fn should_map_every_condition_header_cloud_storage_emits_when_building_a_store_request() {
+        // Arrange: every header list the cloud storage encoders produce.
+        let directory = tempfile::tempdir().unwrap();
+        let backend = ObjectStoreBackend {
+            store: Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
+            timeout: Duration::from_secs(5),
+        };
+        let by_etag = StorageObjectMetadata {
+            size: 3,
+            etag: "\"v1\"".into(),
+            generation: None,
+        };
+        let by_generation = StorageObjectMetadata {
+            generation: Some("7".into()),
+            ..by_etag.clone()
+        };
+        let mut emitted = Vec::new();
+        for condition in [
+            StoragePrecondition::None,
+            StoragePrecondition::IfAbsent,
+            StoragePrecondition::IfMatch(by_etag.clone()),
+            StoragePrecondition::IfMatch(by_generation.clone()),
+        ] {
+            emitted.push((condition.headers().unwrap(), condition));
+        }
+        for identity in [&by_etag, &by_generation] {
+            emitted.push((
+                super::super::object_match_precondition_headers(
+                    &identity.etag,
+                    identity.generation.as_deref(),
+                )
+                .unwrap(),
+                StoragePrecondition::IfMatch(identity.clone()),
+            ));
+        }
+        let identity = |condition: &StoragePrecondition| match condition {
+            StoragePrecondition::IfMatch(metadata) => crate::storage::conditional_object_identity(
+                &metadata.etag,
+                metadata.generation.as_deref(),
+            )
+            .map(|(name, value)| (name, value.to_string())),
+            _ => None,
+        };
+
+        for (mut headers, expected) in emitted {
+            super::super::set_request_timeout_header(&mut headers, Duration::from_secs(1));
+
+            // Act
+            let request = backend.request("metadata/test", &headers).unwrap();
+
+            // Assert
+            assert_eq!(
+                std::mem::discriminant(&request.precondition),
+                std::mem::discriminant(&expected),
+                "{headers:?}"
+            );
+            assert_eq!(identity(&request.precondition), identity(&expected));
+            assert!(request.timeout <= Duration::from_secs(1), "{headers:?}");
+        }
+    }
 }
