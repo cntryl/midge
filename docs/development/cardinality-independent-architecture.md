@@ -13,11 +13,11 @@ sizes have identical wall-clock latency.
 
 The tight read bounds apply after every L1+ SST has complete key bounds and the
 level satisfies the non-overlap invariant. Newly flushed and compacted SSTs set
-`key_bounds_complete`. Legacy files remain readable in a conservative fallback
-bucket until a one-file-at-a-time maintenance pass verifies and durably records
-their complete bounds. A verified overlap quarantines the level until automatic
-same-level repair publishes a disjoint replacement. Reads stay conservative
-while repair runs.
+`key_bounds_complete`. A file without complete bounds remains readable in a
+conservative fallback bucket. Maintenance no longer re-summarizes such files
+(#844), so one stays in the fallback until compaction rewrites it. A verified
+overlap quarantines the level until automatic same-level repair publishes a
+disjoint replacement. Reads stay conservative while repair runs.
 
 The L0 bound assumes writes use the current admission path. A database opened
 with historical state already above the ceiling remains readable, stalls new

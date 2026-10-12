@@ -134,14 +134,19 @@ Provision lifecycle behavior by object class:
 The WAL store contains epoch-scoped immutable segment objects and two identical
 copies of the mutable publication authority document:
 `wal/publication-catalog.v1.json` and
-`wal/publication-catalog.v1.mirror.json`. Lease acquisition conditionally
-advances both catalog copies before recovery. Uploads are recoverable only
-after both copies converge on a conditional catalog publication; an unlisted
-object is an orphan and is ignored. WAL pruning removes the catalog entry only
-after an exact committed metadata snapshot has been proved, its manifest has
-been validated, and every referenced SST dependency has passed stable object proof.
+`wal/publication-catalog.v1.mirror.json`. The `v1` in these names is not the
+document's format version: current binaries read and write only catalog
+format version 2, described in the
+[format compatibility policy](../development/format-compatibility.md). Lease
+acquisition conditionally advances both catalog copies before recovery.
+Uploads are recoverable only after both copies converge on a conditional
+catalog publication; an unlisted object is an orphan and is ignored. WAL
+pruning removes the catalog entry only after an exact committed metadata
+snapshot has been proved, its manifest has been validated, and every
+referenced SST dependency has passed stable object proof.
 Midge then conditionally retires the matching catalog entry before best-effort
-deleting the now-ignored object. Missing, mismatched, changed, or timed-out proof
+deleting the now-ignored object; retirement removes only the catalog's oldest
+entries, in order. Missing, mismatched, changed, or timed-out proof
 retains catalog authority and the WAL object. Operators must not edit or
 reconstruct either catalog copy.
 

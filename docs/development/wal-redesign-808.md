@@ -74,17 +74,81 @@ Decisions that refine the #808 target design:
   before the open segment its frontier extends to the open segment's first
   sequence.
 - Genesis records the holder identity and the first open segment. A fresh
-  cloud cache starts one past the catalog's last segment, linked to the
-  catalog head. A ledger whose open segment is below that was succeeded by
-  another writer, which alone publishes there; `Rebase` keeps its local WAL
-  aside and continues past the catalog, linked to the catalog head.
+  cloud cache starts at the catalog's `next_segment_id`, past every id any
+  writer published, linked to the catalog head.
 - Salvage drops a suffix of the ledger with `SetAside{from, cut, open}`, after
   copying the dropped files into `wal/salvaged-<millis>/`, truncating the cut
   segment to its replayed prefix and sealing that with a footer. The new open
   segment links the cut. Nothing is renamed.
-- Until #844 chains the catalog, the catalog's first entry has no anchor to
-  check; every later cloud segment must carry the epoch its entry names and
-  link the one before.
+- The catalog is a chain (#844, catalog v2), like the ledger. Its `anchor` is
+  the link of the last segment it retired, or the genesis link. Each entry,
+  `{epoch, prev, link, size_bytes, crc32c}`, links the one before; epochs
+  never fall; `next_segment_id` passes the head and never falls. The head is
+  the newest entry's link, or the anchor. The object keys keep their `v1`
+  names and the document says `format_version: 2`; any other version is a
+  `CompatibilityError`, never repaired from the mirror.
+- The catalog owns its shape. Its mutators are pure and refuse whole
+  (`CatalogRefusal`): `fence_to` hands it to a later epoch, `append_run` must
+  chain onto the head (`publish::Refusal::Unchained`), `retire_prefix`
+  retires only the oldest entries, moves the anchor and keeps
+  `next_segment_id`, and `set_aside_suffix` drops a suffix and raises
+  `seq_floor`. Every mutation takes one read-modify-CAS path,
+  `mutate_wal_catalog_within` (#858). A rule refusal writes nothing:
+  `refusal_error` maps another epoch to `Fenced` and anything else to
+  `Corruption`. A lost compare-and-swap re-reads the primary without
+  repairing it: `Fenced` when a later epoch owns it, `Busy` otherwise.
+  Metadata bootstrap refuses any catalog that is not pristine, because a
+  catalog whose entries all retired is still history.
+- Recovery planning is pure (`wal::planner`, #844). Startup only probes the
+  segments (object HEAD, checksum and inspection), cuts the open member and
+  assembles the sources; the planner decides. `lineage` places a cache's
+  ledger against the catalog:
+  - **Fresh:** no ledger. The catalog replays and a new history starts after
+    its head.
+  - **Joined:** the ledger's chain holds the catalog head, and the catalog
+    never handed out the ledger's open id. The catalog replays, then the
+    cache's tail.
+  - **Behind:** the catalog head precedes the ledger's anchor and is not in
+    its chain: the catalog lost history this cache retired. When the
+    catalog's floor covers the ledger's anchor, the catalog set that history
+    aside itself and the cache rebases, even in strict recovery; otherwise it
+    is a hole.
+  - **Diverged:** anything else: another writer extended the catalog. The
+    cache belongs to a writer another one succeeded. It sets its local WAL
+    aside, replays only the catalog and continues past it, since an
+    unpublished tail is not history once another writer has taken over.
+- `plan` admits the catalog's entries, then a Joined cache's tail, to one
+  `format::Chain` from the catalog's anchor. The first position that is
+  missing, damaged or unchained is the hole. Strict recovery refuses it.
+  Salvage replays the prefix before it, sets the rest aside (the catalog
+  suffix and the local members from the hole) and lifts the sequence floor
+  above all of it. Replay checks each published object against its entry
+  (`Expectation::Published`): the header's epoch and previous link, and the
+  link its footer seals. Ledger members at or below the catalog's anchor are
+  retired history: they are neither replayed nor owed to the catalog, and
+  startup retires them locally. The plan carries one history action,
+  `Genesis`, `Keep`, `SetAside` or `Rebase`, that startup only executes.
+  `planner::local` plans a local WAL from its ledger alone.
+- A cataloged segment whose link differs from this ledger's member at the
+  same id is a fork, never Joined: the local tail is set aside and strict
+  recovery opens on the catalog's history, as #843's failback does.
+- `commit_recovery_plan_within` makes a cloud plan durable in one order.
+  First one catalog compare-and-swap drops the suffix from the hole and
+  raises the floor over everything set aside; then the ledger carries out
+  the history action. The failpoint
+  `midge::recovery::after_salvage_floor_before_quarantine` sits between
+  them. A crash there leaves either the same hole, which the next salvage open
+  completes, or, when the catalog dropped history the cache had already
+  retired, a catalog Behind the ledger whose floor covers the gap, which the
+  next open rebases onto, strictly.
+- The #844 discussion proposed treating a cataloged id in
+  `[log_start, open)` that is not a ledger member as set-aside history. That
+  rule is not implemented literally: after an idle-restart `Reopen`, it would
+  retire a successor's strict-acknowledged segment. The catalog CAS before
+  the ledger edit and the Behind and takeover rules replace it. Under catalog
+  v2 its precondition, a catalog that published a segment past a local-only
+  one, cannot occur, because `append_run` requires each new segment to link
+  the catalog head.
 - A transaction is single-family: its frames carry the family, and a batch
   spanning families is refused before any sequence is allocated.
 - Files the ledger does not name are orphans. The writable open sweeps them,
@@ -121,13 +185,16 @@ The segment ledger (#842) turns `restarted-segment-id` and
 `failed-local-unlink` GREEN. Ids come from the ledger, which never hands out
 one it recorded, and the ledger records a new log start before a file is
 unlinked, so a file whose removal fails is never replayed. The matching
-campaign detections became controls. `predecessor-cache` moved to stage 4:
-a segment id cannot tell a predecessor's stale tail from a successor's
-history once the successor's catalog entries retire, so it needs ownership
-(#820). A cache whose ledger is behind the catalog
-belongs to a writer another one succeeded: it sets its local WAL aside,
-replays only the catalog, and continues past it, since an unpublished tail is
-not history once another writer has taken over.
+campaign detections became controls.
+
+The chained catalog and the recovery planner (#844) turn `predecessor-cache`
+GREEN in stage 2. A segment id alone cannot tell a predecessor's stale tail
+from a successor's history once the successor's catalog entries retire. The
+catalog's retained anchor link and `next_segment_id` can: the predecessor's
+ledger does not hold the catalog head, which links the successor's history,
+so its cache is Diverged. It sets its unpublished tail aside and replays only
+the successor's history. The case needs Sqrzl: it is ignored in ordinary test
+runs and runs in the baseline runner with `--with-sqrzl`.
 
 Linked segments (#843) turn `inverted-epoch-history` and
 `recovered-tail-not-durable` GREEN. Replay follows the ledger's chain, so a

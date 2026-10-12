@@ -257,7 +257,12 @@ fn should_preserve_valid_prefix_given_truncated_wal_tail_when_recovering() {
 - Informational tests that only print status are not sufficient for trust guarantees; each guarantee should have an asserted outcome.
 
 The [#808 regression inventory](wal-redesign-808.md) documents the named WAL
-audit baseline runner, its CI partitions, and its acceptance boundary.
+audit baseline runner, its CI partitions, and its acceptance boundary. Its
+Sqrzl-only case, `predecessor-cache` in
+`tests/fault_injection/wal_authority_regressions.rs`, is marked
+`#[ignore = "requires Sqrzl; run cloud-integration.yml"]` like the other
+provider tests. The baseline runner includes ignored tests and runs that case
+only with `--with-sqrzl`.
 
 ## Watchdog contention qualification
 

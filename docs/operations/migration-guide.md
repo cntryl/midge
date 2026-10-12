@@ -189,15 +189,50 @@ which prevents cross-provider credential combinations. `OpenOptions::build`
 performs structural validation only and may therefore reject names or endpoints
 that older releases deferred until startup.
 
+## FORMAT 7 and cloud WAL publication catalog v2
+
+FORMAT 7 (#844) is a breaking pre-1.0 transition with no in-place upgrade
+and no format migration. Binaries reject FORMAT 1 through 6 with
+`CompatibilityError` and leave the marker untouched. FORMAT 7 metadata keeps
+no compatibility encodings: a manifest journal record without its edit
+envelope is corruption, and manifest key bounds must be hex strings.
+
+Cloud databases also move to publication catalog format version 2. The
+catalog keeps its object keys, `wal/publication-catalog.v1.json` and
+`wal/publication-catalog.v1.mirror.json`, but its document is a chain: an
+anchor, entries that each link the one before, the next segment id and a
+sequence floor. Startup rejects a catalog of any other version with
+`CompatibilityError` and leaves both copies unchanged; it neither converts
+the catalog nor repairs it from the mirror. Do not edit either catalog copy by
+hand.
+
+Move each database logically:
+
+1. Stop writers and complete `engine.shutdown(timeout)` with the old binary.
+2. Preserve the old database directory and, for cloud databases, the old
+   prefix and local cache as the rollback copy.
+3. With the old binary, export every column family's logical key/value
+   contents through the public API.
+4. With the new binary, create a new empty database or cloud prefix, recreate
+   the column families, and import the logical data.
+5. Run `midge verify` and application read, write and restart tests, plus the
+   required Sqrzl or real-cloud qualification for cloud databases, before
+   switching traffic.
+
+Rollback is unsupported within the new database or prefix. Roll back by
+restoring traffic to the preserved original with its old binary; older
+binaries must not open a FORMAT 7 database or read a version 2 catalog.
+
 ## Cloud WAL publication catalog v1
 
-Cloud WAL publication catalog format v1 is a breaking persisted-layout
-change. Sealed objects now use
+Cloud WAL publication catalog format v1 was a breaking persisted-layout
+change. Current binaries reject a v1 catalog; see the FORMAT 7 section above.
+Sealed objects use
 `wal/epochs/<writer-epoch>/<segment-id>.wal`, and
 `wal/publication-catalog.v1.json` and its identically encoded
 `wal/publication-catalog.v1.mirror.json` recovery copy represent the sole
-authority for remote WAL recovery. Current Midge releases create the mirror
-when opening a valid primary-only v1 deployment. A database prefix that
+authority for remote WAL recovery. Releases that read catalog v1 create the
+mirror when opening a valid primary-only v1 deployment. A database prefix that
 contains the older segment-only `wal/<segment-id>.wal` layout without a v1
 catalog is rejected explicitly;
 Midge does not guess whether those objects were published before or after a

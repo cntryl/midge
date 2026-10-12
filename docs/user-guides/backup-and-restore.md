@@ -4,7 +4,10 @@ Midge can capture a versioned backup directory from a local or
 `CloudSimulated` engine. The capture briefly pauses mutations while it syncs
 the current WAL and pins the durable file set. It copies and checksums the
 files after releasing that barrier, so the full backup duration does not hold
-the write pause.
+the write pause. The WAL part of the pinned set is `wal/LEDGER` and the
+segments it names. Orphaned segment files and the copies salvage set aside
+under `wal/` are not captured, and a ledger that cannot be read fails the
+backup.
 
 ```rust,no_run
 use cntryl_midge::{Engine, OpenOptions};
