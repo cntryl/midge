@@ -1613,6 +1613,7 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("commit_set_aside_within", "#843"),
     ("EmptyHolder", "#843"),
     ("loses_required_value", "#843"),
+    ("Expectation::Chain", "#843"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

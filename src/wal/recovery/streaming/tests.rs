@@ -806,8 +806,7 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
 /// written by epoch 1.
 fn segments(storage: &BoundedFs, sealed: &[u64], open: Option<u64>) -> ReplaySegments {
     let segments = crate::wal::recovery::fixture::segments(&FsPath::new("wal"), sealed, open);
-    crate::wal::recovery::fixture::wrap_chain(&storage.inner, &segments, 1);
-    segments
+    crate::wal::recovery::fixture::wrap_chain(&storage.inner, &segments, 1)
 }
 
 #[test]

@@ -121,7 +121,7 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
     file.append(bytes::Bytes::from(bytes))
         .expect("write WAL fixture");
     drop(file);
-    crate::wal::recovery::fixture::wrap_chain(
+    let segments = crate::wal::recovery::fixture::wrap_chain(
         &storage,
         &crate::wal::recovery::fixture::segments(&wal_dir, &[1], None),
         0,
@@ -134,7 +134,6 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
         error: crate::simulation::crash_fs::FaultError::Io,
     };
 
-    let segments = crate::wal::recovery::fixture::segments(&wal_dir, &[1], None);
     let replay = |memtables: &mut HashMap<_, _>| {
         replay_wal_with_manifest_filter_within(
             &storage,
@@ -166,7 +165,7 @@ fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() 
         id: 1,
         path: FsPath::new(crate::wal::segment_file_name(1)),
         kind: ReplayFileKind::FinalActive,
-        expect: super::Expectation::Chain,
+        expect: super::Expectation::Epoch(0),
     };
     let failure = ReplayFailure::Error(MidgeError::Corruption(
         "Incomplete WAL record text alone is not a typed tail".to_string(),
@@ -982,7 +981,11 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
 
     // Act
     let mut memtables = HashMap::new();
-    let segments = crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1));
+    let segments = crate::wal::recovery::fixture::wrap_chain(
+        &storage,
+        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
+        0,
+    );
     let stats = replay_wal_with_manifest_filter_within(
         &storage,
         &segments,
@@ -1565,8 +1568,11 @@ fn should_report_verified_prefix_without_modifying_file_when_tolerating_active_w
     let mut torn_frame = encode_frame(&put_record(b"torn", 3));
     torn_frame.truncate(torn_frame.len() - 3);
     append_raw_bytes(&active_path, &torn_frame);
-    let segments = crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1));
-    crate::wal::recovery::fixture::wrap_chain(&storage, &segments, 0);
+    let segments = crate::wal::recovery::fixture::wrap_chain(
+        &storage,
+        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
+        0,
+    );
     let original_len = std::fs::metadata(&active_path).unwrap().len();
     let mut memtables = HashMap::new();
 
@@ -1794,7 +1800,9 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     .expect("write WAL fixture");
     let storage = RealFs::new(dir.path()).expect("open fs");
 
-    let segments = crate::wal::recovery::fixture::segments(&FsPath::new("wal"), &[], Some(1));
+    // Damaged bytes stay as they are: no wrapping, only the builder's epoch.
+    let segments =
+        crate::wal::recovery::fixture::segments_in_epoch(&FsPath::new("wal"), &[], Some(1), 1);
     let replay = match validate_wal_with_policy(&storage, &segments, ReplayPolicy::Strict, None) {
         Ok(stats) => WalkerVerdict::Accepted {
             max_sequence: stats.max_sequence.unwrap_or(0),
@@ -1944,10 +1952,10 @@ fn replay_fixture_with_policy(
     policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
     // Bare bodies a test wrote become a chain of v2 segments first.
-    crate::wal::recovery::fixture::wrap_chain(storage, segments, 0);
+    let segments = crate::wal::recovery::fixture::wrap_chain(storage, segments, 0);
     replay_wal_with_manifest_filter_within(
         storage,
-        segments,
+        &segments,
         memtables,
         policy,
         &|_| Ok(true),

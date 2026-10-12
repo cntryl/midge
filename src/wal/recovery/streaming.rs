@@ -775,7 +775,6 @@ fn admit_segment(
                 header.epoch
             )
         }),
-        Expectation::Chain => Ok(()),
     };
     expected.map_err(|reason| {
         MidgeError::Corruption(format!(

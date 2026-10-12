@@ -565,7 +565,7 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
     let result = active_local_source(
         &fs,
         1,
-        Expectation::Chain,
+        Expectation::Epoch(FIXTURE_EPOCH),
         RecoveryPolicy::Salvage,
         limits(),
         &mut plan,

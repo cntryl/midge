@@ -36,8 +36,6 @@ pub(crate) enum Expectation {
     },
     /// A published object: the writer epoch its catalog entry names.
     Epoch(u64),
-    /// Only the chain.
-    Chain,
 }
 
 impl Expectation {
@@ -54,7 +52,7 @@ impl Expectation {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ReplayFile {
     id: crate::wal::ledger::SegmentId,
     path: FsPath,
@@ -67,7 +65,7 @@ struct ReplayFile {
 /// one open segment, replayed last, whose incomplete tail is a write the
 /// crash interrupted. The first segment links `anchor`, unchecked when it is
 /// unknown; each later one links the footer of the one before.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ReplaySegments {
     anchor: Option<crate::wal::format::ChainLink>,
     files: Vec<ReplayFile>,

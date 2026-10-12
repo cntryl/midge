@@ -332,11 +332,12 @@ fn merge_local_sources(
             limits,
             &mut plan.opened_in_salvage_mode,
         )?;
-        let expect = ledger
-            .expected(segment_id)
-            .map_or(Expectation::Chain, |member| {
-                Expectation::member(ledger, member)
-            });
+        let member = ledger.expected(segment_id).ok_or_else(|| {
+            MidgeError::Internal(format!(
+                "sealed WAL segment {segment_id} is not a member of its own ledger"
+            ))
+        })?;
+        let expect = Expectation::member(ledger, member);
         let Some((path, segment)) = selected else {
             skipped.insert(segment_id);
             continue;
