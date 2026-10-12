@@ -2239,6 +2239,111 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_CHILD: &str = "MIDGE_PARTIAL_SPILL_FLUSH_CHILD";
+
+#[cfg(feature = "failpoints")]
+fn partial_spill_options(path: &std::path::Path) -> crate::OpenOptions {
+    crate::OpenOptions::local(path)
+        .transaction_memory_pool_size(1024)
+        .background_compaction(false)
+        .build()
+        .expect("partial spill options")
+}
+
+#[cfg(feature = "failpoints")]
+fn partial_spill_value() -> Vec<u8> {
+    vec![7_u8; 4 * 1024]
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_flushing_partly_applied_spilled_transaction_in_child() {
+    // Arrange: runs only as the child of the restart test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(PARTIAL_SPILL_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open spill writer");
+    let family = engine.get_column_family("default").expect("default family");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("spilled transaction");
+    tx.put(b"first".to_vec(), partial_spill_value(), None)
+        .expect("spill first");
+    tx.put(b"second".to_vec(), partial_spill_value(), None)
+        .expect("spill second");
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return")
+        .expect("fail the second post-commit apply");
+
+    // Act: the strict commit is durably logged, but only `first` reaches the
+    // memtable; a manual flush then persists that partial memtable before restart.
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(
+        matches!(commit, Err(MidgeError::RecoveryFailed(_))),
+        "{commit:?}"
+    );
+    let flushed = engine.flush_cf(&family);
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+
+    // Assert
+    std::fs::write(path.join("partial-spill-flushed"), format!("{flushed:?}"))
+        .expect("flush marker");
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_apply_whole_spilled_transaction_on_restart_when_flushed_after_partial_apply() {
+    // Arrange: a child process logs a spilled transaction, applies only its
+    // first op, requests a manual flush of the family, and shuts down.
+    let directory = tempfile::tempdir().expect("database directory");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_flushing_partly_applied_spilled_transaction_in_child",
+            "--nocapture",
+        ])
+        .env(PARTIAL_SPILL_CHILD, directory.path())
+        .output()
+        .expect("run partial spill child");
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        directory.path().join("partial-spill-flushed").exists(),
+        "the child must reach its manual flush"
+    );
+
+    // Act
+    let mut reopened =
+        crate::Engine::open(partial_spill_options(directory.path())).expect("restart");
+
+    // Assert: the durably logged transaction is visible whole, never in part.
+    {
+        let tx = reopened
+            .begin_tx(0, crate::TransactionMode::ReadOnly)
+            .expect("read transaction");
+        assert_eq!(
+            tx.get(b"first").expect("read first").as_deref(),
+            Some(partial_spill_value().as_slice())
+        );
+        assert_eq!(
+            tx.get(b"second").expect("read second").as_deref(),
+            Some(partial_spill_value().as_slice())
+        );
+    }
+    reopened
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shutdown restarted engine");
+}
+
 #[test]
 fn should_reject_resident_transaction_when_batch_payload_exceeds_wal_decode_limit(
 ) -> MidgeResult<()> {

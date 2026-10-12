@@ -98,6 +98,11 @@ pub struct ColumnFamilyState {
     /// `WalState::appended_bytes` when the active memtable first became
     /// non-empty; set with `active_memtable_started_in_segment`.
     pub(crate) active_memtable_started_at_wal_bytes: u64,
+    /// Commit sequence of a durably logged unit that reached the active
+    /// memtable only in part. Freezing that memtable would publish a flush
+    /// frontier at or past the commit, and restart would then skip the unit
+    /// as flushed, so the family refuses to freeze until restart replays it.
+    partially_applied_commit: Option<u64>,
 }
 
 /// Root directory for SSTs a salvage open kept but could not prove
@@ -112,7 +117,19 @@ impl ColumnFamilyState {
             immutable_flushes: Vec::new(),
             active_memtable_started_in_segment: 1,
             active_memtable_started_at_wal_bytes: 0,
+            partially_applied_commit: None,
         }
+    }
+
+    /// Record that the unit committed at `commit_seq` reached the active
+    /// memtable only in part.
+    pub(crate) fn mark_partially_applied(&mut self, commit_seq: u64) {
+        self.partially_applied_commit.get_or_insert(commit_seq);
+    }
+
+    /// Commit sequence of a unit the active memtable holds only in part.
+    pub(crate) fn partially_applied_commit(&self) -> Option<u64> {
+        self.partially_applied_commit
     }
 }
 

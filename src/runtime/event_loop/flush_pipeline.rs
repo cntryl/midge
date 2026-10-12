@@ -55,18 +55,21 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         origin: Origin,
     ) -> crate::common::MidgeResult<Option<u64>> {
-        let active_size = self
-            .state
-            .get_cf(cf_id)
-            .ok_or_else(|| {
-                crate::common::MidgeError::InvalidArgument(format!(
-                    "column family {cf_id} does not exist"
-                ))
-            })?
-            .memtable
-            .size_bytes();
-        if active_size == 0 {
+        let cf = self.state.get_cf(cf_id).ok_or_else(|| {
+            crate::common::MidgeError::InvalidArgument(format!(
+                "column family {cf_id} does not exist"
+            ))
+        })?;
+        if cf.memtable.size_bytes() == 0 {
             return Ok(None);
+        }
+        // A flush frontier at or past a partly applied unit's commit would
+        // make restart skip the unit; only replay can apply it whole.
+        if let Some(commit_seq) = cf.partially_applied_commit() {
+            return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                "column family {cf_id} holds a partly applied transaction committed at \
+                 sequence {commit_seq}; restart to replay it before flushing"
+            )));
         }
         if self.state.is_immutable_memtable_queue_full(cf_id) {
             self.state.diagnostics.record(|m| {

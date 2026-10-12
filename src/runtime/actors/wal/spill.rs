@@ -122,22 +122,7 @@ impl WalActor {
             effective_durability,
             commit_time_millis,
         ) {
-            // The WAL already holds the whole transaction, so recovery will
-            // apply all of it. Some ops may be in the memtable now; stop the
-            // writer rather than keep serving a partially applied commit.
-            let message = format!(
-                "spilled transaction {} is durably logged but failed to apply to memtables; \
-                 it will be fully applied on restart: {error}",
-                sequence_plan.txn_id
-            );
-            self.fence_transition(state, message.clone());
-            state.mark_persistence_anomaly();
-            // Durably logged but not applied: a restart applies it (#537).
-            return Err(if matches!(error, MidgeError::Fenced(_)) {
-                error
-            } else {
-                MidgeError::RecoveryFailed(message)
-            });
+            return Err(self.fail_logged_spilled_apply(state, &sequence_plan, error));
         }
 
         let deferred = matches!(
@@ -151,6 +136,33 @@ impl WalActor {
             "streamed spilled WAL transaction apply"
         );
         Ok((sequence_plan.commit_seq, source.len(), deferred))
+    }
+
+    /// Stop a writer whose durably logged spilled transaction reached the
+    /// memtables only in part (#537). The WAL holds the whole unit, so a
+    /// restart replays all of it, provided no flush frontier passes its
+    /// commit first; the family therefore refuses to freeze until then.
+    fn fail_logged_spilled_apply(
+        &mut self,
+        state: &mut RuntimeState,
+        sequence_plan: &TxnSequencePlan,
+        error: MidgeError,
+    ) -> MidgeError {
+        if let Some(cf) = state.get_cf_mut(sequence_plan.cf_id) {
+            cf.mark_partially_applied(sequence_plan.commit_seq);
+        }
+        let message = format!(
+            "spilled transaction {} is durably logged but failed to apply to memtables; \
+             it will be fully applied on restart: {error}",
+            sequence_plan.txn_id
+        );
+        self.fence_transition(state, message.clone());
+        state.mark_persistence_anomaly();
+        if matches!(error, MidgeError::Fenced(_)) {
+            error
+        } else {
+            MidgeError::RecoveryFailed(message)
+        }
     }
 
     fn validate_assertion_only_spill(
