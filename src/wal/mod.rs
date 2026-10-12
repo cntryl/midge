@@ -32,6 +32,7 @@ mod config;
 // crate's own tests and benches can reach them through `crate::__internal`;
 // `wal` itself is private, so nothing downstream can name them.
 pub mod encoding;
+pub mod format;
 pub mod frame;
 pub(crate) mod fs;
 pub(crate) mod ledger;
