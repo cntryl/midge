@@ -7,7 +7,7 @@
       "writer_epoch": 1,
       "max_sequence": 6,
       "size_bytes": 341,
-      "content_crc32c": 2437360345,
+      "content_crc32c": 3386274445,
       "object_key": "wal/epochs/00000000000000000001/00000000000000000002.wal"
     },
     "3": {
@@ -15,7 +15,7 @@
       "writer_epoch": 1,
       "max_sequence": 9,
       "size_bytes": 341,
-      "content_crc32c": 3314765734,
+      "content_crc32c": 2584043794,
       "object_key": "wal/epochs/00000000000000000001/00000000000000000003.wal"
     },
     "4": {
@@ -23,7 +23,7 @@
       "writer_epoch": 1,
       "max_sequence": 12,
       "size_bytes": 343,
-      "content_crc32c": 846560705,
+      "content_crc32c": 45670380,
       "object_key": "wal/epochs/00000000000000000001/00000000000000000004.wal"
     },
     "5": {
@@ -31,7 +31,7 @@
       "writer_epoch": 1,
       "max_sequence": 15,
       "size_bytes": 334,
-      "content_crc32c": 583280099,
+      "content_crc32c": 1949346112,
       "object_key": "wal/epochs/00000000000000000001/00000000000000000005.wal"
     }
   }

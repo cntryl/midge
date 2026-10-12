@@ -795,10 +795,26 @@ mod durability_wal {
             tx.get(b"after").expect("get after"),
             Some(Bytes::from_static(b"value"))
         );
-        let recovered_len = std::fs::metadata(&wal_log).expect("wal metadata").len();
+        // The restart sealed the torn segment after its replayed prefix
+        // (#843), so the post-restart commit stays in a later segment.
+        let sealed = std::fs::read(&wal_log).expect("read sealed torn segment");
+        assert!(sealed.len() as u64 <= torn_len);
+        assert!(cntryl_midge::__internal::wal::segment::footer_link(&sealed)
+            .expect("decode sealed torn segment")
+            .is_some());
+        let later_records: usize = wal_segment_files(db_path)
+            .into_iter()
+            .filter(|(_, path)| *path != wal_log)
+            .map(|(_, path)| {
+                let bytes = std::fs::read(path).expect("read later segment");
+                cntryl_midge::__internal::wal::segment::records(&bytes)
+                    .expect("decode later segment")
+                    .len()
+            })
+            .sum();
         assert!(
-            recovered_len > torn_len,
-            "post-restart commit should remain in the active WAL (torn_len={torn_len}, len={recovered_len})"
+            later_records > 0,
+            "post-restart commit should remain in a later WAL segment"
         );
     }
 
@@ -1941,7 +1957,11 @@ mod durability_atomicity {
 
     #[test]
     fn should_not_resurrect_manifest_covered_value_from_retained_wal_after_tombstone_gc() {
-        // Arrange
+        // Arrange: an idle family's unflushed write pins every WAL segment
+        // from the seed on, so retention keeps WAL history the manifest
+        // already covers. Segments are linked (#843): covered records stay
+        // in the retained segments that wrote them rather than being spliced
+        // into the open one.
         let directory = tempfile::tempdir().expect("create database directory");
         let options = || {
             OpenOptions::local(directory.path())
@@ -1952,6 +1972,16 @@ mod durability_atomicity {
         let cf = engine
             .get_column_family("default")
             .expect("default column family");
+        let idle = engine
+            .create_column_family("idle")
+            .expect("create idle column family");
+        let mut pin = engine
+            .begin_tx(idle.id(), TransactionMode::ReadWrite)
+            .expect("begin idle transaction");
+        pin.put(b"pin".to_vec(), b"unflushed".to_vec(), None)
+            .expect("put idle pin");
+        pin.commit(WriteOptions::sync()).expect("commit idle pin");
+        let seed_segment = open_wal_segment(directory.path());
         let mut seed = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin seed transaction");
@@ -1962,8 +1992,6 @@ mod durability_atomicity {
         seed.put(b"z-anchor".to_vec(), b"z".to_vec(), None)
             .expect("put upper anchor");
         seed.commit(WriteOptions::sync()).expect("commit seed");
-        let retained_wal =
-            std::fs::read(open_wal_segment(directory.path())).expect("capture retained WAL bytes");
         engine.flush_cf(&cf).expect("flush seed values");
 
         let mut delete = engine
@@ -1973,8 +2001,6 @@ mod durability_atomicity {
         delete
             .commit(WriteOptions::sync())
             .expect("commit durable delete");
-        let retained_delete_wal = std::fs::read(open_wal_segment(directory.path()))
-            .expect("capture retained delete WAL bytes");
         engine.flush_cf(&cf).expect("flush delete tombstone");
         for index in 0..2 {
             let mut filler = engine
@@ -2001,15 +2027,13 @@ mod durability_atomicity {
         engine
             .shutdown(std::time::Duration::from_secs(5))
             .expect("shutdown database");
+        assert!(
+            seed_segment.exists(),
+            "the idle family must retain the WAL segment holding the seed"
+        );
 
-        // Act: model WAL that still holds records the manifest already
-        // covers. Recovery always replays the open segment, so put the seed
-        // and the delete records there, oldest first.
-        let open_segment = open_wal_segment(directory.path());
-        let mut replayed = retained_wal;
-        replayed.extend(retained_delete_wal);
-        replayed.extend(std::fs::read(&open_segment).expect("read open WAL segment"));
-        std::fs::write(&open_segment, replayed).expect("restore covered WAL records");
+        // Act: recovery replays the retained segments, whose seed and delete
+        // records the manifest already covers.
         let reopened = Engine::open(options()).expect("reopen database");
         let cf = reopened
             .get_column_family("default")
