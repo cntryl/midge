@@ -1596,6 +1596,35 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("PublishedWalSegment", "#844"),
     ("from_validated_bytes", "#844"),
     ("validate_publication_identity", "#844"),
+    ("merge_local_sources", "#844"),
+    ("select_local_segment", "#844"),
+    ("active_local_source", "#844"),
+    ("stop_at_first_hole", "#844"),
+    ("enforce_epoch_order", "#844"),
+    ("recover_or_salvage", "#844"),
+    ("verified_max_sequence", "#844"),
+    ("wal_sources_equal", "#844"),
+    ("WalPlanningContext", "#844"),
+    ("LocalSources", "#844"),
+    ("ActiveSource", "#844"),
+    ("plan_sets_aside", "#844"),
+    ("was_taken_over", "#844"),
+    ("warn_failed_back", "#844"),
+    ("failed_back", "#844"),
+    ("catalog_head_link", "#844"),
+    ("next_remote_id", "#844"),
+    ("unreplayed_segments", "#844"),
+    ("set_aside_from", "#844"),
+    ("CloudWalRecoveryPlan", "#844"),
+    (
+        "retire_unreplayed_wal_segments_with_authority_within",
+        "#844",
+    ),
+    ("raise_wal_sequence_floor", "#844"),
+    ("raise_wal_sequence_floor_with_authority", "#844"),
+    ("raise_wal_sequence_floor_with_authority_within", "#844"),
+    ("before_salvage_catalog_retirement", "#844"),
+    ("replay_segments", "#844"),
     ("read_only_error", "#844"),
     ("require_read_only", "#844"),
     ("next_wal_seq", "#844"),
@@ -1712,7 +1741,6 @@ const WAL_CORE_FORBIDDEN: &[&str] = &[
 
 /// The WAL core decides; adapters do the I/O (#844).
 #[test]
-#[ignore = "#844: the pure WAL core lands with wal::planner"]
 fn should_keep_wal_core_free_of_io_and_runtime_dependencies() {
     // Arrange
     let files = source_scan::production_files();

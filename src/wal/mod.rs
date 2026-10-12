@@ -17,13 +17,21 @@
 //!
 //! Cloud WAL durability uses epoch-scoped immutable segment objects plus a
 //! lease-fenced publication catalog with a conditionally updated recovery
-//! mirror. Recovery replays only validated catalog entries, so an uploader that
-//! finishes after losing its lease can create only an ignored orphan. A
-//! verified upload only marks its segment uploaded; `publish` selects the
-//! contiguous run of uploads the catalog may publish next. Both
-//! catalog copies advance to every newly acquired lease epoch before recovery
-//! and converge before a cloud durability acknowledgement can advance the
-//! runtime frontier.
+//! mirror. The catalog is a chain like the segment ledger (`cloud_catalog`,
+//! #844): an anchor, entries that each link the one before, and a next id
+//! that never falls. Recovery replays only validated catalog entries, so an
+//! uploader that finishes after losing its lease can create only an ignored
+//! orphan. A verified upload only marks its segment uploaded; `publish`
+//! selects the contiguous run of uploads the catalog may publish next, which
+//! must chain onto its head. Both catalog copies advance to every newly
+//! acquired lease epoch before recovery and converge before a cloud
+//! durability acknowledgement can advance the runtime frontier.
+//!
+//! `planner` decides recovery: it places a cache's ledger against the
+//! catalog, admits the probed segments in chain order, and says what replays,
+//! what salvage sets aside and how the local history continues. It and the
+//! format, ledger, sequence, publication and catalog modules are pure; the
+//! runtime adapters do their I/O.
 
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;
@@ -37,6 +45,7 @@ pub mod frame;
 pub(crate) mod fs;
 pub(crate) mod ledger;
 pub(crate) mod ledger_store;
+pub(crate) mod planner;
 pub mod policy;
 pub(crate) mod publish;
 pub(crate) mod recovery;

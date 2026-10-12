@@ -20,12 +20,12 @@ fn commit(
     catalog: &WalPublicationCatalog,
     history: crate::runtime::wal_history::WalHistory,
 ) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
-    recovered.plan.commit_within(
+    crate::runtime::cloud_startup::commit_recovery_plan_within(
+        &recovered.plan,
         persistence,
         9,
         catalog,
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
-        recovered.next_remote_id,
         &|| Ok(()),
         &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
     )
@@ -93,7 +93,6 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
         ("midge::recovery::after_salvage_floor_before_quarantine", 1),
         ("midge::recovery::after_salvage_member_moved", 1),
         ("midge::recovery::after_salvage_member_moved", 2),
-        ("midge::recovery::before_salvage_catalog_retirement", 1),
     ];
     let artifacts = PathBuf::from(
         std::env::var_os("MIDGE_DISCOVERY_ARTIFACT_DIR")
@@ -113,7 +112,7 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
         "tuples": tuples, "published_epochs": [8,8,9], "published_sequences": [1,2,3], "local_epoch": 9, "local_sequence": 4, "active_epoch": 9, "active_sequence": 5
     })).unwrap())?;
     for (case_index, (trigger, ordinal)) in tuples.into_iter().enumerate() {
-        let (mut fixture, catalog_path, mut command) = prepare_case(trigger, ordinal)?;
+        let (fixture, _catalog_path, mut command) = prepare_case(trigger, ordinal)?;
         let aborted = std::cell::Cell::new(0);
         let reopens = std::cell::Cell::new(0);
         let result =
@@ -126,24 +125,20 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
                     fixture.directory.path(),
                 );
                 aborted.set(1);
-                fixture.catalog =
-                    WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
                 let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
                 commit(
                     &recovered,
                     &persistence(&fixture),
-                    &fixture.catalog,
+                    &fixture.catalog(),
                     fixture.history()?,
                 )?;
-                fixture.catalog =
-                    WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
                 let reopened = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
                 reopens.set(1);
                 // Assert
-                assert_eq!(fixture.catalog.seq_floor(), 5);
+                assert_eq!(fixture.catalog().seq_floor(), 5);
                 assert_eq!(
                     fixture
-                        .catalog
+                        .catalog()
                         .entries()
                         .iter()
                         .map(CatalogEntry::id)
@@ -218,8 +213,7 @@ fn record_case(
         .path()
         .join("cloud")
         .join(crate::wal::cloud_catalog::OBJECT_KEY);
-    std::fs::create_dir_all(catalog_path.parent().unwrap())?;
-    std::fs::write(&catalog_path, fixture.catalog.encode().unwrap())?;
+    // The child reads the catalog the fixture keeps in the cloud store.
     let case = Case {
         root: fixture.directory.path().to_path_buf(),
         trigger: trigger.into(),
@@ -239,76 +233,75 @@ fn record_case(
 #[test]
 fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floor(
 ) -> MidgeResult<()> {
-    for after_set_aside in [false, true] {
-        // Arrange
-        let _guard = crate::failpoints::test_failpoint_guard();
-        let _scenario = fail::FailScenario::setup();
-        let (fixture, catalog_path, _command) = prepare_case("unused", 1)?;
-        let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
-        validity
-            .activate(9, std::time::Instant::now() + Duration::from_mins(1))
-            .unwrap();
-        let check = Arc::clone(&validity);
-        let active = fixture.segment(5);
-        let original = std::fs::read(&active)?;
-        let successor = framed_wal(6, b"successor");
-        let changed_active = active.clone();
-        let changed_bytes = successor.clone();
-        let boundary = if after_set_aside {
-            "midge::recovery::before_salvage_catalog_retirement"
-        } else {
-            "midge::recovery::after_salvage_floor_before_quarantine"
-        };
-        fail::cfg_callback(boundary, move || {
+    // Arrange: salvage's one catalog change lands, then the writer's validity
+    // expires and a successor writes into the open segment's path.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    let (fixture, catalog_path, _command) = prepare_case("unused", 1)?;
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(9, std::time::Instant::now() + Duration::from_mins(1))
+        .unwrap();
+    let check = Arc::clone(&validity);
+    let active = fixture.segment(5);
+    let successor = framed_wal(6, b"successor");
+    let changed_active = active.clone();
+    let changed_bytes = successor.clone();
+    fail::cfg_callback(
+        "midge::recovery::after_salvage_floor_before_quarantine",
+        move || {
             validity.expire_for_test();
             std::fs::write(&changed_active, &changed_bytes).unwrap();
-        })
-        .unwrap();
-        let history = fixture.history()?;
-        // Act
-        let result = recovered.plan.commit_within(
-            &persistence(&fixture),
-            9,
-            &fixture.catalog,
-            crate::runtime::cloud_startup::CacheHistory::Existing(history),
-            recovered.next_remote_id,
-            &|| {
-                check
-                    .remaining(9)
-                    .map(|_| ())
-                    .map_err(|error| error.into_validation_error("salvage writer validity"))
-            },
-            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
-        );
-        // Assert
-        // The successor's bytes survive where it wrote them; a set-aside
-        // before the expiry kept the original open segment's bytes too.
-        assert!(matches!(result, Err(MidgeError::Fenced(_))));
-        assert_eq!(std::fs::read(&active)?, successor);
-        if after_set_aside {
-            let kept = fixture
-                .salvaged(5)
-                .expect("the open segment was kept aside");
-            assert_eq!(std::fs::read(kept)?, original);
-        }
-        let catalog = WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
-        assert_eq!(catalog.seq_floor(), 5);
-        assert_eq!(catalog.entries().len(), 3);
-        assert_eq!(fixture.salvaged(5).is_some(), after_set_aside);
-    }
+        },
+    )
+    .unwrap();
+    let history = fixture.history()?;
+    let catalog = fixture.catalog();
+
+    // Act
+    let result = crate::runtime::cloud_startup::commit_recovery_plan_within(
+        &recovered.plan,
+        &persistence(&fixture),
+        9,
+        &catalog,
+        crate::runtime::cloud_startup::CacheHistory::Existing(history),
+        &|| {
+            check
+                .remaining(9)
+                .map(|_| ())
+                .map_err(|error| error.into_validation_error("salvage writer validity"))
+        },
+        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+    );
+
+    // Assert: the expired writer stops before touching its ledger, so the
+    // successor's bytes survive where it wrote them, and the catalog the
+    // successor sees is consistent: the suffix set aside behind its floor.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert_eq!(std::fs::read(&active)?, successor);
+    assert!(fixture.salvaged(5).is_none());
+    let catalog = WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
+    assert_eq!(catalog.seq_floor(), 5);
+    assert_eq!(
+        catalog
+            .entries()
+            .iter()
+            .map(CatalogEntry::id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
     Ok(())
 }
 
 #[test]
-#[ignore = "#844: R6 salvage commits its catalog suffix before the ledger"]
 fn should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_catalog_commit(
 ) -> MidgeResult<()> {
     // Arrange: cataloged object 2 is damaged and the cache holds no copy of
     // it; local segment 4 and open segment 5 follow. Salvage stops after its
     // catalog commit, before the ledger records the set-aside.
     let trigger = "midge::recovery::after_salvage_floor_before_quarantine";
-    let (mut fixture, catalog_path, mut command) = prepare_case(trigger, 1)?;
+    let (fixture, _catalog_path, mut command) = prepare_case(trigger, 1)?;
     let head = published_link(&fixture, 1)?;
     crash::run_child_expect_abort(
         &mut command,
@@ -316,14 +309,13 @@ fn should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_
         trigger,
         fixture.directory.path(),
     );
-    fixture.catalog = WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
 
     // Act: a strict open after the crash.
     let reopened = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
     let history = commit(
         &reopened,
         &persistence(&fixture),
-        &fixture.catalog,
+        &fixture.catalog(),
         fixture.history()?,
     )?;
 

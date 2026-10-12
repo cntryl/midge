@@ -281,10 +281,19 @@ impl CatalogExpiryFixture {
                 )
                 .map(|_| ())
             }
-            "floor" => storage.raise_wal_sequence_floor_with_authority(7, 11, &validate),
-            "retirement" => storage.retire_unreplayed_wal_segments_with_authority_within(
+            "floor" => storage.set_aside_catalog_suffix_with_authority_within(
                 7,
+                None,
+                &[],
+                11,
+                &validate,
+                &deadline,
+            ),
+            "retirement" => storage.set_aside_catalog_suffix_with_authority_within(
+                7,
+                Some(segment.id()),
                 &[segment],
+                11,
                 &validate,
                 &deadline,
             ),
@@ -488,7 +497,6 @@ fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudP
 }
 
 #[test]
-#[ignore = "#844: R5 members the catalog retired are not owed"]
 fn should_preserve_republished_wal_when_predecessor_validity_expires_before_delete() {
     // Arrange: retain the valid local seal, as a cache whose ledger has not
     // retired it yet does.

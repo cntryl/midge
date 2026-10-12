@@ -340,7 +340,7 @@ impl CloudStartupRecovery {
 
     fn cloud_wal_without_catalog_error(key: &str) -> MidgeError {
         MidgeError::RecoveryFailed(format!(
-            "epoch-scoped cloud WAL object '{key}' exists without publication catalog format v1; refusing ambiguous recovery because object presence is not authority"
+            "epoch-scoped cloud WAL object '{key}' exists without publication catalog format v2; refusing ambiguous recovery because object presence is not authority"
         ))
     }
 

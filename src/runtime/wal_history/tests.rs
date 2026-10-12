@@ -5,7 +5,7 @@
 //! WAL must reopen, and every member the ledger names must still hold the
 //! bytes it held when it became history.
 
-use super::{replay_segments, SalvageCut, SetAside, WalHistory};
+use super::{SalvageCut, SetAside, WalHistory};
 use crate::common::MidgeError;
 use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
@@ -138,7 +138,9 @@ fn header_of(device: &CrashDevice, id: SegmentId) -> SegmentHeader {
 /// Replay every member strictly and return the sequences applied.
 fn replayed_sequences(device: &CrashDevice, history: &WalHistory) -> Vec<u64> {
     let storage = wal(device);
-    let segments = replay_segments(history.ledger(), &FsPath::new(""));
+    let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
+        FsPath::new(crate::wal::segment_file_name(id))
+    });
     let mut memtables = std::collections::HashMap::new();
     crate::wal::recovery::streaming::replay_wal_with_options(
         storage.as_ref(),

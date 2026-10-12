@@ -165,38 +165,6 @@ pub(crate) fn validate_wal_source(
     Ok(())
 }
 
-/// Prove exact alias equality without materializing either complete segment.
-pub(crate) fn wal_sources_equal(
-    left: (&dyn ReadFs, &FsPath),
-    right: (&dyn ReadFs, &FsPath),
-    range_buffer_bytes: usize,
-) -> MidgeResult<bool> {
-    validate_buffer_size(range_buffer_bytes)?;
-    let left_file = left.0.open_read(left.1).map_err(FsError::into_midge)?;
-    let right_file = right.0.open_read(right.1).map_err(FsError::into_midge)?;
-    let size = left_file.len().map_err(FsError::into_midge)?;
-    if right_file.len().map_err(FsError::into_midge)? != size {
-        return Ok(false);
-    }
-    let mut offset = 0_u64;
-    let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("source_equality");
-    while offset < size {
-        let length = (range_buffer_bytes as u64).min(size - offset);
-        if read_exact_range(left_file.as_ref(), offset, length)?
-            != read_exact_range(right_file.as_ref(), offset, length)?
-        {
-            progress.completed(length, 0);
-            progress.finish();
-            return Ok(false);
-        }
-        offset += length;
-        progress.completed(length, 0);
-    }
-    progress.finish();
-    Ok(left_file.len().map_err(FsError::into_midge)? == size
-        && right_file.len().map_err(FsError::into_midge)? == size)
-}
-
 fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<Bytes> {
     let bytes = file.read_at(offset, length).map_err(FsError::into_midge)?;
     if bytes.len() as u64 != length {
@@ -394,43 +362,6 @@ mod tests {
             .lock()
             .iter()
             .all(|(start, end)| end - start <= 1_024));
-        Ok(())
-    }
-
-    #[test]
-    fn should_compare_local_aliases_to_pinned_cloud_wal_without_copying_segments() -> MidgeResult<()>
-    {
-        // Arrange
-        let fixture = Fixture::new()?;
-        let local = crate::io::RealFs::new(fixture.directory.path().join("aliases"))
-            .map_err(FsError::into_midge)?;
-        std::fs::write(
-            fixture.directory.path().join("aliases/equal.wal"),
-            &fixture.bytes,
-        )?;
-        let mut different = fixture.bytes.clone();
-        *different.last_mut().expect("nonempty WAL") ^= 1;
-        std::fs::write(
-            fixture.directory.path().join("aliases/different.wal"),
-            different,
-        )?;
-        let remote: (&dyn ReadFs, &FsPath) = (fixture.source.as_ref(), &fixture.path);
-
-        // Act
-        let equal = wal_sources_equal(remote, (&local, &FsPath::new("equal.wal")), 257)?;
-        let divergent = wal_sources_equal(remote, (&local, &FsPath::new("different.wal")), 257)?;
-        let missing = wal_sources_equal(remote, (&local, &FsPath::new("missing.wal")), 257);
-
-        // Assert
-        assert!(equal);
-        assert!(!divergent);
-        assert!(matches!(missing, Err(MidgeError::NotFound)));
-        assert!(fixture
-            .backend
-            .ranges
-            .lock()
-            .iter()
-            .all(|(start, end)| end - start <= 257));
         Ok(())
     }
 

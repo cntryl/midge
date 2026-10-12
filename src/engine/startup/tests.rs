@@ -832,7 +832,14 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
     let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(
         std::sync::Arc::clone(&fixture.hybrid),
     );
-    persistence.raise_wal_sequence_floor(fixture.lease.epoch(), 7)?;
+    persistence.set_aside_catalog_suffix_with_authority_within(
+        fixture.lease.epoch(),
+        None,
+        &[],
+        7,
+        &|| Ok(()),
+        &crate::common::OperationDeadline::unbounded(),
+    )?;
     let catalog = persistence.fence_cloud_wal_catalog(fixture.lease.epoch())?;
     assert_eq!(catalog.seq_floor(), 7);
 

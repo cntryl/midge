@@ -774,12 +774,25 @@ fn admit_segment(
                 Ok(())
             }
         }
-        Expectation::Epoch(epoch) => (header.epoch == *epoch).then_some(()).ok_or_else(|| {
-            format!(
-                "its header names writer epoch {}, not {epoch}",
-                header.epoch
-            )
-        }),
+        Expectation::Published(entry) => {
+            if header.epoch != entry.epoch() {
+                Err(format!(
+                    "its header names writer epoch {}, not the catalog's {}",
+                    header.epoch,
+                    entry.epoch()
+                ))
+            } else if header.prev != entry.prev() {
+                Err(format!(
+                    "its header links segment {} (last sequence {}), not the catalog's segment {} (last sequence {})",
+                    header.prev.id,
+                    header.prev.last_seq,
+                    entry.prev().id,
+                    entry.prev().last_seq
+                ))
+            } else {
+                Ok(())
+            }
+        }
     };
     expected.map_err(|reason| {
         MidgeError::Corruption(format!(
@@ -790,22 +803,27 @@ fn admit_segment(
     Ok(scan)
 }
 
-/// A sealed member's footer must seal what the ledger recorded.
+/// A sealed segment's footer must seal what its history recorded: the
+/// ledger's facts for a member, the catalog's link for a published object.
 fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
-    let Expectation::Member { member, .. } = &path.expect else {
-        return Ok(());
-    };
-    let Some(expected) = &member.sealed else {
-        return Ok(());
-    };
     let actual = scan.footer().map(crate::wal::format::Footer::sealed_facts);
-    if actual.as_ref() == Some(expected) {
-        Ok(())
-    } else {
-        Err(MidgeError::Corruption(format!(
-            "WAL segment {} seals {actual:?}, not the ledger's {expected:?}",
+    let disagreement = match &path.expect {
+        Expectation::Member { member, .. } => match &member.sealed {
+            Some(expected) if actual.as_ref() != Some(expected) => {
+                Some(format!("the ledger's {expected:?}"))
+            }
+            _ => None,
+        },
+        Expectation::Published(entry) => (actual.as_ref().map(|facts| facts.link)
+            != Some(entry.link()))
+        .then(|| format!("the catalog's {:?}", entry.link())),
+    };
+    match disagreement {
+        None => Ok(()),
+        Some(expected) => Err(MidgeError::Corruption(format!(
+            "WAL segment {} seals {actual:?}, not {expected}",
             path.path
-        )))
+        ))),
     }
 }
 

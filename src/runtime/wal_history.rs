@@ -21,7 +21,6 @@ use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::wal::format::{holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan};
 use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
 use crate::wal::ledger_store::{LedgerStore, LEDGER_FILE};
-use crate::wal::recovery::ReplaySegments;
 use std::sync::Arc;
 
 /// Where a [`WalHistory`] persists its ledger edits.
@@ -725,15 +724,6 @@ fn unused_aside_directory(wal: &dyn Fs) -> MidgeResult<FsPath> {
         }
     }
     unreachable!("some salvage directory name below u32::MAX attempts is free")
-}
-
-/// The files `ledger` replays, relative to `wal_dir`: sealed members in
-/// order, then the open segment, each with the facts the ledger holds, the
-/// first linked to the ledger's anchor.
-pub(crate) fn replay_segments(ledger: &WalLedger, wal_dir: &FsPath) -> ReplaySegments {
-    ReplaySegments::from_ledger(ledger, |id| {
-        join(wal_dir, &crate::wal::segment_file_name(id))
-    })
 }
 
 /// Create the segment `header` names, holding only its header, durably:

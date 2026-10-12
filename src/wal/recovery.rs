@@ -25,32 +25,7 @@ enum ReplayFileKind {
     FinalActive,
 }
 
-/// What replay checks a file's header and footer against, beyond the chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Expectation {
-    /// A ledger member: its header facts and the ledger's holder, and its
-    /// footer facts once sealed.
-    Member {
-        member: crate::wal::ledger::Member,
-        holder: [u8; 16],
-    },
-    /// A published object: the writer epoch its catalog entry names.
-    Epoch(u64),
-}
-
-impl Expectation {
-    /// What `ledger` expects of its `member`, whose header carries the
-    /// ledger's holder.
-    pub(crate) fn member(
-        ledger: &crate::wal::ledger::WalLedger,
-        member: &crate::wal::ledger::Member,
-    ) -> Self {
-        Self::Member {
-            member: member.clone(),
-            holder: ledger.holder().bytes(),
-        }
-    }
-}
+pub(crate) use crate::wal::planner::Expectation;
 
 #[derive(Debug, Clone)]
 struct ReplayFile {
@@ -81,18 +56,29 @@ impl ReplaySegments {
     }
 
     /// Every member of `ledger` at its path, checked against the facts the
-    /// ledger holds, after the ledger's anchor.
+    /// ledger holds, after the ledger's anchor: the local plan
+    /// ([`crate::wal::planner::local`]).
     pub(crate) fn from_ledger(
         ledger: &crate::wal::ledger::WalLedger,
         path: impl Fn(crate::wal::ledger::SegmentId) -> FsPath,
     ) -> Self {
-        let mut segments = Self::new(Some(ledger.anchor()));
-        for member in ledger.member_facts() {
-            let expect = Expectation::member(ledger, member);
-            if member.sealed.is_some() {
-                segments.push_sealed(member.id(), path(member.id()), expect);
+        let plan = crate::wal::planner::local(ledger);
+        Self::from_plan(plan.anchor, &plan.replay, path)
+    }
+
+    /// The segments a recovery plan replays, in its order, at their paths,
+    /// after `anchor`.
+    pub(crate) fn from_plan(
+        anchor: crate::wal::format::ChainLink,
+        planned: &[crate::wal::planner::PlannedSegment],
+        path: impl Fn(crate::wal::ledger::SegmentId) -> FsPath,
+    ) -> Self {
+        let mut segments = Self::new(Some(anchor));
+        for segment in planned {
+            if segment.sealed {
+                segments.push_sealed(segment.id, path(segment.id), segment.expect.clone());
             } else {
-                segments.push_open(member.id(), path(member.id()), expect);
+                segments.push_open(segment.id, path(segment.id), segment.expect.clone());
             }
         }
         segments
@@ -216,11 +202,6 @@ impl VerifiedWalPrefix {
             .as_ref()
             .and_then(|scan| scan.tail().last_seq)
             .unwrap_or(0)
-    }
-
-    /// The writer epoch the segment's header names, or zero before it.
-    pub(crate) fn writer_epoch(&self) -> u64 {
-        self.scan.as_ref().map_or(0, |scan| scan.header().epoch)
     }
 
     /// The records verified so far.

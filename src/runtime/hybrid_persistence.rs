@@ -571,81 +571,35 @@ impl CloudPersistence {
         .map_err(refusal_error)
     }
 
-    /// Drop the segments a salvage open stopped short of from catalog
-    /// authority so later opens do not stop at the same hole and discard
-    /// writes made after it. Their objects stay in place: retirement here is
-    /// not followed by a delete. The sequence floor covering them must
-    /// already be persisted (`raise_wal_sequence_floor`).
-    pub(crate) fn retire_unreplayed_wal_segments_with_authority_within(
+    /// Salvage (#844): in one catalog compare-and-swap, set aside the
+    /// cataloged segments from `from`, which must be `expected` as planning
+    /// saw them, and raise the sequence floor to at least `floor`, so no
+    /// later open replays them or reuses their sequences. Their objects stay
+    /// in place. `validate` is the writer's authority check.
+    ///
+    /// # Errors
+    ///
+    /// `Fenced` when another epoch owns the catalog, `Corruption` when the
+    /// catalog's suffix is not what planning saw, and the load or commit
+    /// error.
+    pub(crate) fn set_aside_catalog_suffix_with_authority_within(
         &self,
         writer_epoch: u64,
-        segments: &[CatalogEntry],
+        from: Option<crate::wal::ledger::SegmentId>,
+        expected: &[CatalogEntry],
+        floor: u64,
         validate: &dyn Fn() -> MidgeResult<()>,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
         mutate_wal_catalog_within(
             self,
-            "cloud WAL salvage retirement",
+            "cloud WAL salvage",
             deadline,
             validate,
             Missing::Refuse,
             |catalog| {
                 catalog
-                    .set_aside_suffix(
-                        writer_epoch,
-                        segments.first().map(CatalogEntry::id),
-                        segments,
-                        0,
-                    )
-                    .map(|changed| Mutation::of(changed, ()))
-            },
-        )?
-        .map(drop)
-        .map_err(refusal_error)
-    }
-
-    /// Persist a sequence floor above WAL that salvage sets aside, so a crash
-    /// before the first flush cannot hand those sequences out again (#529).
-    #[cfg(test)]
-    pub(crate) fn raise_wal_sequence_floor(
-        &self,
-        writer_epoch: u64,
-        sequence_floor: u64,
-    ) -> MidgeResult<()> {
-        self.raise_wal_sequence_floor_with_authority(writer_epoch, sequence_floor, &|| Ok(()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn raise_wal_sequence_floor_with_authority(
-        &self,
-        writer_epoch: u64,
-        sequence_floor: u64,
-        validate: &dyn Fn() -> MidgeResult<()>,
-    ) -> MidgeResult<()> {
-        self.raise_wal_sequence_floor_with_authority_within(
-            writer_epoch,
-            sequence_floor,
-            validate,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-    }
-
-    pub(crate) fn raise_wal_sequence_floor_with_authority_within(
-        &self,
-        writer_epoch: u64,
-        sequence_floor: u64,
-        validate: &dyn Fn() -> MidgeResult<()>,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        mutate_wal_catalog_within(
-            self,
-            "cloud WAL salvage floor",
-            deadline,
-            validate,
-            Missing::Refuse,
-            |catalog| {
-                catalog
-                    .set_aside_suffix(writer_epoch, None, &[], sequence_floor)
+                    .set_aside_suffix(writer_epoch, from, expected, floor)
                     .map(|changed| Mutation::of(changed, ()))
             },
         )?

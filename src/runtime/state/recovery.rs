@@ -604,10 +604,10 @@ impl RuntimeState {
                 .as_ref()
                 .is_some_and(|coverage| coverage.covers_wal_record(record))),
         };
-        let segments = crate::runtime::wal_history::replay_segments(
-            history.ledger(),
-            &crate::io::FsPath::new(""),
-        );
+        // The local plan replays every ledger member (#844).
+        let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
+            crate::io::FsPath::new(crate::wal::segment_file_name(id))
+        });
         let stats = match crate::wal::recovery::replay_wal_with_manifest_filter_within(
             storage,
             &segments,

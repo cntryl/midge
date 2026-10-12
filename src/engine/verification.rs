@@ -301,10 +301,9 @@ fn verify_storage_root(
         .and_then(|ledger| {
             let segments =
                 ledger.map_or_else(crate::wal::recovery::ReplaySegments::default, |ledger| {
-                    crate::runtime::wal_history::replay_segments(
-                        &ledger,
-                        &FsPath::new(crate::wal::WAL_DIR),
-                    )
+                    crate::wal::recovery::ReplaySegments::from_ledger(&ledger, |id| {
+                        crate::wal::segment_key(id)
+                    })
                 });
             crate::wal::recovery::validate_wal_with_policy(
                 fs.as_ref(),

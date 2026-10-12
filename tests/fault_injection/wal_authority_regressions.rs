@@ -72,7 +72,7 @@ fn should_abort_predecessor_when_audit_child_is_requested() {
 }
 
 #[test]
-#[ignore = "#808 stage 4: predecessor-cache"]
+#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache() {
     // Arrange: the predecessor dies with acknowledged but unpublished local WAL.
     let dir = tempfile::tempdir().unwrap();
