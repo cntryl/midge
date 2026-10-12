@@ -236,7 +236,7 @@ Uncovered boundary: Flush/router timeout ownership is representative of accepted
 
 ## WAL-3
 
-Production: [src/wal/planner.rs:300](../../src/wal/planner.rs#L300) `local`; [src/wal/planner.rs:523](../../src/wal/planner.rs#L523) `Planner::admit_open`; [src/runtime/cloud_startup/streaming_wal_plan.rs:459](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L459) `apply_open_cut`; [src/wal/recovery/streaming.rs:270](../../src/wal/recovery/streaming.rs#L270) `replay_wal_with_options`.
+Production: [src/wal/planner.rs:307](../../src/wal/planner.rs#L307) `local`; [src/wal/planner.rs:530](../../src/wal/planner.rs#L530) `Planner::admit_open`; [src/runtime/cloud_startup/streaming_wal_plan.rs:459](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L459) `apply_open_cut`; [src/wal/recovery/streaming.rs:270](../../src/wal/recovery/streaming.rs#L270) `replay_wal_with_options`.
 
 Exact evidence and assertion markers:
 
@@ -251,7 +251,7 @@ Uncovered boundary: These selected assertions prove the replay order, the retain
 
 ## WAL-4
 
-Production: [src/wal/planner.rs:347](../../src/wal/planner.rs#L347) `plan`; [src/wal/planner.rs:584](../../src/wal/planner.rs#L584) `Planner::finish`; [src/runtime/cloud_startup/mod.rs:93](../../src/runtime/cloud_startup/mod.rs#L93) `commit_recovery_plan_within`; [src/wal/recovery.rs:430](../../src/wal/recovery.rs#L430) `replay_wal_with_manifest_filter_within`.
+Production: [src/wal/planner.rs:354](../../src/wal/planner.rs#L354) `plan`; [src/wal/planner.rs:591](../../src/wal/planner.rs#L591) `Planner::finish`; [src/runtime/cloud_startup/mod.rs:93](../../src/runtime/cloud_startup/mod.rs#L93) `commit_recovery_plan_within`; [src/wal/recovery.rs:430](../../src/wal/recovery.rs#L430) `replay_wal_with_manifest_filter_within`.
 
 Exact evidence and assertion markers:
 
@@ -266,7 +266,7 @@ Uncovered boundary: Salvage is degraded recovery, not normal complete-history su
 
 ## WAL-5
 
-Production: [src/wal/format/link.rs:135](../../src/wal/format/link.rs#L135) `Chain::admit`; [src/wal/planner.rs:584](../../src/wal/planner.rs#L584) `Planner::finish`; [src/wal/cloud_catalog.rs:519](../../src/wal/cloud_catalog.rs#L519) `WalPublicationCatalog::set_aside_suffix`; [src/runtime/cloud_startup/mod.rs:93](../../src/runtime/cloud_startup/mod.rs#L93) `commit_recovery_plan_within`.
+Production: [src/wal/format/link.rs:135](../../src/wal/format/link.rs#L135) `Chain::admit`; [src/wal/planner.rs:591](../../src/wal/planner.rs#L591) `Planner::finish`; [src/wal/cloud_catalog.rs:519](../../src/wal/cloud_catalog.rs#L519) `WalPublicationCatalog::set_aside_suffix`; [src/runtime/cloud_startup/mod.rs:93](../../src/runtime/cloud_startup/mod.rs#L93) `commit_recovery_plan_within`.
 
 Exact evidence and assertion markers:
 
@@ -294,7 +294,7 @@ Uncovered boundary: A unit reset allowance is not itself proof that callers re-p
 
 ## WAL-7
 
-Production: [src/runtime/cloud_startup/replay_coverage.rs:154](../../src/runtime/cloud_startup/replay_coverage.rs#L154) `ReplayCoverage::contains`; [src/runtime/hybrid_persistence/streaming_prune.rs:40](../../src/runtime/hybrid_persistence/streaming_prune.rs#L40) `validate`; [src/runtime/hybrid_persistence.rs:755](../../src/runtime/hybrid_persistence.rs#L755) `prune_cloud_wal_segments_within`; [src/runtime/cloud_startup/replay_coverage/candidate_index.rs:79](../../src/runtime/cloud_startup/replay_coverage/candidate_index.rs#L79) `CandidateIndex::visit`; [src/runtime/cloud_startup/replay_coverage/candidate_index.rs:90](../../src/runtime/cloud_startup/replay_coverage/candidate_index.rs#L90) `CandidateIndex::visit_nodes`.
+Production: [src/runtime/cloud_startup/replay_coverage.rs:154](../../src/runtime/cloud_startup/replay_coverage.rs#L154) `ReplayCoverage::contains`; [src/runtime/hybrid_persistence/streaming_prune.rs:40](../../src/runtime/hybrid_persistence/streaming_prune.rs#L40) `validate`; [src/runtime/hybrid_persistence.rs:710](../../src/runtime/hybrid_persistence.rs#L710) `prune_cloud_wal_segments_within`; [src/runtime/cloud_startup/replay_coverage/candidate_index.rs:79](../../src/runtime/cloud_startup/replay_coverage/candidate_index.rs#L79) `CandidateIndex::visit`; [src/runtime/cloud_startup/replay_coverage/candidate_index.rs:90](../../src/runtime/cloud_startup/replay_coverage/candidate_index.rs#L90) `CandidateIndex::visit_nodes`.
 
 Exact evidence and assertion markers:
 
@@ -445,7 +445,7 @@ Exact evidence and assertion markers:
 
 - [src/engine/tests.rs:927](../../src/engine/tests.rs#L927) `should_reject_epoch_scoped_simulated_cloud_wal_without_catalog`: Actual orphan epoch-scoped valid WAL bytes are rejected without the publication catalog. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 949.
 - [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:534](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L534) `should_validate_catalog_authority_before_exposing_replay_sources`: Strict rejects checksum-invalid catalog history; salvage flags degraded recovery, exposes only the first validated segment and no open segment, keeps the open segment aside and rebases at segment 4 or later. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 542, 548, 549, 558, 559, 567, 568, 569.
-- [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:2125](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L2125) `should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry`: A cataloged object whose header links another segment than its entry names fails strict recovery. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2152.
+- [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:2169](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L2169) `should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry`: A cataloged object whose header links another segment than its entry names fails strict recovery. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2152.
 - [src/wal/cloud_catalog.rs:718](../../src/wal/cloud_catalog.rs#L718) `should_reject_catalog_whose_first_entry_does_not_link_the_anchor`: A decoded catalog whose first entry does not link its anchor is invalid. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 728.
 
 Preconditions: Actual filesystem CloudSimulated objects and real catalog bytes through the recovery planner; explicit checksum and chain-link faults.
@@ -456,7 +456,7 @@ Uncovered boundary: These prove object existence is insufficient and catalog ide
 
 Composed native regression: [should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Late native upload completion after real takeover leaves the predecessor cloud frontier unchanged. A deliberate early-frontier mutation is rejected by the fixture. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
-Production: [src/storage/hybrid/backend/uploads.rs:400](../../src/storage/hybrid/backend/uploads.rs#L400) `process_wal_upload`; [src/runtime/hybrid_persistence.rs:730](../../src/runtime/hybrid_persistence.rs#L730) `verify_uploaded_wal_segment`; [src/runtime/hybrid_persistence.rs:785](../../src/runtime/hybrid_persistence.rs#L785) `publish_wal_segments`; [src/runtime/frontiers.rs:58](../../src/runtime/frontiers.rs#L58) `advance_cloud_to`.
+Production: [src/storage/hybrid/backend/uploads.rs:400](../../src/storage/hybrid/backend/uploads.rs#L400) `process_wal_upload`; [src/runtime/hybrid_persistence.rs:622](../../src/runtime/hybrid_persistence.rs#L622) `verify_uploaded_wal_segment`; [src/runtime/hybrid_persistence.rs:681](../../src/runtime/hybrid_persistence.rs#L681) `publish_wal_segments`; [src/runtime/frontiers.rs:58](../../src/runtime/frontiers.rs#L58) `advance_cloud_to`.
 
 Exact evidence and assertion markers:
 
@@ -500,7 +500,7 @@ Uncovered boundary: Selected assertions prove size and bounds validation. They d
 
 Composed native regression: [should_verify_acknowledged_state_in_fresh_recovery_process](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
-Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:71](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L71) `StreamingCloudWalRecovery::build_within`; [src/runtime/cloud_startup/streaming_wal_plan.rs:204](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L204) `PublishedObject::probe`; [src/wal/planner.rs:54](../../src/wal/planner.rs#L54) `lineage`; [src/wal/planner.rs:484](../../src/wal/planner.rs#L484) `Planner::admit_tail`; [src/runtime/cloud_startup/streaming_wal_plan.rs:477](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L477) `assemble_planned_sources`; [src/wal/recovery/streaming.rs:270](../../src/wal/recovery/streaming.rs#L270) `replay_wal_with_options`.
+Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:71](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L71) `StreamingCloudWalRecovery::build_within`; [src/runtime/cloud_startup/streaming_wal_plan.rs:204](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L204) `PublishedObject::probe`; [src/wal/planner.rs:54](../../src/wal/planner.rs#L54) `lineage`; [src/wal/planner.rs:491](../../src/wal/planner.rs#L491) `Planner::admit_tail`; [src/runtime/cloud_startup/streaming_wal_plan.rs:477](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L477) `assemble_planned_sources`; [src/wal/recovery/streaming.rs:270](../../src/wal/recovery/streaming.rs#L270) `replay_wal_with_options`.
 
 Exact evidence and assertion markers:
 
@@ -515,7 +515,7 @@ Uncovered boundary: No native campaign was executed during this preparation. Qua
 
 ## CLOUD-6
 
-Production: [src/runtime/hybrid_persistence/streaming_prune.rs:40](../../src/runtime/hybrid_persistence/streaming_prune.rs#L40) `validate`; [src/runtime/hybrid_persistence.rs:755](../../src/runtime/hybrid_persistence.rs#L755) `prune_cloud_wal_segments_within`; [src/runtime/hybrid_persistence.rs:876](../../src/runtime/hybrid_persistence.rs#L876) `authoritative_wal_entry_within`; [src/runtime/hybrid_persistence/catalog.rs:205](../../src/runtime/hybrid_persistence/catalog.rs#L205) `commit_catalog_with_authority`.
+Production: [src/runtime/hybrid_persistence/streaming_prune.rs:40](../../src/runtime/hybrid_persistence/streaming_prune.rs#L40) `validate`; [src/runtime/hybrid_persistence.rs:710](../../src/runtime/hybrid_persistence.rs#L710) `prune_cloud_wal_segments_within`; [src/runtime/hybrid_persistence.rs:826](../../src/runtime/hybrid_persistence.rs#L826) `authoritative_wal_entry_within`; [src/runtime/hybrid_persistence/catalog.rs:205](../../src/runtime/hybrid_persistence/catalog.rs#L205) `commit_catalog_with_authority`.
 
 Exact evidence and assertion markers:
 

@@ -1808,14 +1808,14 @@
       "production": [
         {
           "path": "src/wal/planner.rs",
-          "line": 300,
+          "line": 307,
           "symbol": "local",
           "kind": "function",
           "marker": "pub(crate) fn local(ledger: &WalLedger) -> RecoveryPlan {"
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 523,
+          "line": 530,
           "symbol": "Planner::admit_open",
           "kind": "function",
           "marker": "fn admit_open("
@@ -1921,14 +1921,14 @@
       "production": [
         {
           "path": "src/wal/planner.rs",
-          "line": 347,
+          "line": 354,
           "symbol": "plan",
           "kind": "function",
           "marker": "pub(crate) fn plan("
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 584,
+          "line": 591,
           "symbol": "Planner::finish",
           "kind": "function",
           "marker": "fn finish("
@@ -2085,7 +2085,7 @@
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 584,
+          "line": 591,
           "symbol": "Planner::finish",
           "kind": "function",
           "marker": "fn finish("
@@ -2292,7 +2292,7 @@
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 755,
+          "line": 710,
           "symbol": "prune_cloud_wal_segments_within",
           "kind": "function",
           "marker": "pub(crate) fn prune_cloud_wal_segments_within("
@@ -3745,13 +3745,13 @@
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 2125,
+          "line": 2169,
           "symbol": "should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry",
           "claim": "A cataloged object whose header links another segment than its entry names fails strict recovery.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2152,
+              "line": 2196,
               "marker": "assert!("
             }
           ]
@@ -3785,14 +3785,14 @@
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 730,
+          "line": 622,
           "symbol": "verify_uploaded_wal_segment",
           "kind": "function",
           "marker": "pub(crate) fn verify_uploaded_wal_segment("
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 785,
+          "line": 681,
           "symbol": "publish_wal_segments",
           "kind": "function",
           "marker": "pub(crate) fn publish_wal_segments("
@@ -4113,7 +4113,7 @@
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 484,
+          "line": 491,
           "symbol": "Planner::admit_tail",
           "kind": "function",
           "marker": "fn admit_tail("
@@ -4286,14 +4286,14 @@
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 755,
+          "line": 710,
           "symbol": "prune_cloud_wal_segments_within",
           "kind": "function",
           "marker": "pub(crate) fn prune_cloud_wal_segments_within("
         },
         {
           "path": "src/runtime/hybrid_persistence.rs",
-          "line": 876,
+          "line": 826,
           "symbol": "authoritative_wal_entry_within",
           "kind": "function",
           "marker": "fn authoritative_wal_entry_within("
