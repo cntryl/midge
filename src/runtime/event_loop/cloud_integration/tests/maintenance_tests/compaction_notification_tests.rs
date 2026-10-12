@@ -147,12 +147,7 @@ impl NotificationFixture {
             ));
             assert!(
                 self.el.cloud_coordinator.cloud_wal_prune_worker.is_some()
-                    || !self
-                        .el
-                        .cloud_coordinator
-                        .cloud_wal
-                        .prune_inflight
-                        .is_empty(),
+                    || self.el.cloud_coordinator.cloud_wal.prunes().len() > 0,
                 "the remaining gate must belong to actual accepted WAL prune work"
             );
             drain_prune_completion_for_test(&mut self.el);

@@ -6,7 +6,7 @@
 use crate::runtime::keyed_group_commit::KeyedGroupCommit;
 #[cfg(test)]
 use crate::types::ReadDurability;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -297,7 +297,7 @@ impl DurabilityCoordinator {
     /// inflight segment. A later segment ack never makes earlier gaps durable.
     pub fn contiguous_acked_cloud_segments(
         &self,
-        acked_segments: &BTreeMap<u64, u64>,
+        acks: &crate::wal::publish::AckSet,
     ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
         let mut owed: Vec<crate::wal::publish::OwedSegment> = self
             .inflight
@@ -308,7 +308,7 @@ impl DurabilityCoordinator {
             })
             .collect();
         owed.sort_unstable_by_key(|segment| segment.segment_id);
-        crate::wal::publish::uploaded_run(&owed, acked_segments)
+        crate::wal::publish::uploaded_run(&owed, acks)
     }
 
     /// Retire a cloud segment only after its frontier and waiter commit has
@@ -324,9 +324,9 @@ impl DurabilityCoordinator {
     #[cfg(test)]
     pub fn take_contiguous_acked_cloud_segments(
         &mut self,
-        acked_segments: &BTreeMap<u64, u64>,
+        acks: &crate::wal::publish::AckSet,
     ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
-        let ready = self.contiguous_acked_cloud_segments(acked_segments)?;
+        let ready = self.contiguous_acked_cloud_segments(acks)?;
         for segment in &ready {
             self.inflight.remove(&segment.segment_id);
         }
@@ -445,6 +445,7 @@ impl DurabilityCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn cloud_coordinator() -> DurabilityCoordinator {
         DurabilityCoordinator::new(0, true, crate::runtime::CloudRuntimePolicy::default())
@@ -456,15 +457,15 @@ mod tests {
         let mut coordinator = cloud_coordinator();
         coordinator.record_cloud_segment_inflight(1, 10);
         coordinator.record_cloud_segment_inflight(2, 20);
-        let mut acknowledgements = BTreeMap::from([(2, 20)]);
+        let later = crate::wal::publish::AckSet::recovered(BTreeMap::from([(2, 20)]));
+        let both = crate::wal::publish::AckSet::recovered(BTreeMap::from([(1, 10), (2, 20)]));
 
         // Act
         let blocked = coordinator
-            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .take_contiguous_acked_cloud_segments(&later)
             .expect("buffer later acknowledgement");
-        acknowledgements.insert(1, 10);
         let ready = coordinator
-            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .take_contiguous_acked_cloud_segments(&both)
             .expect("drain contiguous acknowledgements");
 
         // Assert
@@ -489,7 +490,7 @@ mod tests {
         // Arrange
         let mut coordinator = cloud_coordinator();
         coordinator.record_cloud_segment_inflight(7, 70);
-        let acknowledgements = BTreeMap::from([(7, 71)]);
+        let acknowledgements = crate::wal::publish::AckSet::recovered(BTreeMap::from([(7, 71)]));
 
         // Act
         let result = coordinator.take_contiguous_acked_cloud_segments(&acknowledgements);

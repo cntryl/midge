@@ -8,12 +8,147 @@
 //!
 //! A verified upload therefore only marks its segment uploaded. These pure
 //! decisions choose what one publication adds: the longest run of the
-//! segments a writer owes the catalog, oldest first, whose uploads are all
-//! verified ([`uploaded_run`]), appended past the catalog's head
-//! ([`additions`]).
+//! segments a writer owes the catalog, oldest first, whose segments are all
+//! acknowledged ([`uploaded_run`] over an [`AckSet`]), appended past the
+//! catalog's head ([`additions`]).
 
 use super::cloud_catalog::PublishedWalSegment;
+use super::format::SegmentId;
 use std::collections::BTreeMap;
+
+/// What the writer knows the cloud holds of one segment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Ack {
+    /// A verified upload the catalog does not publish yet.
+    Uploaded(PublishedWalSegment),
+    /// A segment the catalog publishes, holding sequences through
+    /// `max_sequence`.
+    Published { max_sequence: u64 },
+}
+
+impl Ack {
+    /// The last sequence the acknowledged segment holds.
+    fn max_sequence(&self) -> u64 {
+        match self {
+            Self::Uploaded(entry) => entry.max_sequence,
+            Self::Published { max_sequence } => *max_sequence,
+        }
+    }
+}
+
+/// The writer's acknowledged segments: verified uploads waiting to be
+/// published, and segments the catalog publishes.
+///
+/// An upload only ever becomes published, and a published segment only
+/// leaves once pruning retires it from the catalog: withdrawing an upload
+/// never takes back a publication.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AckSet {
+    acks: BTreeMap<SegmentId, Ack>,
+}
+
+impl AckSet {
+    /// The segments recovery found published, each with the last sequence
+    /// it holds.
+    pub(crate) fn recovered(published: BTreeMap<SegmentId, u64>) -> Self {
+        Self {
+            acks: published
+                .into_iter()
+                .map(|(segment_id, max_sequence)| (segment_id, Ack::Published { max_sequence }))
+                .collect(),
+        }
+    }
+
+    /// Acknowledge a verified upload. A segment the catalog already
+    /// publishes stays published.
+    pub(crate) fn record_upload(&mut self, entry: PublishedWalSegment) {
+        if !matches!(
+            self.acks.get(&entry.segment_id),
+            Some(Ack::Published { .. })
+        ) {
+            self.acks.insert(entry.segment_id, Ack::Uploaded(entry));
+        }
+    }
+
+    /// Withdraw `segment_id`'s verified upload, so no run publishes past it
+    /// until it is verified again. Returns whether an upload was withdrawn.
+    pub(crate) fn withdraw(&mut self, segment_id: SegmentId) -> bool {
+        if !matches!(self.acks.get(&segment_id), Some(Ack::Uploaded(_))) {
+            return false;
+        }
+        self.acks.remove(&segment_id);
+        true
+    }
+
+    /// The catalog now publishes `run`: each member's upload becomes a
+    /// publication.
+    pub(crate) fn mark_published(&mut self, run: &[OwedSegment]) {
+        for segment in run {
+            if let Some(ack) = self.acks.get_mut(&segment.segment_id) {
+                if let Ack::Uploaded(entry) = ack {
+                    *ack = Ack::Published {
+                        max_sequence: entry.max_sequence,
+                    };
+                }
+            }
+        }
+    }
+
+    /// The catalog no longer publishes `segment_id`: pruning retired it.
+    pub(crate) fn retire_pruned(&mut self, segment_id: SegmentId) {
+        self.acks.remove(&segment_id);
+    }
+
+    /// The published segments, ascending, each with the last sequence it
+    /// holds.
+    pub(crate) fn published(&self) -> impl Iterator<Item = (SegmentId, u64)> + '_ {
+        self.acks.iter().filter_map(|(segment_id, ack)| match ack {
+            Ack::Published { max_sequence } => Some((*segment_id, *max_sequence)),
+            Ack::Uploaded(_) => None,
+        })
+    }
+
+    /// What publishing `run` adds: its verified uploads, oldest first.
+    /// Segments the catalog already publishes add nothing.
+    pub(crate) fn unpublished(&self, run: &[OwedSegment]) -> Vec<PublishedWalSegment> {
+        run.iter()
+            .filter_map(|segment| match self.acks.get(&segment.segment_id) {
+                Some(Ack::Uploaded(entry)) => Some(entry.clone()),
+                Some(Ack::Published { .. }) | None => None,
+            })
+            .collect()
+    }
+
+    /// How many verified uploads wait to be published, and their total
+    /// size in bytes.
+    pub(crate) fn held(&self) -> (usize, u64) {
+        self.acks
+            .values()
+            .filter_map(|ack| match ack {
+                Ack::Uploaded(entry) => Some(entry.size_bytes),
+                Ack::Published { .. } => None,
+            })
+            .fold((0, 0), |(count, bytes), size| {
+                (count + 1, bytes.saturating_add(size))
+            })
+    }
+
+    /// Whether `segment_id` is acknowledged, uploaded or published.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, segment_id: SegmentId) -> bool {
+        self.acks.contains_key(&segment_id)
+    }
+
+    /// The last sequence acknowledged segment `segment_id` holds.
+    pub(crate) fn max_sequence(&self, segment_id: SegmentId) -> Option<u64> {
+        self.acks.get(&segment_id).map(Ack::max_sequence)
+    }
+
+    /// How many segments are acknowledged.
+    pub(crate) fn len(&self) -> usize {
+        self.acks.len()
+    }
+}
 
 /// A sealed segment its writer has not yet seen published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,24 +238,24 @@ impl From<Refusal> for crate::common::MidgeError {
     }
 }
 
-/// The longest run of `owed`, oldest first, whose every segment is uploaded.
+/// The longest run of `owed`, oldest first, whose every segment is
+/// acknowledged: uploaded and verified, or already published.
 ///
-/// `uploaded` maps a segment to the last sequence its verified upload holds.
-/// The run stops at the first owed segment without a verified upload, so a
-/// later upload never joins it while an earlier segment is missing.
+/// The run stops at the first owed segment `acks` does not hold, so a later
+/// upload never joins it while an earlier segment is missing.
 ///
 /// # Errors
 ///
-/// Refuses `owed` that is not strictly ascending, and an upload whose last
-/// sequence differs from the one its writer sealed.
+/// Refuses `owed` that is not strictly ascending, and an acknowledgement
+/// whose last sequence differs from the one its writer sealed.
 pub(crate) fn uploaded_run(
     owed: &[OwedSegment],
-    uploaded: &BTreeMap<u64, u64>,
+    acks: &AckSet,
 ) -> Result<Vec<OwedSegment>, Refusal> {
     ascending(owed.iter().map(|segment| segment.segment_id))?;
     let mut run = Vec::new();
     for segment in owed {
-        let Some(&uploaded_max) = uploaded.get(&segment.segment_id) else {
+        let Some(uploaded_max) = acks.max_sequence(segment.segment_id) else {
             break;
         };
         if uploaded_max != segment.max_sequence {
@@ -218,14 +353,23 @@ mod tests {
             .collect()
     }
 
+    /// An acknowledgement set holding a verified upload of each segment.
+    fn uploads(segment_ids: &[u64]) -> AckSet {
+        let mut acks = AckSet::default();
+        for &segment_id in segment_ids {
+            acks.record_upload(segment(segment_id));
+        }
+        acks
+    }
+
     #[test]
     fn should_select_nothing_when_oldest_owed_segment_is_not_uploaded() {
         // Arrange
         let owed = owed(&[(1, 10), (2, 20), (3, 30)]);
-        let uploaded = BTreeMap::from([(2, 20), (3, 30)]);
+        let acks = uploads(&[2, 3]);
 
         // Act
-        let run = uploaded_run(&owed, &uploaded);
+        let run = uploaded_run(&owed, &acks);
 
         // Assert
         assert_eq!(run, Ok(Vec::new()));
@@ -235,10 +379,10 @@ mod tests {
     fn should_stop_run_when_a_middle_segment_is_not_uploaded() {
         // Arrange
         let owed = owed(&[(1, 10), (2, 20), (3, 30), (4, 40)]);
-        let uploaded = BTreeMap::from([(1, 10), (2, 20), (4, 40)]);
+        let acks = uploads(&[1, 2, 4]);
 
         // Act
-        let run = uploaded_run(&owed, &uploaded);
+        let run = uploaded_run(&owed, &acks);
 
         // Assert
         assert_eq!(run, Ok(owed[..2].to_vec()));
@@ -248,23 +392,37 @@ mod tests {
     fn should_select_every_owed_segment_when_all_are_uploaded() {
         // Arrange
         let owed = owed(&[(5, 50), (6, 60)]);
-        let uploaded = BTreeMap::from([(5, 50), (6, 60), (7, 70)]);
+        let acks = uploads(&[5, 6, 7]);
 
         // Act
-        let run = uploaded_run(&owed, &uploaded);
+        let run = uploaded_run(&owed, &acks);
 
         // Assert
         assert_eq!(run, Ok(owed));
     }
 
     #[test]
+    fn should_join_published_segments_to_the_run_when_recovery_found_them_published() {
+        // Arrange
+        let owed = owed(&[(1, 10), (2, 20), (3, 30)]);
+        let mut acks = AckSet::recovered(BTreeMap::from([(1, 10)]));
+        acks.record_upload(segment(2));
+
+        // Act
+        let run = uploaded_run(&owed, &acks);
+
+        // Assert
+        assert_eq!(run, Ok(owed[..2].to_vec()));
+    }
+
+    #[test]
     fn should_refuse_run_when_upload_sequence_differs_from_sealed_segment() {
         // Arrange
         let owed = owed(&[(1, 10), (2, 20)]);
-        let uploaded = BTreeMap::from([(1, 10), (2, 21)]);
+        let acks = AckSet::recovered(BTreeMap::from([(1, 10), (2, 21)]));
 
         // Act
-        let run = uploaded_run(&owed, &uploaded);
+        let run = uploaded_run(&owed, &acks);
 
         // Assert
         assert_eq!(
@@ -281,10 +439,10 @@ mod tests {
     fn should_refuse_run_when_owed_segments_are_not_ascending() {
         // Arrange
         let owed = owed(&[(2, 20), (1, 10)]);
-        let uploaded = BTreeMap::from([(1, 10), (2, 20)]);
+        let acks = uploads(&[1, 2]);
 
         // Act
-        let run = uploaded_run(&owed, &uploaded);
+        let run = uploaded_run(&owed, &acks);
 
         // Assert
         assert_eq!(
@@ -398,5 +556,22 @@ mod tests {
                 next: 3,
             })
         );
+    }
+
+    #[test]
+    fn should_keep_published_acknowledgement_when_an_upload_is_withdrawn() {
+        // Arrange
+        let mut acks = uploads(&[1, 2]);
+        acks.mark_published(&owed(&[(1, 10)]));
+
+        // Act
+        let withdrew_published = acks.withdraw(1);
+        let withdrew_upload = acks.withdraw(2);
+
+        // Assert
+        assert!(!withdrew_published);
+        assert!(withdrew_upload);
+        assert_eq!(acks.published().collect::<Vec<_>>(), vec![(1, 10)]);
+        assert!(!acks.contains(2));
     }
 }

@@ -519,7 +519,7 @@ impl EventLoop {
 
         let initially_durable = self
             .durability
-            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acked())
+            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acks())
             .map_err(|refusal| crate::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some(durable) = initially_durable.last() {
@@ -536,8 +536,7 @@ impl EventLoop {
             check_startup_scope(startup_scope, "recovered cloud WAL upload backlog")?;
             self.cloud_coordinator
                 .cloud_wal
-                .upload_backlog
-                .insert(segment_id, segment.max_sequence);
+                .queue_sealed(segment_id, segment.max_sequence);
         }
         if config.upload_at_open {
             // The open fails rather than serve without the writer authority

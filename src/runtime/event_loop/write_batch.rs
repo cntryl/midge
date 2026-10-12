@@ -60,7 +60,7 @@ impl EventLoop {
 
     pub(super) fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.state.should_stall_writes(cf_id)
-            || self.cloud_coordinator.cloud_wal.has_pending_uploads()
+            || !self.cloud_coordinator.cloud_wal.backlog().is_empty()
             || self
                 .cloud_coordinator
                 .hybrid_storage
@@ -89,7 +89,7 @@ impl EventLoop {
             {
                 mask |= PRESSURE_MEMORY;
             }
-            if self.cloud_coordinator.cloud_wal.has_pending_uploads() {
+            if !self.cloud_coordinator.cloud_wal.backlog().is_empty() {
                 mask |= PRESSURE_CLOUD_PENDING;
             }
             if self

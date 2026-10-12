@@ -515,12 +515,8 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     // Assert
     assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1);
     assert_eq!(
-        event_loop
-            .cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&2),
-        Some(&2)
+        event_loop.cloud_coordinator.cloud_wal.backlog().get(2),
+        Some(2)
     );
     event_loop.drain_cloud_wal_upload_backlog();
     assert_eq!(hybrid_storage.pending_upload_count(), 1);
@@ -2031,15 +2027,11 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let backlog_after_open = event_loop.cloud_coordinator.cloud_wal.upload_backlog.len();
+    let backlog_after_open = event_loop.cloud_coordinator.cloud_wal.backlog().len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline
-        && (!event_loop
-            .cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .is_empty()
+        && (!event_loop.cloud_coordinator.cloud_wal.backlog().is_empty()
             || storage.pending_upload_count() > 0)
     {
         event_loop.tick_hybrid_storage();
@@ -2056,11 +2048,7 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         backlog_after_open, 2,
         "remaining sealed and active WAL obligations must stay recoverable"
     );
-    assert!(event_loop
-        .cloud_coordinator
-        .cloud_wal
-        .upload_backlog
-        .is_empty());
+    assert!(event_loop.cloud_coordinator.cloud_wal.backlog().is_empty());
     assert_eq!(storage.pending_upload_count(), 0);
     assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
     Ok(())

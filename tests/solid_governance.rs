@@ -1919,7 +1919,6 @@ fn should_keep_replay_views_read_only() {
 
 /// The cloud WAL upload tracker keeps its collections to itself (#852).
 #[test]
-#[ignore = "#844: the tracker owns its acknowledgement, backlog and prune state"]
 fn should_keep_cloud_wal_tracker_state_private() {
     // Arrange
     let files = source_scan::production_files();

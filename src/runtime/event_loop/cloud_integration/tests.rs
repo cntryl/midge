@@ -84,7 +84,7 @@ fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
     // Act: one failed cloud proof gives the next ready flush its turn.
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
     el.schedule_next_flush_worker();
     assert!(
         el.flush_actor.is_inflight(),
@@ -110,7 +110,7 @@ fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
     drain_prune_completion_for_test(&mut el);
 
     // Assert: an immutable remains ready throughout the second proof attempt.
-    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
     assert!(!remote_wal_path_for_test(&el, 81).exists());
     assert!(el.state.has_due_immutable_flush());
     assert_eq!(el.state.flush_metrics.publish_count, 1);
@@ -168,7 +168,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     assert_eq!(active, 1);
     assert!(el.state.manifest.files.iter().any(|file| file.level > 0));
     assert!(
-        !el.cloud_coordinator.cloud_wal.acked().contains_key(&81),
+        !el.cloud_coordinator.cloud_wal.acks().contains(81),
         "retirement receives the next turn after compaction"
     );
     // Draining retirement completion releases its gate; the run loop gives
@@ -263,9 +263,9 @@ fn should_schedule_wal_retirement_before_another_ready_flush() -> crate::common:
     );
     assert!(!el.flush_actor.is_inflight());
     drain_prune_completion_for_test(&mut el);
-    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&81));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
     assert!(
-        el.cloud_coordinator.cloud_wal.acked().contains_key(&82),
+        el.cloud_coordinator.cloud_wal.acks().contains(82),
         "the immutable generation's first segment remains authoritative"
     );
     assert!(remote_wal_path_for_test(&el, 82).exists());
@@ -1375,11 +1375,8 @@ fn seal_segment_owned_by_runtime_backlog_for_test(
         max_sequence,
     });
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence),
         "a failed readback must hand the upload back to the runtime"
     );
     Ok((segment_id, max_sequence))
@@ -1824,7 +1821,7 @@ fn drain_prune_completion_for_test(el: &mut EventLoop) {
     while Instant::now() < deadline {
         el.tick_hybrid_storage();
         el.drain_hybrid_storage_events();
-        if el.cloud_coordinator.cloud_wal.prune_inflight.is_empty()
+        if el.cloud_coordinator.cloud_wal.prunes().len() == 0
             && el.cloud_coordinator.cloud_wal_prune_worker.is_none()
         {
             return;
@@ -1834,7 +1831,7 @@ fn drain_prune_completion_for_test(el: &mut EventLoop) {
     panic!(
         "cloud WAL prune did not settle: worker_active={}, inflight={:?}",
         el.cloud_coordinator.cloud_wal_prune_worker.is_some(),
-        el.cloud_coordinator.cloud_wal.prune_inflight
+        el.cloud_coordinator.cloud_wal.prunes()
     );
 }
 
@@ -2871,10 +2868,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
         "remote WAL must be retained when a manifest-referenced cloud SST is missing"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -2938,15 +2932,14 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
         "timed-out prune must retain the remote WAL"
     );
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator
+            .cloud_wal
+            .acks()
+            .max_sequence(segment_id),
+        Some(max_sequence),
         "timed-out prune must remain eligible for retry"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
 
     // Restore a normal maintenance budget for the recovery attempt. The
     // initial 100 ms budget is deliberately adversarial and can also expire
@@ -2958,16 +2951,8 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
         !remote_wal_path_for_test(&el, segment_id).exists(),
         "callerless cleanup should finish after provider recovery"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
     Ok(())
 }
 
@@ -3020,15 +3005,14 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
         "metadata proof outlived the bounded prune attempt: {attempt_elapsed:?}"
     );
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator
+            .cloud_wal
+            .acks()
+            .max_sequence(segment_id),
+        Some(max_sequence),
         "metadata timeout must retain WAL authority for retry"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
     Ok(())
 }
 
@@ -3079,8 +3063,11 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator
+            .cloud_wal
+            .acks()
+            .max_sequence(segment_id),
+        Some(max_sequence),
         "ambiguous completion should remain retryable until readback"
     );
     assert_eq!(
@@ -3112,17 +3099,10 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
         max_sequence
     );
     assert!(
-        !el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        !el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "a confirmed-absent catalog entry must settle the prior ambiguous retirement"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
     assert!(
         remote_wal_path_for_test(&el, segment_id).exists(),
         "ambiguous retirement may leak the ignored WAL object but must not delete it without its proof"
@@ -3393,10 +3373,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
         "remote WAL must be retained when a manifest-referenced cloud SST is unreadable"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -3429,10 +3406,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common
         "remote WAL must be retained when committed cloud metadata is missing"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -3478,8 +3452,11 @@ fn should_not_retire_wal_authority_without_cloud_manifest_base() -> crate::commo
     // Assert
     assert!(remote_wal_path_for_test(&el, segment_id).exists());
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
-        Some(&max_sequence)
+        el.cloud_coordinator
+            .cloud_wal
+            .acks()
+            .max_sequence(segment_id),
+        Some(max_sequence)
     );
     let catalog_proof = el
         .cloud_coordinator
@@ -3558,14 +3535,13 @@ fn should_retain_remote_wal_when_intent_metadata_needs_convergence(
         "cleanup verification must remain read-only"
     );
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
-        Some(&max_sequence)
+        el.cloud_coordinator
+            .cloud_wal
+            .acks()
+            .max_sequence(segment_id),
+        Some(max_sequence)
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
 
     Ok(())
 }
@@ -3615,10 +3591,7 @@ fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
         "remote WAL must be retained when cloud manifest metadata is ahead of local state"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -4282,10 +4255,7 @@ fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable() -> crate::com
         "remote WAL must be retained until the cloud durable frontier covers its max sequence"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -4321,10 +4291,7 @@ fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_cover
         "remote WAL must be retained when manifest sequence is advanced but no SST covers it"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -4384,10 +4351,7 @@ fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_
         "remote WAL must be retained when manifest SST coverage is only for a different CF"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -4439,10 +4403,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_
         "remote WAL must be retained when manifest SST metadata does not match actual SST contents"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -4492,11 +4453,7 @@ fn should_not_prune_remote_wal_when_manifest_bounds_cover_absent_value(
         remote_wal_path_for_test(&el, segment_id).exists(),
         "manifest bounds must not substitute for exact WAL value coverage"
     );
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -4586,11 +4543,7 @@ fn should_prune_remote_wal_when_insert_is_canonically_persisted_as_put(
         !remote_wal_path_for_test(&el, segment_id).exists(),
         "a committed Insert is canonically persisted as the same Put value state"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -4631,11 +4584,7 @@ fn should_prune_remote_wal_when_point_delete_is_exactly_covered_by_manifest_sst(
         !remote_wal_path_for_test(&el, segment_id).exists(),
         "an exact committed point tombstone should retire redundant WAL authority"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -4671,11 +4620,7 @@ fn should_not_prune_remote_wal_when_point_delete_has_same_sequence_value(
         remote_wal_path_for_test(&el, segment_id).exists(),
         "a same-sequence value must not be accepted as proof of a point delete"
     );
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -4716,11 +4661,7 @@ fn should_not_prune_remote_wal_when_expired_value_masquerades_as_same_sequence_p
         remote_wal_path_for_test(&el, segment_id).exists(),
         "an expired value must not masquerade as an exact point tombstone"
     );
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -4763,11 +4704,7 @@ fn should_prune_remote_wal_when_expired_value_is_exactly_covered_by_manifest_sst
         !remote_wal_path_for_test(&el, segment_id).exists(),
         "exact persisted value coverage must not change when its TTL expires"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -4800,11 +4737,7 @@ fn should_not_prune_remote_wal_when_manifest_ssts_conflict_at_same_sequence(
         remote_wal_path_for_test(&el, segment_id).exists(),
         "conflicting same-sequence SST states must make exact coverage ambiguous"
     );
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
     Ok(())
 }
 
@@ -5014,14 +4947,11 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
     // Act
     // Assert
     assert!(
-        el.cloud_coordinator.cloud_wal.prune_inflight.is_empty(),
+        el.cloud_coordinator.cloud_wal.prunes().len() == 0,
         "preflight failure must not leave prune inflight state"
     );
     assert!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acked()
-            .contains_key(&segment_id),
+        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "failed guarded prune must keep the WAL eligible for retry"
     );
     assert!(
@@ -5079,14 +5009,14 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked()
-        .contains_key(&blocked_segment));
+        .acks()
+        .contains(blocked_segment));
     assert!(remote_wal_path_for_test(&el, covered_segment).exists());
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .acked()
-        .contains_key(&covered_segment));
+        .acks()
+        .contains(covered_segment));
 
     add_manifest_sst_meta_for_test(
         &mut el,
@@ -5104,14 +5034,14 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked()
-        .contains_key(&blocked_segment));
+        .acks()
+        .contains(blocked_segment));
     assert!(!remote_wal_path_for_test(&el, covered_segment).exists());
     assert!(!el
         .cloud_coordinator
         .cloud_wal
-        .acked()
-        .contains_key(&covered_segment));
+        .acks()
+        .contains(covered_segment));
     Ok(())
 }
 
@@ -5138,9 +5068,9 @@ fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::M
     assert_eq!(
         el.cloud_coordinator
             .cloud_wal
-            .acked()
-            .keys()
-            .copied()
+            .acks()
+            .published()
+            .map(|(segment_id, _)| segment_id)
             .collect::<Vec<_>>(),
         vec![33],
         "one maintenance worker should retire one bounded batch of 32"
@@ -5230,29 +5160,20 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     );
     assert!(remote_wal_path_for_test(&el, segment_id).exists());
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acked().get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator
+            .cloud_wal
+            .acks()
+            .max_sequence(segment_id),
+        Some(max_sequence),
         "delete completion must not settle before the blocked provider call returns"
     );
-    assert!(el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
 
     release_delete.store(true, Ordering::SeqCst);
     drain_prune_completion_for_test(&mut el);
     assert!(!remote_wal_path_for_test(&el, segment_id).exists());
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
     assert!(!el.state.persistence_anomaly_detected());
     Ok(())
 }
@@ -5303,16 +5224,8 @@ fn should_delete_retired_wal_when_coverage_dependency_changes_after_catalog_cas(
         "post-CAS physical cleanup must not re-read retired coverage dependencies"
     );
     assert!(!remote_wal_path_for_test(&el, segment_id).exists());
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .acked()
-        .contains_key(&segment_id));
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
     assert!(!el.state.persistence_anomaly_detected());
     Ok(())
 }
@@ -5379,14 +5292,10 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
         "a failed conditional delete should leave an ignored physical orphan"
     );
     assert!(
-        !el.cloud_coordinator.cloud_wal.acked().contains_key(&segment_id),
+        !el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "post-CAS failure must remove local ACK authority rather than retry an absent catalog entry"
     );
-    assert!(!el
-        .cloud_coordinator
-        .cloud_wal
-        .prune_inflight
-        .contains(&segment_id));
+    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
     assert!(el.state.persistence_anomaly_detected());
     Ok(())
 }
@@ -5423,10 +5332,7 @@ fn should_retain_later_batch_members_when_oldest_wal_is_uncovered() -> crate::co
     // Assert
     for segment_id in 1..=9 {
         assert!(
-            el.cloud_coordinator
-                .cloud_wal
-                .acked()
-                .contains_key(&segment_id),
+            el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
             "segment {segment_id} must not retire across the uncovered oldest authority gap"
         );
     }
@@ -5470,9 +5376,9 @@ fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
     drain_prune_completion_for_test(&mut el);
 
     // Assert
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&1));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(1));
     assert!(
-        el.cloud_coordinator.cloud_wal.acked().contains_key(&2),
+        el.cloud_coordinator.cloud_wal.acks().contains(2),
         "retiring the newer delete while an older value can still replay would permit resurrection"
     );
     let storage = el
@@ -5803,8 +5709,8 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked()
-            .contains_key(&second_segment),
+            .acks()
+            .contains(second_segment),
         "later acknowledgement must remain buffered until the earlier gap closes"
     );
     assert!(
@@ -5892,8 +5798,8 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked()
-            .contains_key(&second_segment),
+            .acks()
+            .contains(second_segment),
         "later ack should be buffered while an earlier segment is unacked"
     );
 
@@ -5912,8 +5818,8 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     assert!(
         el.cloud_coordinator
             .cloud_wal
-            .acked()
-            .contains_key(&second_segment),
+            .acks()
+            .contains(second_segment),
         "later verified ACK bookkeeping must remain buffered behind an earlier gap"
     );
     assert!(el.state.persistence_anomaly_detected());
@@ -6305,8 +6211,8 @@ fn should_back_off_forced_cloud_seal_when_older_segment_awaits_admission(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    el.cloud_coordinator.cloud_wal.upload_backlog.insert(41, 1);
-    el.cloud_coordinator.cloud_wal.defer_upload_retry();
+    el.cloud_coordinator.cloud_wal.queue_sealed(41, 1);
+    el.cloud_coordinator.cloud_wal.defer_uploads_for_memory();
     el.durability.mark_cloud_seal_retry_needed();
 
     // Act
@@ -6379,9 +6285,9 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
         event_loop
             .cloud_coordinator
             .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&sequence)
+            .backlog()
+            .get(segment_id),
+        Some(sequence)
     );
     assert_eq!(
         event_loop.durability.cloud_segment_max_sequence(segment_id),
@@ -6392,11 +6298,12 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
 
     fail::remove("midge::cloud::inject_fail_after_wal_rotate_before_enqueue");
     event_loop.drain_cloud_wal_upload_backlog();
-    assert!(!event_loop
+    assert!(event_loop
         .cloud_coordinator
         .cloud_wal
-        .upload_backlog
-        .contains_key(&segment_id));
+        .backlog()
+        .get(segment_id)
+        .is_none());
     assert_eq!(
         event_loop
             .cloud_coordinator
@@ -6456,9 +6363,9 @@ fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
         event_loop
             .cloud_coordinator
             .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+            .backlog()
+            .get(segment_id),
+        Some(max_sequence),
         "the sealed segment must transfer to runtime retry ownership"
     );
     assert_eq!(
@@ -6607,11 +6514,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     "{boundary:?}"
                 );
                 assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
-                assert!(event_loop
-                    .cloud_coordinator
-                    .cloud_wal
-                    .upload_backlog
-                    .is_empty());
+                assert!(event_loop.cloud_coordinator.cloud_wal.backlog().is_empty());
                 assert!(response.try_recv().is_err(), "{boundary:?}");
                 let retried = event_loop
                     .seal_current_cloud_segment()
@@ -6654,11 +6557,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 );
                 assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
                 assert!(
-                    event_loop
-                        .cloud_coordinator
-                        .cloud_wal
-                        .upload_backlog
-                        .is_empty(),
+                    event_loop.cloud_coordinator.cloud_wal.backlog().is_empty(),
                     "{boundary:?}: no receipt means nothing may be enqueued"
                 );
                 assert_eq!(
@@ -6679,9 +6578,9 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     event_loop
                         .cloud_coordinator
                         .cloud_wal
-                        .upload_backlog
-                        .get(&segment_id),
-                    Some(&max_sequence)
+                        .backlog()
+                        .get(segment_id),
+                    Some(max_sequence)
                 );
                 assert_eq!(
                     event_loop.durability.cloud_segment_max_sequence(segment_id),
@@ -6841,11 +6740,7 @@ fn should_ignore_stale_cloud_failure_for_segment_the_runtime_no_longer_owns(
     );
     assert!(later_response.try_recv().is_err());
     assert!(!event_loop.state.persistence_anomaly_detected());
-    assert!(event_loop
-        .cloud_coordinator
-        .cloud_wal
-        .upload_backlog
-        .is_empty());
+    assert!(event_loop.cloud_coordinator.cloud_wal.backlog().is_empty());
     Ok(())
 }
 
@@ -7474,12 +7369,10 @@ fn should_validate_writer_lease_once_given_multi_segment_backlog_when_draining_u
         append_cloud_async_put(&mut el)?;
         sealed.push(seal_segment_without_remote_proof_for_test(&mut el)?);
     }
-    el.cloud_coordinator.cloud_wal.upload_backlog.clear();
     for (segment_id, max_sequence) in &sealed {
         el.cloud_coordinator
             .cloud_wal
-            .upload_backlog
-            .insert(*segment_id, *max_sequence);
+            .queue_sealed(*segment_id, *max_sequence);
     }
     let before = leader_store.reads();
 
@@ -7488,7 +7381,7 @@ fn should_validate_writer_lease_once_given_multi_segment_backlog_when_draining_u
 
     // Assert
     assert!(
-        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        el.cloud_coordinator.cloud_wal.backlog().is_empty(),
         "the pass must actually drain every segment, or the count below is vacuous"
     );
     let lease_reads = leader_store.reads() - before;
@@ -7533,11 +7426,9 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
         first_max_sequence,
     )?;
     el.set_hybrid_storage(Arc::clone(&storage));
-    el.cloud_coordinator.cloud_wal.upload_backlog.clear();
     el.cloud_coordinator
         .cloud_wal
-        .upload_backlog
-        .insert(second_segment, second_max_sequence);
+        .queue_sealed(second_segment, second_max_sequence);
     let leader_store = Arc::new(CountingLeaderStore::new("writer-1", 1));
     el.fencing.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
     el.fencing.leader_holder_id = Some("writer-1".to_string());
@@ -7551,16 +7442,14 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
     // Assert
     assert_eq!(storage.pending_upload_count(), 1);
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&second_segment),
-        Some(&second_max_sequence)
+        el.cloud_coordinator.cloud_wal.backlog().get(second_segment),
+        Some(second_max_sequence)
     );
     assert!(el
         .cloud_coordinator
         .cloud_wal
-        .upload_retry_deadline_timeout()
+        .backlog()
+        .retry_timeout()
         .is_some());
     assert_eq!(
         leader_store.reads(),
@@ -8103,11 +7992,8 @@ fn should_requeue_publication_with_timeout_given_ack_deadline_expires_before_lea
         })
     ));
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence),
         "deadline expiry must requeue the accepted WAL obligation"
     );
     assert_eq!(
@@ -8151,11 +8037,8 @@ fn should_requeue_known_wal_publication_when_sequence_range_is_inconsistent(
 
     // Assert
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence),
         "known accepted WAL must requeue even when its cache interval cannot be derived"
     );
     assert_eq!(
@@ -8219,7 +8102,7 @@ fn should_resume_wal_upload_when_provider_recovers_after_attempts_are_exhausted(
         "the storage queue keeps a failed upload for its next retry"
     );
     assert!(
-        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        el.cloud_coordinator.cloud_wal.backlog().is_empty(),
         "exhausted attempts never hand the upload back to the runtime"
     );
 
@@ -8239,7 +8122,7 @@ fn should_resume_wal_upload_when_provider_recovers_after_attempts_are_exhausted(
         max_sequence,
         "callerless retry must close the frontier after provider recovery"
     );
-    assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
+    assert!(el.cloud_coordinator.cloud_wal.backlog().is_empty());
     scenario.teardown();
     Ok(())
 }
@@ -8256,11 +8139,8 @@ fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
     let (segment_id, max_sequence) = seal_segment_owned_by_runtime_backlog_for_test(&mut el)?;
     std::thread::sleep(Duration::from_millis(25));
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence)
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence)
     );
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
     msg_tx
@@ -8284,10 +8164,11 @@ fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
         "the fixture must keep request pressure present during the retry slot"
     );
     assert!(
-        !el.cloud_coordinator
+        el.cloud_coordinator
             .cloud_wal
-            .upload_backlog
-            .contains_key(&segment_id),
+            .backlog()
+            .get(segment_id)
+            .is_none(),
         "runtime-owned WAL publication must receive a fairness slot under sustained load"
     );
     Ok(())
@@ -8388,7 +8269,7 @@ fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::com
             request_id: response_id
         }) if response_id == request_id
     ));
-    assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
+    assert!(el.cloud_coordinator.cloud_wal.backlog().is_empty());
     assert_eq!(
         el.cloud_coordinator
             .hybrid_storage
@@ -8492,11 +8373,8 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
         }) if response_id == request_id
     ));
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence),
         "timed-out shutdown must retain the runtime-owned WAL obligation"
     );
     Ok(())
@@ -8577,11 +8455,8 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
         }) if response_id == request_id
     ));
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence),
         "timed-out ACK settlement must retain the accepted WAL for retry"
     );
     assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
@@ -8691,11 +8566,8 @@ fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
     );
     assert!(el.state.persistence_anomaly_detected());
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence),
         "bounded maintenance expiry must retain the accepted WAL for retry"
     );
     assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
@@ -8871,11 +8743,8 @@ fn assert_cloud_waiter_survives_admission_pressure(
         vec![request_id]
     );
     assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .upload_backlog
-            .get(&segment_id),
-        Some(&max_sequence)
+        el.cloud_coordinator.cloud_wal.backlog().get(segment_id),
+        Some(max_sequence)
     );
     drop(held);
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -9472,7 +9341,7 @@ fn should_leave_retry_with_storage_queue_when_upload_attempts_are_exhausted(
         })
     ));
     assert!(
-        el.cloud_coordinator.cloud_wal.upload_backlog.is_empty(),
+        el.cloud_coordinator.cloud_wal.backlog().is_empty(),
         "the storage queue keeps retrying, so the runtime must not upload it again"
     );
     assert_eq!(
@@ -9514,7 +9383,7 @@ fn should_fence_writer_when_storage_reports_a_corrupt_upload() -> crate::common:
         })
     ));
     assert!(el.wal_transition.is_fenced());
-    assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
+    assert!(el.cloud_coordinator.cloud_wal.backlog().is_empty());
     Ok(())
 }
 
@@ -9558,14 +9427,11 @@ fn should_withdraw_first_upload_when_publishing_its_run_fails() -> crate::common
     assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
     let tracker = &el.cloud_coordinator.cloud_wal;
     assert!(
-        !tracker.acked().contains_key(&first),
+        !tracker.acks().contains(first),
         "no later publication may pass the withdrawn upload"
     );
-    assert_eq!(
-        tracker.upload_backlog.get(&first),
-        Some(&first_max_sequence)
-    );
-    assert!(tracker.acked().contains_key(&second));
+    assert_eq!(tracker.backlog().get(first), Some(first_max_sequence));
+    assert!(tracker.acks().contains(second));
     Ok(())
 }
 
@@ -9625,11 +9491,12 @@ fn should_fence_writer_when_catalog_publishes_past_an_owed_segment(
 
     // Assert: a refusal no retry can fix fences instead of requeueing.
     assert!(el.wal_transition.is_fenced());
-    assert!(!el
+    assert!(el
         .cloud_coordinator
         .cloud_wal
-        .upload_backlog
-        .contains_key(&third));
+        .backlog()
+        .get(third)
+        .is_none());
     Ok(())
 }
 
@@ -9681,7 +9548,7 @@ fn should_fence_with_conflicting_segment_when_a_later_run_member_conflicts(
     // Assert
     assert_eq!(el.wal_transition.fenced_sealed_segment(), Some(second));
     assert!(
-        el.cloud_coordinator.cloud_wal.acked().contains_key(&first),
+        el.cloud_coordinator.cloud_wal.acks().contains(first),
         "the segment the catalog publishes identically is not withdrawn"
     );
     Ok(())
@@ -9788,8 +9655,8 @@ fn should_advance_frontier_through_run_when_its_lost_catalog_answer_had_committe
     });
     assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.upload_backlog.get(&first),
-        Some(&first_max_sequence),
+        el.cloud_coordinator.cloud_wal.backlog().get(first),
+        Some(first_max_sequence),
         "the lost answer withdraws the run's first upload"
     );
     assert_eq!(
@@ -9862,11 +9729,11 @@ fn should_publish_whole_run_after_memory_deferral_when_shared_memory_returns(
         ),
         "memory pressure is backpressure, not a failed write"
     );
-    assert!(!el.cloud_coordinator.cloud_wal.acked().contains_key(&first));
-    assert!(el.cloud_coordinator.cloud_wal.acked().contains_key(&second));
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(first));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(second));
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.upload_backlog.get(&first),
-        Some(&first_max_sequence)
+        el.cloud_coordinator.cloud_wal.backlog().get(first),
+        Some(first_max_sequence)
     );
 
     // Act: memory returns and the deferred segment uploads again.
@@ -9879,6 +9746,32 @@ fn should_publish_whole_run_after_memory_deferral_when_shared_memory_returns(
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Ok { request_id: actual }) if actual == request_id
     ));
+    Ok(())
+}
+
+#[test]
+fn should_fence_writer_when_requeued_upload_is_outside_the_ledger() -> crate::common::MidgeResult<()>
+{
+    // Arrange: the runtime owes the cloud a segment whose local file exists
+    // but which the WAL ledger does not hold sealed.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let stray = el.state.wal.history.ledger().next_segment_id() + 10;
+    el.durability.record_cloud_segment_inflight(stray, 1);
+    write_test_file(
+        el.state
+            .host_wal_dir()
+            .join(crate::wal::segment_file_name(stray)),
+        b"stray",
+    );
+
+    // Act
+    el.requeue_cloud_upload(stray);
+
+    // Assert
+    assert!(el.cloud_coordinator.cloud_wal.backlog().is_empty());
+    assert!(el.wal_transition.is_fenced());
     Ok(())
 }
 
@@ -9917,11 +9810,7 @@ fn should_not_owe_a_zero_record_segment_after_restart() -> crate::common::MidgeR
     let ledger = event_loop.state.wal.history.ledger();
     assert_eq!(ledger.open_segment(), 2);
     assert_eq!(ledger.sealed().count(), 0);
-    assert!(event_loop
-        .cloud_coordinator
-        .cloud_wal
-        .upload_backlog
-        .is_empty());
+    assert!(event_loop.cloud_coordinator.cloud_wal.backlog().is_empty());
     assert!(!db_path
         .join("wal")
         .join(crate::wal::segment_file_name(1))

@@ -60,7 +60,7 @@ impl EventLoop {
 
         let ready_segments = match self
             .durability
-            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acked())
+            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acks())
         {
             Ok(ready_segments) => ready_segments,
             Err(refusal) => {
@@ -103,7 +103,8 @@ impl EventLoop {
         let run = self
             .cloud_coordinator
             .cloud_wal
-            .unpublished_uploads(ready_segments);
+            .acks()
+            .unpublished(ready_segments);
         let first_upload = run.first().map_or(acknowledged, |upload| OwedSegment {
             segment_id: upload.segment_id,
             max_sequence: upload.max_sequence,
@@ -139,7 +140,9 @@ impl EventLoop {
     ///
     /// No retry can fix a mismatched object, a refused run or a fenced
     /// catalog, so those fence the writer. Anything else withdraws the upload
-    /// and uploads it again, after a pause when shared memory is short.
+    /// and hands it to the runtime backlog, its one retry owner, to upload
+    /// again after the retry delay. Waiting out shared memory pressure fails
+    /// no waiter.
     fn route_cloud_publication_error(
         &mut self,
         segment: OwedSegment,
@@ -163,19 +166,15 @@ impl EventLoop {
                 // publishes it while its retry is queued.
                 self.cloud_coordinator
                     .cloud_wal
-                    .forget_upload(segment.segment_id);
-                if self.defer_cloud_ack_for_memory(
-                    segment.segment_id,
-                    segment.max_sequence,
-                    &error,
-                    deadline,
-                ) {
-                    return;
+                    .withdraw_upload(segment.segment_id);
+                if self.defer_cloud_ack_for_memory(segment.segment_id, &error, deadline)
+                    || self.settle_failed_cloud_upload(
+                        segment.segment_id,
+                        &Self::cloud_ack_error(context, error),
+                    )
+                {
+                    self.requeue_cloud_upload(segment.segment_id);
                 }
-                self.requeue_failed_cloud_upload(
-                    segment.segment_id,
-                    &Self::cloud_ack_error(context, error),
-                );
             }
         }
     }
@@ -185,7 +184,7 @@ impl EventLoop {
     /// Objects are immutable and never overwritten, so nothing after it can
     /// be published either: fence the writer.
     pub(super) fn fence_cloud_upload(&mut self, segment_id: u64, error: &MidgeError) {
-        self.cloud_coordinator.cloud_wal.forget_upload(segment_id);
+        self.cloud_coordinator.cloud_wal.withdraw_upload(segment_id);
         self.state.cloud.forget_pending_upload(segment_id);
         self.fence_wal_transition(error, Some(segment_id));
         tracing::error!(segment_id, %error, "cloud WAL upload cannot be published; writer fenced");
