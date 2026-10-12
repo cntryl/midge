@@ -968,8 +968,15 @@ mod failure_injection {
         fail::remove("midge::cloud::inject_fail_sst_upload");
         scenario.teardown();
 
-        // Act
+        // Act: the manifest lists the SST once its edit commits; the cache
+        // copy is evicted only after the shared metadata generation publishes.
         wait_for_sst_count(&engine, 1);
+        let eviction_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !sst_file_names(temp_dir.path()).is_empty()
+            && std::time::Instant::now() < eviction_deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // Assert
         let layout = engine
@@ -6949,11 +6956,7 @@ mod cloud_crash_recovery {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        std::fs::write(
-            db_path.join("midge_primary_lease.json"),
-            "holder_id: crashed@host\nowner_token: lease-token\nacquired_at: 2026-07-26T11:00:00Z\nexpires_at: 2026-07-26T11:00:30Z\n",
-        )
-        .expect("write lease record");
+        write_crashed_cloud_lease(db_path);
         std::fs::write(
             db_path.join(".midge_leader.lock"),
             "holder_id=crashed@host\nowner_token=lock-token\ncreated_at=2026-07-26T11:00:10Z\n",
@@ -6973,7 +6976,7 @@ mod cloud_crash_recovery {
             WriteOptions::cloud_async(),
         );
         assert_value_visible(&reopened, b"crash-timeout-key", b"crash-timeout-value");
-        let lease_content = std::fs::read_to_string(db_path.join("midge_primary_lease.json"))
+        let lease_content = std::fs::read_to_string(db_path.join(CLOUD_LEASE))
             .expect("read refreshed lease record");
         assert!(
             !lease_content.contains("crashed@host"),
@@ -6986,11 +6989,7 @@ mod cloud_crash_recovery {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        std::fs::write(
-            db_path.join("midge_primary_lease.json"),
-            "holder_id: crashed@host\nowner_token: lease-token\nacquired_at: 2026-07-26T11:00:00Z\nexpires_at: 2026-07-26T11:00:30Z\n",
-        )
-        .expect("write lease record");
+        write_crashed_cloud_lease(db_path);
         std::fs::write(db_path.join(".midge_leader.lock"), []).expect("write incomplete lock");
 
         // Act
@@ -7006,7 +7005,7 @@ mod cloud_crash_recovery {
             WriteOptions::cloud_async(),
         );
         assert_value_visible(&reopened, b"incomplete-lock-key", b"incomplete-lock-value");
-        let lease_content = std::fs::read_to_string(db_path.join("midge_primary_lease.json"))
+        let lease_content = std::fs::read_to_string(db_path.join(CLOUD_LEASE))
             .expect("read refreshed lease record");
         assert!(
             !lease_content.contains("crashed@host"),
@@ -7501,21 +7500,40 @@ mod cloud_crash_recovery {
         }
     }
 
+    /// Simulated cloud keeps its lease document in the shared object store.
+    const CLOUD_LEASE: &str = "cloud_store/midge_primary_lease.json";
+
+    /// Seed what a holder that crashed before committing metadata leaves in
+    /// the shared store: the active authority sentinel and its lease.
+    fn write_crashed_cloud_lease(db_path: &Path) {
+        std::fs::create_dir_all(db_path.join("cloud_store/metadata")).expect("create shared store");
+        std::fs::write(
+            db_path.join("cloud_store/metadata/authority-initialized.v1"),
+            "midge cloud metadata authority v2 initialized\n",
+        )
+        .expect("write authority sentinel");
+        std::fs::write(
+            db_path.join(CLOUD_LEASE),
+            "lease_version: 3\nfencing_epoch: 1\nholder: crashed@host\nowner: lease-token\nacquired: 2026-07-26T11:00:00Z\nexpires: 2026-07-26T11:00:30Z\nmetadata: null\n",
+        )
+        .expect("write lease record");
+    }
+
     fn expire_crashed_process_lease(db_path: &Path) {
-        let lease_path = db_path.join("midge_primary_lease.json");
+        let lease_path = db_path.join(CLOUD_LEASE);
         if !lease_path.exists() {
             return;
         }
 
         let mut content = std::fs::read_to_string(&lease_path).expect("read lease record");
-        if content.contains("acquired_at: ") || content.contains("expires_at: ") {
+        if content.contains("acquired: ") || content.contains("expires: ") {
             content = content
                 .lines()
                 .map(|line| {
-                    if line.starts_with("acquired_at: ") {
-                        "acquired_at: 1970-01-01T00:00:00Z".to_string()
-                    } else if line.starts_with("expires_at: ") {
-                        "expires_at: 1970-01-01T00:00:00Z".to_string()
+                    if line.starts_with("acquired: ") {
+                        "acquired: 1970-01-01T00:00:00Z".to_string()
+                    } else if line.starts_with("expires: ") {
+                        "expires: 1970-01-01T00:00:00Z".to_string()
                     } else {
                         line.to_string()
                     }
@@ -8432,17 +8450,18 @@ mod cloud_persistence_hardening {
     }
 
     fn expire_crashed_process_lease(db_path: &Path) {
-        let lease_path = db_path.join("midge_primary_lease.json");
+        // Simulated cloud keeps its lease document in the shared object store.
+        let lease_path = db_path.join("cloud_store").join("midge_primary_lease.json");
         if lease_path.exists() {
             let mut content = fs::read_to_string(&lease_path).expect("read crashed lease record");
-            if content.contains("acquired_at: ") || content.contains("expires_at: ") {
+            if content.contains("acquired: ") || content.contains("expires: ") {
                 content = content
                     .lines()
                     .map(|line| {
-                        if line.starts_with("acquired_at: ") {
-                            "acquired_at: 1970-01-01T00:00:00Z".to_string()
-                        } else if line.starts_with("expires_at: ") {
-                            "expires_at: 1970-01-01T00:00:00Z".to_string()
+                        if line.starts_with("acquired: ") {
+                            "acquired: 1970-01-01T00:00:00Z".to_string()
+                        } else if line.starts_with("expires: ") {
+                            "expires: 1970-01-01T00:00:00Z".to_string()
                         } else {
                             line.to_string()
                         }
@@ -9027,7 +9046,7 @@ mod cloud_ddl_two_phase_hardening {
             .expect("read authoritative DDL registry");
         let registry: serde_json::Value =
             serde_json::from_slice(&registry).expect("decode registry");
-        assert_eq!(registry["epoch"], 2);
+        assert_eq!(registry["ddl_epoch"], 2);
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(2));
         shutdown(final_open);
     }
@@ -9069,7 +9088,7 @@ mod cloud_ddl_two_phase_hardening {
             .expect("read authoritative DDL registry");
         let registry: serde_json::Value =
             serde_json::from_slice(&registry).expect("decode registry");
-        assert_eq!(registry["epoch"], 1);
+        assert_eq!(registry["ddl_epoch"], 1);
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
         shutdown(reopened);
     }
@@ -9208,7 +9227,7 @@ mod cloud_ddl_two_phase_hardening {
             .expect("read authoritative DDL registry");
         let registry: serde_json::Value =
             serde_json::from_slice(&registry).expect("decode registry");
-        assert_eq!(registry["epoch"], 1);
+        assert_eq!(registry["ddl_epoch"], 1);
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             engine
@@ -9429,7 +9448,8 @@ mod cloud_ddl_two_phase_hardening {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_recover_ambiguous_ddl_once_when_reopening_after_crash_before_remote_cas_submission() {
+    fn should_abort_prior_epoch_ambiguous_ddl_when_reopening_after_crash_before_remote_cas_submission(
+    ) {
         // Arrange
         let _guard = DDL_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -9472,12 +9492,14 @@ mod cloud_ddl_two_phase_hardening {
         assert!(engine.get_column_family("crash-before-cas").is_none());
         shutdown(engine);
 
-        // Act: startup must safely re-drive the same durable operation rather than
-        // fence the database forever or mint a replacement operation id.
+        // Act: the reopen holds a later lease epoch and fences the registry
+        // before reconciling, so the prior epoch's CAS can never land. Startup
+        // must abort the stale prepare rather than fence the database forever
+        // or invent the edit under the new holder.
         let reopened = open_cloud(temp.path());
 
         // Assert
-        assert!(reopened.get_column_family("crash-before-cas").is_some());
+        assert!(reopened.get_column_family("crash-before-cas").is_none());
         assert!(!temp.path().join("ddl.prepare.json").exists());
         let registry = fs::read(temp.path().join("cloud_store/metadata/ddl.registry.json"))
             .expect("read reconciled authoritative DDL registry");
@@ -9489,8 +9511,8 @@ mod cloud_ddl_two_phase_hardening {
             .iter()
             .filter(|operation| operation["op_id"].as_str() == Some(op_id.as_str()))
             .count();
-        assert_eq!(matching_operations, 1);
-        assert_eq!(registry["epoch"], 1);
+        assert_eq!(matching_operations, 0);
+        assert_eq!(registry["ddl_epoch"], 0);
         shutdown(reopened);
     }
 }
