@@ -7,6 +7,6 @@ pub mod segment;
 
 pub(crate) use link::{follows, Chain, ChainLink, OpenFacts, SegmentId};
 pub(crate) use segment::{
-    holds_no_records, Footer, ScannedFrame, SealedFacts, SegmentHeader, SegmentIdentity,
-    SegmentScan, SegmentTail, HEADER_LEN,
+    holds_no_records, Footer, ScannedFrame, SealedFacts, SegmentDigest, SegmentHeader,
+    SegmentIdentity, SegmentScan, SegmentTail, HEADER_LEN,
 };

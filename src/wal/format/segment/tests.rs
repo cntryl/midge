@@ -126,14 +126,9 @@ fn should_fail_when_footer_family_maxima_disagree_with_records() {
     // Arrange: a footer naming family 5 where the record is in family 0.
     let builder = SegmentBuilder::new(2, 1, ChainLink::GENESIS).record(&put(1, 0));
     let mut bytes = builder.open();
-    let mut facts = SealedFacts::of(
-        &builder.header(),
-        &lenient_tail(&bytes[HEADER_LEN..]),
-        bytes.len() as u64,
-        xxhash_rust::xxh3::xxh3_128(&bytes).to_le_bytes(),
-    );
-    facts.max_seq_per_cf = vec![(5, 1)];
-    bytes.extend(Footer::new(&facts, 1).encode_frame().expect("footer"));
+    let mut footer = lenient_footer(&bytes).expect("footer");
+    footer.max_seq_per_cf = vec![(5, 1)];
+    bytes.extend(footer.encode_frame().expect("footer"));
 
     // Act
     let result = scan(&bytes);

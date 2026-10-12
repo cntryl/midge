@@ -20,14 +20,16 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::FsError;
 use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
-use crate::wal::format::{Footer, SealedFacts, SegmentHeader, SegmentTail, HEADER_LEN};
+use crate::wal::format::{
+    Footer, SealedFacts, SegmentDigest, SegmentHeader, SegmentTail, HEADER_LEN,
+};
 use crate::wal::traits::{WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::writer_runner::{SegmentDigest, SyncState, WriterConfig, WriterRunner};
+use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
@@ -241,20 +243,15 @@ impl FsWalWriterIo {
                 self.header.id
             ))));
         }
-        let mut last = self.tail.lock().last_seq;
-        for record in records {
-            if record.seq < self.header.first_seq || last.is_some_and(|last| record.seq <= last) {
-                return Err(WalAppendError::unchanged(MidgeError::Internal(format!(
-                    "WAL sequence {} does not follow {} in segment {} starting at {}",
-                    record.seq,
-                    last.unwrap_or_default(),
-                    self.header.id,
-                    self.header.first_seq
-                ))));
-            }
-            last = Some(record.seq);
-        }
-        Ok(())
+        self.tail
+            .lock()
+            .admit_all(&self.header, records.into_iter().map(|record| record.seq))
+            .map_err(|reason| {
+                WalAppendError::unchanged(MidgeError::Internal(format!(
+                    "WAL segment {} refuses the append: {reason}",
+                    self.header.id
+                )))
+            })
     }
 
     /// Count records the runner acknowledged into the segment.
@@ -277,7 +274,7 @@ impl FsWalWriterIo {
                 return Err(error);
             }
             let digest = self.digest.lock();
-            if self.queue.lock().is_empty() && digest.len == self.current_pos() {
+            if self.queue.lock().is_empty() && digest.data_len() == self.current_pos() {
                 return Ok(digest);
             }
             drop(digest);
@@ -288,6 +285,18 @@ impl FsWalWriterIo {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// The footer sealing every record written, once the writes drained.
+    fn sealing(&self, timeout: Duration) -> MidgeResult<Footer> {
+        if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} is already sealed",
+                self.header.id
+            )));
+        }
+        let digest = self.drained_digest(timeout)?;
+        Ok(Footer::sealing(&self.header, &self.tail.lock(), &digest))
     }
 
     fn take_buffer(&self) -> Vec<u8> {
@@ -494,31 +503,18 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn seal_facts(&self, timeout: Duration) -> MidgeResult<SealedFacts> {
-        if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(MidgeError::Internal(format!(
-                "WAL segment {} is already sealed",
-                self.header.id
-            )));
-        }
-        let digest = self.drained_digest(timeout)?;
-        Ok(SealedFacts::of(
-            &self.header,
-            &self.tail.lock(),
-            digest.len,
-            digest.hasher.digest128().to_le_bytes(),
-        ))
+        self.sealing(timeout).map(|footer| footer.sealed_facts())
     }
 
     fn write_footer(&self, facts: &SealedFacts, timeout: Duration) -> MidgeResult<()> {
-        let current = self.seal_facts(timeout)?;
-        if current != *facts {
+        let footer = self.sealing(timeout)?;
+        if footer.sealed_facts() != *facts {
             return Err(MidgeError::Internal(format!(
                 "WAL segment {} changed after its seal facts were taken",
                 self.header.id
             )));
         }
-        let first_seq = self.tail.lock().first_seq.unwrap_or(self.header.first_seq);
-        let frame = Footer::new(facts, first_seq).encode_frame()?;
+        let frame = footer.encode_frame()?;
         self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.enqueue_encoded_accounted(frame, timeout)
             .map_err(|failure| failure.error)?;

@@ -27,20 +27,32 @@ pub fn encoded_frame_len(payload_len: usize) -> MidgeResult<usize> {
     Ok(WAL_FRAME_HEADER_LEN + payload_len)
 }
 
+/// The header of the frame holding `payload`: its length, then its CRC32C,
+/// little-endian. The one frame layout every frame writer and the segment
+/// digest share.
+///
+/// # Errors
+///
+/// Returns `MidgeError::InvalidArgument` when the payload exceeds the WAL limits.
+pub(crate) fn frame_header(payload: &[u8]) -> MidgeResult<[u8; WAL_FRAME_HEADER_LEN]> {
+    encoded_frame_len(payload.len())?;
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| MidgeError::InvalidArgument("WAL record length exceeds u32::MAX".into()))?;
+    let mut header = [0; WAL_FRAME_HEADER_LEN];
+    header[..4].copy_from_slice(&payload_len.to_le_bytes());
+    header[4..].copy_from_slice(&crc32c::crc32c(payload).to_le_bytes());
+    Ok(header)
+}
+
 /// Append a length-prefixed WAL frame to `dst`.
 ///
 /// # Errors
 ///
 /// Returns `MidgeError::InvalidArgument` when the payload exceeds the WAL limits.
 pub fn append_frame(dst: &mut Vec<u8>, payload: &[u8]) -> MidgeResult<()> {
-    let frame_len = encoded_frame_len(payload.len())?;
-    let crc = crc32c::crc32c(payload);
-
-    dst.reserve(frame_len);
-    let payload_len = u32::try_from(payload.len())
-        .map_err(|_| MidgeError::InvalidArgument("WAL record length exceeds u32::MAX".into()))?;
-    dst.extend_from_slice(&payload_len.to_le_bytes());
-    dst.extend_from_slice(&crc.to_le_bytes());
+    let header = frame_header(payload)?;
+    dst.reserve(header.len() + payload.len());
+    dst.extend_from_slice(&header);
     dst.extend_from_slice(payload);
     Ok(())
 }
@@ -67,23 +79,16 @@ pub fn append_frame_encoded(
         return Err(error);
     }
 
-    let payload_len = dst.len().saturating_sub(payload_start);
-    if let Err(error) = encoded_frame_len(payload_len) {
-        dst.truncate(frame_start);
-        return Err(error);
+    match frame_header(&dst[payload_start..]) {
+        Ok(header) => {
+            dst[frame_start..payload_start].copy_from_slice(&header);
+            Ok(())
+        }
+        Err(error) => {
+            dst.truncate(frame_start);
+            Err(error)
+        }
     }
-
-    let Ok(payload_len_u32) = u32::try_from(payload_len) else {
-        dst.truncate(frame_start);
-        return Err(MidgeError::InvalidArgument(
-            "WAL record length exceeds u32::MAX".into(),
-        ));
-    };
-    let crc = crc32c::crc32c(&dst[payload_start..]);
-
-    dst[frame_start..frame_start + 4].copy_from_slice(&payload_len_u32.to_le_bytes());
-    dst[frame_start + 4..frame_start + WAL_FRAME_HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
-    Ok(())
 }
 
 /// Decode the fixed-size WAL frame header.

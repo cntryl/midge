@@ -18,9 +18,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
-use crate::wal::format::{
-    holds_no_records, ChainLink, Footer, SealedFacts, SegmentHeader, SegmentScan,
-};
+use crate::wal::format::{holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan};
 use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
 use crate::wal::ledger_store::{LedgerStore, LEDGER_FILE};
 use crate::wal::recovery::ReplaySegments;
@@ -622,19 +620,19 @@ fn seal_scanned(wal: &dyn Fs, id: SegmentId, scan: &SegmentScan) -> MidgeResult<
 
 /// Append the footer sealing what `scan` read at its end, and sync.
 fn write_footer(wal: &dyn Fs, path: &FsPath, scan: &SegmentScan) -> MidgeResult<SealedFacts> {
-    let facts = scan.facts();
-    let frame = Footer::new(&facts, scan.first_seq()).encode_frame()?;
+    let footer = scan.sealing();
+    let frame = footer.encode_frame()?;
     let mut file = wal.open(path, read_write()).map_err(FsError::into_midge)?;
     // The records the footer seals reach the device first: otherwise a
     // power loss could keep the footer while an earlier record page
     // reverts, and the segment would no longer replay.
     file.sync(Durability::Durable)
         .map_err(FsError::into_midge)?;
-    file.write_at(scan.data_len(), bytes::Bytes::from(frame))
+    file.write_at(footer.data_len, bytes::Bytes::from(frame))
         .map_err(FsError::into_midge)?;
     file.sync(Durability::Durable)
         .map_err(FsError::into_midge)?;
-    Ok(facts)
+    Ok(footer.sealed_facts())
 }
 
 /// Read open member `id` whole.

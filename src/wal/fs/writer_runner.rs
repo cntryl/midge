@@ -1,4 +1,5 @@
 use crate::io::{Durability, Fs, FsPath, FsResult};
+use crate::wal::format::SegmentDigest;
 use crate::wal::traits::WalAppendError;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -59,27 +60,6 @@ pub(crate) fn writer_error(
         FsError::NoSpace(_) => MidgeError::NoSpace(message),
         FsError::Timeout(_) => MidgeError::Timeout(message),
         _ => MidgeError::Internal(message),
-    }
-}
-
-/// The digest of every byte a writer has written to its segment, header
-/// first, in order (#843). A write rolled back or never made is not in it.
-pub(crate) struct SegmentDigest {
-    pub(crate) hasher: xxhash_rust::xxh3::Xxh3,
-    /// Bytes the digest covers: the segment's length after the last
-    /// successful write.
-    pub(crate) len: u64,
-}
-
-impl SegmentDigest {
-    /// The digest of a segment holding exactly `bytes`.
-    pub(crate) fn of(bytes: &[u8]) -> Self {
-        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-        hasher.update(bytes);
-        Self {
-            hasher,
-            len: bytes.len() as u64,
-        }
     }
 }
 
@@ -310,10 +290,11 @@ impl WriterRunner {
                 };
             return match write_result {
                 Ok(()) => {
+                    // The digest holds every byte written, in order: a
+                    // write rolled back or never made is not in it.
                     let mut digest = self.config.digest.lock();
-                    if digest.len == start_pos {
-                        digest.hasher.update(big_bytes);
-                        digest.len = start_pos.saturating_add(big_bytes.len() as u64);
+                    if digest.data_len() == start_pos {
+                        digest.update(big_bytes);
                     }
                     Ok(start_pos)
                 }
