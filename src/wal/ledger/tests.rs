@@ -108,6 +108,44 @@ fn members(ledger: &WalLedger) -> Vec<SegmentId> {
     ledger.members().collect()
 }
 
+#[test]
+fn should_stop_retirement_at_the_first_unflushed_family() {
+    // Arrange: segment 1 belongs to the idle family; segment 2 is covered.
+    let mut ledger = ledger_spanning(1, 3);
+    ledger.members[0].sealed.as_mut().unwrap().max_seq_per_cf = vec![(7, 2)];
+    ledger.members[1].sealed.as_mut().unwrap().max_seq_per_cf = vec![(0, 4)];
+
+    // Act
+    let prefix = ledger.retirable_prefix(|cf, sequence| cf == 0 && sequence <= 4);
+
+    // Assert
+    assert_eq!(prefix, None);
+}
+
+#[test]
+fn should_retire_only_sealed_members_whose_family_maxima_are_flushed() {
+    // Arrange
+    let ledger = ledger_spanning(1, 3);
+
+    // Act
+    let prefix = ledger.retirable_prefix(|cf, sequence| cf == 0 && sequence <= 4);
+
+    // Assert: the open segment remains authoritative.
+    assert_eq!(prefix, Some(3));
+}
+
+#[test]
+fn should_retain_a_sealed_member_when_its_family_is_unknown() {
+    // Arrange
+    let ledger = ledger_spanning(1, 2);
+
+    // Act
+    let prefix = ledger.retirable_prefix(|_, _| false);
+
+    // Assert
+    assert_eq!(prefix, None);
+}
+
 fn sealed(ledger: &WalLedger) -> Vec<SegmentId> {
     ledger.sealed().collect()
 }

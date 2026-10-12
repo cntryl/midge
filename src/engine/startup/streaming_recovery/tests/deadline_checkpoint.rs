@@ -344,7 +344,7 @@ fn real_contender_is_denied(path: &Path) -> bool {
             bucket: "bucket".into(),
             prefix: "streaming-recovery".into(),
         },
-        path,
+        crate::storage::simulated::simulated_cloud_root(path),
     ));
     let contention = contender.try_acquire();
     let denied = matches!(

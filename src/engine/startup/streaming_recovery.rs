@@ -16,14 +16,11 @@ use crate::wal::recovery::streaming::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::runtime::cloud_startup::replay_coverage as coverage;
 mod names;
 #[cfg(test)]
 mod tests;
 
 pub(super) struct CloudReplay {
-    #[cfg(feature = "internal-testing")]
-    pub probe: coverage::probe::RecoveryProbeVariant,
     pub fs: Arc<dyn ReadFs>,
     /// The planned WAL files in `fs`, in replay order.
     pub segments: crate::wal::recovery::ReplaySegments,
@@ -83,30 +80,11 @@ impl CloudReplay {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let known_cfs: std::collections::HashSet<_> =
-            materialized.state.column_families.keys().copied().collect();
-        let coverage = coverage::ReplayCoverage::new(
-            materialized.state.manifest.clone(),
-            materialized
-                .runtime_config
-                .sst_read_fs
-                .clone()
-                .unwrap_or_else(|| Arc::clone(&materialized.state.fs)),
-            self.limits.max_frame_bytes,
-        );
-        #[cfg(feature = "internal-testing")]
-        let coverage = coverage.with_probe_variant(self.probe);
+        let frontiers = materialized.state.manifest.flush_frontiers().clone();
         let scope = self
             .scope
             .clone()
             .or_else(|| materialized.state.startup_scope.clone());
-        let should_apply = |record: &crate::wal::WalRecord| {
-            let covered = match scope.as_ref() {
-                Some(scope) => coverage.contains_within(record, scope)?,
-                None => coverage.contains(record),
-            };
-            Ok(known_cfs.contains(&record.cf_id) && !covered)
-        };
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut actor = FlushActor::new_with_memory_limit(
             Arc::clone(&materialized.state.fs),
@@ -122,16 +100,21 @@ impl CloudReplay {
             &self.segments,
             &mut memtables,
             policy,
-            None,
             self.limits,
             ReplayOptions {
                 scope: scope.as_ref(),
-                fallible_should_apply: Some(&should_apply),
+                selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
                 ..ReplayOptions::default()
             },
-            &mut |tables, _stats| {
-                coverage.release_for_checkpoint();
-                checkpoint(materialized, &mut actor, &rx, tables, &mut names)
+            &mut |tables, boundary| {
+                checkpoint(
+                    materialized,
+                    &mut actor,
+                    &rx,
+                    tables,
+                    &mut names,
+                    boundary.through_sequence,
+                )
             },
         );
         // Accepted worker work stays owned while the outer startup worker holds its lease.
@@ -206,6 +189,7 @@ fn checkpoint(
     rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
     tables: &mut HashMap<u32, Arc<SkipListMemtable>>,
     names: &mut names::Names,
+    through_sequence: u64,
 ) -> MidgeResult<()> {
     let mut families: Vec<_> = tables.keys().copied().collect();
     families.sort_unstable();
@@ -219,7 +203,15 @@ fn checkpoint(
             continue;
         }
         super::timing::measure("recovery_checkpoint", || {
-            checkpoint_family(materialized, actor, rx, cf_id, table, names)
+            checkpoint_family(
+                materialized,
+                actor,
+                rx,
+                cf_id,
+                table,
+                names,
+                through_sequence,
+            )
         })?;
         // Release replay memory only after the existing publication protocol
         // has made the new SST authoritative. Remote WAL remains retained.
@@ -235,6 +227,7 @@ fn checkpoint_family(
     cf_id: u32,
     table: Arc<SkipListMemtable>,
     names: &mut names::Names,
+    through_sequence: u64,
 ) -> MidgeResult<()> {
     materialized
         .state
@@ -250,7 +243,7 @@ fn checkpoint_family(
         flush_id: state.next_flush_id,
         writer_epoch: config.writer_epoch,
         cf_id,
-        sequence: 0,
+        sequence: through_sequence,
     };
     state.next_flush_id = state.next_flush_id.checked_add(1).ok_or_else(|| {
         MidgeError::ResourceLimit("flush identity space exhausted during recovery".into())
@@ -271,10 +264,6 @@ fn checkpoint_family(
         Ok(completion)
     })?;
     let file_meta = completion.result?;
-    let identity = FlushIdentity {
-        sequence: file_meta.largest_seq.unwrap_or(0),
-        ..identity
-    };
     let accounting = state.metadata_accounting().clone();
     let medium = state.metadata_medium();
     let started = std::time::Instant::now();
@@ -393,7 +382,6 @@ fn commit_and_mirror_checkpoint(
         lease_healthy: config.lease_healthy.clone(),
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
-        manifest_sequence: state.manifest.last_persisted_sequence,
         runtime_response_timeout: state
             .startup_scope
             .as_ref()

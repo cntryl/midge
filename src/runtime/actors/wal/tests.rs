@@ -253,6 +253,44 @@ fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted()
     Ok(())
 }
 
+#[test]
+fn should_reject_transaction_without_mutation_when_commit_would_use_the_dropped_sentinel(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut state = RuntimeState::new("/tmp/test_midge_dropped_sequence_sentinel".into(), true);
+    state.sequence = u64::MAX - 3;
+    let reserved = state.wal.history.ledger().seq_reserved_through();
+    let frontiers = state.manifest.flush_frontiers().clone();
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::BestEffort,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+
+    // Act
+    let result = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        99,
+        b"reserved-sentinel",
+        b"value",
+        DurabilityPolicy::BestEffort,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert_eq!(state.sequence, u64::MAX - 3);
+    assert_eq!(state.transaction_id_cursor_for_test(), 0);
+    assert_eq!(state.wal.history.ledger().seq_reserved_through(), reserved);
+    assert_eq!(state.manifest.flush_frontiers(), &frontiers);
+    assert_eq!(state.wal.pending_writes, 0);
+    assert_eq!(actor.append_calls(), 0);
+    assert_eq!(state.get_cf(0).unwrap().memtable.iter_all(), []);
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))

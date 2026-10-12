@@ -56,10 +56,13 @@ fn publish_segments(path: &std::path::Path, segments: &[(u64, Vec<u8>, u64)]) {
             .expect("a published segment is sealed");
         assert_eq!((link.id, link.last_seq), (*id, *maximum));
         let publication = crate::wal::cloud_catalog::CatalogEntry::describing(
-            crate::wal::format::SegmentIdentity {
-                epoch: catalog.fencing_epoch(),
+            &crate::wal::cloud_segment::SegmentValidation {
+                writer_epoch: catalog.fencing_epoch(),
                 prev: catalog.head(),
-                link,
+                facts: crate::wal::format::segment::sealed_footer(bytes)
+                    .unwrap()
+                    .unwrap()
+                    .sealed_facts(),
             },
             bytes,
         );
@@ -365,15 +368,16 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
 
 #[cfg(feature = "failpoints")]
 fn expire_child_lease(path: &std::path::Path) {
-    let lease = path.join("midge_primary_lease.json");
+    let lease = crate::storage::simulated::simulated_cloud_root(path)
+        .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
     let text = std::fs::read_to_string(&lease).expect("crashed lease record");
     let text = text
         .lines()
         .map(|line| {
-            if line.starts_with("acquired_at: ") {
-                "acquired_at: 1970-01-01T00:00:00Z"
-            } else if line.starts_with("expires_at: ") {
-                "expires_at: 1970-01-01T00:00:00Z"
+            if line.starts_with("acquired: ") {
+                "acquired: 1970-01-01T00:00:00Z"
+            } else if line.starts_with("expires: ") {
+                "expires: 1970-01-01T00:00:00Z"
             } else {
                 line
             }
@@ -382,11 +386,6 @@ fn expire_child_lease(path: &std::path::Path) {
         .join("\n")
         + "\n";
     std::fs::write(lease, text).expect("expire crashed lease");
-    match std::fs::remove_file(path.join(".midge_leader.lock")) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("remove crashed lease acquisition lock: {error}"),
-    }
 }
 
 #[cfg(feature = "failpoints")]

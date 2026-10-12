@@ -35,7 +35,7 @@ fn copy_populated_fixture_as_current_format(destination: &Path) {
     ] {
         std::fs::copy(source.join(file), destination.join(file)).expect("copy fixture file");
     }
-    std::fs::write(destination.join("FORMAT"), "midge-format-version=7\n")
+    std::fs::write(destination.join("FORMAT"), "midge-format-version=8\n")
         .expect("write format marker");
     for manifest in ["manifest.json", "manifest.snapshot.json"] {
         hex_encode_key_bounds(&destination.join(manifest));
@@ -43,11 +43,17 @@ fn copy_populated_fixture_as_current_format(destination: &Path) {
 }
 
 /// Rewrite the manifest at `path` with hex key bounds, the only encoding
-/// FORMAT 7 decodes.
+/// FORMAT 8 decodes.
 fn hex_encode_key_bounds(path: &Path) {
     let mut manifest: Value =
         serde_json::from_slice(&std::fs::read(path).expect("read fixture manifest"))
             .expect("decode fixture manifest");
+    let through = manifest
+        .as_object_mut()
+        .unwrap()
+        .remove("last_persisted_sequence")
+        .unwrap();
+    manifest["flushed_through"] = serde_json::json!([{"cf_id": 0, "through_sequence": through}]);
     for file in manifest["files"]
         .as_array_mut()
         .expect("fixture SST metadata")
@@ -67,11 +73,11 @@ fn hex_encode_key_bounds(path: &Path) {
 
 fn write_empty_database(path: &Path) {
     std::fs::create_dir_all(path).expect("create database directory");
-    std::fs::write(path.join("FORMAT"), "midge-format-version=7\n").expect("write format marker");
+    std::fs::write(path.join("FORMAT"), "midge-format-version=8\n").expect("write format marker");
     std::fs::write(
         path.join("manifest.json"),
         serde_json::to_vec_pretty(&json!({
-            "last_persisted_sequence": 0,
+            "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
             "files": [],
             "column_families": [],
             "next_sst_seqs": {},
@@ -167,10 +173,10 @@ fn should_emit_v1_storage_error_json_given_missing_database_when_midge_verify_ru
 #[test]
 fn should_emit_v1_corruption_error_json_given_future_format_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/future_v8");
+    let path = fixture_path("tests/fixtures/compatibility/future_v9");
     let output_path = path.to_str().expect("fixture path");
     let expected_message = format!(
-        "Compatibility error: unsupported on-disk format version 8 at '{output_path}'; this build supports versions 7..=7"
+        "Compatibility error: unsupported on-disk format version 9 at '{output_path}'; this build supports versions 8..=8"
     );
     let expected_template = include_str!("fixtures/verification/corruption_error_v1.json").trim();
     let expected: Value = serde_json::from_str(&expected_template.replace(

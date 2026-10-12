@@ -305,7 +305,11 @@ impl Fixture {
                 .cloned()
                 .collect();
             catalog
-                .retire_prefix(catalog.fencing_epoch(), &retired)
+                .retire_prefix(
+                    catalog.fencing_epoch(),
+                    &retired,
+                    crate::lease::SharedGenerationId::new(1).unwrap(),
+                )
                 .expect("retire the catalog's oldest segments");
         });
     }
@@ -2177,14 +2181,17 @@ fn should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry()
         last_seq: 0,
         digest: [0x5a; 16],
     };
-    let (bytes, link) = crate::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
+    let (bytes, _link) = crate::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
         .bytes(&framed_wal(1, b"one"))
         .seal();
     let entry = CatalogEntry::describing(
-        crate::wal::format::SegmentIdentity {
-            epoch: 7,
+        &crate::wal::cloud_segment::SegmentValidation {
+            writer_epoch: 7,
             prev: ChainLink::GENESIS,
-            link,
+            facts: crate::wal::format::segment::sealed_footer(&bytes)
+                .unwrap()
+                .unwrap()
+                .sealed_facts(),
         },
         &bytes,
     );
@@ -2199,5 +2206,31 @@ fn should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry()
         "unexpected result: {:?}",
         result.as_ref().err()
     );
+    Ok(())
+}
+
+#[test]
+fn should_reject_catalog_family_summary_when_payload_has_different_families() -> MidgeResult<()> {
+    // Arrange: the link, digest, length and CRC still match. Only the
+    // persisted family maximum is forged, which could authorize unsafe GC.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
+    let catalog = fixture.catalog();
+    let mut encoded = serde_json::to_value(&catalog).unwrap();
+    encoded["segments"][0]["facts"]["max_seq_per_cf"] = serde_json::json!([[7, 1]]);
+    let forged = WalPublicationCatalog::decode(&serde_json::to_vec(&encoded).unwrap())
+        .map_err(|error| MidgeError::Corruption(error.to_string()))?;
+    fixture.save_catalog(&forged)?;
+    let before = std::fs::read(fixture.catalog_path())?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        result.is_err(),
+        "payload and catalog family maxima must agree before planning"
+    );
+    assert_eq!(std::fs::read(fixture.catalog_path())?, before);
     Ok(())
 }

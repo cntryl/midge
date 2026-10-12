@@ -357,48 +357,53 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
 }
 
 #[test]
-fn should_grant_epoch_above_catalog_fencing_epoch_when_cloud_lease_object_is_deleted(
-) -> MidgeResult<()> {
-    // Arrange
-    let dir = tempfile::tempdir().expect("database directory");
-    let options = crate::OpenOptions::cloud_simulated(dir.path(), "bucket", "epoch-floor")
-        .background_compaction(false)
-        .build()?;
-    let mut engine = crate::Engine::open(options.clone())?;
-    engine.shutdown(std::time::Duration::from_secs(10))?;
-    drop(engine);
-    let catalog_epoch = 9;
-    let catalog_path = dir
-        .path()
-        .join("cloud_store/wal/publication-catalog.v1.json");
-    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
-        &std::fs::read(&catalog_path).expect("read catalog"),
-    )
-    .expect("decode catalog");
-    catalog
-        .fence_to(catalog_epoch)
-        .expect("a later epoch fences the catalog");
-    let encoded = catalog.encode().expect("encode catalog");
-    std::fs::write(&catalog_path, &encoded).expect("write catalog");
-    std::fs::write(
-        dir.path()
-            .join("cloud_store/wal/publication-catalog.v1.mirror.json"),
-        &encoded,
-    )
-    .expect("write catalog mirror");
-    remove_if_present(&dir.path().join("midge_primary_lease.json"));
-    remove_if_present(&dir.path().join(".midge_leader"));
+fn should_fail_closed_when_shared_lease_authority_is_deleted() -> MidgeResult<()> {
+    for policy in [
+        crate::RecoveryPolicy::Strict,
+        crate::RecoveryPolicy::Salvage,
+    ] {
+        // Arrange: catalog and local durable metadata survive, but the sole
+        // committed metadata pointer in the shared lease is gone.
+        let dir = tempfile::tempdir().expect("database directory");
+        let options = crate::OpenOptions::cloud_simulated(dir.path(), "bucket", "epoch-floor")
+            .background_compaction(false)
+            .recovery_policy(policy)
+            .build()?;
+        let mut engine = crate::Engine::open(options.clone())?;
+        engine.shutdown(std::time::Duration::from_secs(10))?;
+        drop(engine);
+        let retained_paths = [
+            "cloud_store/wal/publication-catalog.v1.json",
+            "cloud_store/wal/publication-catalog.v1.mirror.json",
+            crate::metadata::files::MANIFEST_SNAPSHOT,
+            crate::metadata::files::FORMAT,
+        ];
+        let retained: Vec<_> = retained_paths
+            .iter()
+            .map(|path| {
+                (
+                    dir.path().join(path),
+                    std::fs::read(dir.path().join(path)).unwrap(),
+                )
+            })
+            .collect();
+        let lease_path = dir.path().join("cloud_store/midge_primary_lease.json");
+        assert!(lease_path.is_file());
+        std::fs::remove_file(&lease_path)?;
 
-    // Act
-    let mut reopened = crate::Engine::open(options)?;
+        // Act
+        let result = crate::Engine::open(options);
 
-    // Assert
-    let granted_epoch = leader_record_epoch(dir.path());
-    assert!(
-        granted_epoch > catalog_epoch,
-        "granted epoch {granted_epoch} must exceed catalog fencing epoch {catalog_epoch}"
-    );
-    reopened.shutdown(std::time::Duration::from_secs(10))?;
+        // Assert: neither recovery policy reconstructs the missing pointer.
+        assert!(
+            result.is_err(),
+            "missing shared authority admitted under {policy:?}"
+        );
+        assert!(!lease_path.exists());
+        for (path, bytes) in retained {
+            assert_eq!(std::fs::read(&path)?, bytes, "changed {}", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -694,7 +699,12 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
             .join(crate::metadata::files::MANIFEST_SNAPSHOT),
     )?)
     .expect("decode committed manifest snapshot");
-    assert_eq!(restored.last_persisted_sequence, 0);
+    assert_eq!(
+        restored.flush_frontiers().get(0).unwrap(),
+        crate::metadata::FamilyFrontier::Live {
+            through_sequence: 0
+        }
+    );
     assert!(restored.files.is_empty());
     assert!(restored.column_families.is_empty());
     Ok(())
@@ -887,7 +897,11 @@ fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeR
         .append_run(epoch, std::slice::from_ref(&entry))
         .map_err(MidgeError::from)?;
     catalog
-        .retire_prefix(epoch, std::slice::from_ref(&entry))
+        .retire_prefix(
+            epoch,
+            std::slice::from_ref(&entry),
+            crate::lease::SharedGenerationId::FIRST,
+        )
         .map_err(crate::runtime::hybrid_persistence::refusal_error)?;
 
     // Act

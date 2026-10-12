@@ -5,7 +5,9 @@ use bytes::Bytes;
 use std::path::Path;
 
 use crate::common::MidgeResult;
-use crate::types::{EntryType, KeyState, RangeTombstone};
+#[cfg(test)]
+use crate::types::KeyState;
+use crate::types::{EntryType, RangeTombstone};
 
 /// One owned logical version yielded by an SST's raw compaction cursor.
 ///
@@ -49,7 +51,7 @@ pub trait SstStateReader: Send + Sync {
     /// Returns an error when the SST cannot be read or decoded.
     ///
     /// Applies wall-clock TTL expiry. Production reads pass their own clock
-    /// through `get_state_at_with_time`; coverage proofs pass none.
+    /// through test-only `get_state_at_with_time`.
     #[cfg(test)]
     fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState>;
 
@@ -121,6 +123,7 @@ pub trait SstStateReader: Send + Sync {
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState>;
 
     /// Snapshot-aware lookup with a caller-owned TTL clock.
+    #[cfg(test)]
     fn get_state_at_with_time(
         &self,
         key: &[u8],
@@ -405,6 +408,7 @@ pub trait SstFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be opened or decoded.
+    #[cfg(test)]
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReaderExt>>;
 }
 

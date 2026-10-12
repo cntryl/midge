@@ -31,6 +31,14 @@ pub(crate) enum SimulatedCloud {
 }
 
 impl SimulatedCloud {
+    /// The host object store is durable shared state, outside the local cache.
+    pub(crate) fn cache_root_exclusion(&self) -> Option<&'static str> {
+        match self {
+            Self::Host(_) => Some(SIMULATED_CLOUD_DIR),
+            Self::Injected(_) => None,
+        }
+    }
+
     /// Locate the simulated cloud for `root`, preferring an injected store.
     ///
     /// # Errors

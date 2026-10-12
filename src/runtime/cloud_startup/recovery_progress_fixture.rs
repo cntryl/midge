@@ -1,11 +1,9 @@
 //! Actual recovery fixtures for the external watchdog's isolated child tests.
 
-use super::replay_coverage::ReplayCoverage;
-use super::streaming_wal_fs::StreamingWalFs;
 use super::streaming_wal_plan::StreamingCloudWalRecovery;
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
-use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
+use crate::io::{Fs, FsError, ReadFs};
 use crate::memtable::SkipListMemtable;
 use crate::storage::StorageBackend;
 use crate::types::{EntryType, KeyState};
@@ -17,7 +15,7 @@ use crate::wal::recovery::{RecoveryStats, ReplayPolicy};
 use crate::wal::{WalOpKind, WalRecord};
 use bytes::Bytes;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,8 +26,6 @@ use backend::{FixtureObservations, ObservedBackend};
 const READ_WINDOW: usize = 64 * 1024;
 const SEGMENT_EPOCH: u64 = 7;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(5);
-// Thirty-two completed coverage checks must outlast the paired 3s idle budget.
-const COVERAGE_PAUSE: Duration = Duration::from_millis(125);
 
 /// Fault policy owned by a fixture child, outside the supported public API.
 #[doc(hidden)]
@@ -38,7 +34,6 @@ const COVERAGE_PAUSE: Duration = Duration::from_millis(125);
 pub enum RecoveryProgressFixtureMode {
     DelayedRanges,
     HeldFirstRange,
-    CachedCoverage,
     MetadataInventory,
     HeldInventory,
 }
@@ -59,7 +54,6 @@ pub struct RecoveryProgressFixtureResult {
     pub local_wal_bytes: u64,
     pub staged_wal_count: u64,
     pub elapsed_ms: u64,
-    pub coverage_checks: u64,
     pub expected_inventory_entries: u64,
     pub retained_inventory_entries: u64,
     pub completed_inventory_heads: u64,
@@ -68,15 +62,12 @@ pub struct RecoveryProgressFixtureResult {
 
 struct FixtureWal {
     records: Vec<WalRecord>,
-    bytes: Vec<u8>,
     catalog: WalPublicationCatalog,
 }
 
 enum PreparedInput {
     Wal {
         wal: Box<FixtureWal>,
-        coverage: Option<Box<ReplayCoverage>>,
-        replay_fs: Option<Arc<dyn ReadFs>>,
     },
     #[cfg(any(test, feature = "cloud-common"))]
     Inventory(Vec<crate::metadata::FileMeta>),
@@ -136,7 +127,7 @@ pub fn prepare_recovery_progress_fixture(
             ));
         }
         _ => {
-            let wal = seed_wal(root, mode)?;
+            let wal = seed_wal(root)?;
             // The cache's ledger exists before recovery starts, as it does for
             // a real cache, so the measured recovery never writes locally.
             let local_root: Arc<dyn Fs> =
@@ -155,20 +146,7 @@ pub fn prepare_recovery_progress_fixture(
                 )?);
             }
             observations.set_expected_records(wal.records.len())?;
-            let coverage = if mode == RecoveryProgressFixtureMode::CachedCoverage {
-                Some(Box::new(cached_coverage(root, &wal.records, &remote)?))
-            } else {
-                None
-            };
-            let replay_fs = coverage
-                .as_ref()
-                .map(|_| buffered_wal(&wal.bytes))
-                .transpose()?;
-            PreparedInput::Wal {
-                wal: Box::new(wal),
-                coverage,
-                replay_fs,
-            }
+            PreparedInput::Wal { wal: Box::new(wal) }
         }
     };
     Ok(PreparedRecoveryProgressFixture {
@@ -203,19 +181,9 @@ impl PreparedRecoveryProgressFixture {
         let started = Instant::now();
         let local = self.root.join("local");
         match self.input {
-            PreparedInput::Wal {
-                wal,
-                coverage,
-                replay_fs,
-            } => wal_fixture(
-                &local,
-                &self.observations,
-                &wal,
-                &self.remote,
-                coverage.as_deref(),
-                replay_fs.as_ref(),
-                started,
-            ),
+            PreparedInput::Wal { wal } => {
+                wal_fixture(&local, &self.observations, &wal, &self.remote, started)
+            }
             #[cfg(any(test, feature = "cloud-common"))]
             PreparedInput::Inventory(inventory) => inventory_fixture(
                 &self.root,
@@ -234,8 +202,6 @@ fn wal_fixture(
     observations: &Arc<FixtureObservations>,
     wal: &FixtureWal,
     remote: &Arc<dyn StorageBackend>,
-    coverage: Option<&ReplayCoverage>,
-    replay_fs: Option<&Arc<dyn ReadFs>>,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
     observations.set_phase("planner")?;
@@ -263,20 +229,13 @@ fn wal_fixture(
             "fixture planner did not select exactly its cataloged remote WAL".into(),
         ));
     }
-    let replay_fs = replay_fs.cloned().unwrap_or(recovered.fs);
+    let replay_fs = recovered.fs;
     let before_replay = observations.snapshot().completed_range_reads;
     observations.set_phase("replay")?;
     let mut memtables = HashMap::new();
-    let stats = replay_fixture(
-        replay_fs.as_ref(),
-        &recovered.segments,
-        &mut memtables,
-        coverage,
-        observations,
-    )?;
+    let stats = replay_fixture(replay_fs.as_ref(), &recovered.segments, &mut memtables)?;
     observations.check_failure()?;
-    let (verified_records, row_mismatches) =
-        verify_rows(&wal.records, &memtables, coverage.is_some());
+    let (verified_records, row_mismatches) = verify_rows(&wal.records, &memtables);
     let observed = observations.snapshot();
     let (local_wal_bytes, staged_wal_count) = local_wal_state(local)?;
     let mismatches = row_mismatches
@@ -308,7 +267,6 @@ fn wal_fixture(
         local_wal_bytes,
         staged_wal_count,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        coverage_checks: observed.coverage_checks,
         expected_inventory_entries: 0,
         retained_inventory_entries: 0,
         completed_inventory_heads: 0,
@@ -373,7 +331,6 @@ fn inventory_fixture(
         local_wal_bytes,
         staged_wal_count,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        coverage_checks: observed.coverage_checks,
         expected_inventory_entries: observed.expected_inventory_entries,
         retained_inventory_entries: observed.retained_inventory_entries,
         completed_inventory_heads: observed.completed_inventory_heads,
@@ -428,22 +385,13 @@ fn seed_inventory(root: &Path) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
     Ok(files)
 }
 
-fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<FixtureWal> {
+fn seed_wal(root: &Path) -> MidgeResult<FixtureWal> {
     let mut records = Vec::new();
     let mut bytes = Vec::new();
-    let cached = mode == RecoveryProgressFixtureMode::CachedCoverage;
-    while if cached {
-        records.len() < 32
-    } else {
-        bytes.len() < 16 * READ_WINDOW
-    } {
+    while bytes.len() < 16 * READ_WINDOW {
         let sequence = u64::try_from(records.len() + 1)
             .map_err(|_| MidgeError::Internal("fixture sequence exceeds u64".into()))?;
-        let value = if cached {
-            incompressible_value(sequence)
-        } else {
-            sequence.to_le_bytes().repeat(16)
-        };
+        let value = sequence.to_le_bytes().repeat(16);
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from(format!("key-{sequence:08}")),
@@ -451,11 +399,6 @@ fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<Fixtu
             sequence,
         );
         let payload = crate::wal::encoding::encode(&record)?;
-        if cached && payload.len() < READ_WINDOW {
-            return Err(MidgeError::Internal(
-                "cached fixture requires genuinely large encoded WAL frames".into(),
-            ));
-        }
         crate::wal::frame::append_frame(&mut bytes, &payload)?;
         records.push(record);
     }
@@ -477,125 +420,25 @@ fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<Fixtu
     catalog
         .append_run(9, &[publication])
         .map_err(MidgeError::from)?;
-    Ok(FixtureWal {
-        records,
-        bytes,
-        catalog,
-    })
-}
-
-fn incompressible_value(sequence: u64) -> Vec<u8> {
-    let mut state = sequence ^ 0x9e37_79b9_7f4a_7c15;
-    let mut value = Vec::with_capacity(READ_WINDOW);
-    while value.len() < READ_WINDOW {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        value.extend_from_slice(&state.to_le_bytes());
-    }
-    value
-}
-
-fn buffered_wal(bytes: &[u8]) -> MidgeResult<Arc<dyn ReadFs>> {
-    let memory: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
-    let name = crate::wal::segment_file_name(1);
-    memory
-        .open(
-            &FsPath::new(&name),
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: true,
-                create_new: true,
-                truncate: false,
-            },
-        )
-        .map_err(FsError::into_midge)?
-        .write_at(0, Bytes::copy_from_slice(bytes))
-        .map_err(FsError::into_midge)?;
-    let mut buffered = StreamingWalFs::new(READ_WINDOW)?;
-    buffered.insert(name.clone(), memory, FsPath::new(name))?;
-    Ok(Arc::new(buffered))
-}
-
-fn cached_coverage(
-    root: &Path,
-    records: &[WalRecord],
-    remote: &Arc<dyn StorageBackend>,
-) -> MidgeResult<ReplayCoverage> {
-    let directory = root.join("cache-coverage-sst");
-    std::fs::create_dir_all(directory.join("sst"))?;
-    let fs: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::new(&directory).map_err(FsError::into_midge)?);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), READ_WINDOW)
-        .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
-            crate::codec::CompressionAlgo::None,
-        ));
-    let mut writer = factory.create_for_flush(
-        crate::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024),
-    )?;
-    for record in records.iter().filter(|record| record.seq.is_multiple_of(2)) {
-        writer.add_sorted_with_meta(
-            &record.key,
-            record.value.as_deref(),
-            record.seq,
-            EntryType::Put,
-            None,
-        )?;
-    }
-    let name = crate::cloud_layout::file_name(0, 0, 1);
-    let path = directory.join("sst").join(&name);
-    writer.finish_to_path(&path)?;
-    let bytes = std::fs::read(path)?;
-    let mut manifest = crate::metadata::Manifest::default();
-    manifest.files.push(crate::metadata::FileMeta {
-        name: name.clone(),
-        cf_id: 0,
-        size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        content_crc32c: Some(crc32c::crc32c(&bytes)),
-        smallest_key: records.first().map(|record| record.key.to_vec()),
-        largest_key: records.last().map(|record| record.key.to_vec()),
-        smallest_seq: Some(1),
-        largest_seq: Some(u64::try_from(records.len()).unwrap_or(u64::MAX)),
-        ..Default::default()
-    });
-    let pinned: Arc<dyn Fs> = Arc::new(
-        crate::storage::remote_sst::RemoteSstFs::new(fs, Arc::clone(remote), PROVIDER_TIMEOUT)
-            .with_verified_local_overrides(HashSet::from([name])),
-    );
-    let coverage = ReplayCoverage::new(manifest, pinned, 16 * 1024 * 1024);
-    for record in records {
-        if coverage.contains(record) != record.seq.is_multiple_of(2) {
-            return Err(MidgeError::Internal(
-                "cached fixture warmup did not establish exact SST coverage".into(),
-            ));
-        }
-    }
-    Ok(coverage)
+    Ok(FixtureWal { records, catalog })
 }
 
 fn replay_fixture(
     fs: &dyn ReadFs,
     segments: &crate::wal::recovery::ReplaySegments,
     memtables: &mut HashMap<u32, Arc<SkipListMemtable>>,
-    coverage: Option<&ReplayCoverage>,
-    observations: &FixtureObservations,
 ) -> MidgeResult<RecoveryStats> {
-    let should_apply = |record: &WalRecord| {
-        let covered = coverage.is_some_and(|coverage| coverage.contains(record));
-        if coverage.is_some() {
-            observations.record_coverage(covered != record.seq.is_multiple_of(2));
-            std::thread::sleep(COVERAGE_PAUSE);
-        }
-        !covered
-    };
+    let frontiers = crate::metadata::frontiers::FlushFrontiers::default();
     replay_wal_with_options(
         fs,
         segments,
         memtables,
         ReplayPolicy::Strict,
-        Some(&should_apply),
         StreamingReplayLimits::local(),
-        ReplayOptions::default(),
+        ReplayOptions {
+            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
+            ..ReplayOptions::default()
+        },
         &mut |_, _| Ok(()),
     )
 }
@@ -603,7 +446,6 @@ fn replay_fixture(
 fn verify_rows(
     records: &[WalRecord],
     memtables: &HashMap<u32, Arc<SkipListMemtable>>,
-    cached: bool,
 ) -> (u64, u64) {
     let mut verified = 0;
     let mut mismatches = 0;
@@ -611,12 +453,8 @@ fn verify_rows(
         let state = memtables.get(&0).map_or(KeyState::Absent, |table| {
             table.get_raw_key_state_at(&record.key, u64::MAX)
         });
-        let matches = if cached && record.seq.is_multiple_of(2) {
-            matches!(state, KeyState::Absent)
-        } else {
-            matches!(state, KeyState::Value(ref value, sequence, None, EntryType::Put)
-                if Some(value) == record.value.as_ref() && sequence == record.seq)
-        };
+        let matches = matches!(state, KeyState::Value(ref value, sequence, None, EntryType::Put)
+            if Some(value) == record.value.as_ref() && sequence == record.seq);
         if matches {
             verified += 1;
         } else {

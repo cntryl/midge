@@ -1,11 +1,14 @@
 # WAL redesign regression inventory (#808)
 
-This change inventories the 14 original audit classes as 17 executable tests,
+The original baseline inventories the 14 audit classes as 17 executable tests,
 plus two supplemental allocation/history cases and three cases the crash
 simulator found (`torn-unsynced-tail`, #817; `recovered-tail-not-durable`,
 #831; `lost-buffered-delete`, #835). It supplies a baseline runner and CI
-coverage. It does not implement the redesign or complete its simulator
-stage. Refs #808.
+coverage. Subsequent serial PRs implement the stages below. The registry's
+`baseline` column records the current expected result: completed stages are
+GREEN, while unresolved stages keep their original RED assertion markers.
+The original baseline commit and captured RED evidence remain the historical
+reference. Refs #808.
 
 The earlier simulator and shipping adapter changes were removed after review
 found false-pass and false-failure risks. Filesystem fault injection and crash
@@ -14,7 +17,7 @@ oracles, stable replay identities, and engine campaigns must be qualified in
 subsequent serial PRs before serving as acceptance evidence. The removed draft
 is retained in Git history at `33cc1a72e10282eba32e8cfb090aa2fea7535f77`.
 The crash-device-dependent #811 fixture follows the ownership work; #811 stays
-open. Existing production storage and lease protocols are unchanged.
+open. Production changes are described by the implemented stage contracts below.
 
 ## Implementation sequence
 
@@ -30,6 +33,30 @@ names the stage whose pull request turns a case GREEN:
 | 5 | One salvage rule | #821 |
 | 6 | Typed commit outcomes, admission envelope, one transaction rule | #822 |
 | 7 | Invariant catalog and durability contract | #823 |
+
+## Stage 3 flush authority (#819)
+
+FORMAT 8 requires a canonical frontier row for every known family, including
+permanently retained dropped IDs. A flush journals its SST allocation, `AddSst`
+and `AdvanceFlushFrontier` in one atomic batch. Replay selects complete
+transactions by commit sequence against these frontiers; it still validates
+skipped records. Missing family authority is corruption under both recovery
+policies. SST contents and tombstone presence do not decide WAL retention.
+
+Local retirement first persists the new ledger `log_start`, then queues physical
+deletes. Cloud retirement uses the frontiers in an immutable, committed shared
+generation, commits that generation's ordinal in catalog `retired_by`, and then
+queues identity-conditional deletes. Shared ordinals are independent of manifest
+journal edit IDs. Startup verifies the committed generation covers `retired_by`
+before hydrating metadata or admitting WAL history. Simulated cloud engines use
+the same shared-store lease and generation authority as provider engines.
+
+Physical cloud cleanup has a bounded retry queue. It reserves capacity before
+retiring catalog entries and retains the original object identity across
+transient failures. Retries are process-local: a crash or an unconfirmed catalog
+CAS reply can leave remote objects below the committed anchor. Recovery ignores
+those objects; ambiguous CAS results never authorize deletion. Persistent orphan
+reclamation is outside this stage.
 
 Decisions that refine the #808 target design:
 
@@ -80,12 +107,14 @@ Decisions that refine the #808 target design:
   copying the dropped files into `wal/salvaged-<millis>/`, truncating the cut
   segment to its replayed prefix and sealing that with a footer. The new open
   segment links the cut. Nothing is renamed.
-- The catalog is a chain (#844, catalog v2), like the ledger. Its `anchor` is
+- The catalog is a chain (#844, extended in #819), like the ledger. Its `anchor` is
   the link of the last segment it retired, or the genesis link. Each entry,
-  `{epoch, prev, link, size_bytes, crc32c}`, links the one before; epochs
+  `{epoch, prev, facts, size_bytes, crc32c}`, links the one before; epochs
   never fall; `next_segment_id` passes the head and never falls. The head is
   the newest entry's link, or the anchor. The object keys keep their `v1`
-  names and the document says `format_version: 2`; any other version is a
+  names. Stage 3 uses `format_version: 3`, adds complete sealed segment facts
+  (including per-family sequence maxima), and records `retired_by` as the shared
+  generation authorizing its retired prefix. Any other version is a
   `CompatibilityError`, never repaired from the mirror.
 - The catalog owns its shape. Its mutators are pure and refuse whole
   (`CatalogRefusal`): `fence_to` hands it to a later epoch, `append_run` must

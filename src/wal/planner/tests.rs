@@ -235,7 +235,11 @@ fn should_retire_members_at_or_below_the_catalog_anchor() {
     let ledger = ledger(ChainLink::GENESIS, &members, 3, 7);
     let mut catalog = catalog(&members);
     catalog
-        .retire_prefix(9, &[members[0].entry()])
+        .retire_prefix(
+            9,
+            &[members[0].entry()],
+            crate::lease::SharedGenerationId::new(1).unwrap(),
+        )
         .expect("retire");
     let probes = whole(&members[1..], &[], &ledger);
 
@@ -288,7 +292,11 @@ fn should_preserve_a_joined_tail_when_planning_from_the_history_facts() {
     let ledger = ledger(ChainLink::GENESIS, &members, 3, 7);
     let mut catalog = catalog(&members[..1]);
     catalog
-        .retire_prefix(9, &[members[0].entry()])
+        .retire_prefix(
+            9,
+            &[members[0].entry()],
+            crate::lease::SharedGenerationId::new(1).unwrap(),
+        )
         .expect("retire");
     let probes = whole(&[], &members[1..], &ledger);
 
@@ -498,7 +506,11 @@ fn should_raise_floor_to_the_catalog_head_when_every_entry_retired() {
     let published = chain(ChainLink::GENESIS, 1..=2, 7);
     let mut catalog = catalog(&published);
     catalog
-        .retire_prefix(9, &[published[0].entry(), published[1].entry()])
+        .retire_prefix(
+            9,
+            &[published[0].entry(), published[1].entry()],
+            crate::lease::SharedGenerationId::new(1).unwrap(),
+        )
         .expect("retire");
 
     // Act

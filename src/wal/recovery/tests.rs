@@ -135,12 +135,12 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
     };
 
     let replay = |memtables: &mut HashMap<_, _>| {
-        replay_wal_with_manifest_filter_within(
+        replay_wal_with_frontiers_within(
             &storage,
             &segments,
             memtables,
             ReplayPolicy::Strict,
-            &|_| Ok(true),
+            &crate::metadata::frontiers::FlushFrontiers::default(),
             None,
         )
     };
@@ -956,7 +956,7 @@ fn should_apply_txn_batch_atomically_during_recovery() {
 }
 
 #[test]
-fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
+fn should_replay_complete_retained_txn_batch_when_commit_exceeds_frontier() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -988,7 +988,8 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
         writer.append_record(&batch).unwrap();
         writer.sync().unwrap();
     }
-    let should_apply = |record: &WalRecord| Ok(record.key.as_ref() != b"covered");
+    let frontiers =
+        serde_json::from_value(serde_json::json!([{"cf_id": 0, "through_sequence": 2}])).unwrap();
 
     // Act
     let mut memtables = HashMap::new();
@@ -997,12 +998,12 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
         &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
         0,
     );
-    let stats = replay_wal_with_manifest_filter_within(
+    let stats = replay_wal_with_frontiers_within(
         &storage,
         &segments,
         &mut memtables,
         ReplayPolicy::Strict,
-        &should_apply,
+        &frontiers,
         None,
     )
     .unwrap();
@@ -1010,7 +1011,7 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
     // Assert
     assert_eq!(stats.record_count, 1);
     let recovered = &memtables[&0];
-    assert_eq!(recovered.get(b"covered").unwrap(), None);
+    assert_eq!(recovered.get(b"covered").unwrap(), Some(b"value".to_vec()));
     assert_eq!(
         recovered.get(b"uncovered").unwrap(),
         Some(b"value".to_vec())
@@ -1964,14 +1965,12 @@ fn replay_fixture_with_policy(
 ) -> MidgeResult<RecoveryStats> {
     // Bare bodies a test wrote become a chain of v2 segments first.
     let segments = crate::wal::recovery::fixture::wrap_chain(storage, segments, 0);
-    replay_wal_with_manifest_filter_within(
-        storage,
-        &segments,
-        memtables,
-        policy,
-        &|_| Ok(true),
-        None,
-    )
+    let frontiers = serde_json::from_value(serde_json::json!([
+        {"cf_id": 0, "through_sequence": 0},
+        {"cf_id": 1, "through_sequence": 0}
+    ]))
+    .unwrap();
+    replay_wal_with_frontiers_within(storage, &segments, memtables, policy, &frontiers, None)
 }
 
 fn replay_fixture(

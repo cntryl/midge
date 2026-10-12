@@ -755,34 +755,31 @@ fn assert_fenced_publication_response(result: &RuntimeResponse, before_gc: bool)
 }
 
 #[test]
-fn should_capture_most_restrictive_gc_cutoff_when_compaction_launches() -> MidgeResult<()> {
+fn should_preserve_snapshot_horizon_when_retained_wal_no_longer_pins_tombstone_gc(
+) -> MidgeResult<()> {
     // Arrange
     let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    let generation = el.state.wal.open_segment();
-    el.wal_transition.initialize_gc_pins(generation, 20);
     let plan =
         crate::compaction::CompactionPlan::new(0, 0, 1).with_tombstone_gc_eligibility(true, true);
     el.state.register_snapshot(1, 10, Vec::new());
 
     // Act
-    let snapshot_limited = el.prepare_compaction_plan_for_launch(plan.clone())?;
+    let first = el.prepare_compaction_plan_for_launch(plan.clone())?;
     el.state.unregister_snapshot(1);
     el.state.register_snapshot(2, 30, Vec::new());
-    let wal_limited = el.prepare_compaction_plan_for_launch(plan.clone())?;
-    el.wal_transition
-        .register_recovered(generation - 1, 5, true);
-    let unknown = el.prepare_compaction_plan_for_launch(plan)?;
+    el.wal_transition.register_recovered(81, 5, true);
+    let retained_wal = el.prepare_compaction_plan_for_launch(plan.clone())?;
+    el.state.unregister_snapshot(2);
+    let unpinned = el.prepare_compaction_plan_for_launch(plan)?;
 
-    // Assert: unknown WAL tracking disables only GC, not compaction admission.
-    assert_eq!(snapshot_limited.snapshot_horizon, Some(10));
-    assert_eq!(wal_limited.snapshot_horizon, Some(20));
-    assert_eq!(unknown.snapshot_horizon, Some(0));
-    assert!(wal_limited.point_tombstone_gc_eligible);
-    assert!(wal_limited.range_tombstone_gc_eligible);
-    assert!(!unknown.point_tombstone_gc_eligible);
-    assert!(!unknown.range_tombstone_gc_eligible);
-    assert_ne!(unknown.output_seq, 0);
+    // Assert
+    assert_eq!(first.snapshot_horizon, Some(10));
+    assert_eq!(retained_wal.snapshot_horizon, Some(30));
+    assert_eq!(unpinned.snapshot_horizon, None);
+    assert!(retained_wal.point_tombstone_gc_eligible);
+    assert!(retained_wal.range_tombstone_gc_eligible);
+    assert_ne!(unpinned.output_seq, 0);
     Ok(())
 }

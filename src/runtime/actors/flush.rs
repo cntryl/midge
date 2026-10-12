@@ -52,7 +52,6 @@ pub(crate) trait FlushStorage: Send + Sync {
         &self,
         fs: &dyn crate::io::Fs,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        manifest_sequence: u64,
         deadline: &crate::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
@@ -97,7 +96,6 @@ impl FlushStorage for HybridFlushStorage {
         &self,
         fs: &dyn crate::io::Fs,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        manifest_sequence: u64,
         deadline: &crate::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
@@ -114,7 +112,6 @@ impl FlushStorage for HybridFlushStorage {
                 fs,
                 publication_lock,
                 lock_wait_budget: cloud.callback_timeout(),
-                local_manifest_sequence: manifest_sequence,
                 deadline,
                 authority,
             },
@@ -171,7 +168,6 @@ pub(crate) struct FlushMirrorTask {
     pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub manifest_sequence: u64,
     pub runtime_response_timeout: std::time::Duration,
 }
 
@@ -628,7 +624,6 @@ fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
     let mirrored = task.storage.mirror_control_metadata(
         task.fs.as_ref(),
         &task.metadata_publication_lock,
-        task.manifest_sequence,
         &deadline,
         task.leader_store.as_deref().map(|store| {
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
@@ -984,7 +979,6 @@ mod tests {
             lease_healthy: fixture.task.lease_healthy.clone(),
             leader_store: fixture.task.leader_store.clone(),
             leader_holder_id: fixture.task.leader_holder_id.clone(),
-            manifest_sequence: 1,
             runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
         }
     }

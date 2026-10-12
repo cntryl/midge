@@ -1,359 +1,228 @@
-//! Admitted metadata snapshots for resumable WAL cleanup.
+//! Immutable shared metadata publications and the authority they give WAL retirement.
 
-use super::{
-    Arc, CloudMetadataPruneGuard, CloudStorage, CloudWalPruneProgress, GuardedObjectProof,
-    HybridStorage, Manifest, MidgeError, MidgeResult, StorageBackend,
-};
-use crate::io::stream::FileReader;
-use crate::io::{File, FsError, FsPath, OpenMode, OpenOptions};
-use std::io::Read as _;
+use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
+use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use crate::io::{FsError, FsPath};
+use crate::lease::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, SharedGenerationId};
+use crate::metadata::{files, Manifest, ManifestPersistence};
+use crate::storage::cloud::{BlockingCloud, CloudStorage};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-#[derive(Clone)]
-pub(crate) struct CloudMetadataPruneSnapshot {
-    cloud: Arc<CloudStorage>,
-    fs: Arc<dyn crate::io::traits::Fs>,
-    metadata_publication_lock: crate::runtime::MetadataPublicationLock,
-    budget: crate::common::resource_budget::ResourceBudget,
-    progress: CloudWalPruneProgress,
-    authority: Option<(Arc<dyn crate::lease::LeaderStore>, String, u64)>,
+/// A committed shared manifest, decoded from the exact immutable pointer bodies.
+/// Only the shared loader can construct one; local progress never grants authority.
+pub(crate) struct SharedRetirementAuthority {
+    generation: CloudMetadataGeneration,
+    manifest: Manifest,
+    store: Arc<dyn LeaderStore>,
+    holder_id: String,
+    writer_epoch: u64,
+    _memory: ResourceReservation,
 }
 
-impl CloudMetadataPruneSnapshot {
-    pub(crate) fn new(
-        cloud: Arc<CloudStorage>,
-        fs: Arc<dyn crate::io::traits::Fs>,
-        budget: crate::common::resource_budget::ResourceBudget,
-        metadata_publication_lock: crate::runtime::MetadataPublicationLock,
-    ) -> Self {
-        Self {
-            cloud,
-            fs,
-            budget,
-            metadata_publication_lock,
-            progress: CloudWalPruneProgress::default(),
-            authority: None,
-        }
+impl SharedRetirementAuthority {
+    pub(crate) fn generation_id(&self) -> SharedGenerationId {
+        self.generation.id
+    }
+    pub(crate) fn writer_epoch(&self) -> u64 {
+        self.writer_epoch
+    }
+    pub(crate) fn frontiers(&self) -> &crate::metadata::frontiers::FlushFrontiers {
+        self.manifest.flush_frontiers()
     }
 
-    pub(crate) fn with_authority(
-        mut self,
-        store: Arc<dyn crate::lease::LeaderStore>,
+    pub(crate) fn verify_current(&self, deadline: &OperationDeadline) -> MidgeResult<()> {
+        self.store
+            .validate_epoch_with_timeout(&self.holder_id, self.writer_epoch, deadline.remaining())
+            .map_err(|error| error.into_validation_error("shared retirement lease"))?;
+        let current = self
+            .store
+            .read_committed_metadata(deadline.remaining())
+            .map_err(|error| error.into_validation_error("shared retirement pointer"))?;
+        if current != CloudMetadataHead::Committed(self.generation.clone()) {
+            return Err(MidgeError::Fenced(
+                "shared metadata pointer changed before WAL retirement".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SharedMetadataSnapshot {
+    cloud: Arc<CloudStorage>,
+    budget: ResourceBudget,
+    store: Arc<dyn LeaderStore>,
+    holder_id: String,
+    writer_epoch: u64,
+}
+
+impl SharedMetadataSnapshot {
+    pub(crate) fn new(
+        cloud: Arc<CloudStorage>,
+        budget: ResourceBudget,
+        store: Arc<dyn LeaderStore>,
         holder_id: String,
         writer_epoch: u64,
     ) -> Self {
-        self.authority = Some((store, holder_id, writer_epoch));
-        self
+        Self {
+            cloud,
+            budget,
+            store,
+            holder_id,
+            writer_epoch,
+        }
     }
 
-    pub(crate) fn with_progress(mut self, progress: CloudWalPruneProgress) -> Self {
-        self.progress = progress;
-        self
-    }
-
-    /// Verify an exact, read-only metadata snapshot and keep cloud metadata
-    /// publication serialized through the authority-changing operation.
-    ///
-    /// Cleanup must never repair cloud metadata from a captured snapshot: an
-    /// intent or DDL edit can change without advancing the manifest sequence,
-    /// so writing stale bytes here could roll authoritative metadata backward.
-    /// A mismatch is a safe cleanup deferral. Holding the publication lock
-    /// through `operation` prevents a verified snapshot from changing before
-    /// the WAL catalog compare-exchange retires recovery authority.
-    pub(crate) fn verify_exact_then<T>(
+    pub(crate) fn committed_retirement_authority_within(
         &self,
-        deadline: &crate::common::OperationDeadline,
-        operation: impl FnOnce(Arc<Manifest>, CloudMetadataPruneGuard) -> MidgeResult<T>,
-    ) -> MidgeResult<T> {
-        let lock_timeout = deadline
-            .clamp_nonzero(self.cloud.callback_timeout())
-            .ok_or_else(|| {
-                MidgeError::Timeout(
-                    "metadata proof deadline exhausted before publication lock".into(),
-                )
-            })?;
-        let _publication_guard = self
-            .metadata_publication_lock
-            .lock_for(lock_timeout)
-            .ok_or_else(|| {
-                MidgeError::Timeout("metadata proof timed out acquiring publication lock".into())
-            })?;
-
-        // Admit retained manifest, journal replay, and decoding scratch before
-        // loading either local metadata or remote bodies. The publication lock
-        // keeps these local files stable through authority retirement.
-        let mut encoded_bytes = 0usize;
-        for name in crate::metadata::files::CLOUD_MIRRORED {
-            match self.fs.metadata(&FsPath::new(*name)) {
-                Ok(metadata) => {
-                    encoded_bytes = encoded_bytes
-                        .saturating_add(usize::try_from(metadata.len).unwrap_or(usize::MAX));
-                }
-                Err(FsError::NotFound(_)) => {}
-                Err(error) => return Err(error.into_midge()),
-            }
-        }
-        let mut cached = self.progress.0.lock().snapshot(&self.budget);
-        if cached
-            .as_ref()
-            .is_some_and(|guard| guard.metadata.is_none())
-        {
-            cached = None;
-            self.progress.discard_idle_proofs();
-        }
-        let reserve = || {
-            self.budget
-                .reserve(
-                    encoded_bytes.saturating_mul(16).saturating_add(4096),
-                    "WAL cleanup metadata decoding",
-                )
-                .map(Arc::new)
-        };
-        let mut memory = match &cached {
-            Some(guard) => Arc::clone(guard.manifest_memory.as_ref().expect("admitted snapshot")),
-            None => reserve()?,
-        };
-        let (objects, generation) = self.verify_objects(deadline).inspect_err(|_| {
-            // A larger replacement object may not fit beside retained admission.
-            // Release it on deferral so the next attempt can admit fresh metadata.
-            self.progress.discard_idle_proofs();
-        })?;
-
-        let authority = self.authority.as_ref().zip(generation).map(
-            |((store, holder_id, writer_epoch), generation)| super::CloudMetadataAuthorityProof {
-                store: Arc::clone(store),
-                holder_id: holder_id.clone(),
-                writer_epoch: *writer_epoch,
-                generation,
-            },
-        );
-        let unchanged = cached.as_ref().is_some_and(|guard| {
-            let previous = &guard.metadata.as_ref().expect("metadata snapshot").objects;
-            previous.len() == objects.len()
-                && previous
-                    .iter()
-                    .zip(&objects)
-                    .all(|(old, new)| old.same_identity(new))
-        });
-        if unchanged {
-            return operation(
-                Arc::clone(&cached.as_ref().expect("unchanged snapshot").manifest),
-                CloudMetadataPruneGuard {
-                    objects,
-                    memory: Some(memory),
-                    authority,
-                },
-            );
-        }
-        if cached.take().is_some() {
-            self.progress.discard_idle_proofs();
-            drop(memory);
-            memory = reserve()?;
-        }
-        let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &self.fs,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .map_err(MidgeError::Internal)?;
-        let guard = CloudMetadataPruneGuard {
-            objects,
-            memory: Some(memory),
-            authority,
-        };
-        operation(Arc::new(manifest), guard)
-    }
-    /// The local copy of a mirrored metadata file, if it exists.
-    fn open_local(&self, file_name: &str) -> MidgeResult<Option<FileReader<Box<dyn File>>>> {
-        let opened = self.fs.open_persistent_handle(
-            &FsPath::new(file_name),
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        );
-        match opened {
-            Ok(file) => Ok(Some(FileReader::new(file)?)),
-            Err(FsError::NotFound(_)) => Ok(None),
-            Err(error) => Err(error.into_midge()),
-        }
-    }
-
-    fn verify_objects(
-        &self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<(
-        Vec<GuardedObjectProof>,
-        Option<crate::lease::CloudMetadataGeneration>,
-    )> {
-        if let Some((store, holder_id, writer_epoch)) = &self.authority {
-            return self
-                .verify_committed_objects(deadline, store.as_ref(), holder_id, *writer_epoch)
-                .map(|(objects, generation)| (objects, Some(generation)));
-        }
-        if !cfg!(test) {
-            return Err(MidgeError::Fenced(
-                "cloud WAL cleanup has no committed metadata authority".into(),
-            ));
-        }
-        let backend: Arc<dyn StorageBackend> = self.cloud.clone();
-        let mut objects = Vec::with_capacity(crate::metadata::files::CLOUD_MIRRORED.len());
-        let mut has_manifest_base = false;
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let local = self.open_local(file_name)?;
-            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-            let proof = HybridStorage::read_control_from_backend(
-                &backend,
-                &key,
-                &self.budget,
-                self.cloud.callback_timeout(),
-                deadline,
-            )?;
-            let (mut local, proof) = match (local, proof) {
-                (Some(local), Some(proof)) => (local, proof),
-                (None, None) => continue,
-                (Some(_), None) => {
-                    return Err(MidgeError::Corruption(format!(
-                        "cloud metadata '{key}' is missing"
-                    )))
-                }
-                (None, Some(_)) => {
-                    return Err(MidgeError::Corruption(format!(
-                        "local metadata for '{key}' is missing"
-                    )))
-                }
-            };
-            let mut buffer = [0u8; 16 * 1024];
-            for expected in proof.bytes().chunks(buffer.len()) {
-                local.read_exact(&mut buffer[..expected.len()])?;
-                if &buffer[..expected.len()] != expected {
-                    return Err(MidgeError::Corruption(format!(
-                        "cloud metadata '{key}' does not match the captured committed metadata"
-                    )));
-                }
-            }
-            if local.read(&mut buffer[..1])? != 0 {
-                return Err(MidgeError::Corruption(format!(
-                    "cloud metadata '{key}' has a different length"
-                )));
-            }
-            if crate::metadata::files::is_manifest_body(file_name) {
-                has_manifest_base = true;
-            }
-            // Exact byte comparison has completed against identity-pinned reads.
-            // Retain the identity, not another copy of every metadata file.
-            objects.push(GuardedObjectProof::range_identity(
-                Arc::clone(&backend),
-                key,
-                proof.object_metadata().clone(),
-            ));
-        }
-
-        if !has_manifest_base {
-            return Err(MidgeError::Internal(
-                "no committed cloud manifest base is available to guard WAL cleanup".to_string(),
-            ));
-        }
-
-        Ok((objects, None))
-    }
-
-    fn verify_committed_objects(
-        &self,
-        deadline: &crate::common::OperationDeadline,
-        store: &dyn crate::lease::LeaderStore,
-        holder_id: &str,
-        writer_epoch: u64,
-    ) -> MidgeResult<(
-        Vec<GuardedObjectProof>,
-        crate::lease::CloudMetadataGeneration,
-    )> {
-        store
-            .validate_epoch_with_timeout(holder_id, writer_epoch, deadline.remaining())
-            .map_err(|error| error.into_validation_error("cloud metadata cleanup lease check"))?;
-        let crate::lease::CloudMetadataHead::Committed(generation) = store
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<SharedRetirementAuthority> {
+        self.store
+            .validate_epoch_with_timeout(&self.holder_id, self.writer_epoch, deadline.remaining())
+            .map_err(|error| error.into_validation_error("shared metadata snapshot lease"))?;
+        let CloudMetadataHead::Committed(generation) = self
+            .store
             .read_committed_metadata(deadline.remaining())
-            .map_err(|error| error.into_validation_error("cloud metadata cleanup pointer"))?
+            .map_err(|error| error.into_validation_error("shared metadata snapshot pointer"))?
         else {
             return Err(MidgeError::Corruption(
-                "cloud WAL cleanup has no committed metadata generation".into(),
+                "cloud WAL retirement requires a committed shared manifest".into(),
             ));
         };
-        let backend: Arc<dyn StorageBackend> = self.cloud.clone();
-        let mut objects = Vec::with_capacity(generation.objects.len());
-        let mut has_manifest_base = false;
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let local = self.open_local(file_name)?;
-            let committed = generation
-                .objects
-                .iter()
-                .find(|object| object.file_name == *file_name);
-            let (mut local, committed) = match (local, committed) {
-                (None, None) => continue,
-                (Some(local), Some(committed)) => (local, committed),
-                _ => {
-                    return Err(MidgeError::Corruption(format!(
-                        "local metadata '{file_name}' differs from committed presence map"
-                    )));
-                }
-            };
-            let key = &committed.object_key;
-            let proof = HybridStorage::read_control_from_backend(
-                &backend,
-                key,
-                &self.budget,
-                self.cloud.callback_timeout(),
-                deadline,
-            )?
-            .ok_or_else(|| {
-                MidgeError::Corruption(format!("committed cloud metadata '{key}' is missing"))
+        let encoded = generation
+            .objects
+            .iter()
+            .try_fold(0usize, |total, object| {
+                usize::try_from(object.len)
+                    .ok()
+                    .and_then(|len| total.checked_add(len))
+                    .ok_or_else(|| {
+                        MidgeError::ResourceLimit(
+                            "shared metadata length exceeds address space".into(),
+                        )
+                    })
             })?;
-            if u64::try_from(proof.bytes().len()).unwrap_or(u64::MAX) != committed.len
-                || crc32c::crc32c(proof.bytes()) != committed.crc32c
-            {
-                return Err(MidgeError::Corruption(format!(
-                    "committed cloud metadata '{key}' fails length or checksum proof"
-                )));
-            }
-            let mut buffer = [0u8; 16 * 1024];
-            for expected in proof.bytes().chunks(buffer.len()) {
-                local.read_exact(&mut buffer[..expected.len()])?;
-                if &buffer[..expected.len()] != expected {
-                    return Err(MidgeError::Corruption(format!(
-                        "local metadata '{file_name}' differs from committed generation"
-                    )));
-                }
-            }
-            if local.read(&mut buffer[..1])? != 0 {
-                return Err(MidgeError::Corruption(format!(
-                    "local metadata '{file_name}' has a different length"
-                )));
-            }
-            if crate::metadata::files::is_manifest_body(file_name) {
-                has_manifest_base = true;
-            }
-            objects.push(GuardedObjectProof::range_identity(
-                Arc::clone(&backend),
-                key.clone(),
-                proof.object_metadata().clone(),
-            ));
-        }
-        if !has_manifest_base {
-            return Err(MidgeError::Corruption(
-                "committed cloud metadata has no manifest snapshot for WAL cleanup".into(),
-            ));
-        }
-        Ok((objects, generation))
+        let admitted = encoded
+            .checked_mul(16)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit("shared metadata decoding admission overflow".into())
+            })?;
+        let memory = self
+            .budget
+            .reserve(admitted, "shared metadata manifest decoding")?;
+        let bodies = read_committed_metadata_bodies_within(&self.cloud, &generation, deadline)?;
+        let manifest = decode_generation_manifest(&generation, &bodies, deadline)?;
+        let authority = SharedRetirementAuthority {
+            generation,
+            manifest,
+            store: Arc::clone(&self.store),
+            holder_id: self.holder_id.clone(),
+            writer_epoch: self.writer_epoch,
+            _memory: memory,
+        };
+        authority.verify_current(deadline)?;
+        Ok(authority)
     }
 }
 
-/// Commit the local control files as one immutable, lease-pointed generation.
-///
-/// The lease object's compare-exchange is the publication boundary. Staged
-/// objects that lose that CAS are harmless orphans and cannot change recovery.
+pub(crate) fn read_committed_metadata_bodies_within(
+    cloud: &CloudStorage,
+    generation: &CloudMetadataGeneration,
+    deadline: &OperationDeadline,
+) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    if generation.id == SharedGenerationId::NONE {
+        return Err(MidgeError::Corruption(
+            "committed metadata has zero generation ordinal".into(),
+        ));
+    }
+    let io = BlockingCloud::new(cloud, deadline);
+    let mut bodies = BTreeMap::new();
+    for object in &generation.objects {
+        if !files::CLOUD_MIRRORED.contains(&object.file_name.as_str())
+            || bodies.contains_key(&object.file_name)
+        {
+            return Err(MidgeError::Corruption(
+                "shared metadata has unknown or duplicate filenames".into(),
+            ));
+        }
+        let canonical_key = object
+            .object_key
+            .strip_prefix("metadata/generations/")
+            .and_then(|suffix| suffix.split_once('/'))
+            .is_some_and(|(id, name)| {
+                name == object.file_name
+                    && uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
+            });
+        if !canonical_key {
+            return Err(MidgeError::Corruption(
+                "shared metadata has an invalid immutable object key".into(),
+            ));
+        }
+        let data = io.get_optional(&object.object_key)?.ok_or_else(|| {
+            MidgeError::Corruption(format!(
+                "committed cloud metadata '{}' is missing",
+                object.file_name
+            ))
+        })?;
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) != object.len
+            || crc32c::crc32c(&data) != object.crc32c
+        {
+            return Err(MidgeError::Corruption(format!(
+                "committed cloud metadata '{}' does not match its length and checksum",
+                object.file_name
+            )));
+        }
+        bodies.insert(object.file_name.clone(), data);
+    }
+    for required in [files::FORMAT, files::MANIFEST_SNAPSHOT] {
+        if !bodies.contains_key(required) {
+            return Err(MidgeError::Corruption(format!(
+                "committed cloud metadata generation is missing '{required}'"
+            )));
+        }
+    }
+    if bodies[files::FORMAT] != crate::metadata::format::current_format_marker_bytes() {
+        return Err(MidgeError::CompatibilityError(
+            "committed cloud FORMAT differs from the current format".into(),
+        ));
+    }
+    Ok(bodies)
+}
+
+pub(crate) fn decode_generation_manifest(
+    generation: &CloudMetadataGeneration,
+    bodies: &BTreeMap<String, Vec<u8>>,
+    deadline: &OperationDeadline,
+) -> MidgeResult<Manifest> {
+    let manifest = decode_manifest_bodies(bodies, deadline)?;
+    if manifest.edit_checkpoint_id != generation.manifest_horizon {
+        return Err(MidgeError::Corruption(format!(
+            "committed manifest horizon {} differs from shared pointer horizon {}",
+            manifest.edit_checkpoint_id, generation.manifest_horizon
+        )));
+    }
+    Ok(manifest)
+}
+
+fn decode_manifest_bodies(
+    bodies: &BTreeMap<String, Vec<u8>>,
+    deadline: &OperationDeadline,
+) -> MidgeResult<Manifest> {
+    let snapshot = bodies.get(files::MANIFEST_SNAPSHOT).ok_or_else(|| {
+        MidgeError::Corruption("metadata publication lacks manifest snapshot".into())
+    })?;
+    ManifestPersistence::decode_bodies(
+        snapshot,
+        bodies.get(files::JOURNAL).map(Vec::as_slice),
+        &DeadlineScope::new(*deadline),
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CloudMetadataMirrorAuthority<'a> {
-    pub(crate) store: &'a dyn crate::lease::LeaderStore,
+    pub(crate) store: &'a dyn LeaderStore,
     pub(crate) holder_id: &'a str,
     pub(crate) writer_epoch: u64,
 }
@@ -361,863 +230,515 @@ pub(crate) struct CloudMetadataMirrorAuthority<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct CloudMetadataMirrorContext<'a> {
     pub(crate) cloud: &'a CloudStorage,
-    pub(crate) fs: &'a dyn crate::io::traits::Fs,
+    pub(crate) fs: &'a dyn crate::io::Fs,
     pub(crate) publication_lock: &'a crate::runtime::MetadataPublicationLock,
     pub(crate) lock_wait_budget: std::time::Duration,
-    pub(crate) local_manifest_sequence: u64,
-    pub(crate) deadline: &'a crate::common::OperationDeadline,
+    pub(crate) deadline: &'a OperationDeadline,
     pub(crate) authority: CloudMetadataMirrorAuthority<'a>,
 }
 
+fn capture_local_metadata(
+    context: &CloudMetadataMirrorContext<'_>,
+) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    let mut local = BTreeMap::new();
+    for name in files::CLOUD_MIRRORED {
+        if context.deadline.is_expired() {
+            return Err(MidgeError::Timeout(
+                "metadata capture deadline exhausted".into(),
+            ));
+        }
+        match crate::io::read_all(context.fs, &FsPath::new(*name)) {
+            Ok(bytes) => {
+                local.insert((*name).to_string(), bytes.to_vec());
+            }
+            Err(FsError::NotFound(_)) => {}
+            Err(error) => return Err(error.into_midge()),
+        }
+    }
+    if local.get(files::FORMAT) != Some(&crate::metadata::format::current_format_marker_bytes()) {
+        return Err(MidgeError::Corruption(
+            "cannot commit cloud metadata without current FORMAT".into(),
+        ));
+    }
+    Ok(local)
+}
+
+fn validate_manifest_successor(candidate: &Manifest, committed: &Manifest) -> MidgeResult<()> {
+    if candidate.edit_checkpoint_id < committed.edit_checkpoint_id {
+        return Err(MidgeError::Fenced(
+            "candidate shared manifest regresses the committed journal horizon".into(),
+        ));
+    }
+    candidate
+        .flush_frontiers()
+        .dominates(committed.flush_frontiers())
+        .map_err(|error| {
+            MidgeError::Fenced(format!(
+                "candidate shared manifest regresses committed family authority: {error}"
+            ))
+        })?;
+    for old in &committed.column_families {
+        let current = candidate
+            .column_families
+            .iter()
+            .find(|family| family.id == old.id)
+            .ok_or_else(|| {
+                MidgeError::Fenced("candidate shared manifest removes a family identity".into())
+            })?;
+        if current.name != old.name || current.created_at != old.created_at {
+            return Err(MidgeError::Fenced(
+                "candidate shared manifest replaces an existing family identity".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_unchanged_publication(
+    context: &CloudMetadataMirrorContext<'_>,
+    previous: &CloudMetadataGeneration,
+) -> MidgeResult<()> {
+    context
+        .authority
+        .store
+        .validate_epoch_with_timeout(
+            context.authority.holder_id,
+            context.authority.writer_epoch,
+            context.deadline.remaining(),
+        )
+        .map_err(|error| error.into_validation_error("unchanged metadata publication lease"))?;
+    if context
+        .authority
+        .store
+        .read_committed_metadata(context.deadline.remaining())
+        .map_err(|error| error.into_validation_error("unchanged metadata pointer readback"))?
+        != CloudMetadataHead::Committed(previous.clone())
+    {
+        return Err(MidgeError::Fenced(
+            "shared metadata pointer changed during unchanged publication".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn publish_metadata_objects(
+    context: &CloudMetadataMirrorContext<'_>,
+    local: &BTreeMap<String, Vec<u8>>,
+    previous: Option<&CloudMetadataGeneration>,
+    old_bodies: Option<&BTreeMap<String, Vec<u8>>>,
+    validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
+) -> MidgeResult<Vec<crate::lease::CloudMetadataObject>> {
+    let immutable_id = uuid::Uuid::new_v4();
+    let io = BlockingCloud::new(context.cloud, context.deadline);
+    let mut objects = Vec::with_capacity(local.len());
+    for (name, bytes) in local {
+        if let Some(previous) = previous.and_then(|generation| {
+            generation
+                .objects
+                .iter()
+                .find(|object| &object.file_name == name)
+        }) {
+            if old_bodies.and_then(|bodies| bodies.get(name)) == Some(bytes) {
+                objects.push(previous.clone());
+                continue;
+            }
+        }
+        let object_key = format!("metadata/generations/{immutable_id}/{name}");
+        validate_lease(context.deadline)?;
+        io.put_with_precondition(
+            &object_key,
+            bytes.clone(),
+            &crate::storage::StoragePrecondition::IfAbsent,
+        )?;
+        let readback = io.get_optional(&object_key)?.ok_or_else(|| {
+            MidgeError::Corruption(format!(
+                "new cloud metadata '{object_key}' is missing after upload"
+            ))
+        })?;
+        if &readback != bytes {
+            return Err(MidgeError::Corruption(format!(
+                "new cloud metadata '{object_key}' failed exact readback"
+            )));
+        }
+        objects.push(crate::lease::CloudMetadataObject {
+            file_name: name.clone(),
+            object_key,
+            len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            crc32c: crc32c::crc32c(bytes),
+        });
+    }
+    Ok(objects)
+}
+
+fn commit_metadata_generation(
+    context: &CloudMetadataMirrorContext<'_>,
+    previous: Option<&CloudMetadataGeneration>,
+    generation: CloudMetadataGeneration,
+) -> MidgeResult<()> {
+    context
+        .authority
+        .store
+        .publish_committed_metadata(
+            context.authority.holder_id,
+            context.authority.writer_epoch,
+            previous,
+            generation.clone(),
+            context.deadline.remaining(),
+        )
+        .map_err(|error| error.into_validation_error("cloud metadata generation publication"))?;
+    let readback = context
+        .authority
+        .store
+        .read_committed_metadata(context.deadline.remaining())
+        .map_err(|error| error.into_validation_error("cloud metadata generation readback"))?;
+    if readback != CloudMetadataHead::Committed(generation) {
+        return Err(MidgeError::Fenced(
+            "shared metadata pointer changed after publication".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The exact predecessor CAS is the shared publication boundary. Staged objects
+/// that lose it remain harmless orphans. Durable family frontiers never regress.
 pub(crate) fn mirror_control_metadata_within(
     context: CloudMetadataMirrorContext<'_>,
-    mut validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+    mut validate_lease: impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
-    let CloudMetadataMirrorContext {
-        cloud,
-        fs: _,
-        publication_lock,
-        lock_wait_budget,
-        local_manifest_sequence,
-        deadline,
-        authority:
-            CloudMetadataMirrorAuthority {
-                store: leader_store,
-                holder_id,
-                writer_epoch,
-            },
-    } = context;
-    let lock_timeout = if lock_wait_budget.is_zero() {
-        if deadline.is_expired() {
+    let timeout = if context.lock_wait_budget.is_zero() {
+        if context.deadline.is_expired() {
             return Err(MidgeError::Timeout(
                 "metadata mirror deadline exhausted before publication lock".into(),
             ));
         }
         std::time::Duration::ZERO
     } else {
-        deadline
-            .clamp_nonzero(lock_wait_budget.min(cloud.callback_timeout()))
+        context
+            .deadline
+            .clamp_nonzero(
+                context
+                    .lock_wait_budget
+                    .min(context.cloud.callback_timeout()),
+            )
             .ok_or_else(|| {
                 MidgeError::Timeout(
                     "metadata mirror deadline exhausted before publication lock".into(),
                 )
             })?
     };
-    let _publication_guard = publication_lock.lock_for(lock_timeout).ok_or_else(|| {
+    let _guard = context.publication_lock.lock_for(timeout).ok_or_else(|| {
         MidgeError::Timeout("metadata mirror timed out acquiring publication lock".into())
     })?;
-
-    validate_lease(deadline)?;
-    let previous = match leader_store
-        .read_committed_metadata(deadline.remaining())
+    validate_lease(context.deadline)?;
+    context
+        .authority
+        .store
+        .validate_epoch_with_timeout(
+            context.authority.holder_id,
+            context.authority.writer_epoch,
+            context.deadline.remaining(),
+        )
+        .map_err(|error| error.into_validation_error("metadata publication lease"))?;
+    let previous = match context
+        .authority
+        .store
+        .read_committed_metadata(context.deadline.remaining())
         .map_err(|error| error.into_validation_error("cloud metadata pointer read"))?
     {
-        crate::lease::CloudMetadataHead::Committed(generation) => {
-            if generation.manifest_sequence > local_manifest_sequence {
-                return Err(MidgeError::Fenced(format!(
-                    "cloud metadata generation sequence {} is ahead of local sequence {local_manifest_sequence}",
-                    generation.manifest_sequence
-                )));
-            }
-            Some(generation)
-        }
-        crate::lease::CloudMetadataHead::Uncommitted => None,
-        crate::lease::CloudMetadataHead::MissingLease => {
+        CloudMetadataHead::Committed(generation) => Some(generation),
+        CloudMetadataHead::Uncommitted => None,
+        CloudMetadataHead::MissingLease => {
             return Err(MidgeError::Fenced(
                 "cloud metadata lease disappeared before publication".into(),
-            ));
+            ))
         }
     };
-    let objects = stage_control_metadata_objects(&context, previous.as_ref(), &mut validate_lease)?;
-    let generation = crate::lease::CloudMetadataGeneration {
-        manifest_sequence: local_manifest_sequence,
-        objects,
-    };
-    if previous.as_ref() == Some(&generation) {
-        return Ok(());
-    }
-    validate_lease(deadline)?;
-    leader_store
-        .publish_committed_metadata(
-            holder_id,
-            writer_epoch,
-            previous.as_ref(),
-            generation,
-            deadline.remaining(),
-        )
-        .map_err(|error| error.into_validation_error("cloud metadata generation publication"))?;
-    Ok(())
-}
-
-fn stage_control_metadata_objects(
-    context: &CloudMetadataMirrorContext<'_>,
-    previous: Option<&crate::lease::CloudMetadataGeneration>,
-    validate_lease: &mut impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
-) -> MidgeResult<Vec<crate::lease::CloudMetadataObject>> {
-    let generation_id = uuid::Uuid::new_v4();
-    let mut objects = Vec::with_capacity(crate::metadata::files::CLOUD_MIRRORED.len());
-    for file_name in crate::metadata::files::CLOUD_MIRRORED {
-        let old_object = previous.and_then(|generation| {
-            generation
-                .objects
-                .iter()
-                .find(|entry| entry.file_name == *file_name)
-        });
-        if let Some(object) = stage_control_metadata_object(
-            context,
-            generation_id,
-            file_name,
-            old_object,
-            validate_lease,
-        )? {
-            objects.push(object);
-        }
-    }
-    for required in [
-        crate::metadata::files::FORMAT,
-        crate::metadata::files::MANIFEST_SNAPSHOT,
-    ] {
-        if !objects.iter().any(|object| object.file_name == required) {
-            return Err(MidgeError::Corruption(format!(
-                "cannot commit cloud metadata without '{required}'"
-            )));
-        }
-    }
-    Ok(objects)
-}
-
-fn stage_control_metadata_object(
-    context: &CloudMetadataMirrorContext<'_>,
-    generation_id: uuid::Uuid,
-    file_name: &str,
-    old_object: Option<&crate::lease::CloudMetadataObject>,
-    validate_lease: &mut impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
-) -> MidgeResult<Option<crate::lease::CloudMetadataObject>> {
-    if context.deadline.is_expired() {
-        return Err(MidgeError::Timeout(format!(
-            "operation deadline exhausted before cloud metadata local mirror preparation for '{file_name}'"
-        )));
-    }
-    let io = crate::storage::cloud::BlockingCloud::new(context.cloud, context.deadline);
-    let old_bytes = old_object
-        .map(|object| {
-            let bytes = io.get_optional(&object.object_key)?.ok_or_else(|| {
-                MidgeError::Corruption(format!(
-                    "committed cloud metadata '{}' is missing",
-                    object.object_key
-                ))
-            })?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != object.len
-                || crc32c::crc32c(&bytes) != object.crc32c
-            {
-                return Err(MidgeError::Corruption(format!(
-                    "committed cloud metadata '{}' fails length or checksum proof",
-                    object.object_key
-                )));
-            }
-            if crate::metadata::files::is_manifest_body(file_name) {
-                crate::metadata::files::ensure_remote_not_ahead(
-                    file_name,
-                    &bytes,
-                    context.local_manifest_sequence,
-                )?;
-            }
-            Ok(bytes)
+    let local = capture_local_metadata(&context)?;
+    let candidate = decode_manifest_bodies(&local, context.deadline)?;
+    let old_bodies = previous
+        .as_ref()
+        .map(|generation| {
+            read_committed_metadata_bodies_within(context.cloud, generation, context.deadline)
         })
         .transpose()?;
-    let path = crate::io::FsPath::new(file_name);
-    if !context.fs.exists(&path).map_err(FsError::into_midge)? {
-        return Ok(None);
-    }
-    let file = context
-        .fs
-        .open(
-            &path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .map_err(FsError::into_midge)?;
-    let data = file
-        .read_at(0, file.len().map_err(FsError::into_midge)?)
-        .map_err(FsError::into_midge)?
-        .to_vec();
-    if let (Some(old_object), Some(old_bytes)) = (old_object, old_bytes.as_ref()) {
-        if old_bytes == &data {
-            return Ok(Some(old_object.clone()));
+    if let Some(previous) = previous.as_ref() {
+        let committed = decode_generation_manifest(
+            previous,
+            old_bodies.as_ref().expect("previous bodies loaded"),
+            context.deadline,
+        )?;
+        validate_manifest_successor(&candidate, &committed)?;
+        if old_bodies.as_ref() == Some(&local) {
+            return verify_unchanged_publication(&context, previous);
         }
     }
-    drop(old_bytes);
-    let object_key = format!("metadata/generations/{generation_id}/{file_name}");
-    let object = crate::lease::CloudMetadataObject {
-        file_name: file_name.to_string(),
-        object_key: object_key.clone(),
-        len: u64::try_from(data.len()).unwrap_or(u64::MAX),
-        crc32c: crc32c::crc32c(&data),
+    let id = previous
+        .as_ref()
+        .map_or(Some(SharedGenerationId::FIRST), |generation| {
+            generation.id.checked_next()
+        })
+        .ok_or_else(|| {
+            MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
+        })?;
+    let objects = publish_metadata_objects(
+        &context,
+        &local,
+        previous.as_ref(),
+        old_bodies.as_ref(),
+        &mut validate_lease,
+    )?;
+    let generation = CloudMetadataGeneration {
+        id,
+        manifest_horizon: candidate.edit_checkpoint_id,
+        objects,
     };
     validate_lease(context.deadline)?;
-    io.put_with_precondition(
-        &object_key,
-        data,
-        &crate::storage::StoragePrecondition::IfAbsent,
-    )?;
-    let readback = io.get_optional(&object_key)?.ok_or_else(|| {
-        MidgeError::Corruption(format!(
-            "new cloud metadata '{object_key}' is missing after upload"
-        ))
-    })?;
-    if u64::try_from(readback.len()).unwrap_or(u64::MAX) != object.len
-        || crc32c::crc32c(&readback) != object.crc32c
-    {
-        return Err(MidgeError::Corruption(format!(
-            "new cloud metadata '{object_key}' failed readback"
-        )));
-    }
-    for (index, chunk) in readback.chunks(64 * 1024).enumerate() {
-        let offset = u64::try_from(index.saturating_mul(64 * 1024))
-            .map_err(|_| MidgeError::ResourceLimit("metadata readback offset overflow".into()))?;
-        let local = file
-            .read_at(offset, u64::try_from(chunk.len()).unwrap_or(u64::MAX))
-            .map_err(FsError::into_midge)?;
-        if local.as_ref() != chunk {
-            return Err(MidgeError::Corruption(format!(
-                "new cloud metadata '{object_key}' differs from local readback"
-            )));
-        }
-    }
-    Ok(Some(object))
+    commit_metadata_generation(&context, previous.as_ref(), generation)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::hybrid_persistence::CloudWalPruneGuard;
+    use crate::io::Fs;
+    use crate::lease::fs_leader_store::FsLeaderStore;
 
-    fn fixture() -> (tempfile::TempDir, CloudMetadataPruneSnapshot, Manifest) {
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = Manifest {
-            next_sst_seqs: (0..1000).map(|id| (id, 1)).collect(),
-            ..Manifest::default()
-        };
-        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
-        let encoded: usize = crate::metadata::files::CLOUD_MIRRORED
-            .iter()
-            .filter_map(|name| std::fs::metadata(directory.path().join(name)).ok())
-            .map(|metadata| usize::try_from(metadata.len()).unwrap())
-            .sum();
-        let charge = encoded * 16 + 4096;
-        let snapshot = CloudMetadataPruneSnapshot::new(
-            Arc::new(CloudStorage::new(
-                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-                String::new(),
-            )),
-            Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap()),
-            crate::common::resource_budget::ResourceBudget::new(charge + 128 * 1024),
-            crate::runtime::MetadataPublicationLock::default(),
-        );
-        mirror(&snapshot);
-        snapshot
-            .verify_exact_then(
-                &crate::common::OperationDeadline::unbounded(),
-                |manifest, metadata| {
-                    let guard = CloudWalPruneGuard::new(manifest, Some(metadata));
-                    snapshot.progress.0.lock().retain_snapshot(&guard);
-                    Ok(())
-                },
-            )
-            .unwrap();
-        assert!(snapshot.budget.used() > snapshot.budget.limit() / 2);
-        (directory, snapshot, manifest)
-    }
-
-    /// Wait for the shared budget to drain.
-    ///
-    /// The reservation is released when the last handle drops, which can
-    /// trail the call that returned it, so sampling immediately makes the
-    /// assertion depend on timing.
-    fn assert_budget_drains(snapshot: &CloudMetadataPruneSnapshot) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while snapshot.budget.used() != 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "metadata proof retained {} bytes after completing",
-                snapshot.budget.used()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn should_check_remote_manifest_before_writing_any_mirror_file() {
-        use crate::lease::{CloudLeaseConfig, CloudStorageLease, PrimaryLease};
-
-        // Arrange
-        let directory = tempfile::tempdir().unwrap();
-        let remote = Manifest {
-            last_persisted_sequence: 10,
-            ..Manifest::default()
-        };
-        crate::metadata::ensure_or_create_format_marker(
-            &crate::io::real::test_root(directory.path()),
-            directory.path(),
-        )
-        .expect("create local format marker");
-        crate::metadata::ManifestPersistence::save(directory.path(), &remote).unwrap();
-        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-        let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
-        let lease = Arc::new(CloudStorageLease::new_provider_backed(
-            CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            directory.path().to_path_buf(),
-            Arc::clone(&cloud),
-        ));
-        let _guard = Arc::clone(&lease)
-            .try_acquire()
-            .expect("acquire cloud lease");
-        let store = lease.get_leader_store().expect("provider leader store");
-        let fs: Arc<dyn crate::io::traits::Fs> =
-            Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap());
-        let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
-        let publication_lock = crate::runtime::MetadataPublicationLock::default();
-        mirror_control_metadata_within(
-            CloudMetadataMirrorContext {
-                cloud: &cloud,
-                fs: fs.as_ref(),
-                publication_lock: &publication_lock,
-                lock_wait_budget: std::time::Duration::from_secs(5),
-                local_manifest_sequence: 10,
-                deadline: &deadline,
-                authority: CloudMetadataMirrorAuthority {
-                    store: store.as_ref(),
-                    holder_id: &lease.holder_id(),
-                    writer_epoch: lease.epoch(),
-                },
-            },
-            |_| Ok(()),
-        )
-        .expect("commit remote generation");
-        let prior_uploads = backend.get_uploads().len();
-        let local = Manifest {
-            last_persisted_sequence: 5,
-            ..Manifest::default()
-        };
-        crate::metadata::ManifestPersistence::save(directory.path(), &local).unwrap();
-
-        // Act
-        let error = mirror_control_metadata_within(
-            CloudMetadataMirrorContext {
-                cloud: &cloud,
-                fs: fs.as_ref(),
-                publication_lock: &publication_lock,
-                lock_wait_budget: std::time::Duration::from_secs(5),
-                local_manifest_sequence: local.last_persisted_sequence,
-                deadline: &crate::common::OperationDeadline::from_budget(
-                    std::time::Duration::from_secs(5),
-                ),
-                authority: CloudMetadataMirrorAuthority {
-                    store: store.as_ref(),
-                    holder_id: &lease.holder_id(),
-                    writer_epoch: lease.epoch(),
-                },
-            },
-            |_| Ok(()),
-        )
-        .expect_err("remote-ahead metadata must fence the mirror before any write");
-
-        // Assert
-        assert!(matches!(error, MidgeError::Fenced(_)));
-        assert_eq!(
-            backend.get_uploads().len(),
-            prior_uploads,
-            "remote-ahead rejection must not stage another immutable object"
-        );
-    }
-
-    #[test]
-    fn should_not_commit_metadata_generation_without_required_format() {
-        use crate::lease::{CloudLeaseConfig, CloudMetadataHead, CloudStorageLease, PrimaryLease};
-
-        // Arrange
-        let directory = tempfile::tempdir().expect("local cloud cache");
-        crate::metadata::ensure_or_create_format_marker(
-            &crate::io::real::test_root(directory.path()),
-            directory.path(),
-        )
-        .expect("create local format marker");
-        crate::metadata::ManifestPersistence::save(directory.path(), &Manifest::default())
-            .expect("save local manifest");
-        std::fs::remove_file(directory.path().join(crate::metadata::files::FORMAT))
-            .expect("remove required format");
-        let cloud = Arc::new(CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-            String::new(),
-        ));
-        let lease = Arc::new(CloudStorageLease::new_provider_backed(
-            CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            directory.path().to_path_buf(),
-            Arc::clone(&cloud),
-        ));
-        let _guard = Arc::clone(&lease)
-            .try_acquire()
-            .expect("acquire cloud lease");
-        let store = lease.get_leader_store().expect("provider leader store");
-
-        // Act
-        let result = mirror_control_metadata_within(
-            CloudMetadataMirrorContext {
-                cloud: &cloud,
-                fs: &crate::io::RealFs::new(directory.path()).expect("local fs"),
-                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
-                lock_wait_budget: std::time::Duration::from_secs(5),
-                local_manifest_sequence: 0,
-                deadline: &crate::common::OperationDeadline::from_budget(
-                    std::time::Duration::from_secs(5),
-                ),
-                authority: CloudMetadataMirrorAuthority {
-                    store: store.as_ref(),
-                    holder_id: &lease.holder_id(),
-                    writer_epoch: lease.epoch(),
-                },
-            },
-            |_| Ok(()),
-        );
-
-        // Assert
-        assert!(matches!(result, Err(MidgeError::Corruption(_))));
-        assert!(matches!(
-            store
-                .read_committed_metadata(std::time::Duration::from_secs(5))
-                .expect("read pointer after failed publication"),
-            CloudMetadataHead::Uncommitted
-        ));
-    }
-
-    #[test]
-    fn should_report_timeout_when_mirror_exceeds_operation_deadline() {
-        use crate::lease::{CloudLeaseConfig, CloudStorageLease, PrimaryLease};
-
-        // Arrange
-        let directory = tempfile::tempdir().expect("local cloud cache");
-        crate::metadata::ensure_or_create_format_marker(
-            &crate::io::real::test_root(directory.path()),
-            directory.path(),
-        )
-        .expect("create local format marker");
-        crate::metadata::ManifestPersistence::save(directory.path(), &Manifest::default())
-            .expect("save local manifest");
-        let cloud = Arc::new(CloudStorage::new(
-            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-            String::new(),
-        ));
-        let lease = Arc::new(CloudStorageLease::new_provider_backed(
-            CloudLeaseConfig {
-                bucket: "test".into(),
-                prefix: String::new(),
-            },
-            directory.path().to_path_buf(),
-            Arc::clone(&cloud),
-        ));
-        let _guard = Arc::clone(&lease)
-            .try_acquire()
-            .expect("acquire cloud lease");
-        let store = lease.get_leader_store().expect("provider leader store");
-        let fs = crate::io::RealFs::new(directory.path()).expect("local fs");
-        let expired =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_nanos(1));
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        // Act
-        let error = mirror_control_metadata_within(
-            CloudMetadataMirrorContext {
-                cloud: &cloud,
-                fs: &fs,
-                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
-                lock_wait_budget: std::time::Duration::from_secs(5),
-                local_manifest_sequence: 0,
-                deadline: &expired,
-                authority: CloudMetadataMirrorAuthority {
-                    store: store.as_ref(),
-                    holder_id: &lease.holder_id(),
-                    writer_epoch: lease.epoch(),
-                },
-            },
-            |_| Ok(()),
-        )
-        .unwrap_err();
-
-        // Assert
-        assert!(
-            matches!(error, MidgeError::Timeout(_)),
-            "an exhausted deadline must report Timeout, got {error:?}"
-        );
-    }
-
-    fn mirror(snapshot: &CloudMetadataPruneSnapshot) {
-        for name in crate::metadata::files::CLOUD_MIRRORED {
-            if let Ok(bytes) = crate::io::read_all(snapshot.fs.as_ref(), &FsPath::new(*name))
-                .map(|bytes| bytes.to_vec())
-            {
-                let (tx, rx) = std::sync::mpsc::channel();
-                snapshot.cloud.submit_put(
-                    &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
-                    bytes,
-                    Vec::new(),
-                    tx,
-                );
-                assert!(matches!(
-                    rx.recv().unwrap(),
-                    crate::storage::cloud::CloudEvent::Put { result: Ok(()), .. }
-                ));
-            }
-        }
-    }
-
-    #[test]
-    fn should_serialize_prune_proofs_across_separately_constructed_dispatchers() {
-        // Arrange
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = Manifest::default();
-        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
-        let lock = crate::runtime::MetadataPublicationLock::default();
-        let fs: Arc<dyn crate::io::traits::Fs> =
-            Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap());
-        let first = CloudMetadataPruneSnapshot::new(
-            Arc::new(CloudStorage::new(
-                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-                "first-control-dispatcher".into(),
-            )),
-            Arc::clone(&fs),
-            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
-            lock.clone(),
-        );
-        let second = CloudMetadataPruneSnapshot::new(
-            Arc::new(CloudStorage::new(
-                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-                "second-control-dispatcher".into(),
-            )),
-            fs,
-            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
-            lock,
-        );
-        mirror(&first);
-        mirror(&second);
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let first_worker = std::thread::spawn(move || {
-            first.verify_exact_then(&crate::common::OperationDeadline::unbounded(), |_, _| {
-                entered_tx.send(()).expect("signal held publication lock");
-                release_rx.recv().expect("release publication lock");
-                Ok(())
-            })
-        });
-        entered_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("first dispatcher holds publication lock");
-        let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(50));
-
-        // Act
-        let result: MidgeResult<()> = second.verify_exact_then(&deadline, |_, _| {
-            panic!("second dispatcher must not publish while the first owns the runtime lock")
-        });
-        release_tx.send(()).expect("release first dispatcher");
-
-        // Assert
-        assert!(matches!(result, Err(MidgeError::Timeout(_))));
-        first_worker
-            .join()
-            .expect("join first dispatcher")
-            .expect("first proof completes after release");
-    }
-
-    #[test]
-    fn should_replace_retained_snapshot_when_verified_metadata_identity_changes() {
-        // Arrange
-        let (directory, snapshot, mut manifest) = fixture();
-        manifest.next_sst_seqs.insert(0, 2);
-        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
-        mirror(&snapshot);
-
-        // Act
-        snapshot
-            .verify_exact_then(
-                &crate::common::OperationDeadline::unbounded(),
-                |manifest, _metadata| {
-                    // Assert
-                    assert_eq!(manifest.next_sst_seqs[&0], 2);
-                    Ok(())
-                },
-            )
-            .unwrap();
-        assert_budget_drains(&snapshot);
-    }
-
-    #[test]
-    fn should_release_retained_snapshot_when_local_and_remote_metadata_diverge() {
-        // Arrange
-        let (directory, snapshot, mut manifest) = fixture();
-        manifest.next_sst_seqs.insert(0, 2);
-        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
-
-        // Act
-        let result = snapshot
-            .verify_exact_then(&crate::common::OperationDeadline::unbounded(), |_, _| {
-                panic!("divergent metadata cannot authorize retirement")
-            });
-
-        // Assert
-        assert!(matches!(result, Err::<(), _>(MidgeError::Corruption(_))));
-        assert_budget_drains(&snapshot);
-    }
-
-    struct PausingMetadataPutBackend {
-        inner: crate::storage::cloud::MockCloudBackend,
-        pause: std::sync::atomic::AtomicBool,
-        entered: std::sync::Barrier,
-        resume: std::sync::Barrier,
-    }
-
-    impl PausingMetadataPutBackend {
-        fn new() -> Self {
-            Self {
-                inner: crate::storage::cloud::MockCloudBackend::new(),
-                pause: std::sync::atomic::AtomicBool::new(false),
-                entered: std::sync::Barrier::new(2),
-                resume: std::sync::Barrier::new(2),
-            }
-        }
-    }
-
-    impl crate::storage::cloud::CloudBackend for PausingMetadataPutBackend {
-        fn submit_put(
-            &self,
-            key: &str,
-            data: Vec<u8>,
-            headers: Vec<(String, String)>,
-            callback: crate::storage::cloud::CloudCallback,
-        ) {
-            if key.ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
-                && self.pause.swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                self.entered.wait();
-                self.resume.wait();
-            }
-            self.inner.submit_put(key, data, headers, callback);
-        }
-
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
-    }
-
-    fn commit_baseline_metadata(
-        cloud: &CloudStorage,
-        directory: &std::path::Path,
-        store: &dyn crate::lease::LeaderStore,
-        holder_id: &str,
-        epoch: u64,
-    ) -> (Manifest, crate::lease::CloudMetadataHead) {
-        let original = Manifest {
-            last_persisted_sequence: 5,
-            ..Manifest::default()
-        };
-        crate::metadata::ManifestPersistence::save(directory, &original)
-            .expect("save baseline local manifest");
-        let fs = crate::io::RealFs::new(directory).expect("baseline local fs");
-        let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
-        mirror_control_metadata_within(
-            CloudMetadataMirrorContext {
-                cloud,
-                fs: &fs,
-                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
-                lock_wait_budget: std::time::Duration::from_secs(5),
-                local_manifest_sequence: 5,
-                deadline: &deadline,
-                authority: CloudMetadataMirrorAuthority {
-                    store,
-                    holder_id,
-                    writer_epoch: epoch,
-                },
-            },
-            |_| Ok(()),
-        )
-        .expect("commit baseline generation");
-        let baseline = store
-            .read_committed_metadata(std::time::Duration::from_secs(5))
-            .expect("read committed baseline");
-        assert!(matches!(
-            baseline,
-            crate::lease::CloudMetadataHead::Committed(_)
-        ));
-        (original, baseline)
-    }
-
-    fn spawn_paused_metadata_publisher(
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        fs: Arc<dyn Fs>,
         cloud: Arc<CloudStorage>,
-        directory: std::path::PathBuf,
-        store: Arc<dyn crate::lease::LeaderStore>,
-        holder_id: String,
-        epoch: u64,
-    ) -> std::thread::JoinHandle<MidgeResult<()>> {
-        std::thread::spawn(move || {
-            let fs = crate::io::RealFs::new(&directory).expect("first writer local fs");
+        store: Arc<FsLeaderStore>,
+        lock: crate::runtime::MetadataPublicationLock,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let fs = crate::io::real::test_root(directory.path());
+            crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+            ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
+            let store = Arc::new(FsLeaderStore::new(
+                Arc::clone(&fs),
+                crate::lease::LeaseClock::default(),
+            ));
+            store.acquire_leadership("writer").unwrap();
+            Self {
+                _directory: directory,
+                fs,
+                cloud: Arc::new(CloudStorage::with_mock()),
+                store,
+                lock: crate::runtime::MetadataPublicationLock::default(),
+            }
+        }
+        fn mirror(&self) -> MidgeResult<()> {
             mirror_control_metadata_within(
                 CloudMetadataMirrorContext {
-                    cloud: &cloud,
-                    fs: &fs,
-                    publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+                    cloud: &self.cloud,
+                    fs: self.fs.as_ref(),
+                    publication_lock: &self.lock,
                     lock_wait_budget: std::time::Duration::from_secs(5),
-                    local_manifest_sequence: 10,
-                    deadline: &crate::common::OperationDeadline::from_budget(
-                        std::time::Duration::from_secs(5),
-                    ),
+                    deadline: &OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
                     authority: CloudMetadataMirrorAuthority {
-                        store: store.as_ref(),
-                        holder_id: &holder_id,
-                        writer_epoch: epoch,
+                        store: self.store.as_ref(),
+                        holder_id: "writer",
+                        writer_epoch: 1,
                     },
                 },
-                |deadline| {
-                    store
-                        .validate_epoch_with_timeout(&holder_id, epoch, deadline.remaining())
-                        .map_err(|error| MidgeError::Fenced(error.to_string()))
-                },
+                |_| Ok(()),
             )
-        })
+        }
+        fn generation(&self) -> CloudMetadataGeneration {
+            let CloudMetadataHead::Committed(generation) = self
+                .store
+                .read_committed_metadata(std::time::Duration::from_secs(5))
+                .unwrap()
+            else {
+                panic!("committed pointer required")
+            };
+            generation
+        }
     }
 
-    fn assert_pointer_and_epoch(
-        store: &dyn crate::lease::LeaderStore,
-        expected: &crate::lease::CloudMetadataHead,
-        epoch: u64,
-    ) {
-        assert_eq!(
-            store
-                .read_committed_metadata(std::time::Duration::from_secs(5))
-                .expect("read committed metadata pointer"),
-            expected.clone()
+    #[test]
+    fn should_reuse_generation_when_control_bodies_are_unchanged() {
+        // Arrange
+        let fixture = Fixture::new();
+        fixture.mirror().unwrap();
+        let previous = fixture.generation();
+        // Act
+        fixture.mirror().unwrap();
+        // Assert
+        assert_eq!(fixture.generation(), previous);
+        assert_eq!(previous.id, SharedGenerationId::FIRST);
+    }
+
+    #[test]
+    fn should_advance_shared_ordinal_when_metadata_changes_without_a_journal_edit() {
+        // Arrange
+        let fixture = Fixture::new();
+        fixture.mirror().unwrap();
+        let previous = fixture.generation();
+        crate::io::staging::stage_bytes(
+            &fixture.fs,
+            &FsPath::new("intent.tmp"),
+            &FsPath::new(files::INTENT_LOG),
+            b"{}",
+            MidgeError::Internal,
+        )
+        .unwrap();
+        // Act
+        fixture.mirror().unwrap();
+        // Assert
+        let current = fixture.generation();
+        assert_eq!(current.id, previous.id.checked_next().unwrap());
+        assert_eq!(current.manifest_horizon, previous.manifest_horizon);
+    }
+
+    #[test]
+    fn should_load_retirement_frontiers_only_from_the_committed_shared_bodies() {
+        // Arrange
+        let fixture = Fixture::new();
+        fixture.mirror().unwrap();
+        fixture
+            .fs
+            .remove_file(&FsPath::new(files::MANIFEST_SNAPSHOT))
+            .unwrap();
+        let snapshot = SharedMetadataSnapshot::new(
+            Arc::clone(&fixture.cloud),
+            ResourceBudget::new(1024 * 1024),
+            fixture.store.clone(),
+            "writer".into(),
+            1,
         );
+        // Act
+        let authority = snapshot
+            .committed_retirement_authority_within(&OperationDeadline::from_budget(
+                std::time::Duration::from_secs(5),
+            ))
+            .unwrap();
+        // Assert
+        assert_eq!(authority.generation_id(), SharedGenerationId::FIRST);
         assert_eq!(
-            store
-                .read_current()
-                .expect("read current lease")
-                .expect("lease held")
-                .epoch,
-            epoch
+            authority.frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 0
+            }
         );
     }
 
     #[test]
-    fn should_reject_metadata_mirror_when_lease_changes_after_head_before_put() {
-        use crate::lease::{CloudLeaseConfig, CloudStorageLease, PrimaryLease};
-        use std::sync::atomic::Ordering;
-        use std::time::Duration;
-
-        // Arrange: two provider-backed writers share one lease and metadata store.
-        let directory = tempfile::tempdir().expect("cache directory");
-        crate::metadata::ensure_or_create_format_marker(
-            &crate::io::real::test_root(directory.path()),
-            directory.path(),
-        )
-        .expect("create local format marker");
-        let backend = Arc::new(PausingMetadataPutBackend::new());
-        let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
-        let lease = || {
-            Arc::new(
-                CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
-                    CloudLeaseConfig {
-                        bucket: "test".into(),
-                        prefix: String::new(),
-                    },
-                    Arc::clone(&cloud),
-                    Duration::ZERO,
-                    Duration::from_secs(30),
-                    crate::lease::LeaseClock::default(),
-                ),
-            )
-        };
-        let first = lease();
-        let _first_guard = Arc::clone(&first)
-            .try_acquire()
-            .expect("first writer acquires lease");
-        let first_epoch = first.epoch();
-        let first_holder = first.holder_id();
-        let first_store = first.get_leader_store().expect("provider leader store");
-        let (original, baseline) = commit_baseline_metadata(
-            &cloud,
-            directory.path(),
-            first_store.as_ref(),
-            &first_holder,
-            first_epoch,
+    fn should_not_grant_retirement_authority_without_a_shared_publication() {
+        // Arrange
+        let fixture = Fixture::new();
+        let snapshot = SharedMetadataSnapshot::new(
+            Arc::clone(&fixture.cloud),
+            ResourceBudget::new(1024 * 1024),
+            fixture.store.clone(),
+            "writer".into(),
+            1,
         );
-        let newer = Manifest {
-            last_persisted_sequence: 10,
-            ..Manifest::default()
-        };
-        crate::metadata::ManifestPersistence::save(directory.path(), &newer)
-            .expect("save first writer's local manifest");
-
-        backend.pause.store(true, Ordering::SeqCst);
-        let publisher = spawn_paused_metadata_publisher(
-            Arc::clone(&cloud),
-            directory.path().to_path_buf(),
-            Arc::clone(&first_store),
-            first_holder,
-            first_epoch,
+        // Act
+        let result = snapshot.committed_retirement_authority_within(
+            &OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
         );
-        backend.entered.wait();
-        // The second writer inherits the committed pointer after takeover.
-        first
-            .release()
-            .expect("release first lease after metadata HEAD");
-        let second = lease();
-        let _second_guard = Arc::clone(&second)
-            .try_acquire()
-            .expect("second writer takes over");
-        assert!(second.epoch() > first_epoch);
-        let second_store = second.get_leader_store().expect("second provider store");
-        assert_pointer_and_epoch(second_store.as_ref(), &baseline, second.epoch());
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    }
 
-        // Act: the first writer's lease-object CAS cannot pass after takeover.
-        backend.resume.wait();
-        let result = publisher.join().expect("publisher thread");
+    fn manifest_at(through: u64, horizon: u64) -> Manifest {
+        let mut value = serde_json::to_value(Manifest::default()).unwrap();
+        value["flushed_through"][0]["through_sequence"] = through.into();
+        value["edit_checkpoint_id"] = horizon.into();
+        serde_json::from_value(value).unwrap()
+    }
 
-        // Assert: the old writer cannot change committed metadata after takeover.
-        assert!(
-            matches!(result, Err(MidgeError::Fenced(_))),
-            "stale metadata publication must be fenced: {result:?}"
-        );
-        assert_pointer_and_epoch(second_store.as_ref(), &baseline, second.epoch());
-        crate::metadata::ManifestPersistence::save(directory.path(), &original)
-            .expect("restore new holder's baseline local metadata");
-        let first_fs = crate::io::RealFs::new(directory.path()).expect("baseline local fs");
-        let second_result = mirror_control_metadata_within(
+    #[test]
+    fn should_refuse_regressed_frontiers_even_when_local_journal_horizon_is_greater() {
+        // Arrange
+        let fixture = Fixture::new();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(40, 10)).unwrap();
+        fixture.mirror().unwrap();
+        let previous = fixture.generation();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(20, 15)).unwrap();
+        // Act
+        let result = fixture.mirror();
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert_eq!(fixture.generation(), previous);
+    }
+
+    #[test]
+    fn should_refuse_regressed_manifest_horizon_when_frontiers_are_unchanged() {
+        // Arrange
+        let fixture = Fixture::new();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(40, 10)).unwrap();
+        fixture.mirror().unwrap();
+        let previous = fixture.generation();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(40, 9)).unwrap();
+        // Act
+        let result = fixture.mirror();
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        assert_eq!(fixture.generation(), previous);
+    }
+
+    #[test]
+    fn should_order_takeover_publications_independently_of_discarded_local_journal_ids() {
+        // Arrange: successor hydrates shared horizon10; predecessor's unpublished
+        // local edits11..15 do not become the shared publication clock.
+        let fixture = Fixture::new();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(40, 10)).unwrap();
+        fixture.mirror().unwrap();
+        let previous = fixture.generation();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(50, 15)).unwrap();
+        let successor = fixture.store.acquire_leadership("successor").unwrap();
+        ManifestPersistence::save_with_fs(&fixture.fs, &manifest_at(45, 11)).unwrap();
+        // Act
+        mirror_control_metadata_within(
             CloudMetadataMirrorContext {
-                cloud: &cloud,
-                fs: &first_fs,
-                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
-                lock_wait_budget: Duration::from_secs(5),
-                local_manifest_sequence: 5,
-                deadline: &crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+                cloud: &fixture.cloud,
+                fs: fixture.fs.as_ref(),
+                publication_lock: &fixture.lock,
+                lock_wait_budget: std::time::Duration::from_secs(5),
+                deadline: &OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
                 authority: CloudMetadataMirrorAuthority {
-                    store: second_store.as_ref(),
-                    holder_id: &second.holder_id(),
-                    writer_epoch: second.epoch(),
+                    store: fixture.store.as_ref(),
+                    holder_id: "successor",
+                    writer_epoch: successor.epoch,
                 },
             },
             |_| Ok(()),
-        );
-        assert!(
-            second_result.is_ok(),
-            "new holder can publish: {second_result:?}"
-        );
+        )
+        .unwrap();
+        // Assert
+        let current = fixture.generation();
+        assert_eq!(current.id, previous.id.checked_next().unwrap());
+        assert_eq!(current.manifest_horizon, 11);
+        assert!(fixture.mirror().is_err());
+    }
+
+    #[test]
+    fn should_reject_hydration_before_writing_cache_when_catalog_retired_with_a_newer_generation() {
+        // Arrange
+        let fixture = Fixture::new();
+        fixture.mirror().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let root = crate::io::real::test_root(cache.path());
+        // Act
+        let result =
+            crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata_within(
+                &fixture.cloud,
+                fixture.store.as_ref(),
+                &root,
+                cache.path(),
+                crate::config::RecoveryPolicy::Salvage,
+                SharedGenerationId::FIRST.checked_next().unwrap(),
+                &DeadlineScope::new(OperationDeadline::from_budget(
+                    std::time::Duration::from_secs(5),
+                )),
+            );
+        // Assert
+        assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+        assert!(!root.exists(&FsPath::new(files::FORMAT)).unwrap());
+        assert!(!root.exists(&FsPath::new(files::MANIFEST_SNAPSHOT)).unwrap());
     }
 }

@@ -121,6 +121,111 @@ fn add_sst(sequence: u64) -> ManifestEdit {
     })
 }
 
+fn flush_edit(sequence: u64) -> ManifestEdit {
+    ManifestEdit::Batch(vec![
+        ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: crate::cloud_layout::file_name(0, 0, sequence),
+            size_bytes: 10,
+            largest_seq: Some(sequence),
+            ..Default::default()
+        }),
+        ManifestEdit::AdvanceFlushFrontier {
+            cf_id: 0,
+            freeze_sequence: sequence,
+        },
+    ])
+}
+
+#[test]
+fn should_refuse_flush_append_when_manifest_edit_ids_are_exhausted() {
+    for prime_cache in [false, true] {
+        // Arrange: both cold positioning and the known-position path see a
+        // valid exhausted snapshot, with no room for another distinct edit.
+        let directory = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let mut manifest = Manifest::default();
+        manifest.edit_checkpoint_id = u64::MAX;
+        let snapshot = directory
+            .path()
+            .join(crate::metadata::files::MANIFEST_SNAPSHOT);
+        let journal = directory.path().join(crate::metadata::files::JOURNAL);
+        std::fs::write(&snapshot, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(&journal, []).unwrap();
+        let store = ManifestStore::new(fs);
+        if prime_cache {
+            store.save_snapshot(&manifest).unwrap();
+            assert_eq!(
+                store.known.lock().unwrap().position.highest_edit_id,
+                u64::MAX
+            );
+        }
+        let before_snapshot = std::fs::read(&snapshot).unwrap();
+        let before_journal = std::fs::read(&journal).unwrap();
+
+        // Act
+        let appended = store.append_for(Origin::OrdinaryLocalFlush, &flush_edit(7));
+
+        // Assert: a reported success would be skipped on replay as already
+        // checkpointed. Exhaustion must leave all durable authority intact.
+        assert!(
+            matches!(appended, Err(MidgeError::ResourceLimit(_))),
+            "{appended:?}"
+        );
+        assert_eq!(std::fs::read(&snapshot).unwrap(), before_snapshot);
+        assert_eq!(std::fs::read(&journal).unwrap(), before_journal);
+        let recovered = ManifestPersistence::load(directory.path()).unwrap();
+        assert!(recovered.files.is_empty());
+        assert_eq!(recovered.edit_checkpoint_id, u64::MAX);
+        assert_eq!(recovered.flush_frontiers(), manifest.flush_frontiers());
+    }
+}
+
+#[test]
+fn should_checkpoint_the_last_manifest_edit_without_reusing_its_id() {
+    // Arrange: MAX remains a valid final journal identity.
+    let directory = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+    let mut manifest = Manifest::default();
+    manifest.edit_checkpoint_id = u64::MAX - 1;
+    let snapshot = directory
+        .path()
+        .join(crate::metadata::files::MANIFEST_SNAPSHOT);
+    let journal = directory.path().join(crate::metadata::files::JOURNAL);
+    std::fs::write(&snapshot, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let store = ManifestStore::new(fs.clone());
+    let edit = flush_edit(7);
+
+    // Act
+    let last = store.append_for(Origin::OrdinaryLocalFlush, &edit).unwrap();
+    manifest.apply_edit(&edit).unwrap();
+    assert!(manifest.note_applied_journal_edit(last));
+    store.save_snapshot(&manifest).unwrap();
+    let recovered = ManifestPersistence::load(directory.path()).unwrap();
+    // A cold store may still read and checkpoint exhausted authority.
+    let cold_store = ManifestStore::new(fs);
+    cold_store.save_snapshot(&recovered).unwrap();
+    let before_snapshot = std::fs::read(&snapshot).unwrap();
+    let before_journal = std::fs::read(&journal).unwrap();
+    let exhausted = cold_store.append_for(Origin::OrdinaryLocalFlush, &flush_edit(8));
+
+    // Assert
+    assert_eq!(last, u64::MAX);
+    assert_eq!(recovered.edit_checkpoint_id, u64::MAX);
+    assert_eq!(recovered.files.len(), 1);
+    assert_eq!(
+        recovered.flush_frontiers().get(0).unwrap(),
+        crate::metadata::FamilyFrontier::Live {
+            through_sequence: 7
+        }
+    );
+    assert!(
+        matches!(exhausted, Err(MidgeError::ResourceLimit(_))),
+        "{exhausted:?}"
+    );
+    assert_eq!(std::fs::read(&snapshot).unwrap(), before_snapshot);
+    assert_eq!(std::fs::read(&journal).unwrap(), before_journal);
+}
+
 #[test]
 fn should_force_checkpoint_when_cached_authority_is_unknown_or_stale() {
     // Arrange
@@ -136,9 +241,14 @@ fn should_force_checkpoint_when_cached_authority_is_unknown_or_stale() {
     assert!(!store.local_checkpoint_due(manifest.edit_checkpoint_id));
 
     // Act
-    let edit = ManifestEdit::BumpWalSeq { seq: 42 };
+    let edit = ManifestEdit::BumpNextSstSeq {
+        cf_id: 0,
+        next_seq: 42,
+    };
     let id = store.append(&edit).unwrap();
-    manifest.apply_edit(&edit);
+    manifest
+        .apply_edit(&edit)
+        .expect("valid manifest fixture edit");
     manifest.note_applied_journal_edit(id);
 
     // Assert: neither a stale caller nor a changed file can defer authority.
@@ -146,7 +256,10 @@ fn should_force_checkpoint_when_cached_authority_is_unknown_or_stale() {
     assert!(!store.local_checkpoint_due(id));
     crate::metadata::journal::append_edit_with_fs(
         &(fs as Arc<dyn Fs>),
-        &ManifestEdit::BumpWalSeq { seq: 43 },
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 43,
+        },
     )
     .unwrap();
     assert!(store.local_checkpoint_due(id));
@@ -162,16 +275,23 @@ fn should_reduce_fixed_cardinality_checkpoint_payload_without_losing_deferred_ed
             ManifestStore::new_with_accounting(fs.clone(), owner.clone(), Medium::Persistent);
         let mut manifest = Manifest::default();
         for n in 1..=128 {
-            manifest.apply_edit(&add_sst(n));
+            manifest
+                .apply_edit(&add_sst(n))
+                .expect("valid manifest fixture edit");
         }
         store
             .save_snapshot_for(Origin::Ddl, &manifest)
             .unwrap()
             .adopt_into(&mut manifest);
         for n in 1..=128 {
-            let edit = ManifestEdit::BumpWalSeq { seq: n };
+            let edit = ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: n,
+            };
             let id = store.append_for(Origin::OrdinaryLocalFlush, &edit).unwrap();
-            manifest.apply_edit(&edit);
+            manifest
+                .apply_edit(&edit)
+                .expect("valid manifest fixture edit");
             manifest.note_applied_journal_edit(id);
             let recovered = ManifestPersistence::load_with_fs_and_policy_typed(
                 &fs,
@@ -179,7 +299,7 @@ fn should_reduce_fixed_cardinality_checkpoint_payload_without_losing_deferred_ed
             )
             .unwrap();
             assert_eq!(recovered.files.len(), 128);
-            assert_eq!(recovered.last_persisted_sequence, n);
+            assert_eq!(recovered.next_sst_seqs.get(&0).copied().unwrap_or(0), n);
             assert_eq!(recovered.edit_checkpoint_id, id);
             if force || store.local_checkpoint_due(id) {
                 store
@@ -236,11 +356,15 @@ fn should_not_read_metadata_when_current_caller_saves_snapshot() {
     let store = ManifestStore::new(fs.clone());
     let mut manifest = Manifest::default();
     let edit_id = store.append(&add_sst(1)).expect("append");
-    manifest.apply_edit(&add_sst(1));
+    manifest
+        .apply_edit(&add_sst(1))
+        .expect("valid manifest fixture edit");
     manifest.edit_checkpoint_id = edit_id;
     store.save_snapshot(&manifest).expect("prime");
     let edit_id = store.append(&add_sst(2)).expect("append");
-    manifest.apply_edit(&add_sst(2));
+    manifest
+        .apply_edit(&add_sst(2))
+        .expect("valid manifest fixture edit");
     manifest.edit_checkpoint_id = edit_id;
     fs.snapshot_opens.store(0, Ordering::SeqCst);
 
@@ -286,9 +410,14 @@ fn should_require_checkpoint_retry_when_append_refreshes_cache_after_snapshot_fa
 
     // Act: a durable frontier fallback refreshes the cached position, but
     // must not erase the failed checkpoint's publication backpressure.
-    let edit = ManifestEdit::BumpWalSeq { seq: 42 };
+    let edit = ManifestEdit::BumpNextSstSeq {
+        cf_id: 0,
+        next_seq: 42,
+    };
     let id = store.append(&edit).unwrap();
-    manifest.apply_edit(&edit);
+    manifest
+        .apply_edit(&edit)
+        .expect("valid manifest fixture edit");
     manifest.note_applied_journal_edit(id);
     let retry_required = store.local_checkpoint_due(id);
     fs.snapshot_no_space.store(false, Ordering::SeqCst);
@@ -302,7 +431,7 @@ fn should_require_checkpoint_retry_when_append_refreshes_cache_after_snapshot_fa
     assert!(!store.local_checkpoint_due(id));
     assert!(store.can_use_forced_flush_path(id, 2 * 1024 * 1024));
     let recovered = ManifestPersistence::load(directory.path()).unwrap();
-    assert_eq!(recovered.last_persisted_sequence, 42);
+    assert_eq!(recovered.next_sst_seqs.get(&0).copied().unwrap_or(0), 42);
 }
 
 #[test]

@@ -108,7 +108,7 @@ fn should_keep_best_effort_deleted_keys_absent_when_recovering_completed_flushes
     // Act
     let finding = campaign(Profile::BestEffortDelete, DETECTION_SEEDS, 16, config);
 
-    // Assert: a completed flush or shutdown makes the delete recoverable.
+    // Assert: a completed flush makes the delete recoverable.
     assert_clean("best-effort-delete", finding);
 }
 

@@ -231,7 +231,11 @@ impl RuntimeRecoveryMaterialization {
         {
             materialized
                 .state
-                .reset_cloud_durable_sequence_for_recovery();
+                .reset_cloud_durable_sequence_for_recovery(
+                    materialized
+                        .runtime_config
+                        .recovered_cloud_wal_anchor_sequence,
+                );
         }
 
         Self::prepare_storage_for_wal_replay(&mut materialized)?;

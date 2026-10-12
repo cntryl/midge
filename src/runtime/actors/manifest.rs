@@ -52,28 +52,25 @@ impl ManifestActor {
             }
         }
 
-        // Append to manifest journal (durable edit log) - skip in memory mode
-        let mut journaled_id = None;
-        if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::AddSst(file_meta.into());
+        let memory_mode = state.is_memory_mode();
+        let edit = crate::metadata::ManifestEdit::AddSst(file_meta.into());
+        let prepared = state.manifest.prepare_edit(&edit)?;
+        let journaled_id = if memory_mode {
+            None
+        } else {
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_add_sst_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest add_sst append".to_string()
                 ))
             );
-            journaled_id = Some(
+            Some(
                 state
                     .manifest_store
                     .append_for(Origin::Unclassified, &edit)?,
-            );
-        }
-
-        // Now that intent is durable, apply mutation to in-memory manifest
-        // Convert to manifest FileMeta
-        let manifest_meta = file_meta.into();
-
-        state.manifest.add_file(manifest_meta);
+            )
+        };
+        prepared.commit();
         if let Some(edit_id) = journaled_id {
             state.manifest.note_applied_journal_edit(edit_id);
         }
@@ -104,30 +101,25 @@ impl ManifestActor {
         for f in added {
             edits.push(crate::metadata::ManifestEdit::AddSst(f.into()));
         }
-        let mut journaled_id = None;
-        if !edits.is_empty() {
+        let memory_mode = state.is_memory_mode();
+        let batch = crate::metadata::ManifestEdit::Batch(edits);
+        let prepared = state.manifest.prepare_edit(&batch)?;
+        let journaled_id = if !memory_mode && (!removed.is_empty() || !added.is_empty()) {
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_compaction_batch_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest compaction batch append".to_string()
                 ))
             );
-            journaled_id = Some(
+            Some(
                 state
                     .manifest_store
-                    .append_batch_for(Origin::CompactionBeforeGc, &edits)?,
-            );
-        }
-
-        // Now that intent is durable, apply mutations to in-memory manifest
-        // Remove old files
-        state.manifest.retain_files(|f| !removed.contains(&f.name));
-
-        // Add new files
-        for file_meta in added {
-            let manifest_meta = file_meta.into();
-            state.manifest.add_file(manifest_meta);
-        }
+                    .append_for(Origin::CompactionBeforeGc, &batch)?,
+            )
+        } else {
+            None
+        };
+        prepared.commit();
         if let Some(edit_id) = journaled_id {
             state.manifest.note_applied_journal_edit(edit_id);
         }

@@ -79,6 +79,7 @@ fn cloud_debt_with_wal_records(
             write_test_file(el.state.host_sst_dir().join(&name), &bytes);
         }
     }
+    publish_test_flush_frontier(&mut el, 0, last);
     let (tx, rx) = crossbeam::channel::unbounded();
     el.worker_msg_tx = Some(tx);
     el.inline_flush_worker = false;

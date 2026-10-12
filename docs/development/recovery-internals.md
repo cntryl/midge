@@ -212,19 +212,20 @@ The recovery counters exposed by `engine.metrics().get_recovery_metrics()` shoul
 - [storage-invariants.md](storage-invariants.md)
 - [testing.md](testing.md)
 
-## Recovery read reuse and SST name reservations
+## Per-family replay authority and SST name reservations
 
-Cloud WAL coverage retains one pinned SST reader and one checksummed decoded
-block. The block is keyed by its handle within that immutable reader; it never
-uses the application's block cache. Compressed input, decoded output, decoder
-keys, verification windows, and retained comparison values share the recovery
-proof budget. The verified-identity map also charges its entries and table-growth allowance to that budget; metadata exhaustion conservatively replays WAL. Checkpoints discard the map and release its charges. Returned value slices retain their decoded-buffer reservation.
-When coverage compares overlapping SSTs, it copies only the incumbent value
-under a separate charge so the previous block can be released before opening
-the next reader. Checkpoint construction starts after reader and block release.
-A proof that does not fit, or an actual read that fails, preserves WAL replay.
-A cache hit uses already validated bytes from the pinned identity; after
-replacement or eviction, new reads must satisfy that original identity again.
+Recovery validates complete WAL replay units before selecting them by the
+transaction commit sequence and that family's persisted flush frontier. A unit
+whose commit is already covered is skipped as a whole; a newer unit is replayed
+as a whole, including operations whose own sequences are older. Dropped families
+are skipped permanently. A missing family frontier is corruption under both
+strict and salvage recovery. No SST value lookup or proof cache decides replay.
+
+The manifest default family starts at zero. Flush publication durably pairs its
+SST with the frozen commit boundary, including best-effort writes. Compaction and
+reclamation preserve this authority even after every SST has disappeared. Local
+retirement uses this local durable view; remote retirement uses only a validated
+committed shared generation and persisted sealed segment family summaries.
 
 Each participating column family consumes a replay-local contiguous name range.
 Its length is `max(1, max_memtable_encoded_bytes /
@@ -235,8 +236,8 @@ publication preserves the maximum reserved sequence in its journal and snapshot.
 Every checkpoint still uses the existing lease, intent, SST upload, manifest,
 and cloud metadata barriers, with serialized publication and installation.
 
-The `midge::recovery` tracing target reports coverage block hits, misses and
-retained-byte peak, durable `name_reservation` publications, and separate
+The `midge::recovery` tracing target reports durable `name_reservation`
+publications and separate
 `recovery_checkpoint_reservation`, `recovery_checkpoint_construction`,
 `recovery_checkpoint_publication`, and `recovery_checkpoint_installation` times.
 The operational qualification collector also records provider requests and

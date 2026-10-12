@@ -1,15 +1,10 @@
-//! Cloud-covered WAL pruning coordination.
+//! Retire cloud WAL authority using committed shared family frontiers.
 
 use super::super::EventLoop;
-use crate::runtime::hybrid_persistence::{CloudPersistence, CloudWalPruneGuard};
+use crate::runtime::hybrid_persistence::{CloudPersistence, SharedMetadataSnapshot};
 
-// Amortize catalog, metadata, and SST proof round trips across strict-write
-// workloads that publish many small WAL segments. Keep the batch bounded so a
-// maintenance worker cannot monopolize the publication gate indefinitely.
+// Bound each catalog retirement turn so maintenance yields to foreground work.
 const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 32;
-// Yield shared maintenance after acknowledged proof work. This is a scheduling
-// quantum, not a provider timeout: a started range keeps its normal hard budget.
-const CLOUD_WAL_PRUNE_WORK_QUANTUM: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[cfg(test)]
 std::thread_local! {
@@ -17,108 +12,45 @@ std::thread_local! {
         std::cell::RefCell::new(None);
 }
 
-fn run_cloud_wal_prune_preflight(
+fn run_cloud_wal_retirement(
     storage: &CloudPersistence,
     candidates: &[(u64, u64)],
     candidate_ids: Vec<u64>,
-    metadata_snapshot: Option<crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot>,
-    local_guard: CloudWalPruneGuard,
+    metadata_snapshot: &SharedMetadataSnapshot,
     writer_epoch: u64,
     attempt_budget: std::time::Duration,
 ) {
     let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let deadline = crate::common::OperationDeadline::from_budget(attempt_budget);
-        match metadata_snapshot {
-            Some(snapshot) => snapshot.verify_exact_then(&deadline, |manifest, metadata_guard| {
-                let guard = CloudWalPruneGuard::new(manifest, Some(metadata_guard))
-                    .with_memory_limit(local_guard.memory_limit())
-                    .with_progress(local_guard.progress());
-                let guard = match local_guard.work_quantum() {
-                    Some(quantum) => guard.with_work_quantum(quantum),
-                    None => guard,
-                };
-                storage.prune_cloud_wal_segments_within(candidates, guard, writer_epoch, &deadline)
-            }),
-            None => storage.prune_cloud_wal_segments_within(
-                candidates,
-                local_guard,
-                writer_epoch,
-                &deadline,
-            ),
-        }
+        let authority = metadata_snapshot.committed_retirement_authority_within(&deadline)?;
+        storage.prune_cloud_wal_segments_within(candidates, &authority, writer_epoch, &deadline)
     }))
     .unwrap_or_else(|_| {
         Err(crate::common::MidgeError::Internal(
-            "cloud WAL prune preflight panicked".to_string(),
+            "cloud WAL retirement panicked".into(),
         ))
     });
-
     match attempt {
         Ok(results) => {
-            for (segment_id, result) in results {
+            for (id, result) in results {
                 match result {
-                    Ok(()) => storage.queue_cloud_wal_prune_complete(
-                        segment_id,
-                        crate::storage::StorageOutcome::Ok(()),
-                    ),
+                    Ok(()) => storage
+                        .queue_cloud_wal_prune_complete(id, crate::storage::StorageOutcome::Ok(())),
                     Err(error) => {
-                        storage.queue_cloud_wal_prune_attempt_failed(segment_id, error.to_string());
+                        storage.queue_cloud_wal_prune_attempt_failed(id, error.to_string());
                     }
                 }
             }
         }
         Err(error) => {
-            for segment_id in candidate_ids {
-                storage.queue_cloud_wal_prune_attempt_failed(segment_id, error.to_string());
+            for id in candidate_ids {
+                storage.queue_cloud_wal_prune_attempt_failed(id, error.to_string());
             }
         }
     }
 }
 
 impl EventLoop {
-    fn local_wal_prune_guard(
-        &self,
-        storage: &crate::storage::HybridStorage,
-        remote_snapshot: bool,
-    ) -> crate::common::MidgeResult<CloudWalPruneGuard> {
-        let guard = if remote_snapshot {
-            CloudWalPruneGuard::default()
-        } else {
-            let budget = storage.maintenance_memory().ok_or_else(|| {
-                crate::common::MidgeError::Internal(
-                    "local WAL cleanup requires configured maintenance memory".into(),
-                )
-            })?;
-            CloudWalPruneGuard::admitted_local_snapshot(
-                &self.state.manifest,
-                &budget,
-                &self.cloud_coordinator.cloud_wal_prune_progress,
-            )?
-        };
-        Ok(guard
-            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
-            .with_progress(self.cloud_coordinator.cloud_wal_prune_progress.clone()))
-    }
-
-    fn cloud_wal_prune_guards(
-        &self,
-        storage: &crate::storage::HybridStorage,
-    ) -> crate::common::MidgeResult<(
-        Option<crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot>,
-        CloudWalPruneGuard,
-    )> {
-        let metadata_snapshot = self.cloud_metadata_prune_snapshot_for_wal_cleanup()?;
-        // Filesystem-backed cloud simulation has no separate control store;
-        // its event-loop manifest is the authority snapshot guarded below.
-        let local_guard = self.local_wal_prune_guard(storage, metadata_snapshot.is_some())?;
-        let local_guard = if self.cloud_maintenance_enabled() {
-            local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
-        } else {
-            local_guard
-        };
-        Ok((metadata_snapshot, local_guard))
-    }
-
     fn cloud_wal_prune_layout_publication_active(&self) -> bool {
         self.state
             .active_compactions
@@ -132,7 +64,7 @@ impl EventLoop {
         // A cleanup omission retains native WAL authority for recovery fixtures.
         crate::failpoints::fail_point!("midge::cloud::defer_wal_prune_admission", |_| ());
         // Shutdown must settle admitted durability work without admitting a
-        // fresh optional proof from flush/upload completion or maintenance.
+        // fresh optional retirement from flush/upload completion or maintenance.
         // Retain recovery authority for a later engine lifetime instead.
         if self.shutting_down {
             return;
@@ -168,17 +100,12 @@ impl EventLoop {
             return;
         };
         storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
-        let Some(recovery_floor_segment) = self.state.wal_recovery_floor_segment() else {
-            return;
-        };
-        let persisted_sequence = self.state.manifest.last_persisted_sequence;
-        let candidates =
-            self.next_cloud_wal_prune_candidates(recovery_floor_segment, persisted_sequence);
+        let candidates = self.next_cloud_wal_prune_candidates();
         if candidates.is_empty() {
             return;
         }
-        let (metadata_snapshot, local_guard) = match self.cloud_wal_prune_guards(&storage) {
-            Ok(guards) => guards,
+        let metadata_snapshot = match self.cloud_metadata_snapshot_for_wal_cleanup() {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 tracing::debug!(%error, "deferring WAL cleanup admission");
                 return;
@@ -187,7 +114,7 @@ impl EventLoop {
         let writer_epoch = self.state.writer_epoch;
         // This callerless attempt has retry ownership, but shutdown must still
         // be able to join it within the cloud drain window. Starting the budget
-        // here also bounds the whole multi-proof sequence rather than granting
+        // here also bounds the whole retirement sequence rather than granting
         // each provider callback a fresh timeout.
         let attempt_budget = self
             .runtime_response_timeout
@@ -205,7 +132,7 @@ impl EventLoop {
             .cloud_wal
             .admit_prunes(candidate_ids.iter().copied());
         let worker_name = format!(
-            "midge-wal-prune-preflight-{}-{}",
+            "midge-wal-retirement-{}-{}",
             candidate_ids.first().copied().unwrap_or_default(),
             candidate_ids.last().copied().unwrap_or_default()
         );
@@ -213,12 +140,11 @@ impl EventLoop {
         let worker = std::thread::Builder::new()
             .name(worker_name)
             .spawn(move || {
-                run_cloud_wal_prune_preflight(
+                run_cloud_wal_retirement(
                     &CloudPersistence::new(storage),
                     &candidates,
                     worker_candidate_ids,
-                    metadata_snapshot,
-                    local_guard,
+                    &metadata_snapshot,
                     writer_epoch,
                     attempt_budget,
                 );
@@ -234,29 +160,19 @@ impl EventLoop {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     %error,
-                    "Failed to start cloud WAL prune preflight worker"
+                    "Failed to start cloud WAL retirement worker"
                 );
             }
         }
     }
 
-    fn next_cloud_wal_prune_candidates(
-        &self,
-        recovery_floor_segment: u64,
-        persisted_sequence: u64,
-    ) -> Vec<(u64, u64)> {
-        // Retire catalog authority only as an oldest-first prefix. A newer
-        // record may mask an older authoritative WAL record for the same key;
-        // removing the newer segment across a gap can resurrect that older
-        // state after a later tombstone/TTL compaction.
+    fn next_cloud_wal_prune_candidates(&self) -> Vec<(u64, u64)> {
         let tracker = &self.cloud_coordinator.cloud_wal;
         tracker
             .acks()
             .published()
             .take_while(|&(segment_id, max_sequence)| {
-                segment_id < recovery_floor_segment
-                    && max_sequence <= self.state.wal.frontiers.cloud_durable()
-                    && max_sequence <= persisted_sequence
+                max_sequence <= self.state.wal.frontiers.cloud_durable()
                     && !tracker.prunes().contains(segment_id)
             })
             .take(CLOUD_WAL_PRUNE_BATCH_SIZE)
@@ -289,7 +205,7 @@ impl EventLoop {
             });
             if worker.join().is_err() {
                 self.state.mark_persistence_anomaly();
-                tracing::warn!("cloud WAL prune preflight worker panicked during join");
+                tracing::warn!("cloud WAL retirement worker panicked during join");
             }
             self.publication_gate.release(
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
@@ -333,12 +249,7 @@ impl EventLoop {
         let ledger = self.state.wal.history.ledger();
         let to = self.cloud_coordinator.cloud_wal.local_retire_point(ledger);
         if to > ledger.log_start() {
-            crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
-            if let Some(retired) = self.retire_wal_below_or_retain(to) {
-                if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
-                    storage.release_local_wal_bytes(retired.removed_bytes());
-                }
-            }
+            self.retire_wal_below_or_retain(to);
         }
         // Memory mode keeps no local copies, so everything queued is retired.
         let log_start = if self.state.wal.history.segment_files().is_some() {
@@ -354,35 +265,7 @@ impl EventLoop {
             if release.cloud_durable {
                 self.wal_transition.retire_cloud_durable(segment_id)?;
             }
-            if release.gc_pin {
-                self.wal_transition.retire_gc_pin(segment_id);
-            }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::runtime::event_loop::tests::create_test_event_loop;
-
-    #[test]
-    fn should_return_error_when_local_prune_budget_is_unconfigured() {
-        // Arrange
-        let el = create_test_event_loop().unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let local = std::sync::Arc::new(
-            crate::storage::filesystem::FileSystem::new(directory.path()).unwrap(),
-        );
-        let storage = crate::storage::HybridStorage::with_policy(
-            local,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-        );
-
-        // Act
-        let result = el.local_wal_prune_guard(&storage, false);
-
-        // Assert
-        assert!(result.is_err());
     }
 }

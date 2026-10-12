@@ -36,6 +36,7 @@ fn install_underfull_overlap_fixture(
     ];
     let mut manifest = crate::metadata::ManifestPersistence::load(directory)
         .map_err(crate::common::MidgeError::Internal)?;
+    let mut flush_edits = Vec::new();
     for (name, rows) in entries {
         let mut writer = factory.create()?;
         for &(key, value, sequence) in &rows {
@@ -46,25 +47,31 @@ fn install_underfull_overlap_fixture(
         }
         writer.finish_to_path(&sst_dir.join(name))?;
         let bytes = std::fs::read(sst_dir.join(name))?;
-        manifest.add_file(crate::metadata::FileMeta {
-            name: name.clone(),
-            level: 1,
-            size_bytes: u64::try_from(bytes.len()).expect("fixture SST size fits u64"),
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: 0,
-            smallest_key: Some(rows.first().expect("fixture row").0.to_vec()),
-            largest_key: Some(rows.last().expect("fixture row").0.to_vec()),
-            smallest_seq: rows.iter().map(|row| row.2).min(),
-            largest_seq: rows
-                .iter()
-                .map(|row| row.2)
-                .chain((name == &names[0]).then_some(2))
-                .max(),
-            key_bounds_complete: true,
-            ..Default::default()
-        });
+        flush_edits.push(crate::metadata::ManifestEdit::AddSst(
+            crate::metadata::FileMeta {
+                name: name.clone(),
+                level: 1,
+                size_bytes: u64::try_from(bytes.len()).expect("fixture SST size fits u64"),
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                cf_id: 0,
+                smallest_key: Some(rows.first().expect("fixture row").0.to_vec()),
+                largest_key: Some(rows.last().expect("fixture row").0.to_vec()),
+                smallest_seq: rows.iter().map(|row| row.2).min(),
+                largest_seq: rows
+                    .iter()
+                    .map(|row| row.2)
+                    .chain((name == &names[0]).then_some(2))
+                    .max(),
+                key_bounds_complete: true,
+                ..Default::default()
+            },
+        ));
     }
-    manifest.last_persisted_sequence = 3;
+    flush_edits.push(crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+        cf_id: 0,
+        freeze_sequence: 3,
+    });
+    manifest.apply_edit(&crate::metadata::ManifestEdit::Batch(flush_edits))?;
     manifest.next_sst_seqs.insert(0, 4);
     crate::metadata::ManifestPersistence::save(directory, &manifest)
         .map_err(crate::common::MidgeError::Internal)?;
@@ -974,6 +981,12 @@ fn provider_metadata_test_lease(
     lease
 }
 
+fn manifest_at_horizon(horizon: u64) -> crate::metadata::Manifest {
+    let mut manifest = crate::metadata::Manifest::default();
+    manifest.edit_checkpoint_id = horizon;
+    manifest
+}
+
 fn publish_test_metadata_generation(
     cloud: &crate::storage::cloud::CloudStorage,
     lease: &crate::lease::CloudStorageLease,
@@ -983,7 +996,7 @@ fn publish_test_metadata_generation(
     publish_test_metadata_bodies(
         cloud,
         lease,
-        manifest.last_persisted_sequence,
+        manifest.edit_checkpoint_id,
         format_marker,
         serde_json::to_vec_pretty(manifest).expect("serialize test manifest"),
     )
@@ -992,7 +1005,7 @@ fn publish_test_metadata_generation(
 fn publish_test_metadata_bodies(
     cloud: &crate::storage::cloud::CloudStorage,
     lease: &crate::lease::CloudStorageLease,
-    manifest_sequence: u64,
+    manifest_horizon: u64,
     format_marker: Vec<u8>,
     snapshot: Vec<u8>,
 ) -> crate::lease::CloudMetadataGeneration {
@@ -1016,7 +1029,8 @@ fn publish_test_metadata_bodies(
         })
         .collect();
     let generation = crate::lease::CloudMetadataGeneration {
-        manifest_sequence,
+        id: crate::lease::SharedGenerationId::FIRST,
+        manifest_horizon,
         objects,
     };
     lease
@@ -1048,10 +1062,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let local_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 20,
-        ..Default::default()
-    };
+    let local_manifest = manifest_at_horizon(20);
     crate::metadata::ensure_or_create_format_marker(
         &crate::io::real::test_root(temp_dir.path()),
         temp_dir.path(),
@@ -1059,10 +1070,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &local_manifest)
         .expect("save local manifest");
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 21,
-        ..Default::default()
-    };
+    let remote_manifest = manifest_at_horizon(21);
     let generation = publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1088,7 +1096,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     )
     .expect("parse retained remote manifest");
     assert_eq!(
-        retained.last_persisted_sequence, 21,
+        retained.edit_checkpoint_id, 21,
         "engine metadata mirror must not overwrite newer remote manifest"
     );
 }
@@ -1223,10 +1231,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
     ));
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 42,
-        ..Default::default()
-    };
+    let remote_manifest = manifest_at_horizon(42);
     publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1242,7 +1247,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
     // Act
     // Assert
     assert_eq!(
-        hydrated.last_persisted_sequence, 42,
+        hydrated.edit_checkpoint_id, 42,
         "metadata hydration must probe known metadata keys directly"
     );
 }
@@ -1254,14 +1259,8 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let snapshot_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 10,
-        ..Default::default()
-    };
-    let current_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 11,
-        ..Default::default()
-    };
+    let snapshot_manifest = manifest_at_horizon(10);
+    let current_manifest = manifest_at_horizon(11);
     publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1282,7 +1281,7 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
 
     // Act
     // Assert
-    assert_eq!(recovered.last_persisted_sequence, 10);
+    assert_eq!(recovered.edit_checkpoint_id, 10);
     assert!(!temp_dir.path().join("manifest.json").exists());
 }
 
@@ -1293,14 +1292,8 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let snapshot_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 10,
-        ..Default::default()
-    };
-    let current_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 11,
-        ..Default::default()
-    };
+    let snapshot_manifest = manifest_at_horizon(10);
+    let current_manifest = manifest_at_horizon(11);
     publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1322,7 +1315,7 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     // Act
     // Assert
     assert_eq!(
-        hydrated.last_persisted_sequence, 10,
+        hydrated.edit_checkpoint_id, 10,
         "legacy manifest mirror must not override the snapshot"
     );
 }
@@ -1334,10 +1327,7 @@ fn should_recover_cloud_database_when_manifest_json_is_absent() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let snapshot = crate::metadata::Manifest {
-        last_persisted_sequence: 42,
-        ..Default::default()
-    };
+    let snapshot = manifest_at_horizon(42);
     publish_test_metadata_generation(&cloud, &lease, &snapshot, current_test_format_marker());
 
     // Act
@@ -1347,7 +1337,7 @@ fn should_recover_cloud_database_when_manifest_json_is_absent() {
         .expect("recover hydrated snapshot");
 
     // Assert
-    assert_eq!(recovered.last_persisted_sequence, 42);
+    assert_eq!(recovered.edit_checkpoint_id, 42);
     assert!(!temp_dir.path().join("manifest.json").exists());
 }
 
@@ -1390,10 +1380,7 @@ fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_p
             let cloud =
                 crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
             let lease = provider_metadata_test_lease(backend);
-            let manifest = crate::metadata::Manifest {
-                last_persisted_sequence: 42,
-                ..Default::default()
-            };
+            let manifest = manifest_at_horizon(42);
             let generation = publish_test_metadata_generation(
                 &cloud,
                 &lease,
@@ -1474,10 +1461,7 @@ fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let legacy = crate::metadata::Manifest {
-        last_persisted_sequence: 42,
-        ..Default::default()
-    };
+    let legacy = manifest_at_horizon(42);
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",

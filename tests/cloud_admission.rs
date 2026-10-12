@@ -73,7 +73,7 @@ mod cloud_eventual_flush {
                 Instant::now() < deadline,
                 "timed out waiting for runtime condition; last metrics: sst_count={} persisted_seq={} wal_segment={} current_seq={} cloud_seq={} gap={}",
                 metrics.sst_count,
-                metrics.manifest_last_persisted_sequence,
+                metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
                 metrics.wal_current_segment_id,
                 metrics.current_sequence,
                 metrics.wal_cloud_durable_seq,
@@ -113,7 +113,8 @@ mod cloud_eventual_flush {
         );
 
         let metrics = wait_for_metrics(&engine, Duration::from_secs(3), |metrics| {
-            metrics.sst_count >= 1 && metrics.manifest_last_persisted_sequence > 0
+            metrics.sst_count >= 1
+                && metrics.manifest_flush_frontiers[&0].expect("default family remains live") > 0
         });
 
         assert!(
@@ -185,7 +186,8 @@ mod cloud_eventual_flush {
         }
 
         let metrics = wait_for_metrics(&engine, Duration::from_secs(3), |metrics| {
-            metrics.sst_count >= 1 && metrics.manifest_last_persisted_sequence > 0
+            metrics.sst_count >= 1
+                && metrics.manifest_flush_frontiers[&0].expect("default family remains live") > 0
         });
 
         assert!(

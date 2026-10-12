@@ -203,9 +203,6 @@ impl EventLoop {
             // Shared maintenance pressure is backpressure, not a failed
             // accepted write. Keep its waiter and sealed local WAL while
             // the upload backlog owns a bounded retry.
-            self.cloud_coordinator
-                .cloud_wal_prune_progress
-                .discard_idle_proofs();
             tracing::debug!(segment_id, %error, "deferring WAL catalog publication for shared memory");
             return true;
         }
@@ -331,11 +328,10 @@ impl EventLoop {
             tracing::debug!(segment_id, "ignored stale cloud WAL prune completion");
             return;
         }
-        // Catalog retirement does not stop startup replaying a local member,
-        // so its tombstone GC pin holds until the ledger retires it.
+        // Retire any remaining local cache copy after catalog authority.
         if let Err(error) = self.retire_cloud_local_wal(
             segment_id,
-            crate::runtime::event_loop::coordination::LocalRetirement::GC_PIN,
+            crate::runtime::event_loop::coordination::LocalRetirement::default(),
         ) {
             self.fence_wal_transition(&error, Some(segment_id));
             tracing::error!(%error, segment_id, "cloud WAL obligation retirement fenced");
@@ -349,18 +345,18 @@ impl EventLoop {
             crate::storage::StorageOutcome::Err(error) => {
                 // The authoritative catalog entry is retired before physical
                 // deletion is attempted. A failed delete is therefore a safe
-                // storage leak, not a recovery obligation that may be retried
-                // through a now-absent catalog entry.
+                // ignored orphan. Storage owns its bounded conditional retry
+                // independently of the now-absent catalog entry.
                 self.cloud_coordinator.cloud_wal.retire_pruned(segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
                     error = %error,
-                    "Cloud WAL authority was retired but physical deletion failed; retaining an ignored orphan"
+                    "Cloud WAL authority was retired; conditional physical cleanup remains with storage"
                 );
             }
         }
-        // Tests observe delivery after the live runtime has moved its GC pin.
+        // Tests observe delivery after authority and the local cache retire.
         crate::failpoints::fail_point!("midge::cloud::after_wal_prune_complete");
     }
 

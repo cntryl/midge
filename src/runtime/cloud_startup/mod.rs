@@ -2,15 +2,14 @@
 //! files replay, which manifest SSTs survive, what salvage cuts or sets aside,
 //! and which remote objects startup may delete.
 //!
-//! `engine::startup` wires these decisions into engine startup; the coverage
-//! rule they rely on is the shared one in `runtime::hybrid_persistence`.
+//! `engine::startup` wires these decisions into engine startup. Persisted
+//! family frontiers govern replay; committed shared generations govern retirement.
 
 pub(crate) mod cloud_io;
 mod cloud_recovery;
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]
 pub(crate) mod recovery_progress_fixture;
-pub(crate) mod replay_coverage;
 pub(crate) mod streaming_wal_fs;
 pub(crate) mod streaming_wal_plan;
 

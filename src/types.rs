@@ -11,6 +11,45 @@ use std::fmt;
 /// Column family identifier.
 pub type ColumnFamilyId = u32;
 
+/// Order of committed shared metadata publications, independent of WAL and journal ids.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct SharedGenerationId(u64);
+
+impl SharedGenerationId {
+    /// No shared generation has authorized retirement yet.
+    pub const NONE: Self = Self(0);
+    /// The first committed metadata publication.
+    pub const FIRST: Self = Self(1);
+
+    /// A nonzero committed publication ordinal.
+    #[must_use]
+    pub const fn new(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    /// Encoded ordinal.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The next ordinal, refusing exhaustion instead of wrapping.
+    #[must_use]
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
 /// Logical operation associated with a versioned key.
 ///
 /// The discriminants are part of the persisted SST and WAL-compatible state
@@ -235,7 +274,6 @@ pub struct RecoveryMetricsSnapshot {
 pub struct RuntimeMetricsSnapshot {
     pub health: EngineHealth,
     pub current_sequence: u64,
-    pub manifest_last_persisted_sequence: u64,
     pub active_memtables: usize,
     pub immutable_memtables: usize,
     pub total_memtable_bytes: usize,
@@ -254,6 +292,9 @@ pub struct RuntimeMetricsSnapshot {
     pub active_snapshots: usize,
     pub pinned_ssts: usize,
     pub oldest_snapshot_age_seconds: u64,
+    /// Durable local flush boundary per family; `None` identifies a dropped family.
+    /// This is not shared cloud publication or WAL acknowledgement progress.
+    pub manifest_flush_frontiers: std::collections::BTreeMap<ColumnFamilyId, Option<u64>>,
     pub sst_count: usize,
     pub sst_bytes: u64,
     pub salvage_mode_opens: u64,
@@ -385,7 +426,6 @@ pub struct StorageLayoutLevel {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageLayoutSnapshot {
     pub health: EngineHealth,
-    pub manifest_last_persisted_sequence: u64,
     pub levels: Vec<StorageLayoutLevel>,
     pub active_snapshots: Vec<SnapshotPinSnapshot>,
     pub compacting_ssts: Vec<String>,

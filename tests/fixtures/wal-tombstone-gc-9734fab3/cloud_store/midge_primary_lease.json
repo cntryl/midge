@@ -1,0 +1,7 @@
+lease_version: 3
+fencing_epoch: 2
+holder: fixture-predecessor
+owner: fixture-owner
+acquired: 1970-01-01T00:00:00Z
+expires: 1970-01-01T00:00:01Z
+metadata: {"id":1,"manifest_horizon":12,"objects":[{"crc32c":2194359355,"file_name":"FORMAT","len":23,"object_key":"metadata/generations/81900000-0000-4000-8000-000000000001/FORMAT"},{"crc32c":2815111143,"file_name":"manifest.snapshot.json","len":901,"object_key":"metadata/generations/81900000-0000-4000-8000-000000000001/manifest.snapshot.json"},{"crc32c":1984806262,"file_name":"intent_log.json","len":2,"object_key":"metadata/generations/81900000-0000-4000-8000-000000000001/intent_log.json"}]}

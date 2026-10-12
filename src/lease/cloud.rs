@@ -5,18 +5,13 @@
 //! staged diagnostics only; provider-backed fencing epochs live in the remote
 //! lease document.
 //!
-//! Filesystem-simulated cloud mode can still construct this type without a
-//! provider backend; that path remains local-only for deterministic tests.
+//! Filesystem-simulated cloud uses the same provider protocol over its shared object store.
 
 use super::clock::LeaseClock;
-use super::fs_leader_store::FsLeaderStore;
 use super::traits::{
     CloudMetadataGeneration, CloudMetadataHead, LeaderRecord, LeaderStore, LeaseError, LeaseGuard,
     LeaseValidity, PrimaryLease,
 };
-#[cfg(test)]
-use crate::io::RealFs;
-use crate::io::{staging, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -240,7 +235,7 @@ impl ProviderLeaderStore {
         let now = self.clock.now();
         let valid_until = monotonic_now + self.ttl;
         let document = LeaseDocument {
-            version: LeaseDocumentVersion::V2,
+            version: LeaseDocumentVersion::V3,
             epoch: Some(epoch),
             holder_id: holder_id.to_string(),
             owner_token: Some(self.owner_token.clone()),
@@ -479,16 +474,9 @@ impl LeaderStore for ProviderLeaderStore {
                     "cloud metadata authority changed during publication".to_string(),
                 ));
             }
-            if let Some(committed) = current.committed_metadata.as_ref() {
-                if committed.manifest_sequence > generation.manifest_sequence {
-                    return Err(LeaseError::RenewalFailed(format!(
-                        "cloud metadata sequence {} is ahead of local sequence {}",
-                        committed.manifest_sequence, generation.manifest_sequence
-                    )));
-                }
-                if committed == &generation {
-                    return Ok(());
-                }
+            generation.validate_successor(current.committed_metadata.as_ref())?;
+            if current.committed_metadata.as_ref() == Some(&generation) {
+                return Ok(());
             }
             let replacement = LeaseDocument {
                 committed_metadata: Some(generation.clone()),
@@ -517,7 +505,7 @@ impl LeaderStore for ProviderLeaderStore {
         let read_timeout = timeout.min(self.validity.remaining(expected_epoch)?);
         match provider_read_doc_with_timeout(&self.cloud, read_timeout)? {
             Some(document)
-                if document.version == LeaseDocumentVersion::V2
+                if document.version == LeaseDocumentVersion::V3
                     && owns_document(
                         &document,
                         expected_holder_id,
@@ -585,7 +573,7 @@ impl LeaderStore for ProviderLeaderStore {
                 .ok_or_else(|| {
                     LeaseError::RenewalFailed("cloud lease document disappeared".to_string())
                 })?;
-            if existing.version != LeaseDocumentVersion::V2
+            if existing.version != LeaseDocumentVersion::V3
                 || !owns_document(&existing, holder_id, &self.owner_token, expected_epoch)
             {
                 return Err(LeaseError::RenewalFailed(format!(
@@ -685,7 +673,7 @@ impl LeaderStore for ProviderLeaderStore {
             else {
                 return Ok(());
             };
-            if current.version != LeaseDocumentVersion::V2 {
+            if current.version != LeaseDocumentVersion::V3 {
                 tracing::warn!(%holder_id, "skipping cloud lease release after legacy document replacement");
                 return Ok(());
             }
@@ -723,6 +711,25 @@ impl LeaderStore for ProviderLeaderStore {
         })? = tolerance;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn read_test_coordination_document(&self) -> Result<Option<String>, LeaseError> {
+        provider_read_doc_with_timeout(&self.cloud, self.cloud.callback_timeout())
+            .map(|document| document.map(|document| format_lease_document(&document)))
+    }
+
+    #[cfg(test)]
+    fn write_test_coordination_document(&self, content: &str) -> Result<(), LeaseError> {
+        let document = parse_lease_document(content).ok_or_else(|| {
+            LeaseError::Internal("test lease coordination document is malformed".into())
+        })?;
+        provider_write_doc_with_timeout(
+            &self.cloud,
+            &document,
+            Vec::new(),
+            self.cloud.callback_timeout(),
+        )
+    }
 }
 
 impl ProviderLeaderStore {
@@ -745,316 +752,16 @@ fn owns_document(
         && document.epoch == Some(expected_epoch)
 }
 
-struct UnavailableLeaderStore {
-    error: String,
-}
-
-impl UnavailableLeaderStore {
-    fn new(error: String) -> Self {
-        Self { error }
-    }
-
-    fn failure(&self) -> LeaseError {
-        LeaseError::IoError(format!(
-            "simulated-cloud lease store is unavailable: {}",
-            self.error
-        ))
-    }
-}
-
-impl LeaderStore for UnavailableLeaderStore {
-    fn acquire_leadership(&self, _holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        Err(self.failure())
-    }
-
-    fn acquire_leadership_with_minimum_epoch(
-        &self,
-        _holder_id: &str,
-        _minimum_epoch: u64,
-    ) -> Result<LeaderRecord, LeaseError> {
-        Err(self.failure())
-    }
-
-    fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
-        Err(self.failure())
-    }
-
-    fn set_clock_skew_tolerance(&self, _tolerance: Duration) -> Result<(), LeaseError> {
-        Ok(())
-    }
-}
-
-/// Filesystem-backed cloud lease simulation selected once during construction.
-struct SimulatedLeaderStore {
-    inner: FsLeaderStore,
-    fs: Arc<dyn Fs>,
-    owner_token: String,
-    ttl: Duration,
-    validity: Arc<LeaseValidity>,
-    clock_skew_tolerance: Mutex<Duration>,
-    clock: LeaseClock,
-}
-
-impl SimulatedLeaderStore {
-    fn new(
-        fs: Arc<dyn Fs>,
-        owner_token: String,
-        ttl: Duration,
-        validity: Arc<LeaseValidity>,
-        clock_skew_tolerance: Duration,
-        clock: LeaseClock,
-    ) -> Self {
-        Self {
-            inner: FsLeaderStore::new(Arc::clone(&fs), clock.clone()),
-            fs,
-            owner_token,
-            ttl,
-            validity,
-            clock_skew_tolerance: Mutex::new(clock_skew_tolerance),
-            clock,
-        }
-    }
-
-    fn clock_skew_tolerance(&self) -> Duration {
-        *self
-            .clock_skew_tolerance
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn read_document(&self) -> Result<Option<LeaseDocument>, LeaseError> {
-        let path = FsPath::new(LEASE_OBJECT_KEY);
-        match self.fs.exists(&path) {
-            Ok(false) => return Ok(None),
-            Ok(true) => {}
-            Err(error) => {
-                return Err(LeaseError::IoError(format!(
-                    "failed to check lease file existence: {error}"
-                )))
-            }
-        }
-        let metadata = match self.fs.metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(FsError::NotFound(_)) => return Ok(None),
-            Err(error) => {
-                return Err(LeaseError::IoError(format!(
-                    "failed to read lease file metadata: {error}"
-                )))
-            }
-        };
-        let file = match self.fs.open(
-            &path,
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        ) {
-            Ok(file) => file,
-            Err(FsError::NotFound(_)) => return Ok(None),
-            Err(error) => {
-                return Err(LeaseError::IoError(format!(
-                    "failed to open lease file: {error}"
-                )))
-            }
-        };
-        let bytes = file
-            .read_at(0, metadata.len)
-            .map_err(|error| LeaseError::IoError(format!("failed to read lease file: {error}")))?;
-        let content = String::from_utf8(bytes.to_vec()).map_err(|error| {
-            LeaseError::Indeterminate(format!(
-                "local lease coordination document is not UTF-8: {error}"
-            ))
-        })?;
-        parse_lease_document(&content).map(Some).ok_or_else(|| {
-            LeaseError::Indeterminate("local lease coordination document is malformed".to_string())
-        })
-    }
-
-    fn write_document(&self, document: &LeaseDocument) -> Result<(), LeaseError> {
-        let content = format_lease_document(document);
-        let temp_path = FsPath::new(format!("{LEASE_OBJECT_KEY}.{}.tmp", self.owner_token));
-        staging::stage_bytes(
-            &self.fs,
-            &temp_path,
-            &FsPath::new(LEASE_OBJECT_KEY),
-            content.as_bytes(),
-            LeaseError::IoError,
-        )
-    }
-
-    fn remove_document(&self) -> Result<(), LeaseError> {
-        match self.fs.remove_file(&FsPath::new(LEASE_OBJECT_KEY)) {
-            Ok(()) | Err(FsError::NotFound(_)) => Ok(()),
-            Err(error) => Err(LeaseError::IoError(format!(
-                "failed to remove lease file: {error}"
-            ))),
-        }
-    }
-}
-
-impl LeaderStore for SimulatedLeaderStore {
-    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        self.acquire_leadership_with_minimum_epoch(holder_id, 0)
-    }
-
-    fn acquire_leadership_with_minimum_epoch(
-        &self,
-        holder_id: &str,
-        minimum_epoch: u64,
-    ) -> Result<LeaderRecord, LeaseError> {
-        let monotonic_now = Instant::now();
-        let now = self.clock.now();
-        let valid_until = monotonic_now + self.ttl;
-        let record = self.inner.acquire_leadership_after_validation_and_publish(
-            holder_id,
-            |_| {
-                if let Some(existing) = self.read_document()? {
-                    if !existing
-                        .is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())?
-                    {
-                        return Err(LeaseError::AcquisitionFailed(format!(
-                            "another instance holds the lease (holder: {}, expires: {})",
-                            existing.holder_id, existing.expires_at
-                        )));
-                    }
-                }
-                Ok(())
-            },
-            |record| {
-                self.write_document(&LeaseDocument {
-                    version: LeaseDocumentVersion::Legacy,
-                    epoch: Some(record.epoch),
-                    holder_id: holder_id.to_string(),
-                    owner_token: Some(self.owner_token.clone()),
-                    acquired_at: now.to_rfc3339(),
-                    expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl))
-                        .to_rfc3339(),
-                    committed_metadata: None,
-                })
-            },
-            minimum_epoch,
-        )?;
-        self.validity.activate(record.epoch, valid_until)?;
-        Ok(record)
-    }
-
-    fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
-        self.inner.read_current()
-    }
-
-    fn renew_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
-        let valid_until = self.inner.with_exclusive_lock(holder_id, || {
-            let current = self.read_document()?.ok_or_else(|| {
-                LeaseError::RenewalFailed("simulated-cloud lease document disappeared".to_string())
-            })?;
-            if !owns_document(&current, holder_id, &self.owner_token, expected_epoch) {
-                return Err(LeaseError::RenewalFailed(format!(
-                    "simulated-cloud lease ownership changed (holder: {}, epoch: {:?})",
-                    current.holder_id, current.epoch
-                )));
-            }
-            match self.inner.read_current()? {
-                Some(record) if record.holder_id == holder_id && record.epoch == expected_epoch => {
-                }
-                Some(record) => {
-                    return Err(LeaseError::RenewalFailed(format!(
-                        "simulated-cloud leader changed (holder: {}, epoch: {})",
-                        record.holder_id, record.epoch
-                    )))
-                }
-                None => {
-                    return Err(LeaseError::RenewalFailed(
-                        "simulated-cloud leader record disappeared".to_string(),
-                    ))
-                }
-            }
-            let monotonic_now = Instant::now();
-            let now = self.clock.now();
-            let valid_until = monotonic_now + self.ttl;
-            self.validity.remaining(expected_epoch)?;
-            self.write_document(&LeaseDocument {
-                expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl))
-                    .to_rfc3339(),
-                ..current
-            })?;
-            Ok(valid_until)
-        })?;
-        self.inner.refresh_timestamp(holder_id, expected_epoch)?;
-        if let Err(error) = self.validity.advance(expected_epoch, valid_until) {
-            let _ = self.release_leadership(holder_id, expected_epoch);
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn release_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
-        let removed = self.inner.with_exclusive_lock(holder_id, || {
-            let Some(current) = self.read_document()? else {
-                return Ok(false);
-            };
-            if !owns_document(&current, holder_id, &self.owner_token, expected_epoch) {
-                tracing::warn!(%holder_id, expected_epoch, "skipping stale simulated-cloud lease release");
-                return Ok(false);
-            }
-            self.remove_document()?;
-            Ok(true)
-        })?;
-        if removed && expected_epoch > 0 {
-            self.inner.release_if_owner(holder_id, expected_epoch)?;
-        }
-        Ok(())
-    }
-
-    fn set_clock_skew_tolerance(&self, tolerance: Duration) -> Result<(), LeaseError> {
-        *self.clock_skew_tolerance.lock().map_err(|_| {
-            LeaseError::Internal("simulated lease tolerance lock poisoned".to_string())
-        })? = tolerance;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn read_test_coordination_document(&self) -> Result<Option<String>, LeaseError> {
-        self.read_document()
-            .map(|document| document.map(|document| format_lease_document(&document)))
-    }
-
-    #[cfg(test)]
-    fn write_test_coordination_document(&self, content: &str) -> Result<(), LeaseError> {
-        let document = parse_lease_document(content).ok_or_else(|| {
-            LeaseError::Internal("test lease coordination document is malformed".to_string())
-        })?;
-        self.write_document(&document)
-    }
-
-    #[cfg(test)]
-    fn remove_test_coordination_document(&self) -> Result<(), LeaseError> {
-        self.remove_document()
-    }
-}
-
 /// Primary lease implementation for cloud-backed storage.
 ///
-/// When constructed with `new_provider_backed`, the coordination document is
-/// written to object storage with conditional create/update headers. When
-/// constructed with `new`, it falls back to the local coordination file used by
-/// filesystem-simulated cloud tests.
+/// The coordination document is written to shared object storage with conditional
+/// create/update headers, including filesystem-backed simulated storage.
 ///
-/// Provider-backed coordination uses a V2 document. Its required field names
+/// Provider-backed coordination uses a V3 document. Its required field names
 /// differ from the legacy format so older binaries fail to parse and refuse
 /// takeover rather than discarding the committed metadata pointer. Existing
-/// provider V1 documents require an explicit offline migration. Simulated
-/// cloud keeps its local coordination format for deterministic tests.
+/// provider V1 documents are rejected.
 ///
-/// The legacy local coordination document looks like:
-/// ```text
-/// epoch: <monotonic fencing token>
-/// holder_id: <pid@host>
-/// owner_token: <random per-instance token>
-/// acquired_at: <rfc3339>
-/// expires_at: <rfc3339>
-/// ```
 pub struct CloudStorageLease {
     /// Cloud provider configuration.
     config: CloudLeaseConfig,
@@ -1091,64 +798,20 @@ impl CloudStorageLease {
         Arc::clone(&self.validity)
     }
 
-    /// Create a new cloud storage lease.
-    ///
-    /// `local_cache_path` must be the local staging directory for cloud storage.
-    /// The lease coordination file will be written here.
+    /// Exercise the production lease protocol over a filesystem object store.
     #[cfg(test)]
-    pub fn new(config: CloudLeaseConfig, local_cache_path: impl AsRef<std::path::Path>) -> Self {
-        let cache: Result<Arc<dyn Fs>, FsError> =
-            RealFs::new(local_cache_path).map(|fs| Arc::new(fs) as Arc<dyn Fs>);
-        Self::new_with_ttl(
+    pub(crate) fn new(config: CloudLeaseConfig, shared_path: impl AsRef<std::path::Path>) -> Self {
+        let store = Arc::new(crate::storage::filesystem::FileSystem::new(shared_path).unwrap());
+        let cloud = Arc::new(CloudStorage::from_object_store(
+            store,
+            Duration::from_secs(5),
+        ));
+        Self::new_provider_backed_with_ttl(
             config,
-            cache,
+            cloud,
             Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
             LeaseClock::default(),
         )
-    }
-
-    fn new_with_ttl(
-        config: CloudLeaseConfig,
-        cache: Result<Arc<dyn Fs>, FsError>,
-        ttl: Duration,
-        clock: LeaseClock,
-    ) -> Self {
-        let holder_id = format!(
-            "{}@{}",
-            std::process::id(),
-            hostname::get()
-                .unwrap_or_else(|_| std::ffi::OsString::from("unknown"))
-                .to_string_lossy()
-        );
-        let owner_token = uuid::Uuid::new_v4().to_string();
-
-        let clock_skew_tolerance = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2);
-        let validity = Arc::new(LeaseValidity::new());
-        let leader_store: Arc<dyn LeaderStore> = match cache {
-            Ok(fs) => Arc::new(SimulatedLeaderStore::new(
-                fs,
-                owner_token.clone(),
-                ttl,
-                Arc::clone(&validity),
-                clock_skew_tolerance,
-                clock,
-            )),
-            Err(error) => Arc::new(UnavailableLeaderStore::new(error.to_string())),
-        };
-
-        Self {
-            config,
-            holder_id,
-            #[cfg(test)]
-            owner_token,
-            ttl,
-            acquired: AtomicBool::new(false),
-            validity,
-            acquired_epoch: std::sync::atomic::AtomicU64::new(0),
-            pending_release_epoch: Mutex::new(None),
-            leader_store,
-            clock_skew_tolerance,
-        }
     }
 
     /// Override the bounded wall-clock skew allowance used for takeover.
@@ -1162,20 +825,6 @@ impl CloudStorageLease {
         self.leader_store.set_clock_skew_tolerance(tolerance)?;
         self.clock_skew_tolerance = tolerance;
         Ok(self)
-    }
-
-    /// A simulated-cloud lease whose leader record lives in the local cache
-    /// `root`, timed by `clock`.
-    pub(crate) fn new_with_clock_skew_tolerance_and_ttl(
-        config: CloudLeaseConfig,
-        root: Arc<dyn Fs>,
-        clock_skew_tolerance: Duration,
-        ttl: Duration,
-        clock: LeaseClock,
-    ) -> Self {
-        Self::new_with_ttl(config, Ok(root), ttl, clock)
-            .with_clock_skew_tolerance(clock_skew_tolerance)
-            .expect("engine validates lease clock-skew tolerance")
     }
 
     #[cfg(test)]
@@ -1276,11 +925,6 @@ impl CloudStorageLease {
     fn write_lease_file(&self, document: &LeaseDocument) -> Result<(), LeaseError> {
         self.leader_store
             .write_test_coordination_document(&format_lease_document(document))
-    }
-
-    #[cfg(test)]
-    fn remove_lease_file(&self) -> Result<(), LeaseError> {
-        self.leader_store.remove_test_coordination_document()
     }
 }
 
@@ -1457,7 +1101,7 @@ unsafe impl Sync for CloudStorageLease {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseDocumentVersion {
     Legacy,
-    V2,
+    V3,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1497,7 +1141,7 @@ impl LeaseDocument {
     }
 }
 
-/// Format a lease document as a simple line-based text file. V2 encodes its
+/// Format a lease document as a simple line-based text file. V3 encodes its
 /// bounded metadata descriptor as JSON on one line.
 fn format_lease_document(doc: &LeaseDocument) -> String {
     match doc.version {
@@ -1514,14 +1158,14 @@ fn format_lease_document(doc: &LeaseDocument) -> String {
                 doc.holder_id, doc.acquired_at, doc.expires_at,
             )
         }
-        LeaseDocumentVersion::V2 => {
+        LeaseDocumentVersion::V3 => {
             let metadata = serde_json::to_string(&doc.committed_metadata)
                 .expect("metadata generation has infallible JSON serialization");
             format!(
-                "lease_version: 2\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\nmetadata: {metadata}\n",
-                doc.epoch.expect("V2 lease has an epoch"),
+                "lease_version: 3\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\nmetadata: {metadata}\n",
+                doc.epoch.expect("V3 lease has an epoch"),
                 doc.holder_id,
-                doc.owner_token.as_deref().expect("V2 lease has an owner token"),
+                doc.owner_token.as_deref().expect("V3 lease has an owner token"),
                 doc.acquired_at,
                 doc.expires_at,
             )
@@ -1538,7 +1182,7 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
         .lines()
         .any(|line| line.starts_with("lease_version:"))
     {
-        return parse_v2_lease_document(content);
+        return parse_v3_lease_document(content);
     }
     parse_legacy_lease_document(content)
 }
@@ -1575,7 +1219,7 @@ fn parse_legacy_lease_document(content: &str) -> Option<LeaseDocument> {
     })
 }
 
-fn parse_v2_lease_document(content: &str) -> Option<LeaseDocument> {
+fn parse_v3_lease_document(content: &str) -> Option<LeaseDocument> {
     if !content.ends_with('\n') || content.contains('\r') {
         return None;
     }
@@ -1602,7 +1246,7 @@ fn parse_v2_lease_document(content: &str) -> Option<LeaseDocument> {
             _ => return None,
         }
     }
-    if version? != "2" {
+    if version? != "3" {
         return None;
     }
     let epoch = epoch?;
@@ -1618,7 +1262,7 @@ fn parse_v2_lease_document(content: &str) -> Option<LeaseDocument> {
         validate_metadata_generation(generation).ok()?;
     }
     Some(LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(epoch),
         holder_id,
         owner_token: Some(owner_token),
@@ -1628,7 +1272,14 @@ fn parse_v2_lease_document(content: &str) -> Option<LeaseDocument> {
     })
 }
 
-fn validate_metadata_generation(generation: &CloudMetadataGeneration) -> Result<(), LeaseError> {
+pub(super) fn validate_metadata_generation(
+    generation: &CloudMetadataGeneration,
+) -> Result<(), LeaseError> {
+    if generation.id == super::SharedGenerationId::NONE {
+        return Err(LeaseError::Internal(
+            "committed shared generation has zero ordinal".into(),
+        ));
+    }
     if generation.objects.is_empty()
         || generation.objects.len() > crate::metadata::files::CLOUD_MIRRORED.len()
     {
@@ -1696,7 +1347,7 @@ fn missing_initialized_lease_error() -> LeaseError {
 
 fn missing_authority_sentinel_error() -> LeaseError {
     LeaseError::Indeterminate(
-        "V2 cloud lease is missing its permanent metadata authority sentinel".to_string(),
+        "V3 cloud lease is missing its permanent metadata authority sentinel".to_string(),
     )
 }
 

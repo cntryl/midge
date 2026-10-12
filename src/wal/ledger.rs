@@ -478,6 +478,29 @@ impl WalLedger {
             .map(Member::id)
     }
 
+    /// One past the sealed leading run whose persisted family maxima are
+    /// covered. Unknown families must return false; a missing summary or an
+    /// open member stops retirement. This never reads segment payloads.
+    pub(crate) fn retirable_prefix(
+        &self,
+        mut covered: impl FnMut(u32, u64) -> bool,
+    ) -> Option<SegmentId> {
+        let mut below = None;
+        for member in &self.members {
+            let Some(facts) = &member.sealed else { break };
+            if (facts.record_count > 0 && facts.max_seq_per_cf.is_empty())
+                || !facts
+                    .max_seq_per_cf
+                    .iter()
+                    .all(|&(cf, sequence)| covered(cf, sequence))
+            {
+                break;
+            }
+            below = member.id().checked_add(1);
+        }
+        below
+    }
+
     /// The facts the ledger expects of member `id`.
     pub(crate) fn expected(&self, id: SegmentId) -> Option<&Member> {
         self.members

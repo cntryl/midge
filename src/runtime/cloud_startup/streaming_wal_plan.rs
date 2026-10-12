@@ -267,7 +267,16 @@ impl PublishedObject<'_> {
             fs,
             scope.clone(),
         ));
-        let path = FsPath::new(key.clone());
+        self.inspect(entry, &key, fs)
+    }
+
+    fn inspect(
+        &self,
+        entry: &CatalogEntry,
+        key: &str,
+        fs: Arc<dyn Fs>,
+    ) -> MidgeResult<(RemoteSource, Probe)> {
+        let path = FsPath::new(key);
         validate_wal_source(
             fs.as_ref(),
             &path,
@@ -294,6 +303,12 @@ impl PublishedObject<'_> {
             )));
         };
         entry.check(&identity).map_err(MidgeError::Corruption)?;
+        let footer = scan.footer().ok_or_else(|| {
+            MidgeError::Corruption(format!("cloud WAL {key} has no sealed footer"))
+        })?;
+        entry
+            .check_facts(&footer.sealed_facts())
+            .map_err(MidgeError::Corruption)?;
         Ok((
             (fs as Arc<dyn ReadFs>, path),
             Probe::Sealed {

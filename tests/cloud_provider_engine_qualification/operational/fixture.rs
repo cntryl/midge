@@ -119,9 +119,10 @@ impl Campaign {
         engine.flush_cf(&cf).expect("publish seed SST");
         let next_sequence = engine
             .metrics()
-            .get_storage_layout()
-            .expect("seed layout")
-            .manifest_last_persisted_sequence
+            .get_runtime_metrics()
+            .expect("seed frontier")
+            .manifest_flush_frontiers[&cf.id()]
+            .expect("seed family remains live")
             + 1;
         let next_segment = engine
             .metrics()

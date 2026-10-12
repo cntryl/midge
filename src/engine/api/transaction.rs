@@ -503,7 +503,7 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction
-    /// or when `start_key > end_key`.
+    /// or when `start_key >= end_key`.
     /// Returns `MidgeError::ResourceLimit` before staging when either endpoint
     /// exceeds point-key admission limits or the encoded range exceeds 64 MiB.
     pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
@@ -512,9 +512,9 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        if start_key.as_slice() > end_key.as_slice() {
+        if start_key.as_slice() >= end_key.as_slice() {
             return Err(MidgeError::InvalidArgument(
-                "delete_range requires start_key <= end_key".to_string(),
+                "delete_range requires start_key < end_key".to_string(),
             ));
         }
         self.write_set
@@ -960,5 +960,43 @@ mod tests {
 
         // Assert
         assert!(matches!(reported, MidgeError::Fenced(_)));
+    }
+}
+
+#[cfg(test)]
+mod range_admission_tests {
+    use super::*;
+
+    #[test]
+    fn should_reject_equal_range_before_staging_a_write() {
+        // Arrange
+        let engine = crate::Engine::open(crate::OpenOptions::in_memory().build().unwrap()).unwrap();
+        let family = engine.get_column_family("default").unwrap();
+        let mut transaction = engine
+            .begin_tx(family.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        let before = engine
+            .metrics()
+            .get_runtime_metrics()
+            .unwrap()
+            .current_sequence;
+
+        // Act
+        let rejected = transaction.delete_range(b"same".to_vec(), b"same".to_vec());
+
+        // Assert
+        assert!(matches!(rejected, Err(MidgeError::InvalidArgument(_))));
+        assert!(!transaction.has_writes());
+        transaction
+            .commit(crate::WriteOptions::best_effort())
+            .unwrap();
+        assert_eq!(
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .unwrap()
+                .current_sequence,
+            before
+        );
     }
 }

@@ -12,7 +12,6 @@ impl EventLoop {
         self.cloud_coordinator.mirror_metadata_within(
             self.state.fs.as_ref(),
             &self.metadata_publication_lock,
-            self.state.manifest.last_persisted_sequence,
             deadline,
             self.fencing.leader_store.as_deref().map(|store| {
                 crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {

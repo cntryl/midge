@@ -22,7 +22,6 @@ pub(super) struct ObservationSnapshot {
     pub(super) maximum_range_bytes: u64,
     local_wal_bytes: u64,
     staged_wal_count: u64,
-    pub(super) coverage_checks: u64,
     pub(super) mismatches: u64,
     pub(super) expected_inventory_entries: u64,
     pub(super) retained_inventory_entries: u64,
@@ -56,7 +55,6 @@ impl FixtureObservations {
                 maximum_range_bytes: 0,
                 local_wal_bytes: 0,
                 staged_wal_count: 0,
-                coverage_checks: 0,
                 mismatches: 0,
                 expected_inventory_entries: 0,
                 retained_inventory_entries: 0,
@@ -129,14 +127,6 @@ impl FixtureObservations {
                 "recovery fixture evidence persistence failed: {failure}"
             )))
         })
-    }
-
-    pub(super) fn record_coverage(&self, mismatch: bool) {
-        let mut snapshot = self.snapshot.lock();
-        snapshot.coverage_checks += 1;
-        snapshot.mismatches += u64::from(mismatch);
-        drop(snapshot);
-        self.remember_persistence();
     }
 
     fn hold_request(&self) -> MidgeResult<()> {

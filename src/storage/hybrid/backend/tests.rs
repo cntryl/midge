@@ -424,7 +424,7 @@ fn should_reject_remote_cas_when_identity_is_stale() {
 }
 
 #[test]
-fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
+fn should_reject_conditional_delete_when_target_capacity_is_exhausted() {
     // Arrange
     let cloud = Arc::new(NeverCompletesBackend::default());
     let limits = HybridQueueLimits {
@@ -439,33 +439,28 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
         None,
         limits,
     );
-    let target = RemoteObjectProof {
-        range_identity: false,
-        key: "objects/first".to_string(),
-        bytes: vec![1],
-        metadata: StorageObjectMetadata {
-            size: 1,
-            etag: "first-etag".to_string(),
-            generation: None,
-        },
+    let target = StorageObjectMetadata {
+        size: 1,
+        etag: "first-etag".to_string(),
+        generation: None,
     };
     storage
-        .delete_remote_object_guarded(1, target.clone())
+        .delete_remote_objects_by_identity(vec![(1, "objects/first".into(), target.clone())])
         .expect("first guarded delete should occupy the worker");
 
     // Act
     let started = Instant::now();
     let error = storage
-        .delete_remote_object_guarded(2, target)
+        .delete_remote_objects_by_identity(vec![(2, "objects/first".into(), target)])
         .expect_err("second guarded delete must be rejected at worker capacity");
 
     // Assert
-    assert!(error.to_string().contains("workers at capacity"), "{error}");
+    assert!(error.to_string().contains("queue is full"), "{error}");
     assert!(started.elapsed() < Duration::from_millis(50));
 }
 
 #[test]
-fn should_bound_guarded_delete_batch_by_one_callback_budget() {
+fn should_bound_conditional_delete_batch_by_one_callback_budget() {
     // Arrange
     let cloud = Arc::new(NeverCompletesBackend::default());
     let callback_timeout = Duration::from_millis(100);
@@ -485,22 +480,18 @@ fn should_bound_guarded_delete_batch_by_one_callback_budget() {
         .map(|request_id| {
             (
                 request_id,
-                RemoteObjectProof {
-                    range_identity: false,
-                    key: format!("wal/bounded-batch-{request_id}"),
-                    bytes: vec![u8::try_from(request_id).expect("request id fits in u8")],
-                    metadata: StorageObjectMetadata {
-                        size: 1,
-                        etag: format!("bounded-etag-{request_id}"),
-                        generation: None,
-                    },
+                format!("wal/bounded-batch-{request_id}"),
+                StorageObjectMetadata {
+                    size: 1,
+                    etag: format!("bounded-etag-{request_id}"),
+                    generation: None,
                 },
             )
         })
         .collect();
     storage
-        .delete_remote_objects_guarded(targets)
-        .expect("admit bounded guarded-delete batch");
+        .delete_remote_objects_by_identity(targets)
+        .expect("admit bounded conditional-delete batch");
 
     // Act
     let started = Instant::now();
@@ -682,8 +673,8 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        let _ = (request, callback);
-        panic!("test backend received undeclared range HEAD capability");
+        let _ = request;
+        self.retain_callback(callback);
     }
 
     fn submit_metadata_read_request(
@@ -832,20 +823,16 @@ fn should_not_submit_conditional_delete_given_expired_deadline() {
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
-    let target = RemoteObjectProof {
-        range_identity: false,
-        key: "wal/expired-delete".to_string(),
-        bytes: vec![1],
-        metadata: StorageObjectMetadata {
-            size: 1,
-            etag: "expired-delete-etag".to_string(),
-            generation: None,
-        },
+    let key = "wal/expired-delete";
+    let identity = StorageObjectMetadata {
+        size: 1,
+        etag: "expired-delete-etag".into(),
+        generation: None,
     };
     let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
 
     // Act
-    let result = storage.delete_remote_object_guarded_blocking_within(&target, &expired);
+    let result = storage.delete_remote_object_by_identity_blocking_within(key, &identity, &expired);
 
     // Assert
     let error = result.expect_err("an exhausted budget must not submit a conditional delete");
@@ -1142,5 +1129,256 @@ fn should_wait_at_least_one_poll_when_failed_uploads_are_overdue() {
         turn,
         Some(poll),
         "an overdue retry must not wake its caller at once"
+    );
+}
+
+struct ConditionalDeleteHeadPause {
+    started: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+struct FailFirstConditionalDelete {
+    inner: Arc<CloudStorage>,
+    attempts: AtomicUsize,
+    fail_first: bool,
+    head_pause: Mutex<Option<ConditionalDeleteHeadPause>>,
+}
+
+impl StorageBackend for FailFirstConditionalDelete {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        if self.attempts.fetch_add(1, Ordering::AcqRel) == 0 && self.fail_first {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key: request.key,
+                result: StorageOutcome::Err(crate::storage::StorageError::new(
+                    crate::storage::StorageErrorKind::Transport,
+                    "temporary delete outage",
+                )),
+            });
+        } else {
+            self.inner.submit_delete_request(request, callback);
+        }
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        if let Some(pause) = self.head_pause.lock().take() {
+            let inner = self.inner.clone();
+            std::thread::spawn(move || {
+                pause.started.send(()).unwrap();
+                pause.release.recv_timeout(Duration::from_secs(3)).unwrap();
+                inner.submit_range_head_request(request, callback);
+            });
+        } else {
+            self.inner.submit_range_head_request(request, callback);
+        }
+    }
+
+    crate::storage::forward_storage_backend!(inner;
+    submit_range_read_request, submit_metadata_read_request,
+
+        submit_head_request, submit_write_request);
+}
+
+#[test]
+fn should_retry_a_retired_object_with_its_original_identity_after_transport_failure() {
+    // Arrange
+    let mock = Arc::new(MockCloudBackend::new());
+    let cloud = Arc::new(CloudStorage::new(mock, "retry-delete".into()));
+    let backend = Arc::new(FailFirstConditionalDelete {
+        inner: cloud,
+        attempts: AtomicUsize::new(0),
+        fail_first: true,
+        head_pause: Mutex::new(None),
+    });
+    let storage =
+        HybridStorage::with_policy(backend.clone(), policy::StorageBudgetPolicy::default());
+    let key = "wal/retired-object";
+    let original = storage
+        .compare_exchange_remote_object(key, None, b"retired".to_vec())
+        .unwrap();
+    storage
+        .delete_remote_objects_by_identity(vec![(1, key.into(), original.metadata().clone())])
+        .unwrap();
+
+    // Act: only the normal storage tick runs after the failed attempt.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while backend.attempts.load(Ordering::Acquire) < 2 && Instant::now() < deadline {
+        storage.process_uploads();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    storage.shutdown_background_workers();
+
+    // Assert
+    assert_eq!(backend.attempts.load(Ordering::Acquire), 2);
+    assert!(storage.remote_object_proof_optional(key).unwrap().is_none());
+}
+
+#[test]
+fn should_queue_a_retired_object_until_the_conditional_delete_worker_is_available() {
+    // Arrange
+    let mock = Arc::new(MockCloudBackend::new());
+    let cloud = Arc::new(CloudStorage::new(mock, "queued-delete".into()));
+    let (started_tx, started) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::channel();
+    let cloud = Arc::new(FailFirstConditionalDelete {
+        inner: cloud,
+        attempts: AtomicUsize::new(0),
+        fail_first: false,
+        head_pause: Mutex::new(None),
+    });
+    let base = HybridStorage::with_policy(cloud.clone(), policy::StorageBudgetPolicy::default());
+    let first = base
+        .compare_exchange_remote_object("wal/first", None, b"a".to_vec())
+        .unwrap();
+    let second = base
+        .compare_exchange_remote_object("wal/second", None, b"b".to_vec())
+        .unwrap();
+    *cloud.head_pause.lock() = Some(ConditionalDeleteHeadPause {
+        started: started_tx,
+        release: release_rx,
+    });
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud,
+        policy::StorageBudgetPolicy::default(),
+        None,
+        HybridQueueLimits {
+            prune_workers: 1,
+            prune_requests: 2,
+            ..HybridQueueLimits::default()
+        },
+    );
+    storage
+        .delete_remote_objects_by_identity(vec![(1, "wal/first".into(), first.metadata().clone())])
+        .unwrap();
+
+    started.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    // Act: this admission remains bounded but cannot rely on a free worker.
+    storage
+        .delete_remote_objects_by_identity(vec![(
+            2,
+            "wal/second".into(),
+            second.metadata().clone(),
+        )])
+        .expect("a pending target must survive temporary worker exhaustion");
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while storage
+        .remote_object_proof_optional("wal/second")
+        .unwrap()
+        .is_some()
+        && Instant::now() < deadline
+    {
+        storage.process_uploads();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    storage.shutdown_background_workers();
+
+    // Assert
+    assert!(storage
+        .remote_object_proof_optional("wal/second")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn should_release_cleanup_capacity_without_deleting_when_authority_does_not_commit() {
+    // Arrange
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud.clone(),
+        policy::StorageBudgetPolicy::default(),
+        None,
+        HybridQueueLimits {
+            prune_requests: 1,
+            ..HybridQueueLimits::default()
+        },
+    );
+    let target = || {
+        vec![(
+            1,
+            "wal/reserved".into(),
+            StorageObjectMetadata {
+                size: 1,
+                etag: "reserved".into(),
+                generation: None,
+            },
+        )]
+    };
+    let admitted = storage.admit_remote_deletes_by_identity(target()).unwrap();
+
+    // Act
+    assert!(storage.admit_remote_deletes_by_identity(target()).is_err());
+    drop(admitted);
+    let replacement = storage.admit_remote_deletes_by_identity(target()).unwrap();
+    drop(replacement);
+
+    // Assert
+    assert!(cloud.callbacks.lock().is_empty());
+    assert_eq!(storage.next_upload_turn(Duration::from_millis(5)), None);
+}
+
+#[test]
+fn should_retain_a_replacement_object_when_a_physical_cleanup_retry_observes_another_identity() {
+    // Arrange
+    let mock = Arc::new(MockCloudBackend::new());
+    let cloud = Arc::new(CloudStorage::new(mock, "replacement-delete".into()));
+    let backend = Arc::new(FailFirstConditionalDelete {
+        inner: cloud,
+        attempts: AtomicUsize::new(0),
+        fail_first: true,
+        head_pause: Mutex::new(None),
+    });
+    let (events, completions) = cb::bounded(4);
+    let storage = HybridStorage::with_policy_and_event_sender(
+        backend.clone(),
+        policy::StorageBudgetPolicy::default(),
+        Some(events),
+    );
+    let key = "wal/retired-replacement";
+    let original = storage
+        .compare_exchange_remote_object(key, None, b"retired".to_vec())
+        .unwrap();
+    storage
+        .delete_remote_objects_by_identity(vec![(1, key.into(), original.metadata().clone())])
+        .unwrap();
+    assert!(matches!(
+        completions.recv_timeout(Duration::from_secs(1)).unwrap(),
+        StorageEvent::CloudWalPruneComplete {
+            result: StorageOutcome::Err(_),
+            ..
+        }
+    ));
+
+    // Act: no storage tick runs between the failed attempt and replacement.
+    storage
+        .compare_exchange_remote_object(key, Some(original.metadata()), b"replacement".to_vec())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        storage.process_uploads();
+        if completions.try_recv().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retained identity retry did not run"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    storage.shutdown_background_workers();
+
+    // Assert
+    assert_eq!(backend.attempts.load(Ordering::Acquire), 1);
+    assert_eq!(
+        storage.remote_object_proof(key).unwrap().bytes(),
+        b"replacement"
     );
 }

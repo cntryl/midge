@@ -235,10 +235,7 @@ impl DdlRegistry {
                 "remote DDL registry accepts only column-family edits".to_string(),
             ));
         }
-        let mut manifest = Manifest::default();
-        manifest.column_families.clone_from(&self.column_families);
-        manifest.apply_edit(edit);
-        self.column_families = manifest.column_families;
+        crate::metadata::manifest::apply_column_family_lifecycle(&mut self.column_families, edit)?;
         Ok(())
     }
 }
@@ -546,25 +543,44 @@ pub(crate) fn require_empty_registry_for_metadata_bootstrap(
 
 fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
     match edit {
-        ManifestEdit::CreateColumnFamily { id, name, .. } => state
-            .manifest
-            .column_families
-            .iter()
-            .any(|cf| cf.id == *id && cf.name == *name && cf.deleted_at.is_none()),
+        ManifestEdit::CreateColumnFamily {
+            id,
+            name,
+            created_at,
+        } => {
+            state.manifest.column_families.iter().any(|cf| {
+                cf.id == *id
+                    && cf.name == *name
+                    && cf.created_at == *created_at
+                    && cf.deleted_at.is_none()
+            }) && matches!(
+                state.manifest.flush_frontiers().get(*id),
+                Ok(crate::metadata::frontiers::FamilyFrontier::Live { .. })
+            )
+        }
         ManifestEdit::DropColumnFamilyAt {
             id, drop_sequence, ..
         } => state.manifest.column_families.iter().any(|cf| {
-            cf.id == *id && cf.deleted_at.is_some() && cf.drop_sequence == Some(*drop_sequence)
+            cf.id == *id
+                && cf.deleted_at.is_some()
+                && cf.drop_sequence == Some(*drop_sequence)
+                && matches!(
+                    state.manifest.flush_frontiers().get(*id),
+                    Ok(crate::metadata::frontiers::FamilyFrontier::Dropped)
+                )
         }),
         _ => false,
     }
 }
 
-fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEdit) {
+fn apply_remote_committed_visibility(
+    state: &mut RuntimeState,
+    edit: &ManifestEdit,
+) -> MidgeResult<()> {
     if local_edit_matches(state, edit) {
-        return;
+        return Ok(());
     }
-    state.manifest.apply_edit(edit);
+    state.manifest.apply_edit(edit)?;
     match edit {
         ManifestEdit::CreateColumnFamily { id, name, .. } => {
             state.column_families.entry(*id).or_insert_with(|| {
@@ -576,10 +592,11 @@ fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEd
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// Apply a prepared edit to the local journal and runtime state.  The
-/// candidate manifest is built first so a failed journal append cannot mutate
+/// manifest transition is prepared first so a failed journal append cannot mutate
 /// in-memory visibility.
 pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) -> MidgeResult<()> {
     apply_local_edit_for(state, edit, crate::metadata::accounting::Origin::Ddl)
@@ -593,12 +610,12 @@ fn apply_local_edit_for(
     if local_edit_matches(state, edit) {
         return Ok(());
     }
-    let mut candidate = state.manifest.clone();
-    candidate.apply_edit(edit);
+    let memory_mode = state.is_memory_mode();
+    let prepared = state.manifest.prepare_edit(edit)?;
     crate::failpoints::fail_point!("midge::ddl::before_local_commit", |_| Err(
         MidgeError::Internal("failpoint: DDL local commit failed".to_string())
     ));
-    let journaled_id = if state.is_memory_mode() {
+    let journaled_id = if memory_mode {
         None
     } else {
         Some(state.manifest_store.append_for(origin, edit)?)
@@ -606,7 +623,7 @@ fn apply_local_edit_for(
     crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
         MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
     ));
-    state.manifest.replace(candidate);
+    prepared.commit();
     if let Some(edit_id) = journaled_id {
         state.manifest.note_applied_journal_edit(edit_id);
     }
@@ -972,7 +989,7 @@ pub(crate) fn execute_within(
                             && authority.validate(deadline).is_ok()
                     }) =>
             {
-                apply_remote_committed_visibility(state, edit);
+                apply_remote_committed_visibility(state, edit)?;
                 state.mark_persistence_anomaly();
                 tracing::warn!(%error, "remote DDL CAS committed despite a lost response; retaining prepare for local reconciliation");
                 return Ok(());
@@ -999,7 +1016,7 @@ pub(crate) fn execute_within(
         // accept writes that recovery will later discard. Fence that state in
         // memory immediately, retain the prepare for restart reconciliation,
         // and report the operation as committed but degraded.
-        apply_remote_committed_visibility(state, edit);
+        apply_remote_committed_visibility(state, edit)?;
         state.mark_persistence_anomaly();
         tracing::warn!(%error, "remote DDL committed; retaining prepare and applying authoritative visibility after local persistence failure");
         return Ok(());
@@ -1021,6 +1038,38 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn should_retain_schema_tombstone_when_registry_create_reuses_a_dropped_id() {
+        // Arrange
+        let mut registry = DdlRegistry::from_manifest(&Manifest::default());
+        let create = ManifestEdit::CreateColumnFamily {
+            id: 1,
+            name: "original".into(),
+            created_at: 1,
+        };
+        registry.apply_edit(&create).unwrap();
+        let drop = ManifestEdit::DropColumnFamilyAt {
+            id: 1,
+            drop_sequence: 7,
+            dropped_sst_names: Vec::new(),
+        };
+        registry.apply_edit(&drop).unwrap();
+        let before = serde_json::to_value(&registry).unwrap();
+
+        // Act
+        let result = registry.apply_edit(&ManifestEdit::CreateColumnFamily {
+            id: 1,
+            name: "revived".into(),
+            created_at: 9,
+        });
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
+        registry.apply_edit(&drop).unwrap();
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
+    }
 
     struct LoseFirstRegistryCasCallback {
         inner: Arc<dyn crate::storage::StorageBackend>,
@@ -1515,7 +1564,8 @@ mod tests {
                 authority.writer_epoch,
                 None,
                 crate::lease::CloudMetadataGeneration {
-                    manifest_sequence: 0,
+                    id: crate::lease::SharedGenerationId::FIRST,
+                    manifest_horizon: 0,
                     objects,
                 },
                 std::time::Duration::from_secs(5),

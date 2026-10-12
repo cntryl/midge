@@ -97,7 +97,6 @@ struct CatalogExpiryFixture {
     provider: Arc<ExpiringCatalogRead>,
     storage: CloudPersistence,
     segment: CatalogEntry,
-    candidate: super::super::ValidatedWalPruneCandidate,
     publication_path: std::path::PathBuf,
     catalog: WalPublicationCatalog,
     bytes: Vec<u8>,
@@ -133,13 +132,6 @@ impl CatalogExpiryFixture {
         storage
             .compare_exchange_remote_object(&segment.object_key(), None, first_wal)
             .unwrap();
-        let candidate = super::super::ValidatedWalPruneCandidate {
-            segment_id: 1,
-            entry: segment.clone(),
-            validated: super::super::ValidatedWalObject {
-                proof: storage.remote_object_proof(&segment.object_key()).unwrap(),
-            },
-        };
         let second_wal = sealed_wal_bytes(2);
         let publication_path = directory.path().join("second.wal");
         std::fs::write(&publication_path, &second_wal).unwrap();
@@ -179,7 +171,6 @@ impl CatalogExpiryFixture {
             provider,
             storage,
             segment,
-            candidate,
             publication_path,
             catalog,
             bytes,
@@ -198,7 +189,7 @@ impl CatalogExpiryFixture {
                     schedule,
                     "startup-fence"
                         | "publication"
-                        | "prune-proof"
+                        | "retirement-read"
                         | "prune-retirement"
                         | "floor"
                         | "retirement"
@@ -233,7 +224,6 @@ impl CatalogExpiryFixture {
             provider,
             storage,
             segment,
-            candidate,
             publication_path,
             mut catalog,
             bytes,
@@ -268,19 +258,26 @@ impl CatalogExpiryFixture {
                 7,
                 &deadline,
             ),
-            "prune-proof" => {
+            "retirement-read" => {
                 super::super::authoritative_wal_catalog_within(&storage, &deadline).map(|_| ())
             }
-            "prune-retirement" | "prepared-prune-retirement" => {
-                super::super::retire_covered_wal_catalog_prefix_within(
-                    &storage,
-                    vec![candidate],
-                    7,
-                    &deadline,
-                    &mut Vec::new(),
-                )
-                .map(|_| ())
-            }
+            "prune-retirement" | "prepared-prune-retirement" => mutate_wal_catalog_within(
+                &storage,
+                "cloud WAL retirement",
+                &deadline,
+                &|| storage.check_write_authority(),
+                Missing::Refuse,
+                |catalog| {
+                    catalog
+                        .retire_prefix(
+                            7,
+                            std::slice::from_ref(&segment),
+                            crate::lease::SharedGenerationId::FIRST,
+                        )
+                        .map(|retired| Mutation::of(!retired.is_empty(), retired))
+                },
+            )
+            .and_then(|result| result.map(|_| ()).map_err(super::super::refusal_error)),
             "floor" => storage.set_aside_catalog_suffix_with_authority_within(
                 7,
                 None,
@@ -374,7 +371,7 @@ fn should_preserve_catalog_when_validity_expires_during_provider_read() {
     for schedule in [
         "startup-fence",
         "publication",
-        "prune-proof",
+        "retirement-read",
         "prune-retirement",
         "floor",
         "retirement",
@@ -496,25 +493,44 @@ fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudP
     successor
 }
 
-#[test]
-fn should_preserve_republished_wal_when_predecessor_validity_expires_before_delete() {
-    // Arrange: retain the valid local seal, as a cache whose ledger has not
-    // retired it yet does.
-    let fixture = CatalogExpiryFixture::new("gc-republication");
+fn retain_local_seal(fixture: &CatalogExpiryFixture) -> (std::path::PathBuf, std::path::PathBuf) {
     let retained = fixture.directory.path().join("retained");
     std::fs::create_dir_all(retained.join("wal")).unwrap();
     let seal = retained.join("wal").join(crate::wal::segment_file_name(1));
     std::fs::write(&seal, sealed_wal_bytes(1)).unwrap();
     crate::runtime::wal_history::fixture::record_at(&retained, &[1], 2).unwrap();
-    let target = fixture.candidate.validated.proof.clone();
-    let retired = super::super::retire_covered_wal_catalog_prefix_within(
+    (retained, seal)
+}
+
+#[test]
+fn should_preserve_republished_wal_when_predecessor_validity_expires_before_delete() {
+    // Arrange: retain the valid local seal, as a cache whose ledger has not
+    // retired it yet does.
+    let fixture = CatalogExpiryFixture::new("gc-republication");
+    let (retained, seal) = retain_local_seal(&fixture);
+    let target = fixture
+        .storage
+        .remote_object_proof(&fixture.segment.object_key())
+        .unwrap();
+    let retired = mutate_wal_catalog_within(
         &fixture.storage,
-        vec![fixture.candidate],
-        7,
+        "cloud WAL retirement",
         &crate::common::OperationDeadline::unbounded(),
-        &mut Vec::new(),
+        &|| fixture.storage.check_write_authority(),
+        Missing::Refuse,
+        |catalog| {
+            catalog
+                .retire_prefix(
+                    7,
+                    std::slice::from_ref(&fixture.segment),
+                    crate::lease::SharedGenerationId::FIRST,
+                )
+                .map(|retired| Mutation::of(!retired.is_empty(), retired))
+        },
     )
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .0;
     assert_eq!(retired.len(), 1);
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -525,7 +541,11 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
     });
     fixture
         .storage
-        .delete_remote_object_guarded(1, target.clone())
+        .delete_remote_objects_by_identity(vec![(
+            1,
+            fixture.segment.object_key(),
+            target.metadata().clone(),
+        )])
         .unwrap();
     started_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -562,7 +582,10 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .unwrap()
         .retire_below(2)
         .unwrap();
-    assert!(!seal.exists());
+    assert!(
+        seal.exists(),
+        "retired files await GC and cannot be replayed"
+    );
     release_tx.send(()).unwrap();
     let completion = wait_prune_completion(&fixture.storage);
 
@@ -703,20 +726,17 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
     )));
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
     let mut prev = crate::wal::format::ChainLink::GENESIS;
-    for segment_id in 1..=128_u64 {
-        let link = crate::wal::format::ChainLink {
-            id: segment_id,
-            last_seq: segment_id,
-            digest: [u8::try_from(segment_id).unwrap(); 16],
-        };
-        let entry = CatalogEntry::describing(
-            crate::wal::format::SegmentIdentity {
-                epoch: 7,
-                prev,
-                link,
-            },
-            b"w",
+    for segment_id in 1..=1024_u64 {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            segment_id,
         );
+        let (bytes, link) = crate::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
+            .record(&record)
+            .seal();
+        let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("verified fixture segment");
         prev = link;
         catalog.append_run(7, &[entry]).unwrap();
     }

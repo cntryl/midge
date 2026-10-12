@@ -1,6 +1,6 @@
 //! Exercise simulated lease replacement while real filesystem readers are live.
 
-use super::{test_config, CloudStorageLease};
+use super::{test_config, CloudStorageLease, LEASE_OBJECT_KEY};
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions, RealFs};
 use crate::lease::traits::{LeaderStore, PrimaryLease};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +19,7 @@ fn validate_during_renewal(
     // validator must see the current record while this handle keeps its bytes.
     let file = fs
         .open(
-            &FsPath::new(".midge_leader"),
+            &FsPath::new(LEASE_OBJECT_KEY),
             OpenOptions {
                 mode: OpenMode::ReadOnly,
                 create: false,
@@ -74,6 +74,7 @@ fn should_preserve_simulated_lease_when_renewing_with_concurrent_epoch_validatio
         .read_current()
         .expect("read initial leader")
         .expect("initial leader exists");
+    let before_document = lease.read_lease_file().unwrap().unwrap();
     let fs = RealFs::open_existing(directory.path()).expect("reader filesystem");
     let running = AtomicBool::new(true);
     let (ready, received) = mpsc::channel();
@@ -120,10 +121,8 @@ fn should_preserve_simulated_lease_when_renewing_with_concurrent_epoch_validatio
         .read_current()
         .expect("read renewed leader")
         .expect("renewed leader exists");
-    assert!(
-        chrono::DateTime::parse_from_rfc3339(&after.acquired_at).expect("renewed timestamp")
-            > chrono::DateTime::parse_from_rfc3339(&before.acquired_at).expect("initial timestamp"),
-        "a newly opened leader must expose the completed timestamp refresh"
-    );
+    assert_eq!(after.acquired_at, before.acquired_at);
+    let after_document = lease.read_lease_file().unwrap().unwrap();
+    assert!(after_document.expires_at > before_document.expires_at);
     lease.release().expect("release lease");
 }

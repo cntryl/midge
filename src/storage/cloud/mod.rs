@@ -158,6 +158,7 @@ mod mock;
 pub use mock::MockCloudBackend;
 
 mod dispatcher;
+mod object_store_backend;
 pub use dispatcher::CloudStorage;
 
 mod proof;

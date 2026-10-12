@@ -205,10 +205,8 @@ fn assert_preserved_read(
 fn assert_manifest_timeout(policy: RecoveryPolicy) {
     // Arrange: persist a genuine nonempty manifest before the timed read view.
     let directory = tempfile::tempdir().expect("create actual manifest directory");
-    let manifest = Manifest {
-        last_persisted_sequence: 7,
-        ..Manifest::default()
-    };
+    let mut manifest = Manifest::default();
+    manifest.edit_checkpoint_id = 7;
     crate::metadata::ManifestPersistence::save(directory.path(), &manifest)
         .expect("persist actual manifest");
     let target = crate::metadata::files::MANIFEST_SNAPSHOT;

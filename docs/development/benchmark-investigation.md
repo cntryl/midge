@@ -105,29 +105,24 @@ latency or physical-device write amplification. Synthetic SST metadata has no
 acknowledged data. This does not replace the original A/B/C engine campaign,
 forced-publication/crash/frontier controls or final hour acceptance in #752.
 
-## Recovery locality probe
+## Recovery progress controls
+
+The previous SST coverage locality probe was removed with the per-family frontier
+cutover in #819. Recovery now selects complete transactions from persisted family
+frontiers and does not probe SST values. The `benchmark_investigation` example
+retains its independent `checkpoint` campaign.
+
+Native watchdog controls exercise actual delayed WAL range reads, held first
+ranges, delayed manifest-authoritative SST inventory and held inventory requests.
+The journal control restores required family frontier rows from real durable
+create records. Run the paired progressing and held controls with:
 
 ```sh
-cargo run --release --example benchmark_investigation \
-  --features internal-testing -- recovery /tmp/recovery-probe.json
+cargo test --all-features --test stress_workload_watchdog -- --test-threads=1
 ```
 
-The probe builds sixteen real uncompressed checksummed SSTs with 128 keys each
-and uses the unchanged `ReplayCoverage` through the filesystem-backed remote
-adapter. Three repeats vary grouped/interleaved keys, 128 KiB/2 MiB shared
-budgets, and retained proof versus explicit proof discard every 256 probes.
-Every exact point proof must succeed. Original SST bytes have a retained
-XXH3-128 fixture fingerprint to check equality across comparison rows.
-
-Receipts include candidate/node visits, verified bytes, reader/block work,
-completed decodes/key allocations, remote ranges/bytes/errors, inclusive
-coverage time, wall time and peak/final resource charges. Fixture preparation
-is outside measured replay. Every variant releases all retained charges.
-Explicit discard models the cache boundary only; it does not execute durable
-Engine checkpoint publication. Filesystem adapter timing does not establish
-native network-provider latency or a production recovery objective. These
-controlled cases can identify locality costs but cannot attribute all the
-original hour campaign's time without additional native profiles.
+These controls measure completed real I/O and parser work. They do not inject
+coverage pauses or substitute synthetic coverage counters for progress.
 
 ## Delivery boundaries
 
@@ -177,6 +172,5 @@ baseline and does not establish a speedup against older reports.
 
 Probe receipts are written after each completed row with `complete=false`
 until the planned matrix finishes. A later failure retains earlier results and
-job logs, but cannot qualify the whole matrix. Recovery range counters attach
-after `ReplayCoverage` installs its normal observer and forward normal progress;
-a regression requires actual nonzero completed ranges and bytes.
+job logs, but cannot qualify the whole matrix. Recovery watchdog controls require
+actual nonzero completed range requests and bytes in their progressing case.

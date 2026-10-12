@@ -183,8 +183,6 @@ pub struct OpenOptions {
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
     #[cfg(feature = "internal-testing")]
-    recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
-    #[cfg(feature = "internal-testing")]
     filesystem: Option<InjectedFilesystem>,
     #[cfg(feature = "internal-testing")]
     object_store: Option<InjectedObjectStore>,
@@ -211,8 +209,6 @@ pub struct OpenOptionsBuilder {
     io_timeouts: IoTimeouts<Option<Duration>>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
-    #[cfg(feature = "internal-testing")]
-    recovery_probe: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
     #[cfg(feature = "internal-testing")]
     filesystem: Option<InjectedFilesystem>,
     #[cfg(feature = "internal-testing")]
@@ -500,13 +496,6 @@ impl OpenOptions {
         self.lease.clock.clone()
     }
 
-    #[cfg(feature = "internal-testing")]
-    pub(crate) fn recovery_probe(
-        &self,
-    ) -> crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant {
-        self.recovery_probe
-    }
-
     /// The filesystem a test injected in place of the host root, if any.
     pub(crate) fn injected_filesystem(&self) -> Option<Arc<dyn crate::io::Fs>> {
         #[cfg(feature = "internal-testing")]
@@ -567,10 +556,6 @@ impl OpenOptionsBuilder {
             },
             open_timeout: None,
             startup_observer: None,
-            #[cfg(feature = "internal-testing")]
-            recovery_probe:
-                crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant::default(
-                ),
             #[cfg(feature = "internal-testing")]
             filesystem: None,
             #[cfg(feature = "internal-testing")]
@@ -706,18 +691,6 @@ impl OpenOptionsBuilder {
         observer: Arc<dyn crate::runtime::StartupObserver>,
     ) -> Self {
         self.startup_observer = Some(observer);
-        self
-    }
-
-    /// Select a bounded, unsupported recovery experiment. Ordinary builds omit this option.
-    #[cfg(feature = "internal-testing")]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn recovery_probe_variant_for_testing(
-        mut self,
-        variant: crate::runtime::cloud_startup::replay_coverage::probe::RecoveryProbeVariant,
-    ) -> Self {
-        self.recovery_probe = variant;
         self
     }
 
@@ -988,8 +961,6 @@ impl OpenOptionsBuilder {
             },
             open_timeout: self.open_timeout,
             startup_observer: self.startup_observer,
-            #[cfg(feature = "internal-testing")]
-            recovery_probe: self.recovery_probe,
             #[cfg(feature = "internal-testing")]
             filesystem: self.filesystem,
             #[cfg(feature = "internal-testing")]

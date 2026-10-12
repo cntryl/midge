@@ -452,9 +452,8 @@ impl WalHistory {
         Ok(removed)
     }
 
-    /// Retire every member below `to`: make the new log start durable, then
-    /// remove their files. A file that cannot be removed is an orphan
-    /// nothing reads, which the next open sweeps.
+    /// Durably retire every member below `to`, then return its physical cleanup.
+    /// Only the GC actor unlinks retired files; recovery ignores leftovers.
     ///
     /// # Errors
     ///
@@ -476,21 +475,7 @@ impl WalHistory {
             })
             .collect();
         self.commit(&LedgerEdit::AdvanceLogStart { to })?;
-        let mut retired = RetiredWal::default();
-        for (id, bytes) in members {
-            match wal.remove_file(&FsPath::new(crate::wal::segment_file_name(id))) {
-                Ok(()) | Err(FsError::NotFound(_)) => retired.removed.push((id, bytes)),
-                Err(error) => {
-                    tracing::warn!(
-                        segment_id = id,
-                        %error,
-                        "left a retired WAL segment for the next open to sweep"
-                    );
-                    retired.left.push(id);
-                }
-            }
-        }
-        Ok(retired)
+        Ok(RetiredWal { pending: members })
     }
 
     /// Salvage: continue history in a new segment, at least `open_at_least`,
@@ -646,22 +631,10 @@ fn scan_member(wal: &dyn Fs, id: SegmentId) -> MidgeResult<SegmentScan> {
     crate::wal::recovery::streaming::scan_segment_file(file.as_ref(), &path, None)
 }
 
-/// What one retirement did. Every segment in it is out of history.
+/// Physical cleanup authorized by a durable ledger retirement.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct RetiredWal {
-    /// Segments whose files are gone, with the bytes each held.
-    pub(crate) removed: Vec<(SegmentId, u64)>,
-    /// Segments whose files could not be removed; the next open sweeps them.
-    pub(crate) left: Vec<SegmentId>,
-}
-
-impl RetiredWal {
-    /// Bytes the removed files held.
-    pub(crate) fn removed_bytes(&self) -> u64 {
-        self.removed
-            .iter()
-            .fold(0, |total, (_, bytes)| total.saturating_add(*bytes))
-    }
+    pub(crate) pending: Vec<(SegmentId, u64)>,
 }
 
 /// A next segment a rotation created, which the ledger has not recorded.

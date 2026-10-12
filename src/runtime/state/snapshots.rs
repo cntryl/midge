@@ -86,20 +86,22 @@ impl RuntimeState {
                 },
             )
             .collect::<Vec<_>>();
-        let journaled_id =
-            if !self.is_memory_mode() && !edits.is_empty() {
-                Some(self.manifest_store.append_batch_for(
-                    crate::metadata::accounting::Origin::Administration,
-                    &edits,
-                )?)
-            } else {
-                None
-            };
-        let mut reclaimed_names = Vec::new();
-        for ((_, names), edit) in candidates.into_iter().zip(edits) {
-            self.manifest.apply_edit(&edit);
-            reclaimed_names.extend(names);
-        }
+        let memory_mode = self.is_memory_mode();
+        let batch = crate::metadata::ManifestEdit::Batch(edits);
+        let prepared = self.manifest.prepare_edit(&batch)?;
+        let journaled_id = if !memory_mode && !candidates.is_empty() {
+            Some(
+                self.manifest_store
+                    .append_for(crate::metadata::accounting::Origin::Administration, &batch)?,
+            )
+        } else {
+            None
+        };
+        prepared.commit();
+        let reclaimed_names = candidates
+            .into_iter()
+            .flat_map(|(_, names)| names)
+            .collect();
         if let Some(edit_id) = journaled_id {
             self.manifest.note_applied_journal_edit(edit_id);
         }

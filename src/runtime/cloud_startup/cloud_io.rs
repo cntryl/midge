@@ -32,6 +32,7 @@ impl<'a> BlockingCloudIo<'a> {
         BlockingCloud::new(self.cloud, &self.deadline)
     }
 
+    #[cfg(test)]
     pub(crate) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
         self.io().get_optional(key)
     }

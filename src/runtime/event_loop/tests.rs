@@ -236,14 +236,56 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
+    let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+        cloud.clone(),
+        Duration::from_secs(5),
+    ));
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
         cloud,
         storage_policy,
     ));
+    let store: Arc<dyn crate::lease::LeaderStore> =
+        Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            crate::io::real::test_root(db_path.join("cloud_store")),
+            crate::lease::LeaseClock::default(),
+        ));
+    store.acquire_leadership("test-writer")?;
+    crate::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
+    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+    crate::runtime::ddl::fence_remote_registry_on_startup(
+        &hybrid_storage,
+        &crate::runtime::ddl::DdlLeaseAuthority {
+            store: Arc::clone(&store),
+            holder_id: "test-writer".into(),
+            writer_epoch: 1,
+        },
+        &deadline,
+    )?;
+    crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+            cloud: &shared_metadata,
+            fs: state.fs.as_ref(),
+            publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+            lock_wait_budget: Duration::from_secs(5),
+            deadline: &deadline,
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: store.as_ref(),
+                holder_id: "test-writer",
+                writer_epoch: 1,
+            },
+        },
+        |_| Ok(()),
+    )?;
     CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
+        cloud_metadata_storage: Some(shared_metadata),
+        provider_ddl_fencing: true,
+        leader_store: Some(store),
+        leader_holder_id: Some("test-writer".into()),
         writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
@@ -483,7 +525,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;
     state.wal.frontiers.set_local_durable_for_test(3);
-    state.reset_cloud_durable_sequence_for_recovery();
+    state.reset_cloud_durable_sequence_for_recovery(0);
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
@@ -1695,7 +1737,12 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
             ..Default::default()
         });
     event_loop.state.restore_sequence_floor_from_manifest();
-    assert_eq!(event_loop.state.manifest.last_persisted_sequence, 0);
+    assert_eq!(
+        event_loop.state.manifest.flush_frontiers().get(0).unwrap(),
+        crate::metadata::FamilyFrontier::Live {
+            through_sequence: 0
+        },
+    );
     let plan = crate::compaction::CompactionPlan::new(0, 0, 1);
 
     // Act

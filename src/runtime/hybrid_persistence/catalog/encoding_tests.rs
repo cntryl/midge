@@ -1,25 +1,23 @@
 use super::*;
 use crate::wal::cloud_catalog::CatalogEntry;
-use crate::wal::format::{ChainLink, SegmentIdentity};
+use crate::wal::format::ChainLink;
 
 fn populated_catalog() -> WalPublicationCatalog {
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
     let mut prev = ChainLink::GENESIS;
     let entries: Vec<CatalogEntry> = (1..=4096_u64)
         .map(|segment_id| {
-            let link = ChainLink {
-                id: segment_id,
-                last_seq: segment_id,
-                digest: segment_id.to_le_bytes().repeat(2).try_into().unwrap(),
-            };
-            let entry = CatalogEntry::describing(
-                SegmentIdentity {
-                    epoch: 7,
-                    prev,
-                    link,
-                },
-                b"wal",
+            let record = crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"key"),
+                Some(bytes::Bytes::from_static(b"value")),
+                segment_id,
             );
+            let (bytes, link) =
+                crate::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
+                    .record(&record)
+                    .seal();
+            let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("verified fixture segment");
             prev = link;
             entry
         })

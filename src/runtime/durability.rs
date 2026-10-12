@@ -445,7 +445,13 @@ impl DurabilityCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    fn acknowledgements(entries: &[(u64, u64)]) -> crate::wal::publish::AckSet {
+        let mut set = crate::wal::publish::AckSet::default();
+        for &(id, sequence) in entries {
+            set.acknowledge(id, sequence);
+        }
+        set
+    }
 
     fn cloud_coordinator() -> DurabilityCoordinator {
         DurabilityCoordinator::new(0, true, crate::runtime::CloudRuntimePolicy::default())
@@ -457,8 +463,8 @@ mod tests {
         let mut coordinator = cloud_coordinator();
         coordinator.record_cloud_segment_inflight(1, 10);
         coordinator.record_cloud_segment_inflight(2, 20);
-        let later = crate::wal::publish::AckSet::recovered(BTreeMap::from([(2, 20)]));
-        let both = crate::wal::publish::AckSet::recovered(BTreeMap::from([(1, 10), (2, 20)]));
+        let later = acknowledgements(&[(2, 20)]);
+        let both = acknowledgements(&[(1, 10), (2, 20)]);
 
         // Act
         let blocked = coordinator
@@ -490,7 +496,7 @@ mod tests {
         // Arrange
         let mut coordinator = cloud_coordinator();
         coordinator.record_cloud_segment_inflight(7, 70);
-        let acknowledgements = crate::wal::publish::AckSet::recovered(BTreeMap::from([(7, 71)]));
+        let acknowledgements = acknowledgements(&[(7, 71)]);
 
         // Act
         let result = coordinator.take_contiguous_acked_cloud_segments(&acknowledgements);

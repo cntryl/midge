@@ -329,42 +329,9 @@ impl RuntimeState {
         Ok(())
     }
 
-    fn append_flush_manifest_edits(
-        &self,
-        publication: FlushManifestPublication<'_>,
-        file_meta: crate::metadata::FileMeta,
-        next_sst_seq: u64,
-        include_frontier: bool,
-    ) -> MidgeResult<u64> {
-        let next = crate::metadata::ManifestEdit::BumpNextSstSeq {
-            cf_id: publication.cf_id,
-            next_seq: next_sst_seq,
-        };
-        let add = crate::metadata::ManifestEdit::AddSst(file_meta);
-        if include_frontier {
-            self.manifest_store.append_batch_for(
-                publication.origin,
-                &[
-                    next,
-                    add,
-                    crate::metadata::ManifestEdit::BumpWalSeq {
-                        seq: publication.sequence,
-                    },
-                ],
-            )
-        } else {
-            // Healthy cheap flushes retain the original two-edit payload;
-            // their forced snapshot makes the remaining frontier durable.
-            self.manifest_store
-                .append_batch_for(publication.origin, &[next, add])
-        }
-    }
-
     fn checkpoint_flush_publication(
         &mut self,
         publication: FlushManifestPublication<'_>,
-        next_sst_seq: u64,
-        frontiers_journaled: bool,
     ) -> MidgeResult<()> {
         match self
             .manifest_store
@@ -373,30 +340,7 @@ impl RuntimeState {
             Ok(written) => self.manifest.adopt_checkpoint(written),
             Err(error) if !publication.require_snapshot => {
                 self.mark_persistence_anomaly();
-                if !frontiers_journaled {
-                    // No flush ACK until both counter and frontier survive
-                    // without this failed snapshot. A fallback append must
-                    // not release the store's checkpoint retry pressure.
-                    let edit_id = self
-                        .manifest_store
-                        .append_batch_for(
-                            publication.origin,
-                            &[
-                                crate::metadata::ManifestEdit::BumpNextSstSeq {
-                                    cf_id: publication.cf_id,
-                                    next_seq: next_sst_seq,
-                                },
-                                crate::metadata::ManifestEdit::BumpWalSeq {
-                                    seq: publication.sequence,
-                                },
-                            ],
-                        )
-                        .inspect_err(|_| {
-                            self.fence_metadata_until_reloaded();
-                        })?;
-                    self.manifest.note_applied_journal_edit(edit_id);
-                }
-                tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
+                tracing::warn!(%error, "complete flush batch is durable but checkpoint save failed");
             }
             Err(error) => return Err(error),
         }
@@ -441,7 +385,14 @@ impl RuntimeState {
             .iter()
             .find(|file| file.name == manifest_meta.name)
         {
-            Some(existing) if existing.same_identity(&manifest_meta) => {}
+            Some(existing) if existing.same_identity(&manifest_meta) => {
+                if !matches!(self.manifest.flush_frontiers().get(cf_id)?, crate::metadata::frontiers::FamilyFrontier::Live { through_sequence } if through_sequence >= sequence)
+                {
+                    return Err(crate::common::MidgeError::Corruption(
+                        "existing flush output lacks its durable family frontier".into(),
+                    ));
+                }
+            }
             Some(_) => {
                 return Err(crate::common::MidgeError::Corruption(format!(
                     "flush output conflicts with existing SST {}",
@@ -450,20 +401,34 @@ impl RuntimeState {
             }
             None => {
                 crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
-                let edit_id = self.append_flush_manifest_edits(
-                    publication,
-                    manifest_meta.clone(),
-                    next_sst_seq,
-                    !forced_path,
-                )?;
-                self.manifest.add_file(manifest_meta);
-                self.manifest.note_applied_journal_edit(edit_id);
+                let batch = crate::metadata::ManifestEdit::Batch(vec![
+                    crate::metadata::ManifestEdit::BumpNextSstSeq {
+                        cf_id,
+                        next_seq: next_sst_seq,
+                    },
+                    crate::metadata::ManifestEdit::AddSst(manifest_meta),
+                    crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                        cf_id,
+                        freeze_sequence: sequence,
+                    },
+                ]);
+                let prepared = self.manifest.prepare_edit(&batch)?;
+                let append = self.manifest_store.append_for(origin, &batch);
+                match append {
+                    Ok(edit_id) => {
+                        prepared.commit();
+                        self.manifest.note_applied_journal_edit(edit_id);
+                    }
+                    Err(error) => {
+                        drop(prepared);
+                        self.fence_metadata_until_reloaded();
+                        return Err(error);
+                    }
+                }
                 appended = true;
                 crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
             }
         }
-        self.manifest.advance_next_sst_seq(cf_id, next_sst_seq);
-        self.manifest.advance_persisted_sequence(sequence);
         self.clear_flush_publication_intent(&file_meta.name)?;
         if ordinary_local
             && !forced_path
@@ -478,7 +443,7 @@ impl RuntimeState {
         {
             return Ok(());
         }
-        self.checkpoint_flush_publication(publication, next_sst_seq, appended && !forced_path)
+        self.checkpoint_flush_publication(publication)
     }
 
     pub fn transition_compaction_publication_intent(
@@ -718,7 +683,10 @@ mod checkpoint_bound_tests {
                     next_seq: u64::MAX,
                 },
                 crate::metadata::ManifestEdit::AddSst((&meta).into()),
-                crate::metadata::ManifestEdit::BumpWalSeq { seq: u64::MAX },
+                crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: u32::MAX,
+                    freeze_sequence: u64::MAX - 1,
+                },
             ]);
             let envelope = serde_json::json!({"edit_id": u64::MAX, "edit": batch});
             let marker = crate::metadata::journal::FsyncMarker {

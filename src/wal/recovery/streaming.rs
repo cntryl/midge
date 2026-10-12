@@ -122,7 +122,7 @@ pub(crate) struct ReplayOptions<'a> {
     /// Stop with `Timeout` between frames once this expires.
     pub deadline: Option<&'a crate::common::OperationDeadline>,
     pub scope: Option<&'a crate::common::DeadlineScope>,
-    pub fallible_should_apply: Option<&'a FallibleReplayFilter<'a>>,
+    pub selection: crate::wal::replay::ReplaySelection<'a>,
     /// Under `SalvageValidPrefix`, stop at the start of a frame whose record
     /// fails to replay (a conflicting sequence, a corrupt batch payload) and
     /// keep the verified prefix, as for a corrupt frame, instead of failing.
@@ -135,31 +135,28 @@ pub(crate) struct ReplayOptions<'a> {
     pub spill_pending_txns: bool,
 }
 
-type FallibleReplayFilter<'a> = dyn Fn(&WalRecord) -> MidgeResult<bool> + 'a;
-
 impl ReplayOptions<'_> {
     fn check(self) -> MidgeResult<()> {
         ensure_deadline(self.deadline)?;
         self.scope.map_or(Ok(()), |scope| scope.check("WAL replay"))
     }
 
-    fn should_apply(
-        self,
-        record: &WalRecord,
-        legacy: Option<&dyn Fn(&WalRecord) -> bool>,
-    ) -> MidgeResult<bool> {
+    fn should_apply_unit(self, cf_id: u32, commit_sequence: u64) -> MidgeResult<bool> {
         self.check()?;
-        let result = match self.fallible_should_apply {
-            Some(filter) => filter(record)?,
-            None => legacy.is_none_or(|filter| filter(record)),
-        };
+        let result = self.selection.should_apply(cf_id, commit_sequence)?;
         self.check()?;
         Ok(result)
     }
 }
 
+/// The last complete transaction boundary before admission needs a checkpoint.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReplayCheckpoint {
+    pub(crate) through_sequence: u64,
+}
+
 type Memtables = HashMap<u32, Arc<SkipListMemtable>>;
-type Checkpoint<'a> = dyn FnMut(&mut Memtables, &RecoveryStats) -> MidgeResult<()> + 'a;
+type Checkpoint<'a> = dyn FnMut(&mut Memtables, ReplayCheckpoint) -> MidgeResult<()> + 'a;
 
 struct PendingTxn {
     records: PendingRecords,
@@ -236,7 +233,6 @@ struct ReplayState<'a> {
     committed_sequence: Option<u64>,
     limits: StreamingReplayLimits,
     options: ReplayOptions<'a>,
-    should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     checkpoint: &'a mut Checkpoint<'a>,
     operation_progress: crate::telemetry::recovery_progress::WorkProgress,
 }
@@ -249,7 +245,6 @@ pub(crate) fn replay_wal_with_checkpoint(
     segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
-    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
     limits: StreamingReplayLimits,
     checkpoint: &mut Checkpoint<'_>,
 ) -> MidgeResult<RecoveryStats> {
@@ -258,7 +253,6 @@ pub(crate) fn replay_wal_with_checkpoint(
         segments,
         memtables,
         replay_policy,
-        should_apply,
         limits,
         ReplayOptions::default(),
         checkpoint,
@@ -272,7 +266,6 @@ pub(crate) fn replay_wal_with_options(
     segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
-    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
     limits: StreamingReplayLimits,
     options: ReplayOptions<'_>,
     checkpoint: &mut Checkpoint<'_>,
@@ -293,7 +286,6 @@ pub(crate) fn replay_wal_with_options(
         committed_sequence: None,
         limits,
         options,
-        should_apply,
         checkpoint,
         operation_progress: crate::telemetry::recovery_progress::WorkProgress::new(
             "replay_decision",
@@ -422,33 +414,6 @@ fn inspect_file(
         visitor,
         &mut || Ok(()),
     )
-}
-
-pub(crate) fn visit_sealed_wal_records_from(
-    file: &dyn crate::io::ReadFile,
-    path: &FsPath,
-    limits: StreamingReplayLimits,
-    progress: &mut super::VerifiedWalPrefix,
-    visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
-    checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
-) -> MidgeResult<()> {
-    match inspect_file_from(
-        file,
-        path,
-        limits,
-        std::mem::take(progress),
-        visitor,
-        checkpoint,
-    ) {
-        Ok(prefix) => {
-            *progress = prefix;
-            require_sealed_records(path, progress)
-        }
-        Err(failure) => {
-            *progress = failure.verified_prefix;
-            Err(failure.failure.into_error())
-        }
-    }
 }
 
 /// Read segment `path` with one [`SegmentScan`]: its header, then each
@@ -719,9 +684,14 @@ fn replay_paths(
             if let Err(error) = scan.frame(&frame.payload) {
                 return state.stop_at(storage, paths, (index, pos), policy, error.into());
             }
+            // Authority failures cannot be classified as salvageable WAL damage.
+            state
+                .options
+                .selection
+                .validate_family(frame.record.cf_id)?;
             let replayed = scan
                 .observe(frame.record.seq, frame.record.cf_id)
-                .and_then(|()| state.process(frame.record, epoch));
+                .and_then(|()| state.process(frame.record, epoch, scan.header().first_seq));
             if let Err(error) = replayed {
                 if state.options.salvage_record_errors {
                     return state.stop_at(
@@ -804,7 +774,7 @@ fn admit_segment(
 }
 
 /// A sealed segment's footer must seal what its history recorded: the
-/// ledger's facts for a member, the catalog's link for a published object.
+/// ledger's facts for a member, the catalog's facts for a published object.
 fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
     let actual = scan.footer().map(crate::wal::format::Footer::sealed_facts);
     let disagreement = match &path.expect {
@@ -814,9 +784,8 @@ fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
             }
             _ => None,
         },
-        Expectation::Published(entry) => (actual.as_ref().map(|facts| facts.link)
-            != Some(entry.link()))
-        .then(|| format!("the catalog's {:?}", entry.link())),
+        Expectation::Published(entry) => (actual.as_ref() != Some(entry.facts()))
+            .then(|| format!("the catalog's {:?}", entry.facts())),
     };
     match disagreement {
         None => Ok(()),
@@ -933,7 +902,13 @@ impl ReplayState<'_> {
     /// Apply `record`, read from a segment written by `epoch`. Transaction
     /// ids restart in every process, so a split transaction is the pair of
     /// its writer's epoch and its id.
-    fn process(&mut self, record: WalRecord, epoch: u64) -> MidgeResult<()> {
+    fn process(
+        &mut self,
+        record: WalRecord,
+        epoch: u64,
+        segment_first_sequence: u64,
+    ) -> MidgeResult<()> {
+        let previous_sequence = self.stats.max_sequence;
         self.stats.record(&record);
         match record.op.role() {
             WalOpRole::TransactionBatch => {
@@ -945,6 +920,19 @@ impl ReplayState<'_> {
                     payload,
                     self.limits.max_pending_txn_bytes,
                 )?;
+                // The outer frame carries only the commit sequence. Its
+                // complete reserved span must also follow earlier frames and
+                // remain inside this segment's sequence range, even when the
+                // family frontier will skip the unit. Validate before a
+                // checkpoint can clear prior state or any member can apply.
+                if batch.begin_seq < segment_first_sequence
+                    || previous_sequence.is_some_and(|previous| batch.begin_seq <= previous)
+                {
+                    return Err(MidgeError::Corruption(format!(
+                        "transaction batch beginning at sequence {} overlaps earlier WAL history (segment begins at {segment_first_sequence}, previous frame {previous_sequence:?})",
+                        batch.begin_seq
+                    )));
+                }
                 let records: Vec<_> = batch
                     .records
                     .into_iter()
@@ -959,7 +947,7 @@ impl ReplayState<'_> {
                         txn_id: Some(batch.txn_id),
                     })
                     .collect();
-                self.apply_atomic(&records)?;
+                self.apply_atomic(&records, record.cf_id, record.seq)?;
             }
             WalOpRole::TransactionBegin => {
                 if let Some(txn_id) = record.txn_id {
@@ -968,7 +956,7 @@ impl ReplayState<'_> {
             }
             WalOpRole::TransactionCommit => {
                 if let Some(txn_id) = record.txn_id {
-                    self.commit_txn((epoch, txn_id), record.cf_id)?;
+                    self.commit_txn((epoch, txn_id), record.cf_id, record.seq)?;
                 }
             }
             WalOpRole::ValueWrite | WalOpRole::PointDelete | WalOpRole::RangeDelete => {
@@ -1000,7 +988,7 @@ impl ReplayState<'_> {
                         PendingRecords::Spool(spool) => spool.append(&record)?,
                     }
                 } else {
-                    self.apply_atomic(std::slice::from_ref(&record))?;
+                    self.apply_atomic(std::slice::from_ref(&record), record.cf_id, record.seq)?;
                 }
             }
         }
@@ -1038,7 +1026,7 @@ impl ReplayState<'_> {
 
     /// Apply split transaction `key` as its commit marker in family `cf_id`
     /// arrives; a commit without a begin replays nothing.
-    fn commit_txn(&mut self, key: (u64, u64), cf_id: u32) -> MidgeResult<()> {
+    fn commit_txn(&mut self, key: (u64, u64), cf_id: u32, commit_sequence: u64) -> MidgeResult<()> {
         let Some(pending) = self.open_txns.remove(&key) else {
             return Ok(());
         };
@@ -1050,8 +1038,8 @@ impl ReplayState<'_> {
         }
         self.pending_bytes = self.pending_bytes.saturating_sub(pending.bytes);
         match pending.records {
-            PendingRecords::Memory(records) => self.apply_atomic(&records),
-            PendingRecords::Spool(spool) => self.apply_spooled(spool),
+            PendingRecords::Memory(records) => self.apply_atomic(&records, cf_id, commit_sequence),
+            PendingRecords::Spool(spool) => self.apply_spooled(spool, cf_id, commit_sequence),
         }
     }
 
@@ -1070,7 +1058,15 @@ impl ReplayState<'_> {
         Ok(())
     }
 
-    fn apply_atomic(&mut self, records: &[WalRecord]) -> MidgeResult<()> {
+    fn apply_atomic(
+        &mut self,
+        records: &[WalRecord],
+        cf_id: u32,
+        commit_sequence: u64,
+    ) -> MidgeResult<()> {
+        if !self.options.should_apply_unit(cf_id, commit_sequence)? {
+            return Ok(());
+        }
         if self.limits.max_memtable_encoded_bytes == usize::MAX
             && self.limits.target_memtable_encoded_bytes == usize::MAX
         {
@@ -1078,14 +1074,10 @@ impl ReplayState<'_> {
             return self.apply_unchecked(records);
         }
         let mut growth = HashMap::<u32, usize>::new();
-        let should_apply = self.should_apply;
         let progress = &mut self.operation_progress;
         for record in records {
-            let apply = self.options.should_apply(record, should_apply)?;
+            self.options.check()?;
             progress.completed_operation();
-            if !apply {
-                continue;
-            }
             let bytes = match record.op.role() {
                 WalOpRole::RangeDelete => size_bound::range_bytes(
                     record.key.len(),
@@ -1118,9 +1110,12 @@ impl ReplayState<'_> {
                     "cannot checkpoint while split WAL transactions remain open".into(),
                 ));
             }
-            let mut checkpoint_stats = self.stats.clone();
-            checkpoint_stats.max_sequence = self.committed_sequence;
-            (self.checkpoint)(self.memtables, &checkpoint_stats)?;
+            (self.checkpoint)(
+                self.memtables,
+                ReplayCheckpoint {
+                    through_sequence: self.committed_sequence.unwrap_or(0),
+                },
+            )?;
             if self.projected_bytes(&growth) > checkpoint_limit {
                 return Err(MidgeError::ResourceLimit(
                     "WAL checkpoint did not release enough recovered memtable capacity".into(),
@@ -1130,11 +1125,8 @@ impl ReplayState<'_> {
         let started = std::time::Instant::now();
         let progress = &mut self.operation_progress;
         for record in records {
-            let apply = self.options.should_apply(record, should_apply)?;
+            self.options.check()?;
             progress.completed_operation();
-            if !apply {
-                continue;
-            }
             apply_record(record, self.memtables)?;
         }
         self.stats.apply_ns = self
@@ -1146,14 +1138,10 @@ impl ReplayState<'_> {
 
     fn apply_unchecked(&mut self, records: &[WalRecord]) -> MidgeResult<()> {
         let started = std::time::Instant::now();
-        let should_apply = self.should_apply;
         let progress = &mut self.operation_progress;
         for record in records {
-            let apply = self.options.should_apply(record, should_apply)?;
+            self.options.check()?;
             progress.completed_operation();
-            if !apply {
-                continue;
-            }
             apply_record(record, self.memtables)?;
         }
         self.stats.apply_ns = self
@@ -1165,13 +1153,19 @@ impl ReplayState<'_> {
 
     /// Apply a spooled transaction record by record. Spooling requires
     /// unbounded memtable limits, so no checkpoint can fall inside it.
-    fn apply_spooled(&mut self, spool: TxnSpool) -> MidgeResult<()> {
+    fn apply_spooled(
+        &mut self,
+        spool: TxnSpool,
+        cf_id: u32,
+        commit_sequence: u64,
+    ) -> MidgeResult<()> {
         let started = std::time::Instant::now();
-        let should_apply = self.should_apply;
+        let apply = self.options.should_apply_unit(cf_id, commit_sequence)?;
         let memtables = &mut *self.memtables;
         let progress = &mut self.operation_progress;
         spool.replay(|record| {
-            if self.options.should_apply(&record, should_apply)? {
+            self.options.check()?;
+            if apply {
                 apply_record(&record, memtables)?;
             }
             progress.completed_operation();

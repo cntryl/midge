@@ -57,7 +57,6 @@ pub(crate) struct ImmutableFlush {
     pub writer_epoch: u64,
     /// Earliest WAL segment that can contain this generation's records.
     /// Missing provenance must veto retirement until the generation publishes.
-    pub first_wal_segment: Option<u64>,
     pub memtable: Arc<SkipListMemtable>,
     pub sst_name: Option<String>,
     pub sst_seq: Option<u64>,
@@ -138,13 +137,6 @@ pub struct WalState {
     /// Synced, locally durable and cloud durable sequences; they only move
     /// forward outside recovery.
     pub frontiers: crate::runtime::frontiers::WalFrontiers,
-    /// Why each retained sealed local WAL segment last failed its coverage
-    /// proof. In memory only; an empty map just means re-proving (#490).
-    pub(crate) local_segment_proofs:
-        HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
-    /// Manifest SSTs whose identity a local prune proof has already checked
-    /// by reading them in full, so later passes do not reread them (#548).
-    pub(crate) proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities,
     /// WAL bytes appended by this process, across segments. In memory only:
     /// it measures how much local WAL a family's memtable pins (#552).
     pub(crate) appended_bytes: u64,
@@ -160,9 +152,6 @@ impl WalState {
         Self {
             pending_writes: 0,
             frontiers: crate::runtime::frontiers::WalFrontiers::default(),
-            local_segment_proofs: HashMap::new(),
-            proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities::default(
-            ),
             appended_bytes: 0,
             history,
         }
@@ -348,6 +337,21 @@ pub struct ManifestRuntimeState {
     read_views: std::cell::RefCell<crate::runtime::sst_read_view::SstReadViewCache>,
 }
 
+pub(crate) struct PreparedRuntimeManifestEdit<'a> {
+    prepared: crate::metadata::manifest::PreparedManifestEdit<'a>,
+    read_views: &'a mut crate::runtime::sst_read_view::SstReadViewCache,
+    changes_files: bool,
+}
+
+impl PreparedRuntimeManifestEdit<'_> {
+    pub(crate) fn commit(self) {
+        self.prepared.commit();
+        if self.changes_files {
+            self.read_views.invalidate();
+        }
+    }
+}
+
 impl ManifestRuntimeState {
     pub fn new(manifest: Manifest) -> Self {
         Self {
@@ -385,10 +389,6 @@ impl ManifestRuntimeState {
         self.manifest.note_applied_journal_edit(edit_id)
     }
 
-    pub(crate) fn advance_persisted_sequence(&mut self, sequence: u64) {
-        self.manifest.last_persisted_sequence = self.manifest.last_persisted_sequence.max(sequence);
-    }
-
     pub(crate) fn set_next_sst_seq(&mut self, cf_id: u32, sequence: u64) {
         self.manifest.next_sst_seqs.insert(cf_id, sequence);
     }
@@ -405,7 +405,10 @@ impl ManifestRuntimeState {
         checkpoint.adopt_into(&mut self.manifest);
     }
 
-    pub(crate) fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) {
+    pub(crate) fn prepare_edit<'a>(
+        &'a mut self,
+        edit: &crate::metadata::ManifestEdit,
+    ) -> MidgeResult<PreparedRuntimeManifestEdit<'a>> {
         fn changes_files(edit: &crate::metadata::ManifestEdit) -> bool {
             use crate::metadata::ManifestEdit;
             match edit {
@@ -416,10 +419,18 @@ impl ManifestRuntimeState {
                 _ => false,
             }
         }
-        if changes_files(edit) {
-            self.read_views.get_mut().invalidate();
-        }
-        self.manifest.apply_edit(edit);
+        let changes_files = changes_files(edit);
+        let prepared = self.manifest.prepare_edit(edit)?;
+        Ok(PreparedRuntimeManifestEdit {
+            prepared,
+            read_views: self.read_views.get_mut(),
+            changes_files,
+        })
+    }
+
+    pub(crate) fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) -> MidgeResult<()> {
+        self.prepare_edit(edit)?.commit();
+        Ok(())
     }
 
     #[cfg(test)]
@@ -709,7 +720,6 @@ impl RuntimeState {
         crate::types::RuntimeMetricsSnapshot {
             health: self.health(),
             current_sequence: self.sequence,
-            manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
             active_memtables: gauges.active_memtables,
             immutable_memtables: gauges.immutable_memtables,
             total_memtable_bytes: self.total_memtable_bytes,
@@ -730,6 +740,20 @@ impl RuntimeState {
             oldest_snapshot_age_seconds: gauges.oldest_snapshot_age_seconds,
             sst_count: gauges.sst_count,
             sst_bytes: gauges.sst_bytes,
+            manifest_flush_frontiers: self
+                .manifest
+                .flush_frontiers()
+                .iter()
+                .map(|(id, frontier)| {
+                    let through = match frontier {
+                        crate::metadata::FamilyFrontier::Live { through_sequence } => {
+                            Some(through_sequence)
+                        }
+                        crate::metadata::FamilyFrontier::Dropped => None,
+                    };
+                    (id, through)
+                })
+                .collect(),
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode()),
             no_space_events: telemetry.no_space_events,
             compactions_run: telemetry.compactions_run,
@@ -836,7 +860,6 @@ impl RuntimeState {
 
         crate::types::StorageLayoutSnapshot {
             health: self.health(),
-            manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
             levels,
             active_snapshots,
             compacting_ssts: self.compaction.compacting_ssts.clone(),
@@ -1322,28 +1345,19 @@ impl RuntimeState {
 
     pub fn restore_sequence_floor_from_manifest(&mut self) {
         let sequence_floor = Self::manifest_visible_sequence_floor(&self.manifest);
-        if self.manifest.last_persisted_sequence < sequence_floor {
-            self.manifest.advance_persisted_sequence(sequence_floor);
-        }
         if self.sequence < sequence_floor {
             self.sequence = sequence_floor;
         }
         self.wal.frontiers.advance_local_to(sequence_floor);
-        self.wal.advance_cloud_through(sequence_floor);
         self.compaction_output_generation =
             self.compaction_output_generation.max(self.sequence).max(
                 Self::manifest_compaction_output_generation_floor(&self.manifest),
             );
     }
 
-    /// Reset the cloud durability frontier to bytes proven durable by the
-    /// manifest. Startup separately advances it through the contiguous set of
-    /// validated remote WAL segments; local-only replay must never contribute
-    /// to this frontier until its resumed upload is acknowledged.
-    pub(crate) fn reset_cloud_durable_sequence_for_recovery(&mut self) {
-        self.wal
-            .frontiers
-            .reset_cloud_for_recovery(Self::manifest_visible_sequence_floor(&self.manifest));
+    /// Seed cloud acknowledgement from the hydrated catalog's retired anchor.
+    pub(crate) fn reset_cloud_durable_sequence_for_recovery(&mut self, anchor_sequence: u64) {
+        self.wal.frontiers.reset_cloud_for_recovery(anchor_sequence);
     }
 
     /// Get the next transaction ID
@@ -1407,9 +1421,13 @@ impl RuntimeState {
 
     #[cfg(test)]
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
-        let id = u32::try_from(self.column_families.len()).map_err(|_| {
-            crate::common::MidgeError::Internal("too many column families".to_string())
-        })?;
+        let id = self.manifest.next_cf_id()?;
+        self.manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id,
+                name: name.clone(),
+                created_at: 0,
+            })?;
         self.column_families
             .insert(id, ColumnFamilyState::new(id, name));
         Ok(id)

@@ -735,7 +735,8 @@ mod failure_injection {
             "retry must publish the original frozen immutable under its stable SST identity"
         );
         assert!(
-            metrics.manifest_last_persisted_sequence < metrics.current_sequence,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live")
+                < metrics.current_sequence,
             "retry must not advance the persisted frontier over later active-memtable writes"
         );
         assert_visible(&engine, &cf, b"retry-flush-later", b"later-value");
@@ -1036,9 +1037,9 @@ mod failure_injection {
             metrics.current_sequence
         );
         assert!(
-            metrics.manifest_last_persisted_sequence >= 8,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live") >= 8,
             "manifest durable sequence must reflect recovered SST data, got {}",
-            metrics.manifest_last_persisted_sequence
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live")
         );
 
         for index in 0..8 {
@@ -1133,8 +1134,14 @@ mod failure_injection {
     }
 
     #[derive(Serialize)]
+    struct TestFrontier {
+        cf_id: u32,
+        through_sequence: u64,
+    }
+
+    #[derive(Serialize)]
     struct TestManifestFixture {
-        last_persisted_sequence: u64,
+        flushed_through: Vec<TestFrontier>,
         ssts: Vec<String>,
         files: Vec<TestManifestFile>,
         column_families: Vec<TestColumnFamilyMeta>,
@@ -1236,7 +1243,10 @@ mod failure_injection {
         shutdown_engine(engine);
 
         let empty_manifest = TestManifestFixture {
-            last_persisted_sequence: 0,
+            flushed_through: vec![TestFrontier {
+                cf_id: 0,
+                through_sequence: 0,
+            }],
             ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
@@ -1337,7 +1347,10 @@ mod failure_injection {
         shutdown_engine(engine);
 
         let empty_manifest = TestManifestFixture {
-            last_persisted_sequence: 0,
+            flushed_through: vec![TestFrontier {
+                cf_id: 0,
+                through_sequence: 0,
+            }],
             ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
@@ -7156,7 +7169,7 @@ mod cloud_crash_recovery {
             "reopen should restore at least one SST from the authoritative cloud object"
         );
         assert!(
-            metrics.manifest_last_persisted_sequence > 0,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live") > 0,
             "reopen should preserve manifest persistence progress after crash"
         );
 
@@ -7327,7 +7340,8 @@ mod cloud_crash_recovery {
         );
 
         let _published = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
-            metrics.sst_count >= 1 && metrics.manifest_last_persisted_sequence > 0
+            metrics.sst_count >= 1
+                && metrics.manifest_flush_frontiers[&0].expect("default family remains live") > 0
         });
         // Add one acknowledged write after publication, below the four-segment
         // eventual-flush trigger. Recovery must reconcile an authoritative SST
@@ -7441,7 +7455,7 @@ mod cloud_crash_recovery {
                 Instant::now() < deadline,
                 "timed out waiting for cloud recovery condition; last metrics: sst_count={} persisted_seq={} wal_segment={} current_seq={} cloud_seq={} gap={}",
                 metrics.sst_count,
-                metrics.manifest_last_persisted_sequence,
+                metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
                 metrics.wal_current_segment_id,
                 metrics.current_sequence,
                 metrics.wal_cloud_durable_seq,
@@ -10117,7 +10131,8 @@ mod observability_api {
             "flush should publish at least one SST"
         );
         assert!(
-            metrics.manifest_last_persisted_sequence >= metrics.current_sequence,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live")
+                >= metrics.current_sequence,
             "flush should advance manifest durability frontier"
         );
         assert_eq!(
@@ -10700,7 +10715,7 @@ mod observability_api {
             .expect("shutdown before reopen");
 
         let temp_manifest = serde_json::json!({
-            "last_persisted_sequence": 99,
+            "flushed_through": [{"cf_id": 0, "through_sequence": 99}],
             "ssts": [],
             "files": [{
                 "name": "ghost.sst",
@@ -10748,7 +10763,10 @@ mod observability_api {
         // Assert
         assert_eq!(metrics.health, EngineHealth::Healthy);
         assert_eq!(metrics.sst_count, 0);
-        assert_eq!(metrics.manifest_last_persisted_sequence, 0);
+        assert_eq!(
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
+            0
+        );
         assert!(
             layout.levels.iter().all(|level| level.file_count == 0),
             "stale metadata temp files must not publish SST state on reopen"
@@ -11644,12 +11662,12 @@ mod storage_verification_hardening {
     }
 
     fn write_empty_storage_fixture(db_path: &Path) {
-        std::fs::write(db_path.join("FORMAT"), "midge-format-version=7\n")
+        std::fs::write(db_path.join("FORMAT"), "midge-format-version=8\n")
             .expect("write format marker");
         std::fs::write(
             db_path.join("manifest.json"),
             serde_json::to_vec_pretty(&json!({
-                "last_persisted_sequence": 0,
+                "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
                 "files": [],
                 "column_families": [],
                 "next_sst_seqs": {},

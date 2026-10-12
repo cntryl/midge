@@ -1,0 +1,51 @@
+{
+  "column_families": [
+    {
+      "created_at": 1791625109230,
+      "id": 1,
+      "name": "idle",
+      "reclaimed": false
+    },
+    {
+      "created_at": 1791625109266,
+      "id": 2,
+      "name": "data",
+      "reclaimed": false
+    }
+  ],
+  "edit_checkpoint_id": 12,
+  "files": [
+    {
+      "cf_id": 1,
+      "content_crc32c": 748206885,
+      "key_bounds_complete": true,
+      "largest_key": "69646c65",
+      "largest_seq": 2,
+      "level": 0,
+      "name": "000001_00_00000000000000000001.sst",
+      "size_bytes": 248,
+      "smallest_key": "69646c65",
+      "smallest_seq": 2,
+      "sst_seq": 0,
+      "sublevel": 0
+    }
+  ],
+  "flushed_through": [
+    {
+      "cf_id": 0,
+      "through_sequence": 0
+    },
+    {
+      "cf_id": 1,
+      "through_sequence": 3
+    },
+    {
+      "cf_id": 2,
+      "through_sequence": 0
+    }
+  ],
+  "next_sst_seqs": {
+    "1": 17,
+    "2": 33
+  }
+}

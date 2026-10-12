@@ -4,6 +4,7 @@ use crate::common::MidgeResult;
 use bytes::Bytes;
 
 impl SstFileIo {
+    #[cfg(test)]
     pub(crate) fn get_state_at_with_time_and_stats(
         &self,
         key: &[u8],
@@ -139,6 +140,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         })
     }
 
+    #[cfg(test)]
     fn get_state_at_with_time(
         &self,
         key: &[u8],

@@ -144,8 +144,9 @@ fn should_condition_control_replacement_on_filesystem_range_identity() {
         .compare_exchange_remote_object("metadata/catalog", None, b"old".to_vec())
         .unwrap();
     let identity = storage
-        .remote_range_metadata_within("metadata/catalog", &OperationDeadline::unbounded())
-        .unwrap();
+        .remote_range_metadata_optional_within("metadata/catalog", &OperationDeadline::unbounded())
+        .unwrap()
+        .expect("observed object");
     let budget = ResourceBudget::new(1024 * 1024);
 
     // Act

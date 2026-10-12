@@ -1,41 +1,8 @@
-//! Retiring WAL segments whose records the manifest's SSTs already hold.
-//!
-//! Local retention lives here; cloud retention, with its resumable streaming
-//! prover, lives in [`cloud`].
+//! Retire the authoritative sealed WAL prefix covered by durable family frontiers.
 
 use super::EventLoop;
 
 mod cloud;
-
-/// What one local WAL prune pass found.
-#[derive(Debug, Default)]
-struct LocalWalPruneOutcome {
-    /// One past the leading run of retirable sealed segments.
-    retire_below: Option<u64>,
-    anomaly: bool,
-}
-
-/// WAL bytes one local prune pass may read for coverage proofs before it
-/// defers the remaining segments to later passes. A pass always reads at
-/// least one segment, so proofs keep making progress (#548).
-const LOCAL_WAL_PROOF_BYTES_PER_PASS: u64 = 16 * 1024 * 1024;
-
-fn local_wal_proof_byte_budget() -> u64 {
-    #[cfg(test)]
-    if let Some(budget) = LOCAL_WAL_PROOF_BYTE_BUDGET.with(std::cell::Cell::get) {
-        return budget;
-    }
-    LOCAL_WAL_PROOF_BYTES_PER_PASS
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Whole-file reads of local WAL segments, for tests that bound a prune pass.
-    pub(super) static RUNTIME_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Replaces the local WAL proof byte budget for one test thread.
-    pub(super) static LOCAL_WAL_PROOF_BYTE_BUDGET: std::cell::Cell<Option<u64>> =
-        const { std::cell::Cell::new(None) };
-}
 
 impl EventLoop {
     pub(super) fn prune_local_wal_segments_covered_by_manifest(&mut self) {
@@ -49,124 +16,22 @@ impl EventLoop {
         if !self.seal_active_wal_for_prune() {
             return;
         }
-        let sealed: Vec<u64> = self.state.wal.history.ledger().sealed().collect();
-        // Memtables flush in FIFO order per column family, so a segment below
-        // the oldest unflushed memtable's first segment holds only data that
-        // is already in published SSTs, including deletes, which the
-        // per-record proof below cannot certify.
-        let flushed_floor = self.state.wal_recovery_floor_segment();
-        let mut proofs = std::mem::take(&mut self.state.wal.local_segment_proofs);
-        let mut proven = std::mem::take(&mut self.state.wal.proven_coverage_ssts);
-        let outcome =
-            self.retirable_local_wal_prefix(&sealed, flushed_floor, &mut proofs, &mut proven);
-        self.state.wal.proven_coverage_ssts = proven;
-        if outcome.anomaly {
-            self.state.mark_persistence_anomaly();
-        }
-        if let Some(to) = outcome.retire_below {
-            proofs.retain(|segment_id, _| *segment_id >= to);
+        let frontiers = self.state.manifest.flush_frontiers();
+        let to = self
+            .state
+            .wal
+            .history
+            .ledger()
+            .retirable_prefix(|cf, sequence| match frontiers.get(cf) {
+                Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) => {
+                    sequence <= through_sequence
+                }
+                Ok(crate::metadata::FamilyFrontier::Dropped) => true,
+                Err(_) => false,
+            });
+        if let Some(to) = to {
             self.retire_local_wal_below(to);
         }
-        self.state.wal.local_segment_proofs = proofs;
-    }
-
-    /// Finds the leading run of sealed segments that may retire: each is
-    /// below the recovery floor, holds no record, or has every record
-    /// exactly in the manifest's SSTs. Only a prefix retires (#842), so the first segment
-    /// that may not stops the run, and an idle column family's segment holds
-    /// every later one until a flush covers it.
-    ///
-    /// A failed proof is remembered in `proofs` and not repeated until the
-    /// blocking family's SSTs change, so a pass reads only segments whose
-    /// answer could differ (#490). Proof reads stop once a pass has read its
-    /// byte budget, which only retains segments longer (#548).
-    fn retirable_local_wal_prefix(
-        &self,
-        sealed: &[u64],
-        flushed_floor: Option<u64>,
-        proofs: &mut std::collections::HashMap<
-            u64,
-            crate::runtime::hybrid_persistence::FailedWalProof,
-        >,
-        proven: &mut crate::runtime::hybrid_persistence::ProvenSstIdentities,
-    ) -> LocalWalPruneOutcome {
-        use crate::runtime::hybrid_persistence::{
-            coverage_fingerprint, FailedWalProof, VerifiedManifestWalCoverage,
-        };
-        let mut outcome = LocalWalPruneOutcome::default();
-        // One prover per pass, built only if a proof is needed, so each
-        // covering SST is opened once per pass and read in full only the
-        // first time this runtime proves its identity.
-        let mut coverage = None;
-        let mut identity_cache = Some(proven);
-        // Each family's fingerprint once per pass, however many segments ask.
-        let mut fingerprints = std::collections::HashMap::new();
-        let mut fingerprint_of = |cf_id: u32| {
-            *fingerprints
-                .entry(cf_id)
-                .or_insert_with(|| coverage_fingerprint(&self.state.manifest, cf_id))
-        };
-        let budget = local_wal_proof_byte_budget();
-        let mut bytes_read = 0_u64;
-        let mut segments_read = 0_usize;
-        for &segment_id in sealed {
-            if flushed_floor.is_some_and(|floor| segment_id < floor) {
-                outcome.retire_below = Some(segment_id + 1);
-                continue;
-            }
-            let still_fails = proofs
-                .get(&segment_id)
-                .is_some_and(|proof| proof.still_fails(&mut fingerprint_of));
-            if still_fails || (segments_read > 0 && bytes_read >= budget) {
-                break;
-            }
-            segments_read += 1;
-            let path = crate::wal::segment_key(segment_id);
-            let bytes = match self.read_runtime_file(&path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    outcome.anomaly = true;
-                    tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
-                    break;
-                }
-            };
-            bytes_read = bytes_read.saturating_add(bytes.len() as u64);
-            let readback = match crate::wal::cloud_segment::inspect_sealed_bytes(&path.0, &bytes) {
-                Ok(readback) => readback,
-                Err(error) => {
-                    outcome.anomaly = true;
-                    tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
-                    break;
-                }
-            };
-            // A segment holding no record has nothing to prove.
-            if !readback.data_records.is_empty() {
-                let verifier = match (&mut coverage, identity_cache.take()) {
-                    (Some(built), _) => &*built,
-                    (slot @ None, Some(cache)) => slot.insert(VerifiedManifestWalCoverage::open(
-                        std::sync::Arc::clone(&self.state.fs),
-                        crate::cloud_layout::CloudObjectLayout::SST_PREFIX,
-                        &self.state.manifest,
-                        cache,
-                    )),
-                    (None, None) => unreachable!("the prover is built exactly once"),
-                };
-                if let Some(reason) = verifier.first_uncovered(&readback.data_records) {
-                    match FailedWalProof::remember(reason, &mut fingerprint_of) {
-                        Some(proof) => {
-                            proofs.insert(segment_id, proof);
-                        }
-                        // Unverifiable: prove it again next pass.
-                        None => {
-                            proofs.remove(&segment_id);
-                        }
-                    }
-                    break;
-                }
-            }
-            outcome.retire_below = Some(segment_id + 1);
-        }
-        outcome
     }
 
     /// Retires every sealed segment below `to` through the ledger, after a
@@ -188,9 +53,12 @@ impl EventLoop {
     ) -> Option<crate::runtime::wal_history::RetiredWal> {
         match self.wal_actor.retire_wal_below(&mut self.state, to) {
             Ok(retired) => {
-                if !retired.left.is_empty() {
-                    self.state.mark_persistence_anomaly();
-                }
+                crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
+                self.gc_actor.enqueue_retired_wal(&retired);
+                self.gc_actor.retry_retired_wal(
+                    &mut self.state,
+                    self.cloud_coordinator.hybrid_storage.as_deref(),
+                );
                 tracing::debug!(?retired, "retired WAL segments");
                 Some(retired)
             }
@@ -200,25 +68,6 @@ impl EventLoop {
                 None
             }
         }
-    }
-
-    pub(super) fn read_runtime_file(
-        &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<bytes::Bytes> {
-        #[cfg(test)]
-        RUNTIME_FILE_READS.with(|reads| reads.set(reads.get() + 1));
-        let length = self.state.fs.metadata(path)?.len;
-        let file = self.state.fs.open(
-            path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        file.read_at(0, length)
     }
 
     /// Seals the active WAL segment so it can be retired later. In local

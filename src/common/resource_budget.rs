@@ -76,6 +76,7 @@ impl ResourceBudget {
     /// the shared `Arc` because it is a per-holder error contract, and
     /// propagating it would change the errors unrelated callers observe.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn child(&self, limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {
@@ -87,11 +88,6 @@ impl ResourceBudget {
             }),
             report_contention: false,
         }
-    }
-
-    /// Whether `ancestor` is this pool or encloses it.
-    pub(crate) fn is_within(&self, ancestor: &Self) -> bool {
-        self.is_within_pool(ancestor.inner.id)
     }
 
     fn is_within_pool(&self, pool_id: u64) -> bool {
@@ -180,6 +176,7 @@ impl ResourceBudget {
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[cfg(test)]
     pub(crate) fn peak(&self) -> usize {
         self.inner.peak.load(Ordering::Acquire)
     }
@@ -251,10 +248,6 @@ pub struct ResourceReservation {
 }
 
 impl ResourceReservation {
-    pub(crate) fn belongs_to(&self, budget: &ResourceBudget) -> bool {
-        Arc::ptr_eq(&self.budget.inner, &budget.inner)
-    }
-
     pub(crate) fn reserve_related(
         &self,
         bytes: usize,

@@ -1550,7 +1550,7 @@ mod compatibility_fixtures {
     /// and its manifests' byte-array key bounds become hex strings.
     fn copy_populated_fixture_as_current_format() -> tempfile::TempDir {
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
-        fs::write(temp.path().join("FORMAT"), "midge-format-version=7\n")
+        fs::write(temp.path().join("FORMAT"), "midge-format-version=8\n")
             .expect("mark fixture copy as the current format");
         fs::remove_file(temp.path().join("wal").join("wal.log"))
             .expect("drop the pre-ledger active WAL");
@@ -1561,11 +1561,18 @@ mod compatibility_fixtures {
     }
 
     /// Rewrite the manifest at `path` with hex key bounds, the only encoding
-    /// FORMAT 7 decodes.
+    /// FORMAT 8 decodes.
     fn hex_encode_key_bounds(path: &Path) {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(path).expect("read fixture manifest"))
                 .expect("decode fixture manifest");
+        let through = manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("last_persisted_sequence")
+            .unwrap();
+        manifest["flushed_through"] =
+            serde_json::json!([{"cf_id": 0, "through_sequence": through}]);
         for file in manifest["files"]
             .as_array_mut()
             .expect("fixture SST metadata")
@@ -1797,9 +1804,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v8_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v9_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v8");
+        let temp = copy_fixture_dir("future_v9");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())

@@ -21,6 +21,14 @@ use std::sync::Arc;
 /// Well-known filename for the leader record.
 const LEADER_RECORD_FILE: &str = ".midge_leader";
 const LEADER_LOCK_FILE: &str = ".midge_leader.lock";
+const METADATA_POINTER_FILE: &str = ".midge_shared_metadata";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataPointer {
+    format_version: u32,
+    generation: super::CloudMetadataGeneration,
+}
 
 /// Exact timestamp written by owned clean release, retaining the fencing epoch.
 pub(super) const RELEASED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
@@ -161,6 +169,139 @@ impl FsLeaderStore {
 }
 
 impl LeaderStore for FsLeaderStore {
+    fn read_committed_metadata(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<super::CloudMetadataHead, LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "shared metadata pointer read deadline exhausted".into(),
+            ));
+        }
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(timeout),
+        );
+        let scoped = Self::new(
+            crate::io::scope_fs(Arc::clone(&self.fs), scope.clone()),
+            self.clock.clone(),
+        );
+        let current = scoped.read_current()?;
+        let path = FsPath::new(METADATA_POINTER_FILE);
+        let file = match scoped.fs.open(&path, OpenOptions::READ_ONLY) {
+            Ok(file) => file,
+            Err(crate::io::FsError::NotFound(_)) => {
+                return Ok(if current.is_some() {
+                    super::CloudMetadataHead::Uncommitted
+                } else {
+                    super::CloudMetadataHead::MissingLease
+                })
+            }
+            Err(error) => {
+                return Err(LeaseError::IoError(format!(
+                    "read shared metadata pointer: {error}"
+                )))
+            }
+        };
+        if current.is_none() {
+            return Err(LeaseError::Indeterminate(
+                "shared metadata exists without its fencing record".into(),
+            ));
+        }
+        let len = file
+            .len()
+            .map_err(|error| LeaseError::IoError(error.to_string()))?;
+        if len > 64 * 1024 {
+            return Err(LeaseError::Indeterminate(
+                "shared metadata pointer exceeds size limit".into(),
+            ));
+        }
+        let bytes = file
+            .read_at(0, len)
+            .map_err(|error| LeaseError::IoError(error.to_string()))?;
+        let pointer: MetadataPointer = serde_json::from_slice(&bytes).map_err(|error| {
+            LeaseError::Indeterminate(format!("invalid shared metadata pointer: {error}"))
+        })?;
+        if pointer.format_version != 1 {
+            return Err(LeaseError::Indeterminate(
+                "unsupported shared metadata pointer format".into(),
+            ));
+        }
+        super::cloud::validate_metadata_generation(&pointer.generation)?;
+        scope
+            .check("shared metadata pointer read completion")
+            .map_err(|error| LeaseError::Timeout(error.to_string()))?;
+        Ok(super::CloudMetadataHead::Committed(pointer.generation))
+    }
+
+    fn publish_committed_metadata(
+        &self,
+        holder_id: &str,
+        expected_epoch: u64,
+        expected_previous: Option<&super::CloudMetadataGeneration>,
+        generation: super::CloudMetadataGeneration,
+        timeout: std::time::Duration,
+    ) -> Result<(), LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "shared metadata publication deadline exhausted".into(),
+            ));
+        }
+        super::cloud::validate_metadata_generation(&generation)?;
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(timeout),
+        );
+        let fs = crate::io::scope_fs(Arc::clone(&self.fs), scope.clone());
+        let scoped = Self::new(Arc::clone(&fs), self.clock.clone());
+        scoped.with_exclusive_lock(holder_id, || {
+            scope
+                .check("shared metadata mutation lock")
+                .map_err(|error| LeaseError::Timeout(error.to_string()))?;
+            scoped.validate_epoch(holder_id, expected_epoch)?;
+            let previous = match scoped.read_committed_metadata(scope.deadline().remaining())? {
+                super::CloudMetadataHead::Committed(previous) => Some(previous),
+                super::CloudMetadataHead::Uncommitted => None,
+                super::CloudMetadataHead::MissingLease => {
+                    return Err(LeaseError::RenewalFailed(
+                        "shared metadata lease disappeared".into(),
+                    ))
+                }
+            };
+            scope
+                .check("shared metadata predecessor read")
+                .map_err(|error| LeaseError::Timeout(error.to_string()))?;
+            if previous.as_ref() != expected_previous {
+                if previous.as_ref() == Some(&generation) {
+                    return Ok(());
+                }
+                return Err(LeaseError::RenewalFailed(
+                    "shared metadata predecessor changed".into(),
+                ));
+            }
+            generation.validate_successor(previous.as_ref())?;
+            if previous.as_ref() == Some(&generation) {
+                return Ok(());
+            }
+            let pointer = MetadataPointer {
+                format_version: 1,
+                generation,
+            };
+            let bytes = serde_json::to_vec(&pointer)
+                .map_err(|error| LeaseError::Internal(error.to_string()))?;
+            staging::stage_bytes_with_hook(
+                &fs,
+                &Self::temp_path(),
+                &FsPath::new(METADATA_POINTER_FILE),
+                &bytes,
+                || {
+                    scope
+                        .check("shared metadata pointer commit")
+                        .map_err(|error| LeaseError::Timeout(error.to_string()))
+                },
+                LeaseError::IoError,
+            )
+        })
+    }
+
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
         self.acquire_leadership_after_validation(holder_id, |_| Ok(()))
     }
@@ -183,7 +324,18 @@ impl LeaderStore for FsLeaderStore {
 
         match self.fs.exists(&path) {
             Ok(true) => {}
-            Ok(false) => return Ok(None),
+            Ok(false) => {
+                if self
+                    .fs
+                    .exists(&FsPath::new(METADATA_POINTER_FILE))
+                    .map_err(|error| LeaseError::IoError(error.to_string()))?
+                {
+                    return Err(LeaseError::Indeterminate(
+                        "shared metadata pointer exists without its fencing record".into(),
+                    ));
+                }
+                return Ok(None);
+            }
             Err(e) => return Err(LeaseError::IoError(format!("exists check failed: {e}"))),
         }
 
@@ -480,6 +632,135 @@ mod tests {
             Arc::new(MockFs::new()),
             crate::lease::clock::LeaseClock::default(),
         )
+    }
+
+    fn metadata_generation(horizon: u64) -> crate::lease::CloudMetadataGeneration {
+        crate::lease::CloudMetadataGeneration {
+            id: crate::lease::SharedGenerationId::FIRST,
+            manifest_horizon: horizon,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| crate::lease::CloudMetadataObject {
+                file_name: file_name.into(),
+                object_key: format!("metadata/generations/{}/{file_name}", uuid::Uuid::new_v4()),
+                len: 1,
+                crc32c: 1,
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn should_reject_stale_metadata_predecessor_without_changing_the_pointer() {
+        // Arrange
+        let store = make_store();
+        let record = store.acquire_leadership("writer").unwrap();
+        let first = metadata_generation(10);
+        let timeout = std::time::Duration::from_secs(1);
+        store
+            .publish_committed_metadata("writer", record.epoch, None, first.clone(), timeout)
+            .unwrap();
+        let mut second = metadata_generation(11);
+        second.id = first.id.checked_next().unwrap();
+        store
+            .publish_committed_metadata(
+                "writer",
+                record.epoch,
+                Some(&first),
+                second.clone(),
+                timeout,
+            )
+            .unwrap();
+        let mut competing = metadata_generation(12);
+        competing.id = second.id.checked_next().unwrap();
+
+        // Act
+        let result = store.publish_committed_metadata(
+            "writer",
+            record.epoch,
+            Some(&first),
+            competing,
+            timeout,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert_eq!(
+            store.read_committed_metadata(timeout).unwrap(),
+            crate::lease::CloudMetadataHead::Committed(second)
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_new_filesystem_epoch_when_committed_metadata_loses_its_fencing_record() {
+        // Arrange
+        let store = make_store();
+        let record = store.acquire_leadership("writer").unwrap();
+        let first = metadata_generation(10);
+        let timeout = std::time::Duration::from_secs(1);
+        store
+            .publish_committed_metadata("writer", record.epoch, None, first, timeout)
+            .unwrap();
+        store
+            .fs
+            .remove_file(&FsPath::new(LEADER_RECORD_FILE))
+            .unwrap();
+
+        // Act
+        let result = store.acquire_leadership("successor");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
+        assert!(matches!(
+            store.read_committed_metadata(timeout),
+            Err(LeaseError::Indeterminate(_))
+        ));
+    }
+
+    #[test]
+    fn should_preserve_committed_metadata_when_a_successor_acquires_the_filesystem_lease() {
+        // Arrange
+        let store = make_store();
+        let first = store.acquire_leadership("first").unwrap();
+        let generation = super::super::traits::CloudMetadataGeneration {
+            id: crate::lease::SharedGenerationId::FIRST,
+            manifest_horizon: 1,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| super::super::traits::CloudMetadataObject {
+                file_name: file_name.into(),
+                object_key: format!("metadata/generations/{}/{file_name}", uuid::Uuid::new_v4()),
+                len: 1,
+                crc32c: 1,
+            })
+            .collect(),
+        };
+
+        // Act
+        store
+            .publish_committed_metadata(
+                "first",
+                first.epoch,
+                None,
+                generation.clone(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        store.acquire_leadership("second").unwrap();
+
+        // Assert
+        assert_eq!(
+            store
+                .read_committed_metadata(std::time::Duration::from_secs(1))
+                .unwrap(),
+            super::super::traits::CloudMetadataHead::Committed(generation)
+        );
     }
 
     #[test]

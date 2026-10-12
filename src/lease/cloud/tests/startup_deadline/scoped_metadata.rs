@@ -372,7 +372,7 @@ fn assert_successful_native_mirror(observed: &MirrorObservation) {
             observed.committed
         );
     };
-    assert_eq!(generation.manifest_sequence, 0);
+    assert_eq!(generation.manifest_horizon, 0);
     assert_eq!(generation.objects.len(), observed.expected_objects.len());
     for object in &generation.objects {
         let expected = &observed.expected_objects[&object.file_name];

@@ -18,8 +18,6 @@ use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
-mod recovery_index;
-
 /// Stable summary of the physical contents of a single SST file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstFileSummary {
@@ -71,7 +69,6 @@ pub struct SstFileIo {
     range_tombstones: Vec<RangeTombstone>,
     metadata_budget: Option<crate::common::resource_budget::ResourceBudget>,
     metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
-    recovery_block: Option<std::sync::Mutex<recovery::RecoveryBlock>>,
 }
 
 enum BlockEntryCursor {
@@ -667,11 +664,10 @@ impl std::iter::Iterator for SstStateScan {
 }
 
 mod progress;
-pub(crate) use progress::{SstCursorPosition, SstSummaryProgress};
+pub(crate) use progress::SstSummaryProgress;
 
 mod index;
 mod io;
-mod recovery;
 mod scan;
 mod state;
 
@@ -702,7 +698,6 @@ impl SstFileIo {
             range_tombstones: Vec::new(),
             metadata_budget: None,
             metadata_reservations: Vec::new(),
-            recovery_block: None,
         }
     }
 

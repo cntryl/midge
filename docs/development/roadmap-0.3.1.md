@@ -155,7 +155,7 @@ Land this roadmap and the Jev guidance in `AGENTS.md` through a documentation PR
 
 ### 8. [#669 Retain bounded SST block locality during cloud WAL replay coverage](https://github.com/cntryl/midge/issues/669)
 
-- **Location:** `src/runtime/cloud_startup/replay_coverage.rs` and `src/engine/startup/streaming_recovery.rs`.
+- **Historical scope:** SST coverage locality was superseded by #819 per-family frontiers in `src/metadata/frontiers.rs` and whole-unit replay selection in `src/wal/replay.rs`; the old coverage implementation and probe campaign were removed.
 - **Observed behavior:** exact coverage is evaluated for every WAL value record. The proof scans manifest candidates, retains at most one SST reader, and each reader retains one decoded block. Alternating candidates or blocks repeatedly issue range reads; recovery checkpoints release the reader.
 - **Expected behavior:** retain bounded reader/block locality across adjacent probes while preserving exact coverage, immutable-object verification, ordering, TTL, and the global recovery memory budget.
 - **Evidence:** the checked-in cold-recovery campaign processed a 134,219,148-byte WAL with 16,212 records. Coverage used 16.107 s of 18.216 s, issued 33,536 HTTP ranges, and received 2.553 GB while verifying about 134 MB of SST data. Focused tests also demonstrate repeated opens with overlapping SSTs.
@@ -284,7 +284,7 @@ Keep measurement and qualifying implementation in one PR. Run three fresh releas
 
 Implement only when two of three runs in a cell show snapshot bytes at least 5% of published SST bytes, or checkpoint time at least 20% of publication time with checkpoint p95 at least 5 ms. Ordinary local flushes checkpoint after 64 journal records, 1 MiB, or a pending retry. Cloud, recovery, administration, DDL, compaction-before-GC, and clean local shutdown remain forced.
 
-Before deferring snapshots, atomically journal allocation, `AddSst`, and `BumpWalSeq`. Matching-existing-SST retries unconditionally journal monotonic frontier repairs. Failure retains journal authority and retries; persistent I/O failure does not imply a hard journal-size bound. Test crashes after WAL pruning and snapshot rename-before-truncation, frontier repair/reopen, and forced-call coverage.
+Before deferring snapshots, atomically journal allocation, `AddSst`, and `AdvanceFlushFrontier` for the frozen family commit boundary. Matching-existing-SST retries succeed only when the durable family frontier already covers that boundary; they cannot repair it from an SST maximum. Failure retains journal authority and retries; persistent I/O failure does not imply a hard journal-size bound. Test crashes after WAL pruning and snapshot rename-before-truncation, frontier repair/reopen, and forced-call coverage.
 
 Accept only with at least 90% lower snapshot bytes in fixed-cardinality probes and 50% lower attributable checkpoint bytes/time in qualifying cells, without more than 10% stable throughput or flush-p95 regression. Otherwise record qualification and an explicit deferred-policy follow-up.
 

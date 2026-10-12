@@ -246,7 +246,7 @@ fn assert_acknowledged_and_recovered_rows(el: &EventLoop, cf_id: u32, sequence: 
 fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeResult<()> {
     // Arrange: align seeded durable metadata with the next real write's allocator.
     let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     let (mut release, reached) = paused_compactor::install(&mut el);
     let plan = el
         .compaction_actor
@@ -316,7 +316,7 @@ fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeR
 fn should_keep_optional_maintenance_blocked_while_compaction_computes() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     let (mut release, reached) = paused_compactor::install(&mut el);
     let plan = el
         .compaction_actor

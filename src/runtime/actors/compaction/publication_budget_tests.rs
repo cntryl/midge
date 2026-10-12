@@ -203,7 +203,6 @@ impl PublicationFixture {
             lease_validity: Some(validity),
             leader_store: None,
             leader_holder_id: None,
-            metadata_sequence: 1,
             publication_memory_limit: 2 * 1024 * 1024,
             runtime_response_timeout: IO_CAP,
             manual_deadline,

@@ -32,6 +32,7 @@ mod heartbeat;
 mod scoped_leader_store;
 mod traits;
 
+pub use crate::types::SharedGenerationId;
 pub(crate) use clock::LeaseClock;
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
@@ -67,7 +68,10 @@ pub(crate) enum LeaseStorageKind {
 
 impl From<&Storage> for LeaseStorageKind {
     fn from(storage: &Storage) -> Self {
-        if matches!(storage, Storage::Cloud { .. }) {
+        if matches!(
+            storage,
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. }
+        ) {
             Self::Cloud
         } else {
             Self::Local
@@ -205,10 +209,9 @@ pub(crate) fn create_lease_with_validity(
     )
 }
 
-/// Create the primary lease for `storage`. Local and simulated leases keep
-/// their coordination files in the database `root`; a provider lease keeps
-/// its document in the control store, or in `object_store` when a test
-/// injects one. Every lease reads wall time from `clock`.
+/// Create the primary lease for `storage`. Cloud and simulated-cloud leases
+/// keep their pointer and fencing document in the shared object store. Every
+/// lease reads wall time from `clock`.
 pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
     storage: &Storage,
     root: &Arc<dyn crate::io::Fs>,
@@ -275,13 +278,28 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
-            let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
-                config,
-                Arc::clone(root),
-                clock_skew_tolerance,
-                lease_ttl,
-                clock.clone(),
+            let store = crate::storage::simulated::SimulatedCloud::locate(
+                root.as_ref(),
+                object_store,
+                storage_io_timeout,
+            )
+            .and_then(|location| location.open())
+            .map_err(|error| {
+                LeaseError::IoError(format!("simulated shared lease backend: {error}"))
+            })?;
+            let cloud = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+                store,
+                storage_io_timeout,
             ));
+            let lease = Arc::new(
+                CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
+                    config,
+                    cloud,
+                    clock_skew_tolerance,
+                    lease_ttl,
+                    clock.clone(),
+                ),
+            );
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
                 lease,
@@ -345,5 +363,73 @@ mod tests {
 
         // Assert
         assert!(created.validity.is_some());
+    }
+
+    #[test]
+    fn should_share_simulated_metadata_authority_across_distinct_cache_roots() {
+        // Arrange
+        let first_cache = tempfile::tempdir().unwrap();
+        let second_cache = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn crate::storage::cloud::CloudBackend> =
+            Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let make = |directory: &std::path::Path| {
+            create_lease_with_validity_and_timeout_and_ttl(
+                &Storage::CloudSimulated {
+                    local_cache_path: directory.into(),
+                    bucket: "shared".into(),
+                    prefix: String::new(),
+                },
+                &crate::io::real::test_root(directory),
+                Some(Arc::clone(&backend)),
+                Duration::ZERO,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                &LeaseClock::default(),
+            )
+            .unwrap()
+        };
+        let first = make(first_cache.path());
+        let guard = Arc::clone(&first.lease).try_acquire().unwrap();
+        let first_epoch = first.lease.epoch();
+        let first_store = first.lease.get_leader_store().unwrap();
+        let generation = CloudMetadataGeneration {
+            id: SharedGenerationId::FIRST,
+            manifest_horizon: 10,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| CloudMetadataObject {
+                file_name: file_name.into(),
+                object_key: format!("metadata/generations/{}/{file_name}", uuid::Uuid::new_v4()),
+                len: 1,
+                crc32c: 1,
+            })
+            .collect(),
+        };
+        first_store
+            .publish_committed_metadata(
+                &first.lease.holder_id(),
+                first.lease.epoch(),
+                None,
+                generation.clone(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        guard.release();
+        first.lease.release().unwrap();
+        // Act
+        let second = make(second_cache.path());
+        let _guard = Arc::clone(&second.lease).try_acquire().unwrap();
+        let current = second
+            .lease
+            .get_leader_store()
+            .unwrap()
+            .read_committed_metadata(Duration::from_secs(5))
+            .unwrap();
+        // Assert
+        assert_eq!(current, CloudMetadataHead::Committed(generation));
+        assert!(second.lease.epoch() > first_epoch);
     }
 }
