@@ -172,6 +172,21 @@ impl EventLoop {
 
     fn next_cloud_wal_prune_candidates(&self) -> Vec<(u64, u64)> {
         let tracker = &self.cloud_coordinator.cloud_wal;
+        // Retirement is a prefix the committed shared generation covers. That
+        // generation mirrors an earlier local manifest, and family frontiers
+        // only advance, so a segment the local frontiers leave unflushed is
+        // unflushed there too. Checking it here never grants retirement; it
+        // only spares a worker that would hold the gate to answer Busy.
+        let Some(oldest) = tracker.oldest_published_facts() else {
+            return Vec::new();
+        };
+        if self
+            .state
+            .oldest_wal_blocking_family(Some(oldest))
+            .is_some()
+        {
+            return Vec::new();
+        }
         tracker
             .acks()
             .published()

@@ -244,6 +244,57 @@ fn should_schedule_wal_retirement_before_another_ready_flush() -> crate::common:
 }
 
 #[test]
+fn should_not_spawn_retirement_worker_when_oldest_published_segment_is_unflushed(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: two cloud-acknowledged segments, and no flush covers either.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    seed_cloud_prune_candidate(&mut el, 82, 82);
+    el.state.wal.frontiers.set_cloud_durable_for_test(82);
+    el.cloud_coordinator.cloud_maintenance.next =
+        super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+
+    // Assert: the committed generation cannot cover what the local
+    // frontiers do not, so no worker takes the gate only to answer Busy.
+    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    assert!(!el.publication_gate.is_active());
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(82));
+    Ok(())
+}
+
+#[test]
+fn should_retire_flushed_oldest_segment_when_a_later_published_segment_is_unflushed(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a flush covers segment 81 only.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    seed_cloud_prune_candidate(&mut el, 82, 82);
+    el.state.wal.frontiers.set_cloud_durable_for_test(82);
+    add_valid_manifest_sst_for_test(&mut el, "covered.sst", 81);
+    el.cloud_coordinator.cloud_maintenance.next =
+        super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    let spawned = el.cloud_coordinator.cloud_wal_prune_worker.is_some();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(spawned, "a flushed oldest segment must still retire");
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(82));
+    Ok(())
+}
+
+#[test]
 fn should_release_wal_disk_budget_only_after_local_segment_removal(
 ) -> crate::common::MidgeResult<()> {
     // Arrange

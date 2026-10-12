@@ -502,7 +502,10 @@ impl RuntimeState {
             .map(|(cf_id, _)| FlushCandidate { cf_id, reason })
     }
 
-    fn oldest_wal_blocking_family(
+    /// A family the local manifest has not flushed through the oldest WAL
+    /// segment: the oldest published one when given, else the oldest sealed
+    /// local member.
+    pub(crate) fn oldest_wal_blocking_family(
         &self,
         oldest_shared: Option<&crate::wal::format::SealedFacts>,
     ) -> Option<crate::types::ColumnFamilyId> {
