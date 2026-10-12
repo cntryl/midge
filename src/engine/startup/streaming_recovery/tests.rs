@@ -40,6 +40,91 @@ fn record(sequence: u64) -> crate::wal::WalRecord {
     )
 }
 
+/// Publish sealed segments `(id, bytes, last sequence)`, written by the
+/// catalog's epoch, and drop the local WAL cache.
+fn publish_segments(path: &std::path::Path, segments: &[(u64, Vec<u8>, u64)]) {
+    let catalog_path = path.join("cloud_store/wal/publication-catalog.v1.json");
+    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        &std::fs::read(&catalog_path).expect("read catalog"),
+    )
+    .expect("decode catalog");
+    for (id, bytes, maximum) in segments {
+        let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+            *id,
+            *maximum,
+            catalog.fencing_epoch,
+            bytes,
+        );
+        let object = path.join("cloud_store").join(&publication.object_key);
+        std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
+        std::fs::write(object, bytes).expect("publish WAL");
+        catalog.segments.insert(*id, publication);
+    }
+    let encoded = catalog.encode().expect("encode catalog");
+    std::fs::write(catalog_path, &encoded).expect("publish catalog");
+    std::fs::write(
+        path.join("cloud_store/wal/publication-catalog.v1.mirror.json"),
+        &encoded,
+    )
+    .expect("publish catalog mirror");
+    std::fs::remove_dir_all(path.join("wal")).expect("drop the local WAL cache");
+}
+
+#[test]
+fn should_refuse_salvage_open_when_cloud_replay_finds_a_broken_link() {
+    // Arrange: segment 2 of the catalog links a segment 1 other than the
+    // published one, a break only replay sees. Salvage cannot yet set aside
+    // what replay alone stops at (#821).
+    let dir = tempfile::tempdir().expect("database directory");
+    let opts = options(dir.path(), 1024 * 1024);
+    let mut engine = Engine::open(opts).expect("initialize metadata");
+    engine
+        .shutdown(std::time::Duration::from_secs(10))
+        .expect("shutdown");
+    drop(engine);
+    let epoch = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        &std::fs::read(
+            dir.path()
+                .join("cloud_store/wal/publication-catalog.v1.json"),
+        )
+        .expect("read catalog"),
+    )
+    .expect("decode catalog")
+    .fencing_epoch;
+    let (first, link) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&record(1))
+    .seal();
+    let forged = crate::wal::format::ChainLink {
+        digest: [0x42; 16],
+        ..link
+    };
+    let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, epoch, forged)
+        .record(&record(2))
+        .seal();
+    publish_segments(dir.path(), &[(1, first, 1), (2, second, 2)]);
+    let salvage = OpenOptions::cloud_simulated(dir.path(), "bucket", "streaming-recovery")
+        .local_storage_budget(1024 * 1024)
+        .with_memtable_size_limit(64 * 1024)
+        .background_compaction(false)
+        .recovery_policy(crate::RecoveryPolicy::Salvage)
+        .build()
+        .expect("salvage options");
+
+    // Act
+    let result = Engine::open(salvage);
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::MidgeError::RecoveryFailed(_))),
+        "{:?}",
+        result.as_ref().err()
+    );
+}
+
 fn publish_records(
     path: &std::path::Path,
     make_records: impl FnOnce() -> Vec<crate::wal::WalRecord>,

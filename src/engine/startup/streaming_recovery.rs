@@ -140,6 +140,17 @@ impl CloudReplay {
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;
         shutdown?;
+        // Planning sets aside what it finds unreadable and covers it with the
+        // sequence floor. A break only replay sees (a chain link, a header or
+        // footer the ledger disagrees with) has neither, so the open refuses
+        // rather than seal and upload what follows it; setting such a break
+        // aside belongs to the one salvage rule (#821).
+        if let Some(stop) = &stats.salvage_stop {
+            return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                "cloud WAL replay stopped at segment {} after planning; salvage cannot set it aside",
+                stop.segment
+            )));
+        }
         self.install_recovered_tables(materialized, &stats, memtables)
     }
 
