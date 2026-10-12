@@ -3745,13 +3745,13 @@
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 2169,
+          "line": 2168,
           "symbol": "should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry",
           "claim": "A cataloged object whose header links another segment than its entry names fails strict recovery.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2196,
+              "line": 2195,
               "marker": "assert!("
             }
           ]
