@@ -51,14 +51,27 @@ struct RecoveredStartup {
 }
 
 impl RuntimeState {
+    /// The highest sequence the manifest proves was handed out: every SST's,
+    /// and every live family's flush frontier. Replay skips each record at or
+    /// below its family's frontier, so a new write must start above it. A
+    /// frontier is a freeze sequence, which a WAL reservation can lift above
+    /// every SST and WAL record; a host with a fresh cache never saw that
+    /// reservation.
     pub(super) fn manifest_visible_sequence_floor(manifest: &Manifest) -> u64 {
-        let file_max_sequence = manifest
+        use crate::metadata::frontiers::FamilyFrontier;
+        let file_sequences = manifest
             .files
             .iter()
-            .filter_map(|file| file.largest_seq.or(file.smallest_seq))
-            .max()
-            .unwrap_or(0);
-        file_max_sequence
+            .filter_map(|file| file.largest_seq.or(file.smallest_seq));
+        let frontiers =
+            manifest
+                .flush_frontiers()
+                .iter()
+                .filter_map(|(_, frontier)| match frontier {
+                    FamilyFrontier::Live { through_sequence } => Some(through_sequence),
+                    FamilyFrontier::Dropped => None,
+                });
+        file_sequences.chain(frontiers).max().unwrap_or(0)
     }
 
     pub(super) fn manifest_compaction_output_generation_floor(manifest: &Manifest) -> u64 {
