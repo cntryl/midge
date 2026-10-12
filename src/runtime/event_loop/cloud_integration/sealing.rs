@@ -142,6 +142,9 @@ impl EventLoop {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
         }
+        // A fenced protocol refuses before reading the ledger, which may
+        // already have recorded the rotation that fenced it.
+        self.wal_transition.ensure_ready()?;
         let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
             return Err(crate::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
@@ -158,7 +161,7 @@ impl EventLoop {
         self.durability.mark_cloud_seal_retry_needed();
         self.validate_runtime_writer_lease_within(deadline)?;
 
-        let segment_id = self.state.wal.current_segment_id;
+        let segment_id = self.state.wal.open_segment();
         let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
             crate::common::MidgeError::ResourceLimit(
                 "WAL segment identity space exhausted".to_string(),

@@ -18,6 +18,23 @@ pub(crate) fn rotate(history: &mut WalHistory) -> MidgeResult<SegmentId> {
     Ok(history.ledger().open_segment())
 }
 
+/// Rotate `history` until `open` is its open segment.
+///
+/// # Panics
+///
+/// Panics if `history` is already past `open`.
+pub(crate) fn rotate_to(history: &mut WalHistory, open: SegmentId) -> MidgeResult<()> {
+    while history.ledger().open_segment() < open {
+        rotate(history)?;
+    }
+    assert_eq!(
+        history.ledger().open_segment(),
+        open,
+        "the WAL history is already past segment {open}"
+    );
+    Ok(())
+}
+
 /// Bring `history` to where a writer that sealed `segment_id` left it:
 /// `segment_id` sealed at the log start and the segment after it open.
 pub(crate) fn seal_through(history: &mut WalHistory, segment_id: SegmentId) -> MidgeResult<()> {

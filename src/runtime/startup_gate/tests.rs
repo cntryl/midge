@@ -255,7 +255,6 @@ impl ActiveWalFixture {
         )
         .unwrap();
         state.sequence = 1;
-        state.wal.current_segment_id = 1;
         let cloud = Arc::new(
             crate::storage::filesystem::FileSystem::new(directory.path().join("cloud-store"))
                 .unwrap(),

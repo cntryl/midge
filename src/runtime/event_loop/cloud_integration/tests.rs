@@ -30,7 +30,7 @@ mod maintenance_tests;
 fn install_prune_gc_pins_for_test(el: &mut EventLoop, segment: u64, max_sequence: u64) {
     el.wal_transition = crate::runtime::wal_transition::WalTransitionProtocol::new();
     el.wal_transition
-        .initialize_gc_pins(el.state.wal.current_segment_id, max_sequence);
+        .initialize_gc_pins(el.state.wal.open_segment(), max_sequence);
     el.wal_transition
         .register_recovered(segment, max_sequence, true);
 }
@@ -48,7 +48,7 @@ fn queue_generation_for_maintenance_test(
     sequence: u64,
 ) -> crate::common::MidgeResult<()> {
     el.state.sequence = sequence;
-    let segment = el.state.wal.current_segment_id;
+    let segment = el.state.wal.open_segment();
     let cf = el.state.get_cf_mut(0).unwrap();
     cf.active_memtable_started_in_segment = segment;
     cf.memtable.put_with_seq(
@@ -425,7 +425,7 @@ fn should_fail_all_generation_waiters_given_exhausted_cloud_upload_attempts(
     )?;
     let direct_request = 43;
     let pending_request = 44;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     let direct_response = event_loop.router.register(direct_request, "TestRequest");
     let pending_response = event_loop.router.register(pending_request, "TestRequest");
     event_loop.durability.queue_waiter_for_key(
@@ -477,7 +477,7 @@ fn should_preserve_timeout_variant_given_exhausted_cloud_upload_timeouts(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 46;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     let response = event_loop.router.register(request_id, "TestRequest");
     event_loop
         .durability
@@ -1518,18 +1518,12 @@ fn publish_remote_wal_bytes_for_test(
 /// Bring `el`'s segment ledger to where a writer that sealed `segment_id`
 /// left it: `segment_id` sealed at the log start, `segment_id + 1` open.
 fn seal_ledger_through_for_test(el: &mut EventLoop, segment_id: u64) {
-    crate::runtime::wal_history::fixture::seal_through(
-        el.wal_actor
-            .history_for_test()
-            .expect("a file-backed WAL has a segment ledger"),
-        segment_id,
-    )
-    .expect("seal the WAL ledger through the candidate segment");
+    crate::runtime::wal_history::fixture::seal_through(&mut el.state.wal.history, segment_id)
+        .expect("seal the WAL ledger through the candidate segment");
 }
 
 fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence: u64) {
     seal_ledger_through_for_test(el, segment_id);
-    el.state.wal.current_segment_id = segment_id + 1;
     el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
@@ -1554,7 +1548,6 @@ fn seed_cloud_prune_candidate_with_records(
     records: Vec<crate::wal::WalRecord>,
 ) {
     seal_ledger_through_for_test(el, segment_id);
-    el.state.wal.current_segment_id = segment_id + 1;
     el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
@@ -3063,7 +3056,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     );
     assert_eq!(
         el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+            .tombstone_gc_cutoff(el.state.wal.open_segment()),
         0,
         "uncertain commit retains the pin until confirmed readback"
     );
@@ -3086,7 +3079,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     // Assert
     assert_eq!(
         el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+            .tombstone_gc_cutoff(el.state.wal.open_segment()),
         max_sequence
     );
     assert!(
@@ -5055,7 +5048,6 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
         )],
     );
     seed_cloud_prune_candidate(&mut el, covered_segment, covered_segment);
-    el.state.wal.current_segment_id = covered_segment + 1;
     el.state
         .wal
         .frontiers
@@ -5358,7 +5350,7 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
     // Assert
     assert_eq!(
         el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+            .tombstone_gc_cutoff(el.state.wal.open_segment()),
         max_sequence
     );
     assert_eq!(failing_cloud.delete_attempts(), 1);
@@ -5406,7 +5398,6 @@ fn should_retain_later_batch_members_when_oldest_wal_is_uncovered() -> crate::co
     for segment_id in 2..=9 {
         seed_cloud_prune_candidate(&mut el, segment_id, segment_id);
     }
-    el.state.wal.current_segment_id = 10;
     el.state.wal.frontiers.set_cloud_durable_for_test(9);
     add_valid_manifest_sst_for_test(&mut el, "later-batch-covered.sst", 9);
 
@@ -6216,7 +6207,7 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         "buffered transaction should defer cloud durability"
     );
 
-    let failed_segment = el.state.wal.current_segment_id;
+    let failed_segment = el.state.wal.open_segment();
     fail::cfg(
         "midge::cloud::inject_fail_after_wal_flush_before_rotate",
         "return",
@@ -6236,7 +6227,8 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         other => panic!("unexpected seal failure: {other:?}"),
     }
     assert_eq!(
-        el.state.wal.current_segment_id, failed_segment,
+        el.state.wal.open_segment(),
+        failed_segment,
         "failed seal must not advance the current WAL segment"
     );
     assert!(
@@ -6265,7 +6257,7 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         "retry should preserve the original max sequence for the segment"
     );
     assert_eq!(
-        el.state.wal.current_segment_id,
+        el.state.wal.open_segment(),
         failed_segment + 1,
         "successful retry should advance to the next WAL segment"
     );
@@ -6351,7 +6343,7 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
             ttl_seconds: None,
         },
     )?;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     fail::cfg(
         "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
         "return",
@@ -6418,7 +6410,7 @@ fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let max_sequence = append_cloud_async_put(&mut event_loop)?;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     let request_ids = [90_301_u64, 90_302];
     let responses = request_ids.map(|request_id| {
         let response = event_loop.router.register(request_id, "CloudDurability");
@@ -6444,7 +6436,7 @@ fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
         crate::common::MidgeError::Internal(message)
             if message.contains("durability generation drift")
     ));
-    assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
     assert_eq!(event_loop.state.wal.pending_writes, 0);
     assert_eq!(event_loop.wal_actor.bytes_since_sync(), 0);
     assert_eq!(
@@ -6530,7 +6522,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         let max_sequence = append_cloud_async_put(&mut event_loop)?;
-        let segment_id = event_loop.state.wal.current_segment_id;
+        let segment_id = event_loop.state.wal.open_segment();
         let pending_before = event_loop.state.wal.pending_writes;
         let sealed_path = event_loop
             .state
@@ -6584,7 +6576,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
         );
         match expected {
             Outcome::Reversible => {
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id);
                 assert_eq!(event_loop.durability.current_key(), segment_id);
                 assert_eq!(event_loop.state.wal.pending_writes, pending_before);
                 assert!(sealed_path.exists(), "{boundary:?}: the open segment stays");
@@ -6594,10 +6586,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     "{boundary:?}: only an unrecorded empty next segment may remain"
                 );
                 assert_eq!(
-                    event_loop
-                        .wal_actor
-                        .ledger()
-                        .map(crate::wal::ledger::WalLedger::open_segment),
+                    Some(event_loop.state.wal.history.ledger().open_segment()),
                     Some(segment_id),
                     "{boundary:?}"
                 );
@@ -6612,7 +6601,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     .seal_current_cloud_segment()
                     .expect("reversible failure must be retryable");
                 assert_eq!(retried, Some((segment_id, max_sequence)));
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
                 assert_eq!(
                     event_loop
                         .durability
@@ -6623,7 +6612,9 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 assert!(response.try_recv().is_err());
             }
             Outcome::FencedBeforeReceipt => {
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+                // The ledger recorded the rotation: its open segment moved,
+                // and only restart recovery may write again.
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
                 assert_eq!(event_loop.durability.current_key(), segment_id);
                 assert!(
                     sealed_path.exists(),
@@ -6658,7 +6649,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 ));
             }
             Outcome::FencedAfterReceipt => {
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
                 assert_eq!(event_loop.durability.current_key(), segment_id + 1);
                 assert_eq!(event_loop.state.wal.pending_writes, 0);
                 assert_eq!(event_loop.state.wal.frontiers.local_durable(), max_sequence);
@@ -6992,14 +6983,14 @@ fn should_not_enqueue_cloud_wal_segment_given_lease_unhealthy_when_sealing(
         },
     )?;
     event_loop.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(false)));
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
 
     // Act
     let result = event_loop.seal_current_cloud_segment();
 
     // Assert
     assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
-    assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id);
     assert_eq!(
         event_loop
             .cloud_coordinator
@@ -7935,7 +7926,7 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
-    let active_segment = el.state.wal.current_segment_id;
+    let active_segment = el.state.wal.open_segment();
     let request_id = 91_102;
     let response_rx = router.register(request_id, "SealWalForCloud");
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
@@ -7961,7 +7952,8 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         })
     ));
     assert_eq!(
-        el.state.wal.current_segment_id, active_segment,
+        el.state.wal.open_segment(),
+        active_segment,
         "deadline refusal before flush must leave the active WAL segment intact"
     );
     assert_eq!(
@@ -8395,7 +8387,7 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    let active_segment = el.state.wal.current_segment_id;
+    let active_segment = el.state.wal.open_segment();
     el.fencing.leader_store = Some(Arc::new(DelayedLeaderStore::new(
         Duration::from_secs(1),
         "writer-1",
@@ -8425,7 +8417,8 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
         }) if response_id == request_id
     ));
     assert_eq!(
-        el.state.wal.current_segment_id, active_segment,
+        el.state.wal.open_segment(),
+        active_segment,
         "timed-out final seal must retain the active WAL for recovery"
     );
     assert!(

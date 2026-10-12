@@ -31,6 +31,16 @@ enum CompactionManifestState {
     Partial,
 }
 
+/// The WAL history a recovery continues.
+pub(crate) enum RecoveryWal {
+    /// Open the local ledger, an in-memory one in memory mode, and replay
+    /// its members.
+    Replay,
+    /// Cloud startup opened the ledger already; its WAL replays after the
+    /// metadata loads.
+    Deferred(crate::runtime::wal_history::WalHistory),
+}
+
 struct RecoveredStartup {
     opened_in_salvage_mode: bool,
     manifest: Manifest,
@@ -79,7 +89,14 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         let db_path = db_path.as_ref();
         let root = Self::test_root(db_path, memory_mode)?;
-        Self::recover(db_path, memory_mode, root, recovery_policy, true, None)
+        Self::recover(
+            db_path,
+            memory_mode,
+            root,
+            recovery_policy,
+            RecoveryWal::Replay,
+            None,
+        )
     }
 
     /// Load metadata from a host directory before cloud WAL replay.
@@ -90,7 +107,18 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         let db_path = db_path.as_ref();
         let root = Self::test_root(db_path, false)?;
-        Self::recover(db_path, false, root, recovery_policy, false, None)
+        let history = crate::runtime::wal_history::WalHistory::open(
+            crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR),
+            1,
+        )?;
+        Self::recover(
+            db_path,
+            false,
+            root,
+            recovery_policy,
+            RecoveryWal::Deferred(history),
+            None,
+        )
     }
 
     #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
@@ -105,9 +133,9 @@ impl RuntimeState {
 
     /// Recover runtime state from the database `root`.
     ///
-    /// With `replay_wal` false, only metadata is loaded: cloud startup replays
-    /// its WAL afterwards, checkpointing incrementally once outstanding
-    /// publication intents are repaired.
+    /// With [`RecoveryWal::Deferred`], only metadata is loaded: cloud startup
+    /// replays its WAL afterwards, checkpointing incrementally once
+    /// outstanding publication intents are repaired.
     ///
     /// # Errors
     ///
@@ -119,7 +147,7 @@ impl RuntimeState {
         memory_mode: bool,
         root: Arc<dyn Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
-        replay_wal: bool,
+        wal: RecoveryWal,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         check_scope(scope, "recovery filesystem")?;
@@ -132,14 +160,14 @@ impl RuntimeState {
             Some(scope) => crate::io::scope_fs(root, scope.clone()),
             None => root,
         };
-        Self::initialize_recovery_core(db_path, memory_mode, recovery_policy, replay_wal, fs, scope)
+        Self::initialize_recovery_core(db_path, memory_mode, recovery_policy, wal, fs, scope)
     }
 
     fn initialize_recovery_core(
         db_path: &std::path::Path,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
-        replay_wal: bool,
+        wal: RecoveryWal,
         fs: Arc<dyn Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
@@ -149,14 +177,7 @@ impl RuntimeState {
             manifest,
             intent_log,
             wal: wal_recovery,
-        } = Self::load_startup_recovery(
-            db_path,
-            persistence,
-            recovery_policy,
-            replay_wal,
-            &fs,
-            scope,
-        )?;
+        } = Self::load_startup_recovery(db_path, persistence, recovery_policy, wal, &fs, scope)?;
         let recovered_memtable_bytes = Self::recovered_memtable_bytes(&wal_recovery);
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
@@ -191,12 +212,10 @@ impl RuntimeState {
             salvaged_local_ssts: std::collections::HashSet::new(),
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal: WalState {
-                current_segment_id: wal_recovery.open_segment,
-                history: wal_recovery.history,
                 frontiers: crate::runtime::frontiers::WalFrontiers::recovered_at(
                     wal_recovery.recovered_sequence,
                 ),
-                ..WalState::default()
+                ..WalState::new(wal_recovery.history)
             },
             compaction: CompactionState::default(),
             cloud: CloudState::default(),
@@ -245,7 +264,7 @@ impl RuntimeState {
         db_path: &std::path::Path,
         persistence: RuntimePersistence,
         recovery_policy: crate::config::RecoveryPolicy,
-        replay_wal: bool,
+        wal: RecoveryWal,
         fs: &Arc<dyn Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<RecoveredStartup> {
@@ -262,8 +281,8 @@ impl RuntimeState {
             scope,
         )?;
         let column_families = Self::bootstrap_column_families(&manifest);
-        let wal_recovery = if replay_wal {
-            Self::recover_wal_state(
+        let wal_recovery = match wal {
+            RecoveryWal::Replay => Self::recover_wal_state(
                 persistence.is_memory(),
                 fs,
                 &wal_dir,
@@ -271,9 +290,10 @@ impl RuntimeState {
                 &manifest,
                 column_families,
                 scope,
-            )?
-        } else {
-            Self::empty_wal_recovery(&manifest, column_families)
+            )?,
+            RecoveryWal::Deferred(history) => {
+                Self::empty_wal_recovery(&manifest, column_families, history)
+            }
         };
         Ok(RecoveredStartup {
             opened_in_salvage_mode,
@@ -306,46 +326,15 @@ impl RuntimeState {
             .fold(0_usize, usize::saturating_add)
     }
 
-    /// Continue WAL history in `history`'s open segment; the event loop
-    /// hands the ledger to the WAL actor.
-    pub(crate) fn adopt_wal_history(&mut self, history: crate::runtime::wal_history::WalHistory) {
-        self.wal.current_segment_id = history.ledger().open_segment();
-        self.wal.history = Some(history);
-    }
-
-    /// What the WAL actor writes through: nothing durable in memory mode,
-    /// otherwise the ledger recovery adopted, handed over once.
-    ///
-    /// # Errors
-    ///
-    /// A file-backed state whose ledger is gone, or was already handed over.
-    pub(crate) fn take_wal_backing(
-        &mut self,
-        memory_mode: bool,
-    ) -> MidgeResult<crate::runtime::actors::wal::WalBacking> {
-        if memory_mode {
-            return Ok(crate::runtime::actors::wal::WalBacking::Memory);
-        }
-        self.wal
-            .history
-            .take()
-            .map(crate::runtime::actors::wal::WalBacking::Files)
-            .ok_or_else(|| {
-                MidgeError::Internal(
-                    "a file-backed WAL started without its segment ledger".to_string(),
-                )
-            })
-    }
-
     fn empty_wal_recovery(
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
+        history: crate::runtime::wal_history::WalHistory,
     ) -> WalRecoveryState {
         WalRecoveryState {
             column_families,
             recovered_sequence: Self::manifest_visible_sequence_floor(manifest),
-            open_segment: 1,
-            history: None,
+            history,
             records_replayed: 0,
             bytes_replayed: 0,
             opened_in_salvage_mode: false,
@@ -529,12 +518,16 @@ impl RuntimeState {
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<WalRecoveryState> {
         let mut wal_recovery = if memory_mode {
-            Self::empty_wal_recovery(manifest, column_families)
+            Self::empty_wal_recovery(
+                manifest,
+                column_families,
+                crate::runtime::wal_history::WalHistory::in_memory(),
+            )
         } else {
             check_scope(scope, "WAL ledger")?;
             let wal = crate::io::subdirectory(Arc::clone(root), "wal");
-            let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1)?;
-            let mut recovered = Self::replay_wal_storage_within(
+            let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1)?;
+            Self::replay_wal_storage_within(
                 replay_dir,
                 root,
                 recovery_policy,
@@ -542,11 +535,8 @@ impl RuntimeState {
                 column_families,
                 scope,
                 wal.as_ref(),
-                &mut history,
-            )?;
-            recovered.open_segment = history.ledger().open_segment();
-            recovered.history = Some(history);
-            recovered
+                history,
+            )?
         };
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
@@ -581,7 +571,7 @@ impl RuntimeState {
         mut column_families: HashMap<u32, ColumnFamilyState>,
         scope: Option<&DeadlineScope>,
         storage: &dyn Fs,
-        history: &mut crate::runtime::wal_history::WalHistory,
+        mut history: crate::runtime::wal_history::WalHistory,
     ) -> MidgeResult<WalRecoveryState> {
         check_scope(scope, "local WAL replay filesystem")?;
         let mut recovery_memtables = HashMap::new();
@@ -680,8 +670,7 @@ impl RuntimeState {
         Ok(WalRecoveryState {
             column_families,
             recovered_sequence,
-            open_segment: 1,
-            history: None,
+            history,
             records_replayed: stats.record_count,
             bytes_replayed: stats.bytes,
             opened_in_salvage_mode,
@@ -689,7 +678,7 @@ impl RuntimeState {
     }
 
     fn handle_local_wal_replay_failure(
-        history: &mut crate::runtime::wal_history::WalHistory,
+        mut history: crate::runtime::wal_history::WalHistory,
         recovery_policy: crate::config::RecoveryPolicy,
         error: MidgeError,
         column_families: HashMap<u32, ColumnFamilyState>,
@@ -717,6 +706,7 @@ impl RuntimeState {
             recovery_policy,
             format!("WAL recovery failed: {error}"),
             column_families,
+            history,
         )
     }
 
@@ -744,6 +734,7 @@ impl RuntimeState {
         recovery_policy: crate::config::RecoveryPolicy,
         message: String,
         column_families: HashMap<u32, ColumnFamilyState>,
+        history: crate::runtime::wal_history::WalHistory,
     ) -> MidgeResult<WalRecoveryState> {
         if recovery_policy == crate::config::RecoveryPolicy::Strict {
             return Err(MidgeError::RecoveryFailed(message));
@@ -752,8 +743,7 @@ impl RuntimeState {
         Ok(WalRecoveryState {
             column_families,
             recovered_sequence: 0,
-            open_segment: 1,
-            history: None,
+            history,
             records_replayed: 0,
             bytes_replayed: 0,
             opened_in_salvage_mode: true,
@@ -1487,11 +1477,7 @@ mod salvage_quarantine_tests {
 
     /// The ledger the recovery left, as `(sealed members, open segment)`.
     fn history_of(recovered: &WalRecoveryState) -> (Vec<u64>, u64) {
-        let ledger = recovered
-            .history
-            .as_ref()
-            .expect("a file-backed recovery opens the WAL ledger")
-            .ledger();
+        let ledger = recovered.history.ledger();
         (ledger.sealed().collect(), ledger.open_segment())
     }
 

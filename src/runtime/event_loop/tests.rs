@@ -192,16 +192,15 @@ pub(in crate::runtime::event_loop) fn record_wal_history(
     sealed: &[u64],
     open: u64,
 ) {
-    drop(state.wal.history.take());
+    // Release the ledger recovery opened before the fixture replaces it.
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
     let wal: Arc<dyn crate::io::Fs> = Arc::new(
         crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).expect("open the WAL directory"),
     );
     crate::runtime::wal_history::fixture::replace(&wal, sealed, open)
         .expect("record the WAL history");
-    state.wal.history = Some(
-        crate::runtime::wal_history::WalHistory::open(wal, open).expect("open the WAL ledger"),
-    );
-    state.wal.current_segment_id = open;
+    state.wal.history =
+        crate::runtime::wal_history::WalHistory::open(wal, open).expect("open the WAL ledger");
 }
 
 // Helper to create a minimal runtime state for testing

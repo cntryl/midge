@@ -60,7 +60,7 @@ fn hydrate_metadata(
 fn initialize_startup_state(
     opts: &OpenOptions,
     path: &StartupStoragePath,
-    replay_wal: bool,
+    wal: crate::runtime::state::RecoveryWal,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<RuntimeState> {
     check_startup_scope(scope, "local recovery initialization")?;
@@ -69,7 +69,7 @@ fn initialize_startup_state(
         path.memory_mode,
         Arc::clone(&path.root),
         opts.recovery_policy(),
-        replay_wal,
+        wal,
         scope,
     )
 }
@@ -897,8 +897,12 @@ impl RuntimeStorageMaterialization {
             scope,
         )?;
         let recovery_plan = streaming.plan;
-        let mut state = initialize_startup_state(opts, storage_path, false, scope)?;
-        state.adopt_wal_history(history);
+        let mut state = initialize_startup_state(
+            opts,
+            storage_path,
+            crate::runtime::state::RecoveryWal::Deferred(history),
+            scope,
+        )?;
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -1027,8 +1031,12 @@ impl RuntimeStorageMaterialization {
             scope,
         )?;
         let recovery_plan = streaming.plan;
-        let mut state = initialize_startup_state(opts, storage_path, false, scope)?;
-        state.adopt_wal_history(history);
+        let mut state = initialize_startup_state(
+            opts,
+            storage_path,
+            crate::runtime::state::RecoveryWal::Deferred(history),
+            scope,
+        )?;
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -1103,7 +1111,12 @@ impl RuntimeStorageMaterialization {
         };
 
         Ok(Self {
-            state: initialize_startup_state(opts, storage_path, true, scope)?,
+            state: initialize_startup_state(
+                opts,
+                storage_path,
+                crate::runtime::state::RecoveryWal::Replay,
+                scope,
+            )?,
             runtime_config,
             sst_inventory: None,
             cloud_storage_for_restore: None,

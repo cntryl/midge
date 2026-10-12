@@ -243,8 +243,7 @@ impl EventLoop {
             flush_worker_mode.is_inline(),
             flush_worker_mode.worker_msg_tx(),
         );
-        let (memory_mode, initial_segment_id) =
-            (state.is_memory_mode(), state.wal.current_segment_id);
+        let (memory_mode, initial_segment_id) = (state.is_memory_mode(), state.wal.open_segment());
         let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
         Self::apply_runtime_state_config(&mut state, &config);
 
@@ -266,7 +265,7 @@ impl EventLoop {
             config.flush_memory_limit,
         )?;
         let mut wal_actor = WalActor::open(
-            state.take_wal_backing(memory_mode)?,
+            &state,
             config.wal_durability_policy,
             config.wal_batch_config,
             config.writer_epoch,
@@ -361,7 +360,7 @@ impl EventLoop {
                 self.state.sequence
             };
             self.wal_transition
-                .initialize_gc_pins(self.state.wal.current_segment_id, boundary);
+                .initialize_gc_pins(self.state.wal.open_segment(), boundary);
         }
         self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)
     }

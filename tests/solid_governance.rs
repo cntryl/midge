@@ -1546,6 +1546,10 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("cloud_segment_file_name", "#842"),
     ("faults_fired", "#842"),
     ("parse_segment_id", "#843"),
+    ("current_segment_id", "#843"),
+    ("WalBacking", "#843"),
+    ("take_wal_backing", "#843"),
+    ("adopt_wal_history", "#843"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

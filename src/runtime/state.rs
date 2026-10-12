@@ -26,6 +26,7 @@ mod snapshots;
 
 pub(crate) use accounting::FlushPublicationAccounting;
 pub(crate) use manifest::FlushManifestPublication;
+pub(crate) use recovery::RecoveryWal;
 
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
@@ -131,8 +132,6 @@ pub(crate) struct SstNameAllocation {
 
 /// WAL state
 pub struct WalState {
-    /// Current WAL segment ID
-    pub current_segment_id: u64,
     /// Pending writes waiting for sync
     pub pending_writes: usize,
     /// Synced, locally durable and cloud durable sequences; they only move
@@ -148,24 +147,29 @@ pub struct WalState {
     /// WAL bytes appended by this process, across segments. In memory only:
     /// it measures how much local WAL a family's memtable pins (#552).
     pub(crate) appended_bytes: u64,
-    /// The segment ledger recovery opened (#842), until the event loop hands
-    /// it to the WAL actor, which owns it from then on. `None` in memory
-    /// mode, where nothing is persisted.
-    pub(crate) history: Option<crate::runtime::wal_history::WalHistory>,
+    /// The segment ledger (#842): which WAL files are history and which
+    /// segment the writer appends to. It is the only open-segment authority
+    /// in every mode (#851); memory mode keeps it in memory.
+    pub(crate) history: crate::runtime::wal_history::WalHistory,
 }
 
-impl Default for WalState {
-    fn default() -> Self {
+impl WalState {
+    /// The WAL state of a recovery that continues `history`.
+    pub(crate) fn new(history: crate::runtime::wal_history::WalHistory) -> Self {
         Self {
-            current_segment_id: 1,
             pending_writes: 0,
             frontiers: crate::runtime::frontiers::WalFrontiers::default(),
             local_segment_proofs: HashMap::new(),
             proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities::default(
             ),
             appended_bytes: 0,
-            history: None,
+            history,
         }
+    }
+
+    /// The segment the WAL writer appends to: the ledger's open segment.
+    pub(crate) fn open_segment(&self) -> crate::wal::ledger::SegmentId {
+        self.history.ledger().open_segment()
     }
 }
 
@@ -458,9 +462,7 @@ struct RecoveryLoadState {
 struct WalRecoveryState {
     column_families: HashMap<u32, ColumnFamilyState>,
     recovered_sequence: u64,
-    /// The segment the writer appends to next.
-    open_segment: u64,
-    history: Option<crate::runtime::wal_history::WalHistory>,
+    history: crate::runtime::wal_history::WalHistory,
     records_replayed: u64,
     bytes_replayed: u64,
     opened_in_salvage_mode: bool,
@@ -662,7 +664,7 @@ impl RuntimeState {
             memtable_flush_threshold: self.limits.memtable_flush_threshold,
             max_memtable_wal_segment_gap: self.max_memtable_wal_segment_gap(),
             write_stalled: self.has_any_hard_write_stall(),
-            wal_current_segment_id: self.wal.current_segment_id,
+            wal_current_segment_id: self.wal.open_segment(),
             wal_pending_writes: self.wal.pending_writes,
             wal_last_synced_seq: self.wal.frontiers.last_synced(),
             wal_local_durable_seq: self.wal.frontiers.local_durable(),

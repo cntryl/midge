@@ -343,30 +343,26 @@ impl EventLoop {
             .cloud_wal
             .local_retirement
             .queue(segment_id, release);
-        if let Some(to) = self.wal_actor.ledger().map(|ledger| {
-            (
-                self.cloud_coordinator
-                    .cloud_wal
-                    .local_retirement
-                    .retire_point(ledger),
-                ledger.log_start(),
-            )
-        }) {
-            let (to, log_start) = to;
-            if to > log_start {
-                crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
-                if let Some(retired) = self.retire_wal_below_or_retain(to) {
-                    if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
-                        storage.release_local_wal_bytes(retired.removed_bytes());
-                    }
+        let ledger = self.state.wal.history.ledger();
+        let to = self
+            .cloud_coordinator
+            .cloud_wal
+            .local_retirement
+            .retire_point(ledger);
+        if to > ledger.log_start() {
+            crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
+            if let Some(retired) = self.retire_wal_below_or_retain(to) {
+                if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
+                    storage.release_local_wal_bytes(retired.removed_bytes());
                 }
             }
         }
         // Memory mode keeps no local copies, so everything queued is retired.
-        let log_start = self
-            .wal_actor
-            .ledger()
-            .map_or(u64::MAX, crate::wal::ledger::WalLedger::log_start);
+        let log_start = if self.state.wal.history.segment_files().is_some() {
+            self.state.wal.history.ledger().log_start()
+        } else {
+            u64::MAX
+        };
         let released = self
             .cloud_coordinator
             .cloud_wal

@@ -9,13 +9,12 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         crate::storage::simulated::host_simulated_cloud(directory.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-    state.wal.current_segment_id = 7;
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 7)?;
     let secondary = state.create_cf("spilled-floor".into())?;
-    let mut actor = WalActor::new(
-        directory.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -48,7 +47,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     let wal_path = directory
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(1));
+        .join(crate::wal::segment_file_name(7));
     assert_eq!(
         std::fs::metadata(&wal_path)?.len(),
         0,
@@ -69,7 +68,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     )?;
     let observed =
         crate::wal::cloud_segment::inspect_bytes("active", &std::fs::read(wal_path)?).unwrap();
-    state.wal.current_segment_id = 9;
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 9)?;
     let sequence = state.sequence;
     let mut frozen = Vec::new();
     for cf_id in [0, secondary] {
@@ -104,11 +103,10 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        directory.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -138,8 +136,9 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
         false,
         crate::config::RecoveryPolicy::Strict,
     )?;
-    assert_eq!(recovered.wal.current_segment_id, 8);
-    recovered.wal.current_segment_id = 50;
+    assert_eq!(recovered.wal.open_segment(), 8);
+    recovered.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(&mut recovered.wal.history, 50)?;
     let table = recovered.get_cf(0).unwrap().memtable.clone();
     let generation = recovered
         .track_new_immutable_flush(0, table, recovered.sequence)

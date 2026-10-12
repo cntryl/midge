@@ -537,7 +537,12 @@ fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 4 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 50;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 50,
+    )
+    .expect("rotate the WAL ledger");
 
     grow_active_memtable(&mut state, 0, 5 * 1024);
 
@@ -571,7 +576,12 @@ fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 1024 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 1;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 1,
+    )
+    .expect("rotate the WAL ledger");
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -600,7 +610,12 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 1024 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 10;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 10,
+    )
+    .expect("rotate the WAL ledger");
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -625,7 +640,12 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
 fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 20,
+    )
+    .expect("rotate the WAL ledger");
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -656,7 +676,7 @@ fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Assert
     assert_eq!(
         state.max_memtable_wal_segment_gap(),
-        state.wal.current_segment_id.saturating_sub(1)
+        state.wal.open_segment().saturating_sub(1)
     );
 }
 
@@ -881,10 +901,10 @@ fn should_initialize_wal_state_with_defaults() {
     // (no setup)
 
     // Act
-    let wal = WalState::default();
+    let wal = WalState::new(crate::runtime::wal_history::WalHistory::in_memory());
 
     // Assert
-    assert_eq!(wal.current_segment_id, 1);
+    assert_eq!(wal.open_segment(), 1);
     assert_eq!(wal.frontiers.last_synced(), 0);
     assert_eq!(wal.pending_writes, 0);
     assert_eq!(wal.frontiers.local_durable(), 0);
@@ -2092,7 +2112,9 @@ fn should_handle_multiple_column_families() {
 fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
+        .expect("rotate the WAL ledger");
     let secondary = state.create_cf("floor-secondary".into()).unwrap();
     for (cf_id, segment) in [(0, 5), (secondary, 7)] {
         let cf = state.get_cf_mut(cf_id).unwrap();
@@ -2133,7 +2155,9 @@ fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
 fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
+        .expect("rotate the WAL ledger");
     state
         .get_cf_mut(0)
         .unwrap()
@@ -2151,7 +2175,9 @@ fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
 fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
+        .expect("rotate the WAL ledger");
     state.next_flush_id = u64::MAX;
     let cf = state.get_cf_mut(0).unwrap();
     cf.active_memtable_started_in_segment = 3;
@@ -2432,7 +2458,12 @@ fn should_not_select_wal_bytes_flush_candidate_when_only_segments_advance() {
     // far behind in segments but not in bytes must not be flushed. This is
     // what keeps local eventual flushes from feeding each other (#552).
     let mut state = state_with_unflushed_default_family(100);
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 100;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 100,
+    )
+    .expect("rotate the WAL ledger");
 
     // Act
     let by_bytes = state.next_flush_candidate(EventualFlush::WalBytes);

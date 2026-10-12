@@ -4,7 +4,7 @@
 //
 // | step                                         | reversible? | failure outcome        |
 // |----------------------------------------------|-------------|------------------------|
-// | ticket / ledger agreement                    | no          | `Fenced`, sealed none  |
+// | ticket agreement with the ledger             | no          | `Fenced`, sealed none  |
 // | heal the ledger, create the next segment     | yes         | `Open`, retryable      |
 // | open segment missing, next one holds data    | no          | `Fenced`, sealed none  |
 // | drop the writer of the open segment          | no          | `Fenced`, sealed none  |
@@ -56,10 +56,15 @@ impl WalActor {
         ticket: &WalSealTicket,
     ) -> MidgeResult<WalRotationReceipt> {
         self.ensure_transition_authority(state)?;
-        let old_segment = state.wal.current_segment_id;
-        let next_segment = old_segment.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
-        })?;
+        // A fenced WAL refuses with its fence before comparing the ticket:
+        // the ledger may already have recorded the rotation that fenced it.
+        if self.is_fenced() {
+            return Err(self
+                .io_error()
+                .unwrap_or_else(|| MidgeError::RecoveryFailed("the WAL is fenced".to_string())));
+        }
+        let old_segment = state.wal.open_segment();
+        let next_segment = state.wal.history.ledger().next_segment_id();
         let max_sequence = self.segment_max_sequence;
         if ticket.segment_id() != old_segment
             || ticket.next_segment_id() != next_segment
@@ -81,7 +86,10 @@ impl WalActor {
                     MidgeError::Internal("memory WAL transition is unavailable".to_string())
                 }));
             }
-            state.wal.current_segment_id = next_segment;
+            // Memory mode keeps the ledger without files: the rotation is
+            // only the ledger's.
+            let prepared = state.wal.history.prepare_rotation()?;
+            state.wal.history.record_rotation(prepared)?;
             self.segment_max_sequence = 0;
             return Ok(WalRotationReceipt {
                 sealed_segment: old_segment,
@@ -90,11 +98,7 @@ impl WalActor {
             });
         };
         self.begin_io_transition(WalTransitionOperation::Rotate)?;
-        if let Err(error) = self.ensure_ledger_agrees(old_segment, next_segment) {
-            self.fence_transition(state, error.to_string());
-            return Err(error);
-        }
-        let prepared = match self.prepare_next_segment() {
+        let prepared = match self.prepare_next_segment(state) {
             Ok(prepared) => prepared,
             // History is damaged: the open segment's records are gone, or
             // the next segment holds data no ledger edit accounts for.
@@ -123,7 +127,6 @@ impl WalActor {
             );
             return Err(error);
         }
-        state.wal.current_segment_id = next_segment;
         self.segment_max_sequence = 0;
 
         tracing::info!(old_segment, new_segment = next_segment, "WAL rotate");
@@ -134,35 +137,14 @@ impl WalActor {
         })
     }
 
-    fn ensure_ledger_agrees(&self, old_segment: SegmentId, next: SegmentId) -> MidgeResult<()> {
-        let history = self.history.as_ref().ok_or_else(|| {
-            MidgeError::Internal("a file-backed WAL rotated without its segment ledger".to_string())
-        })?;
-        let ledger = history.ledger();
-        if ledger.open_segment() != old_segment || ledger.next_segment_id() != next {
-            return Err(MidgeError::Internal(format!(
-                "the WAL ledger (open segment {}, next {}) disagrees with the actor (segment {old_segment}, next {next})",
-                ledger.open_segment(),
-                ledger.next_segment_id()
-            )));
-        }
-        Ok(())
-    }
-
     /// The reversible step: make the ledger writable again after an earlier
     /// failed write, then create the next segment, empty and durable. An
     /// empty file an earlier attempt left is adopted.
-    fn prepare_next_segment(&mut self) -> MidgeResult<PreparedRotation> {
+    fn prepare_next_segment(&self, state: &mut RuntimeState) -> MidgeResult<PreparedRotation> {
         WalTransitionBoundary::BeforeSegmentCreate.check()?;
         Self::before_segment_create_boundary()?;
         self.ensure_lease_validity()?;
-        let prepared = self
-            .history
-            .as_mut()
-            .ok_or_else(|| {
-                MidgeError::Internal("a file-backed WAL rotated without its segment ledger".into())
-            })?
-            .prepare_rotation()?;
+        let prepared = state.wal.history.prepare_rotation()?;
         WalTransitionBoundary::AfterSegmentCreate.check()?;
         Ok(prepared)
     }
@@ -177,12 +159,7 @@ impl WalActor {
     ) -> MidgeResult<()> {
         drop(self.take_transition_writer());
         self.ensure_transition_authority(state)?;
-        let recorded = match self.history.as_mut() {
-            Some(history) => history.record_rotation(prepared),
-            None => Err(MidgeError::Internal(
-                "a file-backed WAL rotated without its segment ledger".to_string(),
-            )),
-        };
+        let recorded = state.wal.history.record_rotation(prepared);
         self.mark_transition_sealed(old_segment);
         if let Err(error) = recorded {
             self.fence_transition(

@@ -421,7 +421,7 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         Duration::ZERO,
         ReadDelivery::IoBeforeQuarantine,
     );
-    let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1).unwrap();
+    let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1).unwrap();
 
     // Act: exercise the actual replay and its production salvage boundary.
     let result = RuntimeState::replay_wal_storage_within(
@@ -432,7 +432,7 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         HashMap::new(),
         None,
         fs.as_ref(),
-        &mut history,
+        history,
     );
 
     // Assert: a secondary timeout retains its type and all source bytes.

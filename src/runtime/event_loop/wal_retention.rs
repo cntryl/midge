@@ -49,10 +49,7 @@ impl EventLoop {
         if !self.seal_active_wal_for_prune() {
             return;
         }
-        let Some(ledger) = self.wal_actor.ledger() else {
-            return;
-        };
-        let sealed: Vec<u64> = ledger.sealed().collect();
+        let sealed: Vec<u64> = self.state.wal.history.ledger().sealed().collect();
         // Memtables flush in FIFO order per column family, so a segment below
         // the oldest unflushed memtable's first segment holds only data that
         // is already in published SSTs, including deletes, which the
@@ -189,7 +186,7 @@ impl EventLoop {
         &mut self,
         to: u64,
     ) -> Option<crate::runtime::wal_history::RetiredWal> {
-        match self.wal_actor.retire_wal_below(to) {
+        match self.wal_actor.retire_wal_below(&mut self.state, to) {
             Ok(retired) => {
                 if !retired.left.is_empty() {
                     self.state.mark_persistence_anomaly();
@@ -235,7 +232,7 @@ impl EventLoop {
     /// this thread, so none is in flight here. A failed stat seals as before.
     /// Returns false when pruning must stop.
     pub(super) fn seal_active_wal_for_prune(&mut self) -> bool {
-        let active = crate::wal::segment_key(self.state.wal.current_segment_id);
+        let active = crate::wal::segment_key(self.state.wal.open_segment());
         if self
             .state
             .fs

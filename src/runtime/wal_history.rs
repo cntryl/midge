@@ -7,6 +7,9 @@
 //! recording it, or one retired below `log_start` whose unlink failed or
 //! was undone. Nothing reads them; [`WalHistory::sweep_orphans`] removes them
 //! and is the only place that lists `wal/`.
+//!
+//! Memory mode keeps the same ledger in memory (#851), with no segment files
+//! behind it, so the ledger is the one open-segment authority in every mode.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
@@ -15,18 +18,68 @@ use crate::wal::ledger_store::{LedgerStore, LEDGER_FILE};
 use crate::wal::recovery::ReplaySegments;
 use std::sync::Arc;
 
+/// Where a [`WalHistory`] persists its ledger edits.
+pub(crate) trait LedgerJournal: Send {
+    /// The ledger as persisted.
+    fn ledger(&self) -> &WalLedger;
+
+    /// Make `edit` durable, then apply it; an edit that does not apply is
+    /// refused unchanged.
+    fn append(&mut self, edit: &LedgerEdit) -> MidgeResult<()>;
+
+    /// Make the journal describe the ledger again after a failed write.
+    fn heal(&mut self) -> MidgeResult<()>;
+}
+
+impl LedgerJournal for LedgerStore {
+    fn ledger(&self) -> &WalLedger {
+        LedgerStore::ledger(self)
+    }
+
+    fn append(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
+        LedgerStore::append(self, edit)
+    }
+
+    fn heal(&mut self) -> MidgeResult<()> {
+        LedgerStore::heal(self)
+    }
+}
+
+/// The ledger of a memory-mode WAL, which persists nothing.
+struct MemoryJournal {
+    ledger: WalLedger,
+}
+
+impl LedgerJournal for MemoryJournal {
+    fn ledger(&self) -> &WalLedger {
+        &self.ledger
+    }
+
+    fn append(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
+        let mut next = self.ledger.clone();
+        next.apply(edit)?;
+        self.ledger = next;
+        Ok(())
+    }
+
+    fn heal(&mut self) -> MidgeResult<()> {
+        Ok(())
+    }
+}
+
 /// The ledger this process writes through, with the WAL directory it
-/// governs.
+/// governs; a memory-mode history has no directory.
 pub(crate) struct WalHistory {
-    wal: Arc<dyn Fs>,
-    store: LedgerStore,
+    segments: Option<Arc<dyn Fs>>,
+    journal: Box<dyn LedgerJournal>,
 }
 
 impl std::fmt::Debug for WalHistory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WalHistory")
-            .field("ledger", self.store.ledger())
+            .field("ledger", self.journal.ledger())
+            .field("files", &self.segments.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -57,11 +110,25 @@ impl WalHistory {
     /// segment is `first_open`.
     pub(crate) fn open(wal: Arc<dyn Fs>, first_open: SegmentId) -> MidgeResult<Self> {
         let history = match LedgerStore::open(Arc::clone(&wal))? {
-            Some(store) => Self { wal, store },
+            Some(store) => Self {
+                segments: Some(wal),
+                journal: Box::new(store),
+            },
             None => Self::genesis(wal, first_open)?,
         };
         history.sweep_orphans()?;
         Ok(history)
+    }
+
+    /// The history of a memory-mode WAL: a ledger with no files, whose first
+    /// open segment is 1.
+    pub(crate) fn in_memory() -> Self {
+        let ledger = WalLedger::genesis(uuid::Uuid::new_v4().to_string(), 1)
+            .expect("a new holder identity and segment 1 make a valid ledger");
+        Self {
+            segments: None,
+            journal: Box::new(MemoryJournal { ledger }),
+        }
     }
 
     /// Start the history of a new database: create its first segment, then
@@ -81,16 +148,19 @@ impl WalHistory {
         create_segment(wal.as_ref(), first_open)?;
         let ledger = WalLedger::genesis(uuid::Uuid::new_v4().to_string(), first_open)?;
         let store = LedgerStore::create(Arc::clone(&wal), &ledger)?;
-        Ok(Self { wal, store })
+        Ok(Self {
+            segments: Some(wal),
+            journal: Box::new(store),
+        })
     }
 
     pub(crate) fn ledger(&self) -> &WalLedger {
-        self.store.ledger()
+        self.journal.ledger()
     }
 
-    /// The WAL directory this history governs.
-    pub(crate) fn wal(&self) -> Arc<dyn Fs> {
-        Arc::clone(&self.wal)
+    /// The WAL directory this history governs; `None` in memory mode.
+    pub(crate) fn segment_files(&self) -> Option<Arc<dyn Fs>> {
+        self.segments.clone()
     }
 
     /// Make `edit` durable, then apply it. Every edit pairs with its file
@@ -102,7 +172,7 @@ impl WalHistory {
     /// have made the edit durable; the next edit republishes the ledger
     /// first.
     fn commit(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
-        self.store.append(edit)
+        self.journal.append(edit)
     }
 
     /// The reversible half of a rotation: republish the ledger if an earlier
@@ -116,16 +186,18 @@ impl WalHistory {
     /// `RecoveryFailed` when the open segment's file is gone, `Corruption`
     /// when the next segment already holds data, and the I/O error otherwise.
     pub(crate) fn prepare_rotation(&mut self) -> MidgeResult<PreparedRotation> {
-        self.store.heal()?;
+        self.journal.heal()?;
         let ledger = self.ledger();
         let (seal, open) = (ledger.open_segment(), ledger.next_segment_id());
-        let open_file = FsPath::new(crate::wal::segment_file_name(seal));
-        if !self.wal.exists(&open_file).map_err(FsError::into_midge)? {
-            return Err(MidgeError::RecoveryFailed(format!(
-                "open WAL segment {seal} disappeared; the records appended to it are lost"
-            )));
+        if let Some(wal) = &self.segments {
+            let open_file = FsPath::new(crate::wal::segment_file_name(seal));
+            if !wal.exists(&open_file).map_err(FsError::into_midge)? {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "open WAL segment {seal} disappeared; the records appended to it are lost"
+                )));
+            }
+            create_segment(wal.as_ref(), open)?;
         }
-        create_segment(self.wal.as_ref(), open)?;
         Ok(PreparedRotation { seal, open })
     }
 
@@ -147,13 +219,16 @@ impl WalHistory {
     /// Remove segment files the ledger does not name. Members are never
     /// touched.
     fn sweep_orphans(&self) -> MidgeResult<usize> {
+        let Some(wal) = &self.segments else {
+            return Ok(0);
+        };
         let ledger = self.ledger();
         let mut removed = 0;
-        for (id, name) in segment_files(self.wal.as_ref())? {
+        for (id, name) in segment_files(wal.as_ref())? {
             if ledger.is_member(id) {
                 continue;
             }
-            if id >= ledger.next_segment_id() && !is_empty(self.wal.as_ref(), &name)? {
+            if id >= ledger.next_segment_id() && !is_empty(wal.as_ref(), &name)? {
                 // A non-empty file above every id the ledger handed out was
                 // written by a writer this ledger never knew: keep it for an
                 // operator rather than delete what may be data.
@@ -161,8 +236,7 @@ impl WalHistory {
                     "WAL segment {name} holds data the WAL ledger never recorded"
                 )));
             }
-            self.wal
-                .remove_file(&FsPath::new(&name))
+            wal.remove_file(&FsPath::new(&name))
                 .map_err(FsError::into_midge)?;
             removed += 1;
         }
@@ -178,23 +252,24 @@ impl WalHistory {
     /// Returns an error, removing nothing, if the ledger refuses or cannot
     /// record the new log start.
     pub(crate) fn retire_below(&mut self, to: SegmentId) -> MidgeResult<RetiredWal> {
+        let Some(wal) = self.segments.clone() else {
+            self.commit(&LedgerEdit::AdvanceLogStart { to })?;
+            return Ok(RetiredWal::default());
+        };
         let members: Vec<(SegmentId, u64)> = self
             .ledger()
             .members()
             .take_while(|id| *id < to)
             .map(|id| {
                 let name = FsPath::new(crate::wal::segment_file_name(id));
-                let bytes = self.wal.metadata(&name).map_or(0, |metadata| metadata.len);
+                let bytes = wal.metadata(&name).map_or(0, |metadata| metadata.len);
                 (id, bytes)
             })
             .collect();
         self.commit(&LedgerEdit::AdvanceLogStart { to })?;
         let mut retired = RetiredWal::default();
         for (id, bytes) in members {
-            match self
-                .wal
-                .remove_file(&FsPath::new(crate::wal::segment_file_name(id)))
-            {
+            match wal.remove_file(&FsPath::new(crate::wal::segment_file_name(id))) {
                 Ok(()) | Err(FsError::NotFound(_)) => retired.removed.push((id, bytes)),
                 Err(error) => {
                     tracing::warn!(
@@ -237,16 +312,19 @@ impl WalHistory {
         };
         let dropped: Vec<SegmentId> = ledger.members().filter(|id| *id >= from).collect();
         let open = ledger.next_segment_id().max(open_at_least);
-        let aside = self.keep_aside(cut.map(|cut| cut.segment), &dropped)?;
+        let wal = self.segments.clone().ok_or_else(|| {
+            MidgeError::Internal("a memory-mode WAL has nothing to set aside".to_string())
+        })?;
+        let aside = keep_aside(wal.as_ref(), cut.map(|cut| cut.segment), &dropped)?;
         if let Some(cut) = cut {
             crate::io::truncate_durably(
-                self.wal.as_ref(),
+                wal.as_ref(),
                 &FsPath::new(crate::wal::segment_file_name(cut.segment)),
                 cut.valid_bytes,
             )
             .map_err(FsError::into_midge)?;
         }
-        create_segment(self.wal.as_ref(), open)?;
+        create_segment(wal.as_ref(), open)?;
         self.commit(&LedgerEdit::SetAside { from, open })?;
         self.sweep_orphans()?;
         tracing::warn!(
@@ -258,33 +336,32 @@ impl WalHistory {
         );
         Ok(())
     }
+}
 
-    /// Keep what salvage drops in a new directory: a durable copy of `cut`,
-    /// then each of `dropped` moved there. A dropped member whose file is
-    /// already gone has nothing to keep.
-    fn keep_aside(&self, cut: Option<SegmentId>, dropped: &[SegmentId]) -> MidgeResult<FsPath> {
-        let wal = self.wal.as_ref();
-        let aside = unused_aside_directory(wal)?;
-        wal.create_dir_all(&aside).map_err(FsError::into_midge)?;
-        if let Some(id) = cut {
-            let name = crate::wal::segment_file_name(id);
-            crate::io::copy_durably(wal, &FsPath::new(&name), &join(&aside, &name))
-                .map_err(FsError::into_midge)?;
-        }
-        for id in dropped {
-            let name = FsPath::new(crate::wal::segment_file_name(*id));
-            if wal.exists(&name).map_err(FsError::into_midge)? {
-                wal.rename_atomic(&name, &join(&aside, &name.0))
-                    .map_err(FsError::into_midge)?;
-                crate::failpoints::fail_point!("midge::recovery::after_salvage_member_moved");
-            }
-        }
-        wal.sync_dir(&aside, Durability::Durable)
+/// Keep what salvage drops in a new directory of `wal`: a durable copy of
+/// `cut`, then each of `dropped` moved there. A dropped member whose file is
+/// already gone has nothing to keep.
+fn keep_aside(wal: &dyn Fs, cut: Option<SegmentId>, dropped: &[SegmentId]) -> MidgeResult<FsPath> {
+    let aside = unused_aside_directory(wal)?;
+    wal.create_dir_all(&aside).map_err(FsError::into_midge)?;
+    if let Some(id) = cut {
+        let name = crate::wal::segment_file_name(id);
+        crate::io::copy_durably(wal, &FsPath::new(&name), &join(&aside, &name))
             .map_err(FsError::into_midge)?;
-        wal.sync_dir(&FsPath::new(""), Durability::Durable)
-            .map_err(FsError::into_midge)?;
-        Ok(aside)
     }
+    for id in dropped {
+        let name = FsPath::new(crate::wal::segment_file_name(*id));
+        if wal.exists(&name).map_err(FsError::into_midge)? {
+            wal.rename_atomic(&name, &join(&aside, &name.0))
+                .map_err(FsError::into_midge)?;
+            crate::failpoints::fail_point!("midge::recovery::after_salvage_member_moved");
+        }
+    }
+    wal.sync_dir(&aside, Durability::Durable)
+        .map_err(FsError::into_midge)?;
+    wal.sync_dir(&FsPath::new(""), Durability::Durable)
+        .map_err(FsError::into_midge)?;
+    Ok(aside)
 }
 
 /// What one retirement did. Every segment in it is out of history.

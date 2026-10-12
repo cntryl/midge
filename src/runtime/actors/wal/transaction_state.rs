@@ -475,7 +475,7 @@ impl WalActor {
         value: Option<Bytes>,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        let current_segment_id = state.wal.current_segment_id;
+        let open_segment = state.wal.open_segment();
         let appended_bytes = state.wal.appended_bytes;
         let cf_state = state.column_families.get_mut(&cf_id).ok_or_else(|| {
             MidgeError::Internal(format!(
@@ -496,7 +496,7 @@ impl WalActor {
         }
         let new = cf_state.memtable.size_bytes();
         if prev == 0 && new > 0 {
-            cf_state.active_memtable_started_in_segment = current_segment_id;
+            cf_state.active_memtable_started_in_segment = open_segment;
             cf_state.active_memtable_started_at_wal_bytes = appended_bytes;
         }
         state.recompute_total_memtable_bytes();
@@ -511,7 +511,7 @@ impl WalActor {
         start_key: &[u8],
         end_key: &[u8],
     ) -> MidgeResult<()> {
-        let current_segment_id = state.wal.current_segment_id;
+        let open_segment = state.wal.open_segment();
         let appended_bytes = state.wal.appended_bytes;
         let cf_state = state.column_families.get_mut(&cf_id).ok_or_else(|| {
             MidgeError::Internal(format!(
@@ -525,7 +525,7 @@ impl WalActor {
             .delete_range_with_seq(start_key, end_key, sequence)?;
         let new = memtable.size_bytes();
         if prev == 0 && new > 0 {
-            cf_state.active_memtable_started_in_segment = current_segment_id;
+            cf_state.active_memtable_started_in_segment = open_segment;
             cf_state.active_memtable_started_at_wal_bytes = appended_bytes;
         }
         state.recompute_total_memtable_bytes();
