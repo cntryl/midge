@@ -157,6 +157,29 @@ impl WalHistory {
         anchor: ChainLink,
         open: SegmentId,
     ) -> MidgeResult<Self> {
+        Self::genesis_as(wal, epoch, anchor, open, HolderId::new())
+    }
+
+    /// [`Self::genesis`] for a fixed `holder`, so fixtures can build
+    /// segments that belong to the ledger.
+    #[cfg(test)]
+    pub(crate) fn genesis_held_by(
+        wal: Arc<dyn Fs>,
+        epoch: u64,
+        anchor: ChainLink,
+        open: SegmentId,
+        holder: HolderId,
+    ) -> MidgeResult<Self> {
+        Self::genesis_as(wal, epoch, anchor, open, holder)
+    }
+
+    fn genesis_as(
+        wal: Arc<dyn Fs>,
+        epoch: u64,
+        anchor: ChainLink,
+        open: SegmentId,
+        holder: HolderId,
+    ) -> MidgeResult<Self> {
         wal.create_dir_all(&FsPath::new(""))
             .map_err(FsError::into_midge)?;
         // Files holding no record are what an interrupted genesis or
@@ -167,7 +190,6 @@ impl WalHistory {
                 return Err(unrecorded_history(&name));
             }
         }
-        let holder = HolderId::new();
         let open = OpenFacts {
             id: open,
             epoch,

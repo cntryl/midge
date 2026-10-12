@@ -13,8 +13,9 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::runtime::wal_history::WalHistory;
+use crate::wal::format::segment::FIXTURE_HOLDER;
 use crate::wal::format::{ChainLink, Footer, SealedFacts, SegmentHeader, HEADER_LEN};
-use crate::wal::ledger::SegmentId;
+use crate::wal::ledger::{HolderId, SegmentId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -120,10 +121,15 @@ pub(crate) fn record(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -
             .get(&id)
             .and_then(|bytes| SegmentHeader::decode(bytes).ok())
     };
-    let (epoch, anchor) = adopted(ids[0]).map_or((0, ChainLink::GENESIS), |header| {
-        (header.epoch, header.prev)
-    });
-    let mut history = WalHistory::genesis(Arc::clone(wal), epoch, anchor, ids[0])?;
+    let (epoch, anchor, holder) = adopted(ids[0])
+        .map_or((0, ChainLink::GENESIS, FIXTURE_HOLDER), |header| {
+            (header.epoch, header.prev, header.holder)
+        });
+    // The ledger holds the segments the fixture adopts.
+    let holder = HolderId::from_bytes(holder).ok_or_else(|| {
+        MidgeError::InvalidArgument("a fixture segment names the nil holder".into())
+    })?;
+    let mut history = WalHistory::genesis_held_by(Arc::clone(wal), epoch, anchor, ids[0], holder)?;
     for (index, id) in ids.iter().enumerate() {
         if let Some(bytes) = stashed.get(id) {
             if adopted(*id).is_some() {

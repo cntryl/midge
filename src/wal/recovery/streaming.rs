@@ -748,19 +748,26 @@ fn admit_segment(
     let header = *scan.header();
     chain.admit(&header, path.id)?;
     let expected = match &path.expect {
-        Expectation::Member(member) => {
+        Expectation::Member { member, holder } => {
             let actual = crate::wal::ledger::OpenFacts {
                 id: header.id,
                 epoch: header.epoch,
                 first_seq: header.first_seq,
                 prev: header.prev,
             };
-            (actual == member.open).then_some(()).ok_or_else(|| {
-                format!(
+            if header.holder != *holder {
+                Err(format!(
+                    "its header names holder {:02x?}, not this ledger's {holder:02x?}",
+                    header.holder
+                ))
+            } else if actual != member.open {
+                Err(format!(
                     "its header {actual:?} is not the ledger's {:?}",
                     member.open
-                )
-            })
+                ))
+            } else {
+                Ok(())
+            }
         }
         Expectation::Epoch(epoch) => (header.epoch == *epoch).then_some(()).ok_or_else(|| {
             format!(
@@ -781,7 +788,7 @@ fn admit_segment(
 
 /// A sealed member's footer must seal what the ledger recorded.
 fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
-    let Expectation::Member(member) = &path.expect else {
+    let Expectation::Member { member, .. } = &path.expect else {
         return Ok(());
     };
     let Some(expected) = &member.sealed else {

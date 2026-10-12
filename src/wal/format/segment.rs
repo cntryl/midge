@@ -579,6 +579,11 @@ pub fn footer_link(bytes: &[u8]) -> MidgeResult<Option<ChainLink>> {
     }
 }
 
+/// The holder fixtures write into segment headers and record in the ledgers
+/// they create, so their segments belong to their ledgers.
+#[cfg(any(test, feature = "internal-testing"))]
+pub const FIXTURE_HOLDER: [u8; 16] = *b"midge-fixture-01";
+
 /// Builds segment bytes for tests and fixtures: a header, frames, and a
 /// footer whose facts come from whatever frames decode, so a deliberately
 /// corrupt body still seals.
@@ -599,10 +604,19 @@ impl SegmentBuilder {
             header: SegmentHeader {
                 id,
                 epoch,
-                holder: [0; 16],
+                holder: FIXTURE_HOLDER,
                 first_seq: prev.last_seq.saturating_add(1),
                 prev,
             },
+            body: Vec::new(),
+        }
+    }
+
+    /// A segment with exactly `header`.
+    #[must_use]
+    pub fn from_header(header: SegmentHeader) -> Self {
+        Self {
+            header,
             body: Vec::new(),
         }
     }

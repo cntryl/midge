@@ -28,12 +28,30 @@ enum ReplayFileKind {
 /// What replay checks a file's header and footer against, beyond the chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Expectation {
-    /// A ledger member: its header facts, and its footer facts once sealed.
-    Member(crate::wal::ledger::Member),
+    /// A ledger member: its header facts and the ledger's holder, and its
+    /// footer facts once sealed.
+    Member {
+        member: crate::wal::ledger::Member,
+        holder: [u8; 16],
+    },
     /// A published object: the writer epoch its catalog entry names.
     Epoch(u64),
     /// Only the chain.
     Chain,
+}
+
+impl Expectation {
+    /// What `ledger` expects of its `member`, whose header carries the
+    /// ledger's holder.
+    pub(crate) fn member(
+        ledger: &crate::wal::ledger::WalLedger,
+        member: &crate::wal::ledger::Member,
+    ) -> Self {
+        Self::Member {
+            member: member.clone(),
+            holder: ledger.holder().bytes(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -72,7 +90,7 @@ impl ReplaySegments {
     ) -> Self {
         let mut segments = Self::new(Some(ledger.anchor()));
         for member in ledger.member_facts() {
-            let expect = Expectation::Member(member.clone());
+            let expect = Expectation::member(ledger, member);
             if member.sealed.is_some() {
                 segments.push_sealed(member.id(), path(member.id()), expect);
             } else {

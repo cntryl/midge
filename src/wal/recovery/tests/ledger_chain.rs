@@ -150,8 +150,7 @@ fn should_fail_strict_replay_when_sealed_file_differs_from_ledger_facts() {
     // whose footer matches its own different record.
     let (wal, history) = ledgered_wal();
     let header = SegmentHeader::decode(&read_segment(wal.as_ref(), 2)).expect("segment header");
-    let (substitute, _) = SegmentBuilder::new(2, header.epoch, header.prev)
-        .first_seq(header.first_seq)
+    let (substitute, _) = SegmentBuilder::from_header(header)
         .record(&WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"substitute"),
@@ -187,4 +186,29 @@ fn should_fail_strict_replay_when_sealed_member_ends_without_footer() {
 
     // Assert
     assert_corruption(result, "ends without its footer");
+}
+
+#[test]
+fn should_fail_strict_replay_when_open_member_belongs_to_another_database() {
+    // Arrange: segment 3, the open member, is replaced by another database's
+    // segment whose header matches every fact but the holder, holding a
+    // record.
+    let (wal, history) = ledgered_wal();
+    let mut header = SegmentHeader::decode(&read_segment(wal.as_ref(), 3)).expect("segment header");
+    header.holder = [0x42; 16];
+    let foreign = SegmentBuilder::from_header(header)
+        .record(&WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"foreign"),
+            Some(Bytes::from_static(b"value")),
+            3,
+        ))
+        .open();
+    replace_segment(wal.as_ref(), 3, &foreign);
+
+    // Act
+    let result = replay_members(wal.as_ref(), &history);
+
+    // Assert
+    assert_corruption(result, "holder");
 }

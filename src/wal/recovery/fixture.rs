@@ -57,7 +57,7 @@ pub(crate) fn wrap_chain(storage: &dyn crate::io::Fs, segments: &ReplaySegments,
         let header = SegmentHeader {
             id: file.id,
             epoch,
-            holder: [0; 16],
+            holder: crate::wal::format::segment::FIXTURE_HOLDER,
             first_seq: prev.last_seq.saturating_add(1),
             prev,
         };

@@ -38,6 +38,14 @@ impl HolderId {
         Self(uuid::Uuid::new_v4())
     }
 
+    /// The identity segment headers store as `bytes`; `None` for the nil
+    /// identity.
+    #[cfg(test)]
+    pub(crate) fn from_bytes(bytes: [u8; 16]) -> Option<Self> {
+        let uuid = uuid::Uuid::from_bytes(bytes);
+        (!uuid.is_nil()).then_some(Self(uuid))
+    }
+
     /// The identity as segment headers store it.
     pub(crate) fn bytes(self) -> [u8; 16] {
         *self.0.as_bytes()

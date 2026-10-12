@@ -317,7 +317,7 @@ fn merge_local_sources(
         let expect = ledger
             .expected(segment_id)
             .map_or(Expectation::Chain, |member| {
-                Expectation::Member(member.clone())
+                Expectation::member(ledger, member)
             });
         let Some((path, segment)) = selected else {
             skipped.insert(segment_id);
@@ -350,7 +350,7 @@ fn merge_local_sources(
     let active = if plan_sets_aside(plan.set_aside_from, open) {
         None
     } else {
-        let expect = Expectation::Member(ledger.open_member().clone());
+        let expect = Expectation::member(ledger, ledger.open_member());
         active_local_source(local, open, expect, policy, limits, plan)?
     };
     Ok(LocalSources { active, skipped })
