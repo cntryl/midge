@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Core manifest structure tracking all SSTs and metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Manifest {
     /// Last persisted sequence number
     pub last_persisted_sequence: u64,
@@ -19,12 +19,6 @@ pub struct Manifest {
     /// Column families
     #[serde(default)]
     pub column_families: Vec<ColumnFamilyMeta>,
-    /// Cloud checkpoint info for WAL coordination
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cloud_checkpoint: Option<CloudCheckpoint>,
-    /// Next WAL sequence number
-    #[serde(default = "default_next_wal_seq")]
-    pub next_wal_seq: u64,
     /// Next SST sequence numbers per CF
     #[serde(default)]
     pub next_sst_seqs: HashMap<u32, u64>,
@@ -35,20 +29,6 @@ pub struct Manifest {
     /// snapshot rename but before journal truncation idempotent.
     #[serde(default)]
     pub edit_checkpoint_id: u64,
-}
-
-impl Default for Manifest {
-    fn default() -> Self {
-        Self {
-            last_persisted_sequence: 0,
-            files: Vec::new(),
-            column_families: Vec::new(),
-            cloud_checkpoint: None,
-            next_wal_seq: 1,
-            next_sst_seqs: HashMap::new(),
-            edit_checkpoint_id: 0,
-        }
-    }
 }
 
 impl Manifest {
@@ -71,10 +51,6 @@ impl Manifest {
     }
 }
 
-fn default_next_wal_seq() -> u64 {
-    1
-}
-
 fn millis_since_epoch() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
@@ -83,15 +59,6 @@ fn millis_since_epoch() -> u64 {
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
-}
-
-/// Cloud checkpoint for WAL coordination
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloudCheckpoint {
-    /// Highest WAL sequence fully materialized to cloud
-    pub checkpoint_sequence: u64,
-    /// SST files covering the checkpoint
-    pub covering_ssts: Vec<String>,
 }
 
 /// Column family metadata
@@ -135,7 +102,7 @@ pub struct FileMeta {
     pub cf_id: u32,
     #[serde(default)]
     pub sst_seq: u64,
-    /// Serialized as hex (format version 4); legacy byte arrays still decode.
+    /// Serialized as a hex string.
     #[serde(default, with = "crate::metadata::key_bounds")]
     pub smallest_key: Option<Vec<u8>>,
     #[serde(default, with = "crate::metadata::key_bounds")]
@@ -147,8 +114,8 @@ pub struct FileMeta {
     /// Whether the persisted key bounds include every point key and range
     /// tombstone endpoint in this SST.
     ///
-    /// Older manifests omit this additive field and are therefore treated as
-    /// untrusted until a maintenance pass verifies the SST contents.
+    /// An entry without it decodes as `false`, and reads do not prune by its
+    /// bounds.
     #[serde(default)]
     pub key_bounds_complete: bool,
     #[serde(default)]
@@ -203,12 +170,6 @@ impl FileMeta {
 }
 
 impl Manifest {
-    /// Increment WAL sequence
-    #[cfg(test)]
-    pub fn increment_wal_seq(&mut self) {
-        self.next_wal_seq += 1;
-    }
-
     /// Get all files at a specific level
     #[cfg(test)]
     pub fn files_at_level(&self, level: u32) -> Vec<&FileMeta> {
@@ -443,15 +404,6 @@ impl Manifest {
                     self.next_sst_seqs.insert(*cf_id, *next_seq);
                 }
             }
-            crate::metadata::ManifestEdit::SetCloudCheckpoint(cp) => {
-                let should_advance = self
-                    .cloud_checkpoint
-                    .as_ref()
-                    .is_none_or(|current| cp.checkpoint_sequence >= current.checkpoint_sequence);
-                if should_advance {
-                    self.cloud_checkpoint = Some(cp.clone());
-                }
-            }
             crate::metadata::ManifestEdit::Batch(edits) => {
                 // Apply each edit in order (atomic at journal record boundary)
                 for e in edits {
@@ -482,28 +434,7 @@ mod tests {
         assert_eq!(manifest.last_persisted_sequence, 0);
         assert!(manifest.files.is_empty());
         assert!(manifest.column_families.is_empty());
-        assert!(manifest.cloud_checkpoint.is_none());
-        assert_eq!(manifest.next_wal_seq, 1);
         assert!(manifest.next_sst_seqs.is_empty());
-    }
-
-    // ========================================================================
-    // WAL sequence tests
-    // ========================================================================
-
-    #[test]
-    fn should_increment_wal_seq() {
-        // Arrange
-        let mut manifest = Manifest {
-            next_wal_seq: 5,
-            ..Default::default()
-        };
-
-        // Act
-        manifest.increment_wal_seq();
-
-        // Assert
-        assert_eq!(manifest.next_wal_seq, 6);
     }
 
     // ========================================================================
@@ -536,17 +467,17 @@ mod tests {
     fn should_treat_missing_key_bounds_completeness_as_untrusted() {
         // Arrange
         let json = r#"{
-            "name":"legacy.sst",
+            "name":"untrusted.sst",
             "level":1,
             "size_bytes":10,
             "cf_id":0,
             "sst_seq":1,
-            "smallest_key":[97],
-            "largest_key":[122]
+            "smallest_key":"61",
+            "largest_key":"7a"
         }"#;
 
         // Act
-        let file: FileMeta = serde_json::from_str(json).expect("deserialize legacy metadata");
+        let file: FileMeta = serde_json::from_str(json).expect("deserialize file metadata");
 
         // Assert
         assert!(!file.key_bounds_complete);

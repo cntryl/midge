@@ -1,6 +1,6 @@
 use crate::common::MidgeResult;
 use crate::io::FsError;
-use crate::metadata::manifest::{CloudCheckpoint, FileMeta};
+use crate::metadata::manifest::FileMeta;
 use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -107,17 +107,14 @@ pub enum ManifestEdit {
         cf_id: u32,
         next_seq: u64,
     },
-    SetCloudCheckpoint(CloudCheckpoint),
     /// Batch of edits emitted atomically as a single journal TLV record
     Batch(Vec<ManifestEdit>),
 }
 
-/// Journal payload wrapper used by new writers.
-///
-/// The record framing and edit enum remain unchanged so older journals can be
-/// replayed. The wrapper adds a durable monotonic identity to each record,
-/// allowing checkpoint recovery to ignore edits already represented by the
-/// snapshot even when journal truncation did not complete.
+/// Every journal edit record's payload: the edit with a durable monotonic
+/// identity, so checkpoint recovery can ignore edits the snapshot already
+/// holds even when journal truncation did not complete. Replay refuses a
+/// record without it as corruption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JournalEditEnvelope {
     edit_id: u64,
@@ -142,7 +139,6 @@ impl ManifestEdit {
             ManifestEdit::CreateColumnFamily { .. } => 3,
             ManifestEdit::BumpWalSeq { .. } => 5,
             ManifestEdit::BumpNextSstSeq { .. } => 6,
-            ManifestEdit::SetCloudCheckpoint(_) => 7,
             ManifestEdit::Batch(_) => 8,
             ManifestEdit::DropColumnFamilyAt { .. } => 10,
             ManifestEdit::ReclaimColumnFamily { .. } => 11,
@@ -165,12 +161,6 @@ impl ManifestEdit {
                 ..
             } => {
                 for name in dropped_sst_names {
-                    validate(name)?;
-                }
-                Ok(())
-            }
-            ManifestEdit::SetCloudCheckpoint(checkpoint) => {
-                for name in &checkpoint.covering_ssts {
                     validate(name)?;
                 }
                 Ok(())
@@ -567,7 +557,7 @@ fn repair_partial_journal_tail(
     )
 }
 
-/// Convenience wrapper: append via a `RealFs` created from `db_path` (backwards compatible)
+/// Append `edit` through a `RealFs` rooted at `db_path`.
 #[cfg(test)]
 pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<u64> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
@@ -577,7 +567,7 @@ pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<u64> {
     append_edit_with_fs(&fs, edit)
 }
 
-/// Convenience wrapper: replay journal via a `RealFs` created from `db_path` (backwards compatible)
+/// Replay the journal through a `RealFs` rooted at `db_path`.
 #[cfg(test)]
 pub fn replay_journal(db_path: &Path) -> MidgeResult<Vec<ManifestEdit>> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
@@ -758,7 +748,6 @@ struct JournalReplayState {
     edits: Vec<JournalEdit>,
     last_marker_edit_idx: Option<usize>,
     last_marker_offset: Option<u64>,
-    max_edit_id: u64,
 }
 
 struct JournalRecord {
@@ -952,79 +941,56 @@ fn handle_fsync_marker_record(
 }
 
 fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -> MidgeResult<()> {
-    if let Ok(envelope) = journal_deserialize::<JournalEditEnvelope>(&record.payload) {
-        if !matches!(envelope.edit, ManifestEdit::Batch(_)) {
-            return Err(journal_record_type_mismatch(record, &envelope.edit));
-        }
-        push_journal_edit(
-            state,
-            JournalEdit {
-                edit_id: envelope.edit_id,
-                edit: envelope.edit,
-            },
-        )?;
-        return Ok(());
+    let envelope = decode_edit_envelope(record)?;
+    if !matches!(envelope.edit, ManifestEdit::Batch(_)) {
+        return Err(journal_record_type_mismatch(record, &envelope.edit));
     }
-
-    let batch = journal_deserialize::<Vec<ManifestEdit>>(&record.payload).map_err(|error| {
-        crate::common::MidgeError::Corruption(format!(
-            "manifest journal batch at byte {} is invalid: {error}",
-            record.record_start
-        ))
-    })?;
-    let edit_id = next_replay_edit_id(state);
     push_journal_edit(
         state,
         JournalEdit {
-            edit_id,
-            edit: ManifestEdit::Batch(batch),
+            edit_id: envelope.edit_id,
+            edit: envelope.edit,
         },
-    )?;
-    Ok(())
+    )
 }
 
 fn handle_manifest_edit_record(
     record: &JournalRecord,
     state: &mut JournalReplayState,
 ) -> MidgeResult<()> {
-    let is_legacy_edit = (1..BATCH_RECORD_TYPE).contains(&record.typ);
-    let is_reclamation_edit = matches!(
-        record.typ,
-        DROP_COLUMN_FAMILY_AT_RECORD_TYPE | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
-    );
-    if !is_legacy_edit && !is_reclamation_edit {
+    let is_single_edit_record = (1..BATCH_RECORD_TYPE).contains(&record.typ)
+        || matches!(
+            record.typ,
+            DROP_COLUMN_FAMILY_AT_RECORD_TYPE | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
+        );
+    if !is_single_edit_record {
         return Err(crate::common::MidgeError::Corruption(format!(
             "manifest journal has unknown record type {} at byte {}",
             record.typ, record.record_start
         )));
     }
 
-    if let Ok(envelope) = journal_deserialize::<JournalEditEnvelope>(&record.payload) {
-        if envelope.edit.record_type() != record.typ {
-            return Err(journal_record_type_mismatch(record, &envelope.edit));
-        }
-        push_journal_edit(
-            state,
-            JournalEdit {
-                edit_id: envelope.edit_id,
-                edit: envelope.edit,
-            },
-        )?;
-        return Ok(());
+    let envelope = decode_edit_envelope(record)?;
+    if envelope.edit.record_type() != record.typ {
+        return Err(journal_record_type_mismatch(record, &envelope.edit));
     }
+    push_journal_edit(
+        state,
+        JournalEdit {
+            edit_id: envelope.edit_id,
+            edit: envelope.edit,
+        },
+    )
+}
 
-    let edit = journal_deserialize::<ManifestEdit>(&record.payload).map_err(|error| {
+/// Decode an edit record's payload, which must carry the edit envelope.
+fn decode_edit_envelope(record: &JournalRecord) -> MidgeResult<JournalEditEnvelope> {
+    journal_deserialize::<JournalEditEnvelope>(&record.payload).map_err(|error| {
         crate::common::MidgeError::Corruption(format!(
-            "manifest journal edit at byte {} is invalid: {error}",
+            "manifest journal record at byte {} is not an edit envelope: {error}",
             record.record_start
         ))
-    })?;
-    if edit.record_type() != record.typ {
-        return Err(journal_record_type_mismatch(record, &edit));
-    }
-    let edit_id = next_replay_edit_id(state);
-    push_journal_edit(state, JournalEdit { edit_id, edit })?;
-    Ok(())
+    })
 }
 
 fn journal_record_type_mismatch(
@@ -1041,13 +1007,8 @@ fn journal_record_type_mismatch(
 
 fn push_journal_edit(state: &mut JournalReplayState, edit: JournalEdit) -> MidgeResult<()> {
     edit.edit.validate_persisted_sst_names()?;
-    state.max_edit_id = state.max_edit_id.max(edit.edit_id);
     state.edits.push(edit);
     Ok(())
-}
-
-fn next_replay_edit_id(state: &JournalReplayState) -> u64 {
-    state.max_edit_id.saturating_add(1).max(1)
 }
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
@@ -1129,7 +1090,7 @@ pub(crate) fn append_validated_edit_batch_with_id_observed(
     Ok(edit_id)
 }
 
-/// Convenience wrapper: append batch via a `RealFs` created from `db_path` (backwards compatible)
+/// Append `batch` as one record through a `RealFs` rooted at `db_path`.
 #[cfg(test)]
 pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<u64> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
@@ -1286,9 +1247,21 @@ mod tests {
         }
     }
 
-    fn encode_test_record(payload_edit: &ManifestEdit, crc_edit: &ManifestEdit) -> Vec<u8> {
-        let payload = serde_json::to_vec(payload_edit).expect("serialize test journal payload");
-        let crc_payload = serde_json::to_vec(crc_edit).expect("serialize test CRC payload");
+    /// An edit record `edit_id` whose payload holds `payload_edit` and whose
+    /// CRC covers `crc_edit`.
+    fn encode_test_record(
+        edit_id: u64,
+        payload_edit: &ManifestEdit,
+        crc_edit: &ManifestEdit,
+    ) -> Vec<u8> {
+        let envelope = |edit: &ManifestEdit| JournalEditEnvelope {
+            edit_id,
+            edit: edit.clone(),
+        };
+        let payload =
+            serde_json::to_vec(&envelope(payload_edit)).expect("serialize test journal payload");
+        let crc_payload =
+            serde_json::to_vec(&envelope(crc_edit)).expect("serialize test CRC payload");
         assert_eq!(
             payload.len(),
             crc_payload.len(),
@@ -1462,7 +1435,11 @@ mod tests {
         let fake = ManifestEdit::RemoveSst {
             name: "missing.sst".to_string(),
         };
-        let payload = serde_json::to_vec(&fake).unwrap();
+        let payload = serde_json::to_vec(&JournalEditEnvelope {
+            edit_id: 2,
+            edit: fake.clone(),
+        })
+        .unwrap();
         let mut hasher = Crc32::new();
         hasher.update(&payload);
         let _crc = hasher.finalize();
@@ -1487,6 +1464,39 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_journal_record_without_edit_envelope() {
+        // Arrange: durable edit and batch records whose payloads have no
+        // edit envelope.
+        let edit = ManifestEdit::BumpWalSeq { seq: 7 };
+        let marker = FsyncMarker {
+            last_persisted_sequence: 7,
+            ts_millis: 0,
+        };
+        let bare_records = [
+            encode_journal_record(edit.record_type(), &edit).expect("encode bare edit"),
+            encode_journal_record(BATCH_RECORD_TYPE, std::slice::from_ref(&edit))
+                .expect("encode bare batch"),
+        ];
+        for bare in bare_records {
+            let td = tempdir().expect("create temp directory");
+            let mut journal = bare;
+            journal.extend_from_slice(
+                &encode_journal_record(FSYNC_MARKER_TYPE, &marker).expect("encode marker"),
+            );
+            write_and_sync_test_journal(td.path(), &journal);
+
+            // Act
+            let result = replay_journal(td.path());
+
+            // Assert
+            assert!(
+                matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn should_fail_when_corrupt_record_precedes_valid_record() {
         // Arrange
         let td = tempdir().expect("create temp directory");
@@ -1500,8 +1510,8 @@ mod tests {
             name: "apply.sst".to_string(),
         };
         let valid_later = ManifestEdit::BumpWalSeq { seq: 9 };
-        let mut suffix = encode_test_record(&corrupted_middle, &stale_crc_source);
-        suffix.extend_from_slice(&encode_test_record(&valid_later, &valid_later));
+        let mut suffix = encode_test_record(2, &corrupted_middle, &stale_crc_source);
+        suffix.extend_from_slice(&encode_test_record(3, &valid_later, &valid_later));
         let mut journal = std::fs::OpenOptions::new()
             .append(true)
             .open(td.path().join(JOURNAL_FILE))
@@ -1680,7 +1690,7 @@ mod tests {
         let stale_crc_source = ManifestEdit::RemoveSst {
             name: "apply.sst".to_string(),
         };
-        let journal = encode_test_record(&corrupted_first, &stale_crc_source);
+        let journal = encode_test_record(1, &corrupted_first, &stale_crc_source);
         write_and_sync_test_journal(td.path(), &journal);
 
         // Act
@@ -1698,7 +1708,7 @@ mod tests {
         append_edit(td.path(), &first).expect("append first edit");
 
         let partial = ManifestEdit::BumpWalSeq { seq: 2 };
-        let encoded = encode_test_record(&partial, &partial);
+        let encoded = encode_test_record(2, &partial, &partial);
         let mut journal = std::fs::OpenOptions::new()
             .append(true)
             .open(td.path().join(JOURNAL_FILE))

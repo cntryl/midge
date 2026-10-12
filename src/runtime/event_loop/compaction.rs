@@ -263,23 +263,6 @@ impl EventLoop {
 
         self.background_compaction_schedule
             .defer_for(BACKGROUND_COMPACTION_CHECK_INTERVAL);
-        match self.backfill_one_legacy_sst_bounds() {
-            Ok(true) => {
-                // Continue migrating one file per event-loop turn without
-                // making one maintenance invocation proportional to catalog
-                // size.
-                self.background_compaction_schedule
-                    .defer_for(STARTUP_CLOUD_MAINTENANCE_DELAY);
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(%error, "SST key-bound backfill maintenance failed; retaining conservative read fallback");
-            }
-        }
-        if self.legacy_bound_backfill.is_inflight() {
-            self.background_compaction_schedule
-                .defer_for(STARTUP_CLOUD_MAINTENANCE_DELAY);
-        }
         match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
             Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
             Ok(false) => {}

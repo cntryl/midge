@@ -242,7 +242,6 @@ fn should_include_range_tombstones_in_skippable_sst_sequence_bounds() {
     let flush = include_str!("../src/runtime/actors/flush/build.rs");
     let summary = include_str!("../src/sst/fs/reader_io/mod.rs");
     let compaction = include_str!("../src/runtime/actors/compaction.rs");
-    let backfill = include_str!("../src/runtime/event_loop/read_path.rs");
     let snapshot = include_str!("../src/runtime/read_snapshot.rs");
 
     // Act
@@ -251,7 +250,6 @@ fn should_include_range_tombstones_in_skippable_sst_sequence_bounds() {
     assert!(summary.contains("accumulator.observe(size_bytes, &range.start, range.seq"));
     assert!(summary.contains("accumulator.observe(size_bytes, &range.end, range.seq"));
     assert!(compaction.contains("largest_seq: Some(summary.largest_seq)"));
-    assert!(backfill.contains("updated.largest_seq = Some(summary.largest_seq)"));
     let conflict_check = snapshot
         .split("pub fn any_sequence_after_in_range(")
         .nth(1)
@@ -653,21 +651,6 @@ fn should_register_background_maintenance_with_retry_deadlines() {
     assert!(event_loop
         .contains("background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule"));
     assert!(scheduler.contains("Some(self.background_maintenance_timeout())"));
-}
-
-#[test]
-fn should_bound_legacy_sst_backfill_work_when_persisting() {
-    // Arrange
-    let read_path = include_str!("../src/runtime/event_loop/read_path.rs");
-
-    // Act
-    let uses_worker = read_path.contains("midge-legacy-sst-bound-backfill");
-    let batches_edits = read_path
-        .contains(".append_batch_for(crate::metadata::accounting::Origin::Administration, &edits)");
-
-    // Assert
-    assert!(uses_worker);
-    assert!(batches_edits);
 }
 
 /// Source scanning shared by the #808 WAL-authority rules: production code is
@@ -1190,18 +1173,11 @@ const WAL_PATH_WORDS: &[&str] = &[
 /// Test-only functions in the WAL authority scope that name a WAL path, each
 /// with why it may exist and the #808 stage that removes it. Tests must
 /// drive the production path; these are entry points the redesign retires.
-const TEST_ONLY_WAL_PATHS: &[(&str, &str, &str)] = &[
-    (
-        "src/runtime/state/recovery.rs",
-        "try_new_before_cloud_replay",
-        "loads metadata from a host directory for cloud replay tests; stage 2 plans cloud replay",
-    ),
-    (
-        "src/wal/recovery/streaming.rs",
-        "replay_wal_with_checkpoint",
-        "bounded replay through the infallible filter slot; stage 3 deletes the slot",
-    ),
-];
+const TEST_ONLY_WAL_PATHS: &[(&str, &str, &str)] = &[(
+    "src/wal/recovery/streaming.rs",
+    "replay_wal_with_checkpoint",
+    "bounded replay through the infallible filter slot; stage 3 deletes the slot",
+)];
 
 /// A planted shadow, as a free function and as a method, beside production
 /// code and a test module.
@@ -1622,6 +1598,22 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("validate_publication_identity", "#844"),
     ("read_only_error", "#844"),
     ("require_read_only", "#844"),
+    ("next_wal_seq", "#844"),
+    ("manifest_next_wal_seq", "#844"),
+    ("default_next_wal_seq", "#844"),
+    ("increment_wal_seq", "#844"),
+    ("SetCloudCheckpoint", "#844"),
+    ("CloudCheckpoint", "#844"),
+    ("cloud_checkpoint", "#844"),
+    ("last_cloud_checkpoint_seq", "#844"),
+    ("LegacyBoundBackfill", "#844"),
+    ("legacy_bound_backfill", "#844"),
+    ("backfill_one_legacy_sst_bounds", "#844"),
+    ("publish_backfilled_bounds", "#844"),
+    ("checkpoint_backfilled_bounds", "#844"),
+    ("next_replay_edit_id", "#844"),
+    ("is_legacy_edit", "#844"),
+    ("try_new_before_cloud_replay", "#844"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
@@ -1830,7 +1822,6 @@ fn should_find_compatibility_words_when_scanning_identifiers_and_comments() {
 /// No WAL or metadata production code keeps a path for older formats or
 /// dead code (#844): FORMAT 7 rejects older state instead.
 #[test]
-#[ignore = "#844: metadata compatibility paths are deleted with FORMAT 7"]
 fn should_keep_wal_scope_free_of_compatibility_paths() {
     // Arrange
     let files = source_scan::production_files();

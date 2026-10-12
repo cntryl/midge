@@ -19,7 +19,8 @@ fn parse_stdout(output: &Output) -> Value {
 
 /// Copy the populated release fixture into `destination` as a database of
 /// the current format: its manifest and SST are what the report verifies.
-/// Its empty pre-ledger `wal.log` goes with the old marker.
+/// Its empty pre-ledger `wal.log` goes with the old marker, and its
+/// manifests' byte-array key bounds become hex strings.
 fn copy_populated_fixture_as_current_format(destination: &Path) {
     let source = fixture_path("tests/fixtures/compatibility/v3_populated_v4_sst_db");
     for directory in ["", "sst", "wal"] {
@@ -36,6 +37,32 @@ fn copy_populated_fixture_as_current_format(destination: &Path) {
     }
     std::fs::write(destination.join("FORMAT"), "midge-format-version=7\n")
         .expect("write format marker");
+    for manifest in ["manifest.json", "manifest.snapshot.json"] {
+        hex_encode_key_bounds(&destination.join(manifest));
+    }
+}
+
+/// Rewrite the manifest at `path` with hex key bounds, the only encoding
+/// FORMAT 7 decodes.
+fn hex_encode_key_bounds(path: &Path) {
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read fixture manifest"))
+            .expect("decode fixture manifest");
+    for file in manifest["files"]
+        .as_array_mut()
+        .expect("fixture SST metadata")
+    {
+        for bound in ["smallest_key", "largest_key"] {
+            let bytes: Option<Vec<u8>> =
+                serde_json::from_value(file[bound].take()).expect("byte-array key bound");
+            file[bound] = json!(bytes.map(hex::encode));
+        }
+    }
+    std::fs::write(
+        path,
+        serde_json::to_vec(&manifest).expect("encode manifest"),
+    )
+    .expect("write fixture manifest");
 }
 
 fn write_empty_database(path: &Path) {
@@ -47,7 +74,6 @@ fn write_empty_database(path: &Path) {
             "last_persisted_sequence": 0,
             "files": [],
             "column_families": [],
-            "next_wal_seq": 1,
             "next_sst_seqs": {},
             "edit_checkpoint_id": 0
         }))

@@ -11,6 +11,19 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 
 ### Changed
 
+- **Breaking on-disk format: database FORMAT 7 (#844).** Binaries reject
+  FORMAT 1 through 6 with `CompatibilityError`; there is no migration.
+  Export the logical contents with the old binary and import them into a new
+  database. FORMAT 7 metadata keeps no compatibility encodings: every
+  manifest journal record must carry its edit envelope, and a record without
+  one is corruption; manifest key bounds must be hex strings, and the
+  byte-array form written before FORMAT 4 is rejected. The manifest's
+  `next_wal_seq` and `cloud_checkpoint` fields and the `SetCloudCheckpoint`
+  journal record are gone, and maintenance no longer re-summarizes SSTs
+  whose manifest entry lacks complete key bounds.
+- **Breaking API (#844).** `RuntimeMetricsSnapshot::manifest_next_wal_seq`
+  and `StorageLayoutSnapshot::manifest_next_wal_seq` are removed; the
+  manifest no longer tracks a WAL sequence.
 - **Breaking on-disk format: database FORMAT 6 (#843).** WAL segments are
   linked: each starts with a header naming its writer epoch, first sequence
   and the segment before it, and each sealed segment ends with a footer whose

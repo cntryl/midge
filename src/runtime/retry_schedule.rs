@@ -44,11 +44,6 @@ impl RetrySchedule {
         self.defer();
     }
 
-    pub(crate) fn defer_from(&mut self, now: Instant, delay: Duration) {
-        self.delay = delay;
-        self.at = Some(now + delay);
-    }
-
     pub(crate) fn mark_due(&mut self) {
         self.at = Some(self.clock.now());
     }

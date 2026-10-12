@@ -1188,7 +1188,6 @@ mod failure_injection {
         ssts: Vec<String>,
         files: Vec<TestManifestFile>,
         column_families: Vec<TestColumnFamilyMeta>,
-        next_wal_seq: u64,
         next_sst_seqs: std::collections::BTreeMap<u32, u64>,
     }
 
@@ -1291,7 +1290,6 @@ mod failure_injection {
             ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
-            next_wal_seq: 1,
             next_sst_seqs: std::collections::BTreeMap::new(),
         };
         std::fs::write(
@@ -1393,7 +1391,6 @@ mod failure_injection {
             ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
-            next_wal_seq: 1,
             next_sst_seqs: std::collections::BTreeMap::new(),
         };
         std::fs::write(
@@ -10722,7 +10719,6 @@ mod observability_api {
                 "sublevel": 0
             }],
             "column_families": [],
-            "next_wal_seq": 1,
             "next_sst_seqs": {}
         });
         std::fs::write(
@@ -11654,7 +11650,6 @@ mod storage_verification_hardening {
                 "last_persisted_sequence": 0,
                 "files": [],
                 "column_families": [],
-                "next_wal_seq": 1,
                 "next_sst_seqs": {},
                 "edit_checkpoint_id": 0
             }))

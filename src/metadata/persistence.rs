@@ -308,12 +308,6 @@ impl ManifestPersistence {
             crate::cloud_layout::PersistedSstName::parse(&file.name)
                 .map_err(|error| format!("manifest SST name is invalid: {error}"))?;
         }
-        if let Some(checkpoint) = &manifest.cloud_checkpoint {
-            for name in &checkpoint.covering_ssts {
-                crate::cloud_layout::PersistedSstName::parse(name)
-                    .map_err(|error| format!("cloud checkpoint SST name is invalid: {error}"))?;
-            }
-        }
         Ok(())
     }
 
@@ -349,22 +343,12 @@ impl ManifestPersistence {
         persisted.last_persisted_sequence = persisted
             .last_persisted_sequence
             .max(manifest.last_persisted_sequence);
-        persisted.next_wal_seq = persisted.next_wal_seq.max(manifest.next_wal_seq);
         for (&cf_id, &next_seq) in &manifest.next_sst_seqs {
             persisted
                 .next_sst_seqs
                 .entry(cf_id)
                 .and_modify(|current| *current = (*current).max(next_seq))
                 .or_insert(next_seq);
-        }
-        if let Some(candidate) = &manifest.cloud_checkpoint {
-            let should_advance = persisted
-                .cloud_checkpoint
-                .as_ref()
-                .is_none_or(|current| candidate.checkpoint_sequence > current.checkpoint_sequence);
-            if should_advance {
-                persisted.cloud_checkpoint = Some(candidate.clone());
-            }
         }
         Ok(persisted)
     }
@@ -547,7 +531,7 @@ impl ManifestPersistence {
         })
     }
 
-    /// Save manifest to disk in JSON format (compat wrapper for tests and callers using Path)
+    /// Save `manifest` as JSON through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
     pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
         use crate::io::real::RealFs;
@@ -559,7 +543,7 @@ impl ManifestPersistence {
         Self::save_with_fs(&fs, manifest)
     }
 
-    /// Load manifest using a `RealFs` (compat wrapper)
+    /// Load the manifest strictly through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
@@ -735,7 +719,6 @@ mod tests {
         // Arrange: build manifest in one expression to avoid field_reassign_with_default
         let test_dir = create_test_dir();
         let manifest = Manifest {
-            next_wal_seq: 42,
             last_persisted_sequence: 100,
             column_families: vec![
                 crate::metadata::ColumnFamilyMeta {
@@ -774,7 +757,6 @@ mod tests {
             manifest_path.exists(),
             "manifest file should exist after save"
         );
-        assert_eq!(loaded.next_wal_seq, 42);
         assert_eq!(loaded.last_persisted_sequence, 100);
         assert_eq!(loaded.column_families.len(), 2);
         assert_eq!(loaded.column_families[0].name, "default");
@@ -833,7 +815,6 @@ mod tests {
         let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert
-        assert_eq!(loaded.next_wal_seq, 1);
         assert_eq!(loaded.last_persisted_sequence, 0);
         assert_eq!(loaded.column_families.len(), 0);
     }

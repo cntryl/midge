@@ -940,7 +940,6 @@ fn should_initialize_cloud_state() {
 
     // Assert
     assert_eq!(cloud.pending_uploads.len(), 0);
-    assert_eq!(cloud.last_cloud_checkpoint_seq, 0);
 }
 
 // =========== RuntimeState Tests ===========

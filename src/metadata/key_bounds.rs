@@ -1,10 +1,7 @@
-//! Compact manifest encoding for SST key bounds (#546).
-//!
-//! Key bounds used to serialize as JSON arrays, one number per byte. They now
-//! serialize as a hex string. Decoding still accepts the array form, so
-//! manifests and journals written before format version 4 load unchanged.
+//! Compact manifest encoding for SST key bounds (#546): each bound is a hex
+//! string. Any other encoding fails to deserialize.
 
-use serde::de::{self, SeqAccess, Visitor};
+use serde::de::{self, Visitor};
 use serde::{Deserializer, Serializer};
 
 // Serde's `with` contract passes the field by reference.
@@ -31,7 +28,7 @@ impl<'de> Visitor<'de> for OptionalKey {
     type Value = Option<Vec<u8>>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("a hex key string, a byte array, or null")
+        formatter.write_str("a hex key string or null")
     }
 
     fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -43,29 +40,21 @@ impl<'de> Visitor<'de> for OptionalKey {
     }
 
     fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
-        deserializer.deserialize_any(Key).map(Some)
+        deserializer.deserialize_str(Key).map(Some)
     }
 }
 
 struct Key;
 
-impl<'de> Visitor<'de> for Key {
+impl Visitor<'_> for Key {
     type Value = Vec<u8>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("a hex key string or a byte array")
+        formatter.write_str("a hex key string")
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
         hex::decode(value).map_err(|error| E::custom(format!("invalid hex key bound: {error}")))
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(byte) = seq.next_element::<u8>()? {
-            bytes.push(byte);
-        }
-        Ok(bytes)
     }
 }
 
@@ -101,16 +90,15 @@ mod tests {
     }
 
     #[test]
-    fn should_decode_legacy_array_key_bounds() {
-        // Arrange: the form every manifest and journal used before format 4.
+    fn should_reject_byte_array_key_bounds() {
+        // Arrange: the array form manifests used before format 4.
         let json = r#"{"name":"000001_00_00000000000000000001.sst","level":0,"size_bytes":1,"smallest_key":[97,0,255],"largest_key":null}"#;
 
         // Act
-        let decoded: FileMeta = serde_json::from_str(json).expect("deserialize legacy");
+        let result = serde_json::from_str::<FileMeta>(json);
 
         // Assert
-        assert_eq!(decoded.smallest_key, Some(vec![97, 0, 255]));
-        assert_eq!(decoded.largest_key, None);
+        assert!(result.is_err(), "{result:?}");
     }
 
     #[test]
