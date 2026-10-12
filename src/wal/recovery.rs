@@ -249,12 +249,8 @@ fn replay_error_action(
     replay_file: &ReplayFile,
     replay_policy: ReplayPolicy,
     failure: &ReplayFailure,
-    footer_seen: bool,
 ) -> ReplayErrorAction {
-    if replay_file.kind == ReplayFileKind::FinalActive
-        && failure.is_incomplete_tail()
-        && !footer_seen
-    {
+    if replay_file.kind == ReplayFileKind::FinalActive && failure.is_incomplete_tail() {
         ReplayErrorAction::TolerateFinalActiveTail
     } else if replay_policy == ReplayPolicy::SalvageValidPrefix && failure.error().is_salvageable()
     {
@@ -289,9 +285,6 @@ pub struct RecoveryStats {
     /// Total nanoseconds spent in overall replay (per call)
     pub total_replay_ns: u128,
 
-    /// The open segment replay read last, and whether a footer already
-    /// sealed it (a rotation that crashed before recording the seal).
-    pub(crate) open_tail: Option<OpenTail>,
     /// Final active WAL whose incomplete tail replay tolerated. Replay stays
     /// read-only; an owner that reopens the file for append must first
     /// truncate it to `valid_bytes`, or new frames land after the torn bytes.
@@ -300,13 +293,6 @@ pub struct RecoveryStats {
     /// keeps writing must first move everything past this point aside, or
     /// new records land behind corruption and reuse on-disk sequences.
     pub(crate) salvage_stop: Option<WalSalvageStop>,
-}
-
-/// The open segment a replay read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct OpenTail {
-    pub(crate) id: crate::wal::ledger::SegmentId,
-    pub(crate) footer_present: bool,
 }
 
 /// Point at which salvage replay stopped, and the WAL it never reached.
@@ -345,7 +331,6 @@ impl RecoveryStats {
             wal_read_ns: 0,
             apply_ns: 0,
             total_replay_ns: 0,
-            open_tail: None,
             tolerated_active_tail: None,
             salvage_stop: None,
         }

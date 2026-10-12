@@ -1614,6 +1614,7 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("EmptyHolder", "#843"),
     ("loses_required_value", "#843"),
     ("Expectation::Chain", "#843"),
+    ("OpenTail", "#843"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

@@ -1,7 +1,7 @@
 //! Cloud replay with bounded reads, transaction buffers, and checkpointable memtables.
 
 use super::{
-    apply_record, open_wal_replay_file, replay_error_action, Expectation, NextWalFrame, OpenTail,
+    apply_record, open_wal_replay_file, replay_error_action, Expectation, NextWalFrame,
     RecoveryStats, ReplayErrorAction, ReplayFailure, ReplayFile, ReplayFileKind, ReplayPolicy,
     ReplaySegments, ToleratedActiveTail, WalSalvageStop,
 };
@@ -648,7 +648,7 @@ fn replay_paths(
             return state.stop_at(
                 storage,
                 paths,
-                (index, 0, false),
+                (index, 0),
                 policy,
                 ReplayFailure::Record(MidgeError::Corruption(format!(
                     "WAL segment {} is history but its file is missing",
@@ -660,13 +660,12 @@ fn replay_paths(
         let mut scan = match admit_segment(&source, path, &mut chain) {
             Ok(scan) => scan,
             Err(error) => {
-                return state.stop_at(storage, paths, (index, 0, false), policy, error.into());
+                return state.stop_at(storage, paths, (index, 0), policy, error.into());
             }
         };
         let epoch = scan.header().epoch;
         // End of the last frame this file replayed: the verified prefix.
         let mut pos = HEADER_LEN as u64;
-        let mut footer_seen = false;
         loop {
             state.options.check()?;
             let next = frame_reader::next_frame(
@@ -684,26 +683,19 @@ fn replay_paths(
                         .and_then(|_| ends_at_footer(&source, &path.path, next_pos))
                         .and_then(|()| expect_footer(path, &scan));
                     if let Err(error) = sealed {
-                        return state.stop_at(
-                            storage,
-                            paths,
-                            (index, pos, false),
-                            policy,
-                            error.into(),
-                        );
+                        return state.stop_at(storage, paths, (index, pos), policy, error.into());
                     }
-                    footer_seen = true;
                     progress.completed(next_pos.saturating_sub(pos), 0);
                     break;
                 }
                 Ok(NextWalFrame::Frame(frame)) => frame,
                 Err(failure) => {
-                    return state.stop_at(storage, paths, (index, pos, false), policy, failure);
+                    return state.stop_at(storage, paths, (index, pos), policy, failure);
                 }
             };
             let bytes = frame.next_pos.saturating_sub(pos);
             if let Err(error) = scan.frame(&frame.payload) {
-                return state.stop_at(storage, paths, (index, pos, false), policy, error.into());
+                return state.stop_at(storage, paths, (index, pos), policy, error.into());
             }
             let replayed = scan
                 .observe(frame.record.seq, frame.record.cf_id)
@@ -713,7 +705,7 @@ fn replay_paths(
                     return state.stop_at(
                         storage,
                         paths,
-                        (index, pos, false),
+                        (index, pos),
                         policy,
                         ReplayFailure::Record(error),
                     );
@@ -723,13 +715,9 @@ fn replay_paths(
             pos = frame.next_pos;
             progress.completed(bytes, 1);
         }
-        if let Some(stopped) = state.end_segment(
-            storage,
-            paths,
-            (index, pos, footer_seen),
-            (&scan, &mut chain),
-            policy,
-        ) {
+        if let Some(stopped) =
+            state.end_segment(storage, paths, (index, pos), (&scan, &mut chain), policy)
+        {
             return stopped;
         }
     }
@@ -805,24 +793,18 @@ fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
 }
 
 impl ReplayState<'_> {
-    /// Finish `paths[index]`, read through `pos`: note the open tail, and
-    /// link the chain to a sealed file's footer. `Some` when replay stops
-    /// here: a sealed file must end in its footer.
+    /// Finish `paths[index]`, read through `pos`: link the chain to a sealed
+    /// file's footer. `Some` when replay stops here: a sealed file must end
+    /// in its footer.
     fn end_segment(
         &mut self,
         storage: &dyn Fs,
         paths: &[ReplayFile],
-        (index, pos, footer_seen): (usize, u64, bool),
+        (index, pos): (usize, u64),
         (scan, chain): (&SegmentScan, &mut Chain),
         policy: ReplayPolicy,
     ) -> Option<MidgeResult<()>> {
         let path = &paths[index];
-        if path.kind == ReplayFileKind::FinalActive {
-            self.stats.open_tail = Some(OpenTail {
-                id: path.id,
-                footer_present: footer_seen,
-            });
-        }
         match scan.footer() {
             Some(footer) => {
                 chain.seal(footer.sealed_facts().link);
@@ -831,7 +813,7 @@ impl ReplayState<'_> {
             None if path.kind == ReplayFileKind::Sealed => Some(self.stop_at(
                 storage,
                 paths,
-                (index, pos, false),
+                (index, pos),
                 policy,
                 ReplayFailure::Error(MidgeError::Corruption(format!(
                     "sealed WAL segment {} ends without its footer",
@@ -849,12 +831,12 @@ impl ReplayState<'_> {
         &mut self,
         storage: &dyn Fs,
         paths: &[ReplayFile],
-        (index, valid_bytes, footer_seen): (usize, u64, bool),
+        (index, valid_bytes): (usize, u64),
         policy: ReplayPolicy,
         failure: ReplayFailure,
     ) -> MidgeResult<()> {
         let path = &paths[index];
-        match replay_error_action(path, policy, &failure, footer_seen) {
+        match replay_error_action(path, policy, &failure) {
             ReplayErrorAction::TolerateFinalActiveTail => {
                 tracing::info!(
                     path = %path.path,
@@ -865,10 +847,6 @@ impl ReplayState<'_> {
                 self.stats.tolerated_active_tail = Some(ToleratedActiveTail {
                     path: path.path.clone(),
                     valid_bytes,
-                });
-                self.stats.open_tail = Some(OpenTail {
-                    id: path.id,
-                    footer_present: false,
                 });
                 Ok(())
             }
