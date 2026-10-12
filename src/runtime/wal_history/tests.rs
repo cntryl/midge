@@ -709,7 +709,7 @@ fn should_not_record_set_aside_when_the_cut_fails() {
 }
 
 #[test]
-fn should_keep_members_aside_and_link_catalog_head_when_rebasing() {
+fn should_link_catalog_head_when_rebasing() {
     // Arrange: another writer published through segment 7.
     let device = CrashDevice::new();
     let mut history = four_segments(&device);

@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn should_report_header_identity_and_footer_sequence_when_validating() {
+    fn should_report_segment_identity_when_validating() {
         // Arrange
         let (bytes, _) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
             .record(&put(1))

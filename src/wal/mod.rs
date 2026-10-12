@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_alias_and_foreign_form_in_each_segment_parser() {
+    fn should_reject_foreign_forms_in_each_segment_parser() {
         // Arrange
         let file = segment_file_name(42);
         let object = segment_object_key(42, 7);

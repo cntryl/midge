@@ -993,7 +993,7 @@ fn should_keep_loaded_state_when_power_fails_after_open() {
 }
 
 #[test]
-fn should_round_trip_anchor_facts_and_reservation_when_compacting() {
+fn should_round_trip_v2_ledger_when_compacting() {
     // Arrange: a retired prefix moves the anchor, rotations record sealed
     // facts, and a reservation is raised.
     let fs = mock_fs();
