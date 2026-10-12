@@ -163,6 +163,6 @@ new database, an older binary must not open it.
 ## Fixture Coverage
 
 Repository gates reject the checked-in populated FORMAT 3/SST V4 fixture, a
-prior FORMAT 2 fixture and a synthetic future FORMAT 7 fixture with
+prior FORMAT 2 fixture and a synthetic future FORMAT 8 fixture with
 `CompatibilityError`, without rewriting their markers. Format changes must
 update these fixtures and their CI assertions together.
