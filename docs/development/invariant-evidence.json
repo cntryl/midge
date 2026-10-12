@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "9171810c3d03dd40cdd6fe13d70c0b7d92fb51e1",
+  "source_revision": "2a240c221ed81667ea7b655672ccb8cdcceb9fc6",
   "source_revision_status": "References and SHA256 postimages bind the current #819 frontier cutover working tree based on this commit. Removed SST coverage/proof references are replaced by family frontier, whole-unit replay and shared-generation retirement controls. This inventory is source/reference evidence; test execution and qualification remain separate.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
@@ -627,6 +627,27 @@
             {
               "line": 567,
               "marker": "assert_eq!(result2, Some(Bytes::from_static(b\"value2\")));"
+            }
+          ]
+        },
+        {
+          "path": "src/metadata/manifest/tests.rs",
+          "line": 208,
+          "symbol": "should_replay_original_family_creation_without_reviving_a_dropped_family",
+          "claim": "Replaying the original create after its permanent drop tombstone is installed is idempotent and leaves the serialized manifest and Dropped frontier unchanged.",
+          "scope": "Pure manifest transition and serialized state comparison; engine restart lifecycle is separately exercised by column-family integration tests",
+          "assertions": [
+            {
+              "line": 237,
+              "marker": "assert!("
+            },
+            {
+              "line": 241,
+              "marker": "assert_eq!(serde_json::to_value(&manifest).unwrap(), before);"
+            },
+            {
+              "line": 242,
+              "marker": "assert_eq!("
             }
           ]
         }

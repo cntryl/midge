@@ -95,10 +95,11 @@ fn plan_family_lifecycle(
                 return Err(invalid_transition("default or duplicate live family name"));
             }
             if let Some(existing) = existing {
-                if existing.deleted_at.is_none()
-                    && existing.name == *name
-                    && existing.created_at == *created_at
-                {
+                // A checkpoint can already contain the dropped identity when
+                // replay reaches its original create edit. Only the exact
+                // original identity is idempotent; a new family must use a
+                // fresh id and creation timestamp.
+                if existing.name == *name && existing.created_at == *created_at {
                     return Ok(existing.clone());
                 }
                 return Err(invalid_transition(format!(
@@ -286,7 +287,21 @@ impl<'a> EditValidator<'a> {
                 self.files.insert(name.clone(), None);
                 self.steps.push(ManifestStep::Remove(name.clone()));
             }
-            ManifestEdit::CreateColumnFamily { id, name, .. } => {
+            ManifestEdit::CreateColumnFamily {
+                id,
+                name,
+                created_at,
+            } => {
+                if self.family(*id).is_some_and(|existing| {
+                    existing.deleted_at.is_some()
+                        && existing.name == *name
+                        && existing.created_at == *created_at
+                }) {
+                    // Recovery can replay the original create edit after a
+                    // checkpoint installed its permanent tombstone. Recognize
+                    // it before checking whether a later family reused the name.
+                    return Ok(());
+                }
                 let collision = self
                     .families
                     .values()

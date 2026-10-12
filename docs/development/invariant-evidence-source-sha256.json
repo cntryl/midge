@@ -55,7 +55,7 @@
   "src/metadata/format.rs": "08cecd111cb581f140c343b9ed6d417b5a93e82189202d4d06fab6c5a88750cc",
   "src/metadata/journal.rs": "a1d9e64b263bc143637cc6dadeb24aaadcd86045d396a664326db0f86d447513",
   "src/metadata/manifest.rs": "7a948329a079ef587ce043ef6ddc4c96abff82361cc5759431d04738d4bcefa5",
-  "src/metadata/manifest/tests.rs": "12d0d0b00dc949dbb9e5ae4bf87990fe9a4191785efb60570854eb9d6615eac8",
+  "src/metadata/manifest/tests.rs": "ecf6457828fad0af4502d4d3b70061f0f00fa161c06ad7bcbb2e6329f85693f0",
   "src/metadata/persistence.rs": "42e82deec22c1921f4dbec2650d2333ade1b8a7e0ec93ae49d3fcc525c075f77",
   "src/metadata/store.rs": "c92adc5e7e8bead33c119c5ea657de14cd46380bf68186e2efaf58902069d649",
   "src/runtime/actors/compaction.rs": "76395250e6a480c6c75fa1d3cc67f5a05425f59a88c1ca7cf5fdbb7b11c2304c",

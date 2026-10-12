@@ -205,6 +205,47 @@ fn should_preserve_drop_tombstone_when_create_reuses_a_family_id() {
 }
 
 #[test]
+fn should_replay_original_family_creation_without_reviving_a_dropped_family() {
+    // Arrange
+    let mut manifest = Manifest::default();
+    let create = ManifestEdit::CreateColumnFamily {
+        id: 1,
+        name: "retired".into(),
+        created_at: 1,
+    };
+    manifest.apply_edit(&create).unwrap();
+    manifest
+        .apply_edit(&ManifestEdit::DropColumnFamilyAt {
+            id: 1,
+            drop_sequence: 2,
+            dropped_sst_names: Vec::new(),
+        })
+        .unwrap();
+    manifest
+        .apply_edit(&ManifestEdit::CreateColumnFamily {
+            id: 2,
+            name: "retired".into(),
+            created_at: 3,
+        })
+        .unwrap();
+    let before = serde_json::to_value(&manifest).unwrap();
+
+    // Act
+    let result = manifest.apply_edit(&create);
+
+    // Assert
+    assert!(
+        result.is_ok(),
+        "replaying the original create must be harmless"
+    );
+    assert_eq!(serde_json::to_value(&manifest).unwrap(), before);
+    assert_eq!(
+        manifest.flush_frontiers().get(1).unwrap(),
+        FamilyFrontier::Dropped
+    );
+}
+
+#[test]
 fn should_reject_missing_frontiers_when_decoding_a_manifest() {
     // Arrange
     let mut encoded = serde_json::to_value(Manifest::default()).unwrap();
