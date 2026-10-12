@@ -582,18 +582,26 @@ impl CloudPersistence {
             max_sequence,
         )
         .map_err(MidgeError::Corruption)?;
-        if readback.validation.id != segment_id {
-            return Err(MidgeError::Corruption(format!(
-                "local WAL segment '{source}' holds the header of segment {}, not {segment_id}",
-                readback.validation.id
-            )));
-        }
         // The object is named for the epoch of the writer that wrote it,
         // which its header records (#843).
-        let object_key =
-            crate::wal::cloud_segment::object_key(segment_id, readback.validation.writer_epoch);
-        self.enqueue_object_upload(segment_id, object_key.clone(), source.clone(), max_sequence)?;
-        Ok(object_key)
+        let entry = PublishedWalSegment::from_validated_bytes(
+            segment_id,
+            max_sequence,
+            readback.validation.writer_epoch,
+            &bytes,
+        );
+        entry
+            .check(&readback.validation.identity())
+            .map_err(|detail| {
+                MidgeError::Corruption(format!("local WAL segment '{source}': {detail}"))
+            })?;
+        self.enqueue_object_upload(
+            segment_id,
+            entry.object_key.clone(),
+            source.clone(),
+            max_sequence,
+        )?;
+        Ok(entry.object_key)
     }
 
     pub(crate) fn fence_cloud_wal_catalog(
@@ -757,21 +765,18 @@ impl CloudPersistence {
             expected_max_sequence,
         )
         .map_err(MidgeError::Internal)?;
-        if local_readback.id != segment_id {
-            return Err(PublicationError::Mismatch {
-                segment_id,
-                detail: format!(
-                    "local WAL segment '{source}' holds the header of segment {}",
-                    local_readback.id
-                ),
-            });
-        }
         let entry = PublishedWalSegment::from_validated_bytes(
             segment_id,
             expected_max_sequence,
             local_readback.writer_epoch,
             &local_bytes,
         );
+        entry
+            .check(&local_readback.identity())
+            .map_err(|detail| PublicationError::Mismatch {
+                segment_id,
+                detail: format!("local WAL segment '{source}': {detail}"),
+            })?;
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
             return Err(PublicationError::Mismatch {

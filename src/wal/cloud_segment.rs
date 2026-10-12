@@ -27,15 +27,21 @@ pub(crate) struct SegmentValidation {
     pub(crate) id: u64,
 }
 
+impl SegmentValidation {
+    /// What the segment says it is.
+    pub(crate) fn identity(self) -> crate::wal::format::SegmentIdentity {
+        crate::wal::format::SegmentIdentity {
+            id: self.id,
+            epoch: self.writer_epoch,
+            last_seq: self.max_sequence,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SegmentReadback {
     pub(crate) validation: SegmentValidation,
     pub(crate) data_records: Vec<DataCoverageRecord>,
-}
-
-#[must_use]
-pub(crate) fn object_key(segment_id: u64, writer_epoch: u64) -> String {
-    super::segment_object_key(segment_id, writer_epoch)
 }
 
 /// Validate a segment without collecting coverage records.
@@ -49,31 +55,6 @@ pub(crate) fn validate_bytes(
 ) -> Result<SegmentValidation, String> {
     let validation = validate_segment_bytes(key, data)?;
     check_expected_max_sequence(key, validation.max_sequence, expected_max_sequence)?;
-    Ok(validation)
-}
-
-/// Validate the bytes of published segment `segment_id`: its header must
-/// name that id and `writer_epoch`, and its footer `max_sequence` (#843).
-pub(crate) fn validate_published_bytes(
-    key: &str,
-    data: &[u8],
-    segment_id: u64,
-    writer_epoch: u64,
-    max_sequence: u64,
-) -> Result<SegmentValidation, String> {
-    let validation = validate_bytes(key, data, max_sequence)?;
-    if validation.id != segment_id {
-        return Err(format!(
-            "cloud WAL segment '{key}' header names segment {}, not {segment_id}",
-            validation.id
-        ));
-    }
-    if validation.writer_epoch != writer_epoch {
-        return Err(format!(
-            "cloud WAL segment '{key}' header names writer epoch {}, not {writer_epoch}",
-            validation.writer_epoch
-        ));
-    }
     Ok(validation)
 }
 
@@ -299,10 +280,16 @@ mod tests {
             .record(&put(1))
             .seal();
 
+        let entry = |id, epoch| {
+            crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+                id, 1, epoch, &bytes,
+            )
+        };
+
         // Act
-        let wrong_epoch = validate_published_bytes("wal/x", &bytes, 4, 42, 1);
-        let wrong_id = validate_published_bytes("wal/x", &bytes, 5, 41, 1);
-        let matching = validate_published_bytes("wal/x", &bytes, 4, 41, 1);
+        let wrong_epoch = entry(4, 42).validate_bytes(&bytes);
+        let wrong_id = entry(5, 41).validate_bytes(&bytes);
+        let matching = entry(4, 41).validate_bytes(&bytes);
 
         // Assert
         assert!(wrong_epoch.unwrap_err().contains("writer epoch 41"));

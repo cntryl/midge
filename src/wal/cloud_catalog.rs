@@ -56,13 +56,42 @@ impl PublishedWalSegment {
                 self.segment_id, self.content_crc32c
             ));
         }
-        crate::wal::cloud_segment::validate_published_bytes(
-            &self.object_key,
-            bytes,
-            self.segment_id,
-            self.writer_epoch,
-            self.max_sequence,
-        )?;
+        let validation =
+            crate::wal::cloud_segment::validate_bytes(&self.object_key, bytes, self.max_sequence)?;
+        self.check(&validation.identity())
+    }
+
+    /// Whether a segment that says it is `identity` is the one this entry
+    /// names (#843): the same id, writer epoch and last sequence. The one
+    /// identity check every reader of a published or publishing segment
+    /// applies.
+    ///
+    /// # Errors
+    ///
+    /// What differs, naming the object.
+    pub(crate) fn check(
+        &self,
+        identity: &crate::wal::format::SegmentIdentity,
+    ) -> Result<(), String> {
+        let key = &self.object_key;
+        if identity.id != self.segment_id {
+            return Err(format!(
+                "cloud WAL segment '{key}' header names segment {}, not {}",
+                identity.id, self.segment_id
+            ));
+        }
+        if identity.epoch != self.writer_epoch {
+            return Err(format!(
+                "cloud WAL segment '{key}' header names writer epoch {}, not {}",
+                identity.epoch, self.writer_epoch
+            ));
+        }
+        if identity.last_seq != self.max_sequence {
+            return Err(format!(
+                "cloud WAL segment '{key}' holds sequences through {}, not {}",
+                identity.last_seq, self.max_sequence
+            ));
+        }
         Ok(())
     }
 }

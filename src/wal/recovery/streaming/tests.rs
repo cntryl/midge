@@ -864,6 +864,6 @@ fn should_resume_sealed_inspection_when_visitor_stops_mid_segment() {
     assert!(matches!(stopped, Err(MidgeError::Timeout(_))));
     assert!(resumed.is_ok(), "{resumed:?}");
     assert_eq!(visited, vec![2, 3]);
-    assert!(progress.sealed);
-    assert_eq!(progress.record_count, 3);
+    assert!(progress.sealed());
+    assert_eq!(progress.record_count(), 3);
 }

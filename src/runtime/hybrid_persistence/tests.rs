@@ -744,7 +744,7 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     let bytes = valid_wal_bytes(segment_id, max_sequence);
     let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write publisher local WAL");
-    let object_key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    let object_key = crate::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
 
     pausing_cloud.pause_next_catalog_compare_exchange();
@@ -818,7 +818,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
         .join(crate::wal::segment_file_name(published_segment_id));
     std::fs::write(&published_local_path, &published_bytes)
         .expect("write concurrently published local WAL");
-    let published_object_key = crate::wal::cloud_segment::object_key(published_segment_id, 1);
+    let published_object_key = crate::wal::segment_object_key(published_segment_id, 1);
     write_cloud_object(&storage, &published_object_key, published_bytes);
 
     pausing_cloud.pause_next_catalog_compare_exchange();
@@ -903,7 +903,7 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
     std::fs::write(&holding_local_path, &holding_bytes).expect("write lock-holding local WAL");
     write_cloud_object(
         &storage,
-        &crate::wal::cloud_segment::object_key(holding_segment_id, 1),
+        &crate::wal::segment_object_key(holding_segment_id, 1),
         holding_bytes,
     );
 
@@ -916,7 +916,7 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
     std::fs::write(&waiting_local_path, &waiting_bytes).expect("write lock-waiting local WAL");
     write_cloud_object(
         &storage,
-        &crate::wal::cloud_segment::object_key(waiting_segment_id, 1),
+        &crate::wal::segment_object_key(waiting_segment_id, 1),
         waiting_bytes,
     );
 
@@ -1209,7 +1209,7 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
     assert_eq!(
         wal_mock.get_uploads(),
         vec![(
-            crate::wal::cloud_segment::object_key(17, 1),
+            crate::wal::segment_object_key(17, 1),
             wal_bytes.len() as u64
         )]
     );
@@ -2365,7 +2365,7 @@ fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 11;
     let max_sequence = 21;
-    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    let key = crate::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &key, valid_wal_bytes(segment_id, max_sequence));
     let stale_proof = storage
         .remote_object_proof(&key)
@@ -2390,7 +2390,7 @@ fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
 fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
     // Arrange
     let segment_id = 12;
-    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    let key = crate::wal::segment_object_key(segment_id, 1);
     let bytes = valid_wal_bytes(segment_id, 22);
     let backend = Arc::new(RacingReadDeleteBackend::new(bytes.clone()));
     let cloud: Arc<dyn StorageBackend> = backend.clone();
@@ -2808,7 +2808,7 @@ fn should_not_overwrite_existing_remote_wal_during_upload() {
     let tmp = tempfile::tempdir().expect("create WAL dir");
     let segment_id = 12;
     let upload_max_sequence = 22;
-    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    let key = crate::wal::segment_object_key(segment_id, 1);
     let existing_bytes = valid_wal_bytes(segment_id, upload_max_sequence + 100);
     write_cloud_object(&storage, &key, existing_bytes.clone());
 
@@ -2873,7 +2873,7 @@ fn should_acknowledge_wal_upload_when_remote_object_holds_the_same_bytes() {
     let segment_id = 14;
     let max_sequence = 24;
     let bytes = valid_wal_bytes(segment_id, max_sequence);
-    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    let key = crate::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &key, bytes.clone());
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&wal_path, &bytes).expect("write local WAL");

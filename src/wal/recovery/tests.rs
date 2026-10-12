@@ -1834,13 +1834,13 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     };
     let inspector = match super::streaming::inspect_wal_file(file.as_ref(), &path, limits) {
         Ok(prefix) => WalkerVerdict::Accepted {
-            max_sequence: prefix.max_sequence,
+            max_sequence: prefix.max_sequence(),
             valid_bytes: prefix.valid_bytes as u64,
         },
         // Cloud recovery truncates a torn tail to the verified prefix, as
         // local replay tolerates it.
         Err(failure) if failure.is_incomplete_tail() => WalkerVerdict::Accepted {
-            max_sequence: failure.verified_prefix().max_sequence,
+            max_sequence: failure.verified_prefix().max_sequence(),
             valid_bytes: failure.verified_prefix().valid_bytes as u64,
         },
         Err(_) => WalkerVerdict::Rejected,

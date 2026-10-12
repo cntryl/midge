@@ -49,6 +49,15 @@ pub(crate) fn holds_no_records(len: u64) -> bool {
     len <= HEADER_LEN as u64
 }
 
+/// What a sealed segment's bytes say it is (#843): the id and writer epoch
+/// its header names and the last sequence its records hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentIdentity {
+    pub(crate) id: SegmentId,
+    pub(crate) epoch: u64,
+    pub(crate) last_seq: u64,
+}
+
 /// The fixed header at the start of every segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentHeader {

@@ -199,20 +199,54 @@ impl From<MidgeError> for ReplayFailure {
     }
 }
 
-/// What one segment's walk verified so far, resumable: its records' facts
-/// and where the next frame starts.
+/// What one segment's walk verified so far, resumable: the scan of its
+/// header and records, and where the next frame starts.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct VerifiedWalPrefix {
-    pub(crate) max_sequence: u64,
-    /// The writer epoch the segment's header names.
-    pub(crate) writer_epoch: u64,
-    pub(crate) record_count: usize,
     pub(crate) valid_bytes: usize,
-    /// The segment's footer was verified: nothing follows it.
-    pub(crate) sealed: bool,
     /// The scan the walk resumes, once the header was read. Boxed: its
     /// digest state is large, and failures carry the prefix.
     pub(crate) scan: Option<Box<crate::wal::format::SegmentScan>>,
+}
+
+impl VerifiedWalPrefix {
+    /// The greatest sequence the verified records hold, or zero.
+    pub(crate) fn max_sequence(&self) -> u64 {
+        self.scan
+            .as_ref()
+            .and_then(|scan| scan.tail().last_seq)
+            .unwrap_or(0)
+    }
+
+    /// The writer epoch the segment's header names, or zero before it.
+    pub(crate) fn writer_epoch(&self) -> u64 {
+        self.scan.as_ref().map_or(0, |scan| scan.header().epoch)
+    }
+
+    /// The records verified so far.
+    pub(crate) fn record_count(&self) -> u64 {
+        self.scan
+            .as_ref()
+            .map_or(0, |scan| scan.tail().record_count)
+    }
+
+    /// Whether the segment's footer was verified, nothing following it.
+    pub(crate) fn sealed(&self) -> bool {
+        self.scan
+            .as_ref()
+            .is_some_and(|scan| scan.footer().is_some())
+    }
+
+    /// What the segment says it is, once its header was read.
+    pub(crate) fn identity(&self) -> Option<crate::wal::format::SegmentIdentity> {
+        self.scan
+            .as_ref()
+            .map(|scan| crate::wal::format::SegmentIdentity {
+                id: scan.header().id,
+                epoch: scan.header().epoch,
+                last_seq: self.max_sequence(),
+            })
+    }
 }
 
 #[derive(Debug)]

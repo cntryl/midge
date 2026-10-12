@@ -297,7 +297,7 @@ fn should_restart_crc_progress_when_wal_provider_identity_changes() {
     let progress = CloudWalPruneProgress::default();
     backend.allowance.store(3, Ordering::SeqCst);
     assert!(attempt(&storage, &manifest, &progress, 80).is_err());
-    let key = crate::wal::cloud_segment::object_key(1, 1);
+    let key = crate::wal::segment_object_key(1, 1);
     let bytes = read_cloud_object(&storage, &key);
     write_cloud_object(&storage, &key, bytes);
     backend.reads.lock().clear();
@@ -335,7 +335,7 @@ fn should_restart_semantic_progress_when_sst_provider_identity_changes() {
     assert!(result.is_err());
     assert_eq!(
         backend.reads.lock().first(),
-        Some(&(crate::wal::cloud_segment::object_key(1, 1), 0))
+        Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments
@@ -359,7 +359,7 @@ fn should_revalidate_from_start_when_process_local_proof_state_is_lost() {
     assert!(result.is_err());
     assert_eq!(
         backend.reads.lock().first(),
-        Some(&(crate::wal::cloud_segment::object_key(1, 1), 0))
+        Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments
@@ -662,7 +662,7 @@ fn should_retain_catalog_authority_when_resumed_wal_identity_contains_corrupt_by
     let progress = CloudWalPruneProgress::default();
     backend.allowance.store(3, Ordering::SeqCst);
     assert!(attempt(&storage, &manifest, &progress, 80).is_err());
-    let key = crate::wal::cloud_segment::object_key(1, 1);
+    let key = crate::wal::segment_object_key(1, 1);
     let mut bytes = read_cloud_object(&storage, &key);
     *bytes.last_mut().expect("WAL payload") ^= 1;
     write_cloud_object(&storage, &key, bytes);
@@ -699,7 +699,7 @@ fn should_revalidate_exact_coverage_when_manifest_family_assignment_changes() {
     );
     assert_eq!(
         backend.reads.lock().first(),
-        Some(&(crate::wal::cloud_segment::object_key(1, 1), 0))
+        Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments

@@ -8,7 +8,7 @@ use super::{
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
 use crate::memtable::{size_bound, SkipListMemtable};
-use crate::wal::format::{Chain, ScannedFrame, SegmentScan, HEADER_LEN};
+use crate::wal::format::{Chain, SegmentScan, HEADER_LEN};
 use crate::wal::{types::WalOpRole, WalRecord};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -397,12 +397,12 @@ pub(crate) fn visit_sealed_wal_records(
 }
 
 fn require_sealed_records(path: &FsPath, prefix: &super::VerifiedWalPrefix) -> MidgeResult<()> {
-    if !prefix.sealed {
+    if !prefix.sealed() {
         return Err(MidgeError::Corruption(format!(
             "sealed WAL segment {path} ends without its footer"
         )));
     }
-    if prefix.record_count == 0 {
+    if prefix.record_count() == 0 {
         return Err(MidgeError::Corruption("sealed WAL segment is empty".into()));
     }
     Ok(())
@@ -510,7 +510,7 @@ fn inspect_file_from(
     file: &dyn crate::io::File,
     path: &FsPath,
     limits: StreamingReplayLimits,
-    mut prefix: super::VerifiedWalPrefix,
+    prefix: super::VerifiedWalPrefix,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
     checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
@@ -519,75 +519,104 @@ fn inspect_file_from(
     })?;
     let mut read_ns = 0;
     let source = frame_reader::source(file, path, limits);
-    if prefix.scan.is_none() {
-        let scan = read_header(&source).and_then(|header| SegmentScan::start(&header));
-        let scan = scan.map_err(|error| super::wal_prefix_failure(prefix.clone(), error.into()))?;
-        prefix.writer_epoch = scan.header().epoch;
-        prefix.valid_bytes = HEADER_LEN;
-        prefix.scan = Some(Box::new(scan));
-    }
+    let super::VerifiedWalPrefix {
+        mut valid_bytes,
+        scan,
+    } = prefix;
+    let mut scan = match scan {
+        Some(scan) => scan,
+        None => match read_header(&source).and_then(|header| SegmentScan::start(&header)) {
+            Ok(scan) => {
+                valid_bytes = HEADER_LEN;
+                Box::new(scan)
+            }
+            Err(error) => {
+                return Err(super::wal_prefix_failure(
+                    super::VerifiedWalPrefix {
+                        valid_bytes,
+                        scan: None,
+                    },
+                    error.into(),
+                ))
+            }
+        },
+    };
     let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sealed_inspection");
-    while !prefix.sealed {
-        let next = frame_reader::next_frame(
-            &source,
-            path,
-            prefix.valid_bytes as u64,
-            limits,
-            &mut read_ns,
-        )
-        .map_err(|failure| super::wal_prefix_failure(prefix.clone(), failure))?;
+    while scan.footer().is_none() {
+        let next =
+            match frame_reader::next_frame(&source, path, valid_bytes as u64, limits, &mut read_ns)
+            {
+                Ok(next) => next,
+                Err(failure) => return Err(stopped(valid_bytes, scan, failure)),
+            };
         let (next_pos, records) = match next {
             NextWalFrame::Eof => break,
             NextWalFrame::Footer { payload, next_pos } => {
-                let scanned = prefix
-                    .scan
-                    .as_mut()
-                    .map_or(Ok(ScannedFrame::Record), |scan| scan.frame(&payload));
-                scanned.map_err(|error| super::wal_prefix_failure(prefix.clone(), error.into()))?;
-                ends_at_footer(&source, path, next_pos)
-                    .map_err(|error| super::wal_prefix_failure(prefix.clone(), error.into()))?;
-                prefix.sealed = true;
+                // Nothing may follow the footer; the scan takes it only then,
+                // so a stopped walk never reads as sealed.
+                let sealed = ends_at_footer(&source, path, next_pos)
+                    .and_then(|()| scan.frame(&payload).map(drop));
+                if let Err(error) = sealed {
+                    return Err(stopped(valid_bytes, scan, error.into()));
+                }
                 (next_pos, 0)
             }
             NextWalFrame::Frame(frame) => {
                 // The scan takes the frame only once the visitor accepted
                 // it: a visitor that stops (a deadline, a budget) leaves the
                 // prefix where a resumed inspection reads the frame again.
-                let admitted = prefix
-                    .scan
-                    .as_ref()
-                    .map_or(Ok(()), |scan| scan.check_record(frame.record.seq))
+                let admitted = scan
+                    .check_record(frame.record.seq)
                     .and_then(|()| {
                         validate_record_contents(&frame.record, limits.max_pending_txn_bytes)
                     })
                     .and_then(|()| visitor(&frame.record))
                     .and_then(|()| {
-                        prefix.scan.as_mut().map_or(Ok(()), |scan| {
-                            scan.frame(&frame.payload)?;
-                            scan.observe(frame.record.seq, frame.record.cf_id)
-                        })
+                        scan.frame(&frame.payload)?;
+                        scan.observe(frame.record.seq, frame.record.cf_id)
                     });
-                admitted
-                    .map_err(|error| super::wal_prefix_failure(prefix.clone(), error.into()))?;
-                prefix.max_sequence = prefix.max_sequence.max(frame.record.seq);
-                prefix.record_count = prefix.record_count.saturating_add(1);
+                if let Err(error) = admitted {
+                    return Err(stopped(valid_bytes, scan, error.into()));
+                }
                 (frame.next_pos, 1)
             }
         };
-        let bytes = next_pos.saturating_sub(prefix.valid_bytes as u64);
-        prefix.valid_bytes = usize::try_from(next_pos).map_err(|_| {
-            super::wal_prefix_failure(
-                prefix.clone(),
+        let bytes = next_pos.saturating_sub(valid_bytes as u64);
+        let Ok(next_valid) = usize::try_from(next_pos) else {
+            return Err(stopped(
+                valid_bytes,
+                scan,
                 super::ReplayFailure::Error(MidgeError::ResourceLimit(
                     "WAL offset exceeds platform address space".into(),
                 )),
-            )
-        })?;
-        checkpoint().map_err(|error| super::wal_prefix_failure(prefix.clone(), error.into()))?;
+            ));
+        };
+        valid_bytes = next_valid;
+        if let Err(error) = checkpoint() {
+            return Err(stopped(valid_bytes, scan, error.into()));
+        }
         progress.completed(bytes, records);
     }
     progress.finish();
-    Ok(prefix)
+    Ok(super::VerifiedWalPrefix {
+        valid_bytes,
+        scan: Some(scan),
+    })
+}
+
+/// A walk that stopped after verifying `valid_bytes` with `scan`.
+fn stopped(
+    valid_bytes: usize,
+    scan: Box<SegmentScan>,
+    failure: super::ReplayFailure,
+) -> super::WalPrefixInspectionFailure {
+    super::wal_prefix_failure(
+        super::VerifiedWalPrefix {
+            valid_bytes,
+            scan: Some(scan),
+        },
+        failure,
+    )
 }
 
 /// Nothing may follow a footer that ends at `next_pos`.

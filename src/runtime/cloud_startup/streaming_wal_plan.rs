@@ -525,15 +525,15 @@ fn remote_source(
         .map_err(FsError::into_midge)?;
     let prefix = inspect_sealed_wal_file(file.as_ref(), &path, limits)?;
     let header = prefix.scan.as_ref().map(|scan| *scan.header());
-    if prefix.max_sequence != publication.max_sequence
-        || prefix.writer_epoch != publication.writer_epoch
-        || header.map(|header| header.id) != Some(publication.segment_id)
-    {
-        return Err(MidgeError::Corruption(format!(
-            "cloud WAL {} sequence, epoch or segment differs from its catalog proof",
+    let identity = prefix.identity().ok_or_else(|| {
+        MidgeError::Corruption(format!(
+            "cloud WAL {} has no header",
             publication.object_key
-        )));
-    }
+        ))
+    })?;
+    publication
+        .check(&identity)
+        .map_err(MidgeError::Corruption)?;
     Ok(PublishedSource {
         link: sealed_link(&prefix),
         holder: header.map_or([0; 16], |header| header.holder),
@@ -561,8 +561,8 @@ fn select_local_segment(
         (
             path,
             crate::runtime::RecoveredCloudWalSegment {
-                max_sequence: prefix.max_sequence,
-                writer_epoch: prefix.writer_epoch,
+                max_sequence: prefix.max_sequence(),
+                writer_epoch: prefix.writer_epoch(),
             },
         )
     }))
@@ -623,7 +623,7 @@ fn active_local_source(
     }
     drop(file);
     if prefix.valid_bytes as u64 != length {
-        if salvaged || prefix.record_count == 0 {
+        if salvaged || prefix.record_count() == 0 {
             // Salvage drops acknowledged records past the corruption, and
             // bytes without a complete record are unexplained; keep the
             // original before cutting the only copy.
@@ -634,7 +634,7 @@ fn active_local_source(
         crate::io::truncate_durably(fs.as_ref(), &path, prefix.valid_bytes as u64)
             .map_err(FsError::into_midge)?;
     }
-    if prefix.record_count == 0 {
+    if prefix.record_count() == 0 {
         return Ok(None);
     }
     Ok(Some(ActiveSource {
@@ -643,8 +643,8 @@ fn active_local_source(
             path,
             expect,
         },
-        max_sequence: prefix.max_sequence,
-        writer_epoch: prefix.writer_epoch,
+        max_sequence: prefix.max_sequence(),
+        writer_epoch: prefix.writer_epoch(),
     }))
 }
 
@@ -724,7 +724,7 @@ fn verified_max_sequence(
         Err(error) => return Err(error.into_midge()),
     };
     match inspect_wal_file(file.as_ref(), &wal_path, limits) {
-        Ok(prefix) => Ok(prefix.max_sequence),
+        Ok(prefix) => Ok(prefix.max_sequence()),
         Err(failure) => {
             if matches!(failure.error(), MidgeError::Timeout(_)) {
                 return Err(failure.error().replay());
@@ -736,7 +736,7 @@ fn verified_max_sequence(
                 prefix.valid_bytes as u64,
                 limits,
             )?;
-            Ok(prefix.max_sequence.max(suffix.unwrap_or(0)))
+            Ok(prefix.max_sequence().max(suffix.unwrap_or(0)))
         }
     }
 }

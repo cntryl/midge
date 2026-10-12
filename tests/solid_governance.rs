@@ -1615,6 +1615,7 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("loses_required_value", "#843"),
     ("Expectation::Chain", "#843"),
     ("OpenTail", "#843"),
+    ("cloud_segment::object_key", "#843"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
