@@ -102,7 +102,7 @@ impl Manifest {
     pub fn prepare_edit(&mut self, edit: &ManifestEdit) -> MidgeResult<PreparedManifestEdit<'_>> {
         edit.validate_for_append()?;
         let mut validator = EditValidator::new(self);
-        validator.apply(edit)?;
+        validator.validate(edit)?;
         let steps = validator.steps;
         Ok(PreparedManifestEdit {
             manifest: self,

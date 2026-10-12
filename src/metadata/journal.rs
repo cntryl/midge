@@ -130,58 +130,7 @@ struct JournalEdit {
 
 impl ManifestEdit {
     pub(crate) fn validate_for_append(&self) -> MidgeResult<()> {
-        self.validate_persisted_sst_names()?;
-        self.validate_flush_pairing()
-    }
-
-    fn validate_flush_pairing(&self) -> MidgeResult<()> {
-        fn flatten<'a>(edit: &'a ManifestEdit, leaves: &mut Vec<&'a ManifestEdit>) {
-            match edit {
-                ManifestEdit::Batch(children) => {
-                    for child in children {
-                        flatten(child, leaves);
-                    }
-                }
-                _ => leaves.push(edit),
-            }
-        }
-        let mut leaves = Vec::new();
-        flatten(self, &mut leaves);
-        for (index, leaf) in leaves.iter().enumerate() {
-            if let ManifestEdit::AdvanceFlushFrontier {
-                cf_id,
-                freeze_sequence,
-            } = leaf
-            {
-                let additions = leaves[..index]
-                    .iter()
-                    .filter_map(|edit| match edit {
-                        ManifestEdit::AddSst(file) if file.cf_id == *cf_id => Some(file),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if !matches!(self, Self::Batch(_))
-                    || *freeze_sequence == u64::MAX
-                    || additions.is_empty()
-                    || additions.iter().any(|file| {
-                        file.largest_seq
-                            .is_none_or(|sequence| sequence > *freeze_sequence)
-                    })
-                {
-                    return Err(crate::common::MidgeError::Corruption(
-                        "flush frontier must follow its SST in the same outer manifest batch"
-                            .into(),
-                    ));
-                }
-                if leaves.iter().any(|edit| matches!(edit, ManifestEdit::RemoveSst { name } if additions.iter().any(|file| file.name == *name))) {
-                    return Err(crate::common::MidgeError::Corruption("flush batch removes its paired SST".into()));
-                }
-                if leaves[..index].iter().any(|edit| matches!(edit, ManifestEdit::AdvanceFlushFrontier { cf_id: earlier, .. } if earlier == cf_id)) {
-                    return Err(crate::common::MidgeError::Corruption("flush batch advances one family more than once".into()));
-                }
-            }
-        }
-        Ok(())
+        self.validate_persisted_sst_names()
     }
 
     pub fn record_type(&self) -> u8 {
@@ -1232,23 +1181,6 @@ pub(crate) fn truncate_journal_with_fs_unlocked(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn should_refuse_unpaired_frontier_before_writing_the_journal() {
-        // Arrange
-        let directory = tempfile::tempdir().unwrap();
-        let edit = ManifestEdit::AdvanceFlushFrontier {
-            cf_id: 0,
-            freeze_sequence: 7,
-        };
-
-        // Act
-        let result = append_edit(directory.path(), &edit);
-
-        // Assert
-        assert!(result.is_err());
-        assert!(!directory.path().join(JOURNAL_FILE).exists());
-    }
     use crate::io::traits::{
         DirEntry, Durability, File, Fs, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
     };

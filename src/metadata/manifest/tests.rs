@@ -120,6 +120,66 @@ fn should_refuse_invalid_frontier_advances_when_publishing_a_flush() {
 }
 
 #[test]
+fn should_refuse_unpaired_flush_frontiers_when_preparing_an_edit() {
+    // Arrange: every edit below would pass the base-relative frontier checks
+    // alone, so only the pairing rule can refuse it.
+    let mut manifest = Manifest::default();
+    manifest
+        .apply_edit(&flush_edit(0, "first.sst", 3, 4))
+        .unwrap();
+    let before = serde_json::to_value(&manifest).unwrap();
+    let add = |name: &str, largest_seq: Option<u64>| {
+        ManifestEdit::AddSst(FileMeta {
+            name: name.into(),
+            largest_seq,
+            ..Default::default()
+        })
+    };
+    let advance = |freeze_sequence| ManifestEdit::AdvanceFlushFrontier {
+        cf_id: 0,
+        freeze_sequence,
+    };
+    let unpaired = [
+        ("outside an outer batch", advance(4)),
+        ("without an output", ManifestEdit::Batch(vec![advance(4)])),
+        (
+            "with an unbounded output",
+            ManifestEdit::Batch(vec![add("unbounded.sst", None), advance(5)]),
+        ),
+        (
+            "with an output past the freeze",
+            ManifestEdit::Batch(vec![add("past.sst", Some(6)), advance(5)]),
+        ),
+        (
+            "removing its output",
+            ManifestEdit::Batch(vec![
+                add("removed.sst", Some(5)),
+                advance(5),
+                ManifestEdit::RemoveSst {
+                    name: "removed.sst".into(),
+                },
+            ]),
+        ),
+        (
+            "advancing twice",
+            ManifestEdit::Batch(vec![add("twice.sst", Some(5)), advance(5), advance(5)]),
+        ),
+    ];
+
+    for (case, edit) in unpaired {
+        // Act
+        let result = manifest.prepare_edit(&edit).map(|_| ());
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Corruption(_))),
+            "{case}: {result:?}"
+        );
+        assert_eq!(serde_json::to_value(&manifest).unwrap(), before, "{case}");
+    }
+}
+
+#[test]
 fn should_retain_frontiers_when_compaction_or_reclamation_removes_every_sst() {
     // Arrange
     let mut manifest = Manifest::default();

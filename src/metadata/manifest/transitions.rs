@@ -145,6 +145,69 @@ fn plan_family_lifecycle(
     }
 }
 
+/// A flush frontier is authority only for the SST published with it: in the
+/// same outer batch, after an output of that family bounded by the freeze,
+/// keeping that output, and advancing the family once.
+fn check_flush_pairing(edit: &ManifestEdit) -> MidgeResult<()> {
+    fn flatten<'a>(edit: &'a ManifestEdit, leaves: &mut Vec<&'a ManifestEdit>) {
+        match edit {
+            ManifestEdit::Batch(children) => {
+                for child in children {
+                    flatten(child, leaves);
+                }
+            }
+            _ => leaves.push(edit),
+        }
+    }
+    let mut leaves = Vec::new();
+    flatten(edit, &mut leaves);
+    for (index, leaf) in leaves.iter().enumerate() {
+        let ManifestEdit::AdvanceFlushFrontier {
+            cf_id,
+            freeze_sequence,
+        } = leaf
+        else {
+            continue;
+        };
+        let additions = leaves[..index]
+            .iter()
+            .filter_map(|edit| match edit {
+                ManifestEdit::AddSst(file) if file.cf_id == *cf_id => Some(file),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !matches!(edit, ManifestEdit::Batch(_))
+            || *freeze_sequence == u64::MAX
+            || additions.is_empty()
+            || additions.iter().any(|file| {
+                file.largest_seq
+                    .is_none_or(|sequence| sequence > *freeze_sequence)
+            })
+        {
+            return Err(MidgeError::Corruption(
+                "flush frontier must follow its SST in the same outer manifest batch".into(),
+            ));
+        }
+        if leaves.iter().any(|edit| {
+            matches!(edit, ManifestEdit::RemoveSst { name }
+                if additions.iter().any(|file| file.name == *name))
+        }) {
+            return Err(MidgeError::Corruption(
+                "flush batch removes its paired SST".into(),
+            ));
+        }
+        if leaves[..index].iter().any(|edit| {
+            matches!(edit, ManifestEdit::AdvanceFlushFrontier { cf_id: earlier, .. }
+                if earlier == cf_id)
+        }) {
+            return Err(MidgeError::Corruption(
+                "flush batch advances one family more than once".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct EditValidator<'a> {
     base: &'a Manifest,
     families: HashMap<u32, ColumnFamilyMeta>,
@@ -275,7 +338,13 @@ impl<'a> EditValidator<'a> {
         Ok(())
     }
 
-    pub(super) fn apply(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
+    /// Validate a whole outer edit: its flush pairing, then every transition.
+    pub(super) fn validate(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
+        check_flush_pairing(edit)?;
+        self.apply(edit)
+    }
+
+    fn apply(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
         match edit {
             ManifestEdit::Batch(edits) => {
                 for child in edits {
