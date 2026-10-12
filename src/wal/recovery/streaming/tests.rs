@@ -867,3 +867,39 @@ fn should_resume_sealed_inspection_when_visitor_stops_mid_segment() {
     assert!(progress.sealed());
     assert_eq!(progress.record_count(), 3);
 }
+
+#[test]
+fn should_reject_segment_scan_when_bytes_follow_its_footer() {
+    // Arrange: a sealed segment whose footer is followed by one more frame,
+    // as recovery scans an open member a crashed rotation already sealed.
+    let (mut sealed, _) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        1,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&put("key", 1))
+    .seal();
+    sealed.extend(encode(&put("key", 2)));
+    let storage = fixture(&[(1, sealed)], 1024);
+    let path = crate::wal::segment_key(1);
+    let file = storage
+        .open(
+            &path,
+            OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .unwrap();
+
+    // Act
+    let result = scan_segment_file(file.as_ref(), &path, None);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::Corruption(message)) if message.contains("follow the footer")),
+        "{result:?}"
+    );
+}

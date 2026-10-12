@@ -39,6 +39,7 @@ fn scan(bytes: &[u8]) -> MidgeResult<SegmentScan> {
         )
         .map_err(crate::wal::frame::FrameError::into_error)?;
         let crate::wal::frame::FrameStep::Frame { payload, next_pos } = step else {
+            scan.finish(bytes.len() as u64)?;
             return Ok(scan);
         };
         if scan.frame(&payload)? == ScannedFrame::Record {

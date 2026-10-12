@@ -131,11 +131,6 @@ fn inspect(
             .map_err(|error| format!("cloud WAL segment '{key}': {error}"))?;
         pos = next_pos;
         if scanned == super::format::ScannedFrame::Footer {
-            if pos != data.len() as u64 {
-                return Err(format!(
-                    "cloud WAL segment '{key}': bytes follow its footer"
-                ));
-            }
             break;
         }
         let record = super::encoding::decode(payload.as_ref())
@@ -146,6 +141,8 @@ fn inspect(
             append_data_coverage_records(key, &record, &mut data_records)?;
         }
     }
+    scan.finish(data.len() as u64)
+        .map_err(|error| format!("cloud WAL segment '{key}': {error}"))?;
     let Some(footer) = scan.footer() else {
         return Err(format!("cloud WAL segment '{key}' ends without its footer"));
     };

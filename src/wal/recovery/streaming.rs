@@ -491,6 +491,10 @@ pub(crate) fn scan_segment_file(
             until.unwrap_or_default()
         )));
     }
+    scan.finish(match until {
+        Some(until) => until,
+        None => crate::wal::frame::FrameBytes::len(&source)?,
+    })?;
     Ok(scan)
 }
 
@@ -552,13 +556,17 @@ fn inspect_file_from(
         let (next_pos, records) = match next {
             NextWalFrame::Eof => break,
             NextWalFrame::Footer { payload, next_pos } => {
-                // Nothing may follow the footer; the scan takes it only then,
-                // so a stopped walk never reads as sealed.
-                let sealed = ends_at_footer(&source, path, next_pos)
-                    .and_then(|()| scan.frame(&payload).map(drop));
-                if let Err(error) = sealed {
+                // The walk takes the footer only once nothing follows it, so
+                // a stopped walk never reads as sealed.
+                let mut sealed = (*scan).clone();
+                let finished = sealed
+                    .frame(&payload)
+                    .and_then(|_| crate::wal::frame::FrameBytes::len(&source))
+                    .and_then(|len| sealed.finish(len));
+                if let Err(error) = finished {
                     return Err(stopped(valid_bytes, scan, error.into()));
                 }
+                *scan = sealed;
                 (next_pos, 0)
             }
             NextWalFrame::Frame(frame) => {
@@ -617,22 +625,6 @@ fn stopped(
         },
         failure,
     )
-}
-
-/// Nothing may follow a footer that ends at `next_pos`.
-fn ends_at_footer(
-    source: &crate::wal::frame::FileFrames<'_>,
-    path: &FsPath,
-    next_pos: u64,
-) -> MidgeResult<()> {
-    use crate::wal::frame::FrameBytes;
-    let len = source.len()?;
-    if next_pos != len {
-        return Err(MidgeError::Corruption(format!(
-            "bytes follow the footer of WAL segment {path}: it ends at {next_pos} of {len}"
-        )));
-    }
-    Ok(())
 }
 
 fn validate_record_contents(record: &WalRecord, max_bytes: usize) -> MidgeResult<()> {
@@ -709,7 +701,8 @@ fn replay_paths(
                 Ok(NextWalFrame::Footer { payload, next_pos }) => {
                     let sealed = scan
                         .frame(&payload)
-                        .and_then(|_| ends_at_footer(&source, &path.path, next_pos))
+                        .and_then(|_| crate::wal::frame::FrameBytes::len(&source))
+                        .and_then(|len| scan.finish(len))
                         .and_then(|()| expect_footer(path, &scan));
                     if let Err(error) = sealed {
                         return state.stop_at(storage, paths, (index, pos), policy, error.into());

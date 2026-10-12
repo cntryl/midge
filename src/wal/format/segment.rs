@@ -422,7 +422,8 @@ pub(crate) struct SegmentScan {
     header: SegmentHeader,
     digest: SegmentDigest,
     tail: SegmentTail,
-    footer: Option<Footer>,
+    /// The footer, once the scan took it, and where its frame ends.
+    footer: Option<(Footer, u64)>,
 }
 
 impl std::fmt::Debug for SegmentScan {
@@ -432,7 +433,7 @@ impl std::fmt::Debug for SegmentScan {
             .field("header", &self.header)
             .field("data_len", &self.digest.data_len())
             .field("tail", &self.tail)
-            .field("footer", &self.footer)
+            .field("footer", &self.footer())
             .finish_non_exhaustive()
     }
 }
@@ -463,7 +464,7 @@ impl SegmentScan {
 
     /// The footer, once the scan reached it.
     pub(crate) fn footer(&self) -> Option<&Footer> {
-        self.footer.as_ref()
+        self.footer.as_ref().map(|(footer, _)| footer)
     }
 
     /// Take the next complete, checksum-verified frame `payload`. A record
@@ -489,7 +490,11 @@ impl SegmentScan {
                     self.header.id
                 )));
             }
-            self.footer = Some(footer);
+            let end = self
+                .digest
+                .data_len()
+                .saturating_add((crate::wal::frame::WAL_FRAME_HEADER_LEN + payload.len()) as u64);
+            self.footer = Some((footer, end));
             return Ok(ScannedFrame::Footer);
         }
         let frame_header = crate::wal::frame::frame_header(payload)
@@ -531,6 +536,23 @@ impl SegmentScan {
             .map_err(MidgeError::Corruption)
     }
 
+    /// End the scan of a segment `len` bytes long (#843): a sealed segment
+    /// ends at its footer, nothing following it. Every walker ends its scan
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// `Corruption` when bytes follow the footer.
+    pub(crate) fn finish(&self, len: u64) -> MidgeResult<()> {
+        match &self.footer {
+            Some((_, end)) if *end != len => Err(MidgeError::Corruption(format!(
+                "bytes follow the footer of WAL segment {}: it ends at {end} of {len}",
+                self.header.id
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// The footer sealing what the scan has read so far.
     pub(crate) fn sealing(&self) -> Footer {
         Footer::sealing(&self.header, &self.tail, &self.digest)
@@ -557,6 +579,7 @@ pub fn records(bytes: &[u8]) -> MidgeResult<Vec<crate::wal::WalRecord>> {
         )
         .map_err(crate::wal::frame::FrameError::into_error)?;
         let crate::wal::frame::FrameStep::Frame { payload, next_pos } = step else {
+            scan.finish(bytes.len() as u64)?;
             return Ok(records);
         };
         if scan.frame(&payload)? == ScannedFrame::Record {
@@ -586,6 +609,17 @@ pub fn header_epoch(bytes: &[u8]) -> MidgeResult<u64> {
 /// The first decode, frame or footer error.
 #[cfg(any(test, feature = "internal-testing"))]
 pub fn footer_link(bytes: &[u8]) -> MidgeResult<Option<ChainLink>> {
+    Ok(sealed_footer(bytes)?.map(|footer| footer.sealed_facts().link))
+}
+
+/// The footer of `bytes`, a whole segment, or `None` for one that is still
+/// open.
+///
+/// # Errors
+///
+/// The first decode, frame or footer error.
+#[cfg(any(test, feature = "internal-testing"))]
+pub(crate) fn sealed_footer(bytes: &[u8]) -> MidgeResult<Option<Footer>> {
     let mut scan = SegmentScan::start(bytes)?;
     let mut pos = HEADER_LEN as u64;
     loop {
@@ -597,7 +631,8 @@ pub fn footer_link(bytes: &[u8]) -> MidgeResult<Option<ChainLink>> {
         )
         .map_err(crate::wal::frame::FrameError::into_error)?;
         let crate::wal::frame::FrameStep::Frame { payload, next_pos } = step else {
-            return Ok(scan.footer().map(|footer| footer.sealed_facts().link));
+            scan.finish(bytes.len() as u64)?;
+            return Ok(scan.footer().cloned());
         };
         if scan.frame(&payload)? == ScannedFrame::Record {
             let record = crate::wal::encoding::decode_view(payload.as_ref())?;

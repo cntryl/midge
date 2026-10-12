@@ -14,7 +14,7 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::runtime::wal_history::WalHistory;
 use crate::wal::format::segment::FIXTURE_HOLDER;
-use crate::wal::format::{ChainLink, Footer, SealedFacts, SegmentHeader, HEADER_LEN};
+use crate::wal::format::{ChainLink, SealedFacts, SegmentHeader, HEADER_LEN};
 use crate::wal::ledger::{HolderId, SegmentId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -177,37 +177,12 @@ type FooterWrite = (u64, Vec<u8>);
 /// write at its offset, unless the segment already ends in one.
 fn seal_facts(wal: &dyn Fs, id: SegmentId) -> MidgeResult<(SealedFacts, Option<FooterWrite>)> {
     let bytes = crate::io::read_all(wal, &segment_path(id)).map_err(FsError::into_midge)?;
-    if let Ok(Some(link)) = crate::wal::format::segment::footer_link(&bytes) {
-        let footer = existing_footer(&bytes, link)?;
+    if let Ok(Some(footer)) = crate::wal::format::segment::sealed_footer(&bytes) {
         return Ok((footer.sealed_facts(), None));
     }
     let footer = crate::wal::format::segment::lenient_footer(&bytes)?;
     let frame = footer.encode_frame()?;
     Ok((footer.sealed_facts(), Some((bytes.len() as u64, frame))))
-}
-
-/// The footer of a sealed segment, decoded from its final frame.
-fn existing_footer(bytes: &[u8], link: ChainLink) -> MidgeResult<Footer> {
-    let mut pos = HEADER_LEN as u64;
-    loop {
-        let step = crate::wal::frame::next_frame(
-            &bytes,
-            &"fixture",
-            pos,
-            crate::wal::frame::FrameLimits::default(),
-        )
-        .map_err(crate::wal::frame::FrameError::into_error)?;
-        let crate::wal::frame::FrameStep::Frame { payload, next_pos } = step else {
-            return Err(MidgeError::Internal(format!(
-                "segment {} has no footer frame",
-                link.id
-            )));
-        };
-        if crate::wal::format::segment::is_footer_payload(&payload) {
-            return Footer::decode_payload(&payload);
-        }
-        pos = next_pos;
-    }
 }
 
 /// The facts sealing a memory-mode segment, which holds nothing.
