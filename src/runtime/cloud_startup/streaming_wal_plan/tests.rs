@@ -1609,6 +1609,56 @@ fn should_link_rejoined_cache_to_catalog_head_when_failing_back() -> MidgeResult
 }
 
 #[test]
+fn should_link_reopened_cache_to_catalog_head_when_a_successor_takes_its_next_id() -> MidgeResult<()>
+{
+    // Arrange: this cache published segment 1 and left an empty open
+    // segment 2; an idle restart reopened it as 3, still linked to 1. A
+    // successor then published its own segment 2, linked to 1.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
+    fixture.active(b"")?;
+    let mut history = fixture.history()?;
+    history.start_epoch(8, 2)?;
+    assert_eq!(history.ledger().open_segment(), 3);
+    drop(history);
+    fixture.publish(2, 2, 9, &framed_wal(2, b"successor"))?;
+    let head = published_link(&fixture, 2)?;
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+
+    // Act
+    let mut history = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
+    )?;
+
+    // Assert: the successor took over, so the cache continues after its
+    // segment rather than forking the chain at segment 1.
+    assert!(recovered.plan.failed_back);
+    let open = history.ledger().open_member().open;
+    assert_eq!(open.prev, head);
+    // A write in the rebased segment publishes after the successor's, and
+    // the published chain replays strictly.
+    append_local(&fixture, open.id, head.last_seq + 1)?;
+    crate::runtime::wal_history::fixture::rotate(&mut history)?;
+    drop(history);
+    let sealed = std::fs::read(fixture.segment(open.id))?;
+    fixture.publish(open.id, head.last_seq + 1, 9, &sealed)?;
+    let reopened = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+    assert!(!reopened.plan.failed_back);
+    assert_eq!(
+        reopened
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2, open.id]
+    );
+    replay_strictly(&reopened)
+}
+
+#[test]
 fn should_link_fresh_cache_first_segment_to_catalog_head() -> MidgeResult<()> {
     // Arrange: a new cache over a catalog holding segments 1 and 2.
     let mut fixture = Fixture::new()?;

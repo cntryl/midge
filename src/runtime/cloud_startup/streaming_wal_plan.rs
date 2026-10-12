@@ -60,6 +60,18 @@ pub(crate) struct StreamingCloudWalRecovery {
     pub(crate) next_remote_id: SegmentId,
 }
 
+/// Whether another writer published past this cache's history (#843).
+/// This ledger publishes only segments it sealed, and every one it sealed is
+/// at or below the segment its open member links: its newest sealed member,
+/// or the anchor it continued from. A catalog segment above that came from
+/// another writer, which took over; this cache's unpublished tail is not
+/// history. An idle restart that reopened an empty segment under a later id
+/// still links the same segment, so it cannot hide the takeover.
+fn was_taken_over(ledger: &WalLedger, catalog_head: Option<SegmentId>) -> bool {
+    let own_tail = ledger.open_member().open.prev.id;
+    catalog_head.is_some_and(|head| head > own_tail)
+}
+
 /// Rejoin past the catalog: every local member is kept aside, replay reads
 /// only what the catalog published, and history continues in a new segment
 /// linked to the catalog's head.
@@ -114,11 +126,9 @@ impl StreamingCloudWalRecovery {
     ) -> MidgeResult<Self> {
         scope.check("cloud WAL planning")?;
         let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
-        let next_remote_id = next_segment_id(catalog.segments.keys().copied().max())?;
-        // This ledger records each seal before it uploads, so only another
-        // writer publishes at or past its open segment: that writer took
-        // over, and this cache's unpublished tail is not history.
-        let failed_back = ledger.is_some_and(|ledger| ledger.open_segment() < next_remote_id);
+        let catalog_head = catalog.segments.keys().copied().max();
+        let next_remote_id = next_segment_id(catalog_head)?;
+        let failed_back = ledger.is_some_and(|ledger| was_taken_over(ledger, catalog_head));
         let mut replay_fs = StreamingWalFs::new(read_window)?;
         let mut plan = CloudWalRecoveryPlan::new(catalog.sequence_floor, failed_back);
         if let (true, Some(ledger)) = (failed_back, ledger) {
