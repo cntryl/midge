@@ -3,7 +3,7 @@
 //! Deterministic, no I/O, suitable for testing.
 
 use super::traits::{
-    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
 };
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -93,6 +93,70 @@ fn checked_write_start(offset: u64) -> FsResult<usize> {
     usize::try_from(offset).map_err(|_| FsError::Io("offset does not fit usize".to_string()))
 }
 
+impl ReadFs for MockFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        let files = self.files.lock();
+        if path.0.is_empty() || files.contains_key(&path.0) {
+            return Ok(true);
+        }
+        let prefix = dir_prefix(path);
+        Ok(self.directories.lock().contains(&path.0)
+            || files.keys().any(|key| key.starts_with(&prefix)))
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        let files = self.files.lock();
+        if let Some(data) = files.get(&path.0) {
+            Ok(Metadata {
+                len: data.data.len() as u64,
+                is_dir: false,
+            })
+        } else {
+            Err(FsError::NotFound(path.0.clone()))
+        }
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        // Directories are implicit: a child is a directory when some key
+        // continues past it. Return immediate child basenames like RealFs.
+        let files = self.files.lock();
+        let directories = self.directories.lock();
+        let prefix = dir_prefix(path);
+        let mut children = std::collections::BTreeMap::new();
+        for rest in directories
+            .iter()
+            .filter_map(|directory| directory.strip_prefix(&prefix))
+        {
+            let child = rest.split_once('/').map_or(rest, |(child, _)| child);
+            children.insert(child.to_string(), true);
+        }
+        for rest in files.keys().filter_map(|key| key.strip_prefix(&prefix)) {
+            match rest.split_once('/') {
+                Some((child, _)) => {
+                    children.insert(child.to_string(), true);
+                }
+                None => {
+                    children.entry(rest.to_string()).or_insert(false);
+                }
+            }
+        }
+        let entries: Vec<_> = children
+            .into_iter()
+            .map(|(name, is_dir)| DirEntry { name, is_dir })
+            .collect();
+
+        if entries.is_empty() && !path.0.is_empty() && !directories.contains(&path.0) {
+            return Err(FsError::NotFound(path.0.clone()));
+        }
+
+        Ok(entries)
+    }
+}
+
 impl Fs for MockFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let mut files = self.files.lock();
@@ -154,28 +218,6 @@ impl Fs for MockFs {
         Ok(())
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        let files = self.files.lock();
-        if path.0.is_empty() || files.contains_key(&path.0) {
-            return Ok(true);
-        }
-        let prefix = dir_prefix(path);
-        Ok(self.directories.lock().contains(&path.0)
-            || files.keys().any(|key| key.starts_with(&prefix)))
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        let files = self.files.lock();
-        if let Some(data) = files.get(&path.0) {
-            Ok(Metadata {
-                len: data.data.len() as u64,
-                is_dir: false,
-            })
-        } else {
-            Err(FsError::NotFound(path.0.clone()))
-        }
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let mut directories = self.directories.lock();
         let mut current = String::new();
@@ -187,42 +229,6 @@ impl Fs for MockFs {
             directories.insert(current.clone());
         }
         Ok(())
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        // Directories are implicit: a child is a directory when some key
-        // continues past it. Return immediate child basenames like RealFs.
-        let files = self.files.lock();
-        let directories = self.directories.lock();
-        let prefix = dir_prefix(path);
-        let mut children = std::collections::BTreeMap::new();
-        for rest in directories
-            .iter()
-            .filter_map(|directory| directory.strip_prefix(&prefix))
-        {
-            let child = rest.split_once('/').map_or(rest, |(child, _)| child);
-            children.insert(child.to_string(), true);
-        }
-        for rest in files.keys().filter_map(|key| key.strip_prefix(&prefix)) {
-            match rest.split_once('/') {
-                Some((child, _)) => {
-                    children.insert(child.to_string(), true);
-                }
-                None => {
-                    children.entry(rest.to_string()).or_insert(false);
-                }
-            }
-        }
-        let entries: Vec<_> = children
-            .into_iter()
-            .map(|(name, is_dir)| DirEntry { name, is_dir })
-            .collect();
-
-        if entries.is_empty() && !path.0.is_empty() && !directories.contains(&path.0) {
-            return Err(FsError::NotFound(path.0.clone()));
-        }
-
-        Ok(entries)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

@@ -3,7 +3,7 @@
 //! state a power loss can leave rather than asserting one happy outcome.
 
 use super::{CrashDevice, CrashFs, Fault, FaultEffect, FaultError, FaultOp, PAGE_BYTES};
-use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use bytes::Bytes;
 use std::collections::BTreeSet;
 

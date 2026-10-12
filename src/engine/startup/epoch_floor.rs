@@ -98,9 +98,10 @@ impl StartupEpochFloor {
         {
             return Ok(0);
         }
-        let mut storage = crate::io::subdirectory(Arc::clone(root), "wal");
+        let mut storage: Arc<dyn crate::io::ReadFs> =
+            crate::io::subdirectory(Arc::clone(root), "wal");
         if let Some(scope) = scope {
-            storage = crate::io::scope_fs(storage, scope.clone());
+            storage = crate::io::scope_read_fs(storage, scope.clone());
         }
         // Read only: the lease is not held yet, so nothing may change.
         let result = crate::runtime::wal_history::WalHistory::read(&storage)

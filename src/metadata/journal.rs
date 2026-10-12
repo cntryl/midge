@@ -1168,7 +1168,7 @@ pub(crate) fn truncate_journal_with_fs_unlocked(
 mod tests {
     use super::*;
     use crate::io::traits::{
-        DirEntry, Durability, File, Fs, FsPath, FsResult, Metadata, OpenOptions,
+        DirEntry, Durability, File, Fs, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
     };
     use crate::metadata::FileMeta;
     use crate::metadata::{Manifest, ManifestPersistence};
@@ -1231,6 +1231,24 @@ mod tests {
         open_gate: Arc<JournalOpenGate>,
     }
 
+    impl ReadFs for GatedJournalFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for GatedJournalFs {
         fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
             self.inner.host_addressing()
@@ -1251,20 +1269,8 @@ mod tests {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

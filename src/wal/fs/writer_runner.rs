@@ -508,7 +508,7 @@ impl WriterRunner {
 mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, FsError, Metadata};
-    use crate::io::{Fs, FsPath, FsResult, OpenOptions as FsOpenOptions};
+    use crate::io::{File, Fs, FsPath, FsResult, OpenOptions as FsOpenOptions, ReadFs};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
@@ -672,6 +672,30 @@ mod tests {
         }
     }
 
+    impl ReadFs for FailingOpenFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, FsOpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
+            Ok(false)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            Err(FsError::Unavailable(format!(
+                "metadata failed for {}",
+                path.0
+            )))
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(format!(
+                "list dir failed for {}",
+                path.0
+            )))
+        }
+    }
+
     impl Fs for FailingOpenFs {
         fn open(
             &self,
@@ -688,27 +712,9 @@ mod tests {
             )))
         }
 
-        fn exists(&self, _path: &FsPath) -> FsResult<bool> {
-            Ok(false)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            Err(FsError::Unavailable(format!(
-                "metadata failed for {}",
-                path.0
-            )))
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             Err(FsError::Unavailable(format!(
                 "create dir failed for {}",
-                path.0
-            )))
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            Err(FsError::Unavailable(format!(
-                "list dir failed for {}",
                 path.0
             )))
         }

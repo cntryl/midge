@@ -11,7 +11,7 @@
 
 use super::traits::{
     DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, Metadata,
-    OpenOptions,
+    OpenOptions, ReadFs,
 };
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -177,6 +177,47 @@ impl RealFs {
     }
 }
 
+impl ReadFs for RealFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        let full = self.full_path(path)?;
+        match fs::metadata(&full) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_err("metadata(exists)", &full, &error)),
+        }
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        let full = self.full_path(path)?;
+        let meta = fs::metadata(&full).map_err(|error| file_op_err("metadata", &full, &error))?;
+        Ok(Metadata {
+            len: meta.len(),
+            is_dir: meta.is_dir(),
+        })
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        let full = self.full_path(path)?;
+        let entries = fs::read_dir(&full)
+            .map_err(|error| file_op_err("read_dir", &full, &error))?
+            .map(|entry| {
+                let entry = entry.map_err(|e| io_err("read_dir_entry", &full, &e))?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry
+                    .file_type()
+                    .map_err(|e| io_err("file_type", &full, &e))?
+                    .is_dir();
+                Ok(DirEntry { name, is_dir })
+            })
+            .collect::<Result<Vec<_>, FsError>>()?;
+        Ok(entries)
+    }
+}
+
 impl Fs for RealFs {
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         Some(HostAddressing {
@@ -207,47 +248,12 @@ impl Fs for RealFs {
         fs::remove_file(&full).map_err(|error| file_op_err("remove_file", &full, &error))
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        let full = self.full_path(path)?;
-        match fs::metadata(&full) {
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(io_err("metadata(exists)", &full, &error)),
-        }
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        let full = self.full_path(path)?;
-        let meta = fs::metadata(&full).map_err(|error| file_op_err("metadata", &full, &error))?;
-        Ok(Metadata {
-            len: meta.len(),
-            is_dir: meta.is_dir(),
-        })
-    }
-
     /// Creates missing directories durably: each new entry's parent is
     /// fsynced before this returns (#519).
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path)?;
         super::durable_dir::create_dir_all_durably(&self.base_path, &full)
             .map_err(|e| io_err("create_dir_all", &full, &e))
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        let full = self.full_path(path)?;
-        let entries = fs::read_dir(&full)
-            .map_err(|error| file_op_err("read_dir", &full, &error))?
-            .map(|entry| {
-                let entry = entry.map_err(|e| io_err("read_dir_entry", &full, &e))?;
-                let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry
-                    .file_type()
-                    .map_err(|e| io_err("file_type", &full, &e))?
-                    .is_dir();
-                Ok(DirEntry { name, is_dir })
-            })
-            .collect::<Result<Vec<_>, FsError>>()?;
-        Ok(entries)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

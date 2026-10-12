@@ -1,7 +1,7 @@
 //! Test filesystem that fails reads past an offset with a transient I/O error.
 
 use super::traits::{
-    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
 };
 use bytes::Bytes;
 
@@ -37,6 +37,24 @@ impl File for TransientReadFile<'_> {
     }
 }
 
+impl ReadFs for TransientReadFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for TransientReadFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(TransientReadFile {
@@ -47,17 +65,8 @@ impl Fs for TransientReadFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_dir_all(path)

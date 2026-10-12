@@ -276,7 +276,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::traits::{DirEntry, File, FsError, FsResult, Metadata};
+    use crate::io::traits::{DirEntry, File, FsError, FsResult, Metadata, ReadFs};
     use parking_lot::Mutex;
 
     struct RecordingFile<'a> {
@@ -326,6 +326,24 @@ mod tests {
         }
     }
 
+    impl ReadFs for RecordingFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for RecordingFs {
         fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             Ok(Box::new(RecordingFile {
@@ -338,20 +356,8 @@ mod tests {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

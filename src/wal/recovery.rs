@@ -6,7 +6,7 @@
 
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{File, FsError, FsPath, ReadFs};
 use crate::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -396,7 +396,7 @@ impl RecoveryStats {
 /// fails to replay stops at its frame like a corrupt one. Limits are
 /// unbounded, so no checkpoint is needed.
 fn replay_local(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
@@ -430,7 +430,7 @@ fn replay_local(
 /// Returns the error replay would return, or `Timeout` once `deadline`
 /// expires between frames.
 pub(crate) fn validate_wal_with_policy(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     replay_policy: ReplayPolicy,
     deadline: Option<&crate::common::OperationDeadline>,
@@ -447,7 +447,7 @@ pub(crate) fn validate_wal_with_policy(
 }
 
 pub(crate) fn replay_wal_with_manifest_filter_within(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
@@ -490,7 +490,7 @@ enum NextWalFrame {
 }
 
 fn open_wal_replay_file<'a>(
-    storage: &'a dyn Fs,
+    storage: &'a dyn ReadFs,
     file_path: &FsPath,
     file_read_ns: &mut u128,
 ) -> MidgeResult<Option<Box<dyn File + 'a>>> {
@@ -499,15 +499,7 @@ fn open_wal_replay_file<'a>(
     }
 
     let open_start = std::time::Instant::now();
-    let file = match storage.open(
-        file_path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    ) {
+    let file = match storage.open_read(file_path) {
         Ok(file) => file,
         Err(FsError::NotFound(_)) => return Ok(None),
         Err(e) => return Err(map_fs_error(e)),

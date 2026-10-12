@@ -26,7 +26,7 @@
 
 use super::ledger::{LedgerEdit, LedgerError, WalLedger};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -102,8 +102,8 @@ impl LedgerStore {
     ///
     /// Loading makes nothing durable: a state read after a process crash can
     /// still be lost to a power loss until [`LedgerStore::open`] returns.
-    pub(crate) fn load(fs: &Arc<dyn Fs>) -> MidgeResult<Option<(WalLedger, LedgerTail)>> {
-        let Some(bytes) = read_ledger(fs.as_ref())? else {
+    pub(crate) fn load(fs: &dyn ReadFs) -> MidgeResult<Option<(WalLedger, LedgerTail)>> {
+        let Some(bytes) = read_ledger(fs)? else {
             return Ok(None);
         };
         let parsed = parse(&bytes)?;
@@ -273,7 +273,7 @@ fn byte_len(bytes: &[u8]) -> u64 {
     u64::try_from(bytes.len()).unwrap_or(u64::MAX)
 }
 
-fn read_ledger(fs: &dyn Fs) -> MidgeResult<Option<Bytes>> {
+fn read_ledger(fs: &dyn ReadFs) -> MidgeResult<Option<Bytes>> {
     match crate::io::read_all(fs, &FsPath::new(LEDGER_FILE)) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(FsError::NotFound(_)) => Ok(None),

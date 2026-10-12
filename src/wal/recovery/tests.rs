@@ -1,5 +1,5 @@
 use super::*;
-use crate::io::{FsPath, RealFs};
+use crate::io::{Fs, FsPath, OpenMode, OpenOptions, RealFs};
 use crate::wal::fs::FsWalWriterIo;
 use crate::wal::types::WalOpKind;
 use crate::wal::WalWriter;

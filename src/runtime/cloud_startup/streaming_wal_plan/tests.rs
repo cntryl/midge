@@ -377,7 +377,7 @@ fn should_serve_planned_wal_sources_without_staging_copies() -> MidgeResult<()> 
     );
     let file = recovered
         .fs
-        .open(&FsPath::new(crate::wal::segment_file_name(2)), READ_ONLY)
+        .open_read(&FsPath::new(crate::wal::segment_file_name(2)))
         .map_err(FsError::into_midge)?;
     assert_eq!(
         file.read_at(0, second.len() as u64)
@@ -1009,6 +1009,24 @@ impl crate::io::File for TruncateFailingFile<'_> {
     }
 }
 
+impl ReadFs for TruncateFailingFs {
+    fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for TruncateFailingFs {
     fn open(
         &self,
@@ -1032,20 +1050,8 @@ impl Fs for TruncateFailingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {

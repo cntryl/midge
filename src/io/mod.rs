@@ -15,7 +15,7 @@
 //!
 //! ## Module Structure
 //!
-//! - **`traits`**: Core `Fs` and `File` abstractions
+//! - **`traits`**: Core `ReadFs`, `Fs` and `File` abstractions
 //! - **`real`**: `RealFs` - production filesystem via `std::fs`
 //! - **`mock`**: `MockFs` - in-memory deterministic backend
 //! - **`staging`**: atomic temp-write + rename helpers for bootstrap files
@@ -43,9 +43,9 @@ mod whole_file;
 pub(crate) use location::FsLocation;
 pub use mock::MockFs;
 pub use real::RealFs;
-pub(crate) use scoped_fs::scope_fs;
+pub(crate) use scoped_fs::{scope_fs, scope_read_fs};
 pub(crate) use subdirectory::subdirectory;
 pub use traits::{
-    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions,
+    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions, ReadFs,
 };
 pub(crate) use whole_file::{copy_durably, read_all, truncate_durably};

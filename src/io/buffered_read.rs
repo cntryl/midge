@@ -3,7 +3,7 @@
 use super::{Durability, File, FsError, FsResult};
 use bytes::{Bytes, BytesMut};
 
-fn read_only_error() -> FsError {
+fn immutable_handle_error() -> FsError {
     FsError::Unsupported("buffered immutable read handles are read only".into())
 }
 
@@ -84,12 +84,12 @@ impl File for BufferedReadFile<'_> {
         Ok(self.file_len)
     }
     fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_handle_error())
     }
     fn append(&mut self, _data: Bytes) -> FsResult<u64> {
-        Err(read_only_error())
+        Err(immutable_handle_error())
     }
     fn sync(&mut self, _durability: Durability) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_handle_error())
     }
 }

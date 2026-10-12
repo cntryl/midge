@@ -471,7 +471,7 @@ impl FsLeaderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::MockFs;
+    use crate::io::{MockFs, ReadFs};
     use std::sync::Barrier;
     use std::thread;
 
@@ -932,7 +932,7 @@ mod tests {
 mod lock_init_failure_tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
-    use crate::io::{File, FsResult, MockFs};
+    use crate::io::{File, FsResult, MockFs, ReadFs};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct FailingLockWriteFile<'a> {
@@ -966,6 +966,24 @@ mod lock_init_failure_tests {
         fail_record_open: AtomicBool,
     }
 
+    impl ReadFs for LockWriteFaultFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for LockWriteFaultFs {
         fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             if path.0 == LEADER_RECORD_FILE && self.fail_record_open.load(Ordering::SeqCst) {
@@ -982,17 +1000,8 @@ mod lock_init_failure_tests {
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_file(path)
         }
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_dir_all(path)

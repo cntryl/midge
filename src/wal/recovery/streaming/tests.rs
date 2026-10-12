@@ -1,6 +1,6 @@
 use super::*;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, FsError, FsResult, MockFs, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsResult, MockFs, OpenOptions};
 use crate::wal::{encoding, frame, WalOpKind};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,6 +46,36 @@ impl File for BoundedFile<'_> {
     }
 }
 
+impl ReadFs for BoundedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        if path.0 == "wal" {
+            Ok(true)
+        } else {
+            self.inner.exists(path)
+        }
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path).map(|entries| {
+            entries
+                .into_iter()
+                .map(|mut entry| {
+                    entry.name = entry.name.rsplit('/').next().unwrap().to_string();
+                    entry
+                })
+                .collect()
+        })
+    }
+}
+
 impl Fs for BoundedFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(BoundedFile {
@@ -59,29 +89,8 @@ impl Fs for BoundedFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        if path.0 == "wal" {
-            Ok(true)
-        } else {
-            self.inner.exists(path)
-        }
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path).map(|entries| {
-            entries
-                .into_iter()
-                .map(|mut entry| {
-                    entry.name = entry.name.rsplit('/').next().unwrap().to_string();
-                    entry
-                })
-                .collect()
-        })
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_dir_all(path)

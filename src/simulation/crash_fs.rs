@@ -37,7 +37,7 @@
 //! is one global choice, so any new directory operation can move it.
 
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions, ReadFs};
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1200,32 +1200,9 @@ impl CrashFs {
     }
 }
 
-impl Fs for CrashFs {
-    fn coordination_key(&self) -> u64 {
-        Arc::as_ptr(&self.device.state) as usize as u64
-    }
-
-    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.open_file(path, opts)
-            .map(|file| Box::new(file) as Box<dyn File>)
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        self.open_file(path, opts)
-            .map(|file| Box::new(file) as Box<dyn File>)
-    }
-
-    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
-        let parts = Self::parts(path)?;
-        self.state()?
-            .faulted(FaultOp::RemoveFile, &[&path.0], |state| {
-                let inode = state.lookup(&parts)?;
-                if state.is_directory(inode) {
-                    return Err(FsError::Io(format!("is a directory: {}", path.0)));
-                }
-                let (parent, name) = state.parent(&parts)?;
-                state.unlink(parent, &name)
-            })
+impl ReadFs for CrashFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -1256,14 +1233,6 @@ impl Fs for CrashFs {
         })
     }
 
-    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        let parts = Self::parts(path)?;
-        self.state()?
-            .faulted(FaultOp::CreateDirAll, &[&path.0], |state| {
-                state.create_dirs(&parts)
-            })
-    }
-
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         let parts = Self::parts(path)?;
         self.state()?
@@ -1278,6 +1247,43 @@ impl Fs for CrashFs {
                         is_dir: state.is_directory(*child),
                     })
                     .collect())
+            })
+    }
+}
+
+impl Fs for CrashFs {
+    fn coordination_key(&self) -> u64 {
+        Arc::as_ptr(&self.device.state) as usize as u64
+    }
+
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.open_file(path, opts)
+            .map(|file| Box::new(file) as Box<dyn File>)
+    }
+
+    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        self.open_file(path, opts)
+            .map(|file| Box::new(file) as Box<dyn File>)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        let parts = Self::parts(path)?;
+        self.state()?
+            .faulted(FaultOp::RemoveFile, &[&path.0], |state| {
+                let inode = state.lookup(&parts)?;
+                if state.is_directory(inode) {
+                    return Err(FsError::Io(format!("is a directory: {}", path.0)));
+                }
+                let (parent, name) = state.parent(&parts)?;
+                state.unlink(parent, &name)
+            })
+    }
+
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        let parts = Self::parts(path)?;
+        self.state()?
+            .faulted(FaultOp::CreateDirAll, &[&path.0], |state| {
+                state.create_dirs(&parts)
             })
     }
 

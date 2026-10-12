@@ -644,24 +644,16 @@ impl ManifestPersistence {
 mod tests {
     use super::*;
     use crate::io::traits::{
-        DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+        DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
     };
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct UnavailableExistsFs;
 
-    impl Fs for UnavailableExistsFs {
-        fn open(&self, _path: &FsPath, _options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            Err(FsError::Unavailable(
-                "test filesystem unavailable".to_string(),
-            ))
-        }
-
-        fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
-            Err(FsError::Unavailable(
-                "test filesystem unavailable".to_string(),
-            ))
+    impl ReadFs for UnavailableExistsFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
         }
 
         fn exists(&self, _path: &FsPath) -> FsResult<bool> {
@@ -676,13 +668,27 @@ mod tests {
             ))
         }
 
-        fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+        fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+    }
+
+    impl Fs for UnavailableExistsFs {
+        fn open(&self, _path: &FsPath, _options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             Err(FsError::Unavailable(
                 "test filesystem unavailable".to_string(),
             ))
         }
 
-        fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
             Err(FsError::Unavailable(
                 "test filesystem unavailable".to_string(),
             ))

@@ -6,7 +6,7 @@ use super::{
     ReplaySegments, ToleratedActiveTail, WalSalvageStop,
 };
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsPath};
+use crate::io::{FsPath, ReadFs};
 use crate::memtable::{size_bound, SkipListMemtable};
 use crate::wal::format::{Chain, SegmentScan, HEADER_LEN};
 use crate::wal::{types::WalOpRole, WalRecord};
@@ -245,7 +245,7 @@ struct ReplayState<'a> {
 /// publish checkpoints durably before removing entries from the memtable map.
 #[cfg(test)]
 pub(crate) fn replay_wal_with_checkpoint(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
@@ -268,7 +268,7 @@ pub(crate) fn replay_wal_with_checkpoint(
 /// `replay_wal_with_checkpoint` with local-recovery behaviour selected.
 #[allow(clippy::too_many_arguments)] // Each input is a distinct replay contract.
 pub(crate) fn replay_wal_with_options(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut Memtables,
     replay_policy: ReplayPolicy,
@@ -324,7 +324,7 @@ fn ensure_deadline(deadline: Option<&crate::common::OperationDeadline>) -> Midge
 /// Highest sequence among verified frames beginning at `offset`. Used only to
 /// keep new writes above sequences that salvage set aside unreplayed.
 fn max_verified_sequence_from_offset(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     path: &FsPath,
     limits: StreamingReplayLimits,
     offset: u64,
@@ -653,7 +653,7 @@ fn validate_record_contents(record: &WalRecord, max_bytes: usize) -> MidgeResult
 }
 
 fn replay_paths(
-    storage: &dyn Fs,
+    storage: &dyn ReadFs,
     segments: &ReplaySegments,
     policy: ReplayPolicy,
     state: &mut ReplayState<'_>,
@@ -815,7 +815,7 @@ impl ReplayState<'_> {
     /// in its footer.
     fn end_segment(
         &mut self,
-        storage: &dyn Fs,
+        storage: &dyn ReadFs,
         paths: &[ReplayFile],
         (index, pos): (usize, u64),
         (scan, chain): (&SegmentScan, &mut Chain),
@@ -846,7 +846,7 @@ impl ReplayState<'_> {
     /// or fail.
     fn stop_at(
         &mut self,
-        storage: &dyn Fs,
+        storage: &dyn ReadFs,
         paths: &[ReplayFile],
         (index, valid_bytes): (usize, u64),
         policy: ReplayPolicy,

@@ -121,6 +121,7 @@ impl Drop for TrackedScratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::ReadFs;
     use std::io::Read as _;
 
     #[test]
@@ -162,6 +163,24 @@ mod tests {
     /// Forwards everything to an in-memory root except long-lived handles.
     struct HandlelessFs(crate::io::MockFs);
 
+    impl ReadFs for HandlelessFs {
+        fn open_read(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
+            self.0.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            self.0.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.0.list_dir(path)
+        }
+    }
+
     impl Fs for HandlelessFs {
         fn coordination_key(&self) -> u64 {
             self.0.coordination_key()
@@ -179,20 +198,8 @@ mod tests {
             self.0.remove_file(path)
         }
 
-        fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
-            self.0.exists(path)
-        }
-
-        fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
-            self.0.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
             self.0.create_dir_all(path)
-        }
-
-        fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-            self.0.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {

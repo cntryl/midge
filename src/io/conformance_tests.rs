@@ -89,6 +89,34 @@ fn should_return_not_found_when_opening_missing_file_without_create() {
 }
 
 #[test]
+fn should_match_read_only_open_when_opening_for_read() {
+    for_each_backend(|backend, fs| {
+        // Arrange
+        write_file(fs, "dir/table.sst", b"durable bytes");
+        let path = FsPath::new("dir/table.sst");
+        let missing = FsPath::new("dir/missing.sst");
+
+        // Act
+        let read = fs.open_read(&path).and_then(|file| file.read_at(0, 13));
+        let opened = fs
+            .open(&path, READ_ONLY)
+            .and_then(|file| file.read_at(0, 13));
+        let absent = fs.open_read(&missing).map(|_| ());
+
+        // Assert
+        assert_eq!(read.unwrap(), opened.unwrap(), "{backend}");
+        assert!(
+            matches!(absent, Err(FsError::NotFound(_))),
+            "{backend}: {absent:?}"
+        );
+        assert!(
+            !fs.exists(&missing).unwrap(),
+            "{backend}: open_read must not create"
+        );
+    });
+}
+
+#[test]
 fn should_list_only_immediate_children_when_listing_directory() {
     for_each_backend(|backend, fs| {
         // Arrange

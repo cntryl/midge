@@ -3811,6 +3811,33 @@ mod recovery_wal_coverage {
         }
     }
 
+    impl crate::io::ReadFs for WholeFileReadCountingFs {
+        fn open_read(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl crate::io::Fs for WholeFileReadCountingFs {
         fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
             self.inner.host_addressing()
@@ -3841,26 +3868,8 @@ mod recovery_wal_coverage {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {

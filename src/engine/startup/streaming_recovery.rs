@@ -2,7 +2,7 @@
 
 use super::RuntimeStorageMaterialization;
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::Fs;
+use crate::io::ReadFs;
 use crate::memtable::SkipListMemtable;
 use crate::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
@@ -24,7 +24,7 @@ mod tests;
 pub(super) struct CloudReplay {
     #[cfg(feature = "internal-testing")]
     pub probe: coverage::probe::RecoveryProbeVariant,
-    pub fs: Arc<dyn Fs>,
+    pub fs: Arc<dyn ReadFs>,
     /// The planned WAL files in `fs`, in replay order.
     pub segments: crate::wal::recovery::ReplaySegments,
     pub limits: StreamingReplayLimits,

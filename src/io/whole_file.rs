@@ -1,7 +1,7 @@
 //! Whole-file reads for small control files (markers, catalogs, leases),
 //! and durable copies and cuts of files that salvage keeps.
 
-use super::{Durability, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions};
+use super::{Durability, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions, ReadFs};
 use bytes::Bytes;
 
 /// Bytes one copy step reads, so a large file is never held whole.
@@ -13,16 +13,8 @@ const COPY_CHUNK: u64 = 4 << 20;
 ///
 /// Returns the backend's error when the file cannot be opened, measured or read;
 /// a missing file is `FsError::NotFound`.
-pub(crate) fn read_all(fs: &dyn Fs, path: &FsPath) -> FsResult<Bytes> {
-    let file = fs.open(
-        path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
+pub(crate) fn read_all(fs: &dyn ReadFs, path: &FsPath) -> FsResult<Bytes> {
+    let file = fs.open_read(path)?;
     let length = file.len()?;
     file.read_at(0, length)
 }

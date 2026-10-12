@@ -7,7 +7,7 @@
 
 use super::{replay_segments, SalvageCut, SetAside, WalHistory};
 use crate::common::MidgeError;
-use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions};
+use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
 use crate::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
 use crate::wal::ledger::SegmentId;
@@ -18,6 +18,11 @@ const POWER_LOSS_SEEDS: u64 = 64;
 
 fn wal(device: &CrashDevice) -> Arc<dyn Fs> {
     crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR)
+}
+
+/// [`wal`] as the read-only view [`WalHistory::read`] takes.
+fn wal_view(device: &CrashDevice) -> Arc<dyn ReadFs> {
+    wal(device)
 }
 
 fn name(id: SegmentId) -> String {
@@ -230,7 +235,7 @@ fn should_adopt_header_only_segment_when_genesis_crashed_before_ledger() {
     device.process_crash();
 
     // Act
-    let read = WalHistory::read(&wal(&device));
+    let read = WalHistory::read(&wal_view(&device));
     let history = WalHistory::open(wal(&device), 1, 2);
 
     // Assert: a header holds no record, so a new history starts over it.

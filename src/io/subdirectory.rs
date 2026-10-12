@@ -3,7 +3,7 @@
 //! a component handed `wal/` or `sst/` cannot bypass the engine's injected root.
 
 use super::traits::{DirEntry, Metadata, ReadObserver};
-use super::{Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenOptions};
+use super::{Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -66,6 +66,24 @@ impl Subdirectory {
     }
 }
 
+impl ReadFs for Subdirectory {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(&self.path(path)?)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(&self.path(path)?)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(&self.path(path)?)
+    }
+}
+
 impl Fs for Subdirectory {
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
@@ -107,20 +125,8 @@ impl Fs for Subdirectory {
         self.inner.remove_file(&self.path(path)?)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(&self.path(path)?)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(&self.path(path)?)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(&self.path(path)?)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(&self.path(path)?)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

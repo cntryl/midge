@@ -5,7 +5,7 @@ use super::streaming_wal_fs::StreamingWalFs;
 use super::streaming_wal_plan::StreamingCloudWalRecovery;
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
-use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::memtable::SkipListMemtable;
 use crate::storage::StorageBackend;
 use crate::types::{EntryType, KeyState};
@@ -76,7 +76,7 @@ enum PreparedInput {
     Wal {
         wal: Box<FixtureWal>,
         coverage: Option<Box<ReplayCoverage>>,
-        replay_fs: Option<Arc<dyn Fs>>,
+        replay_fs: Option<Arc<dyn ReadFs>>,
     },
     #[cfg(any(test, feature = "cloud-common"))]
     Inventory(Vec<crate::metadata::FileMeta>),
@@ -228,17 +228,16 @@ fn wal_fixture(
     wal: &FixtureWal,
     remote: &Arc<dyn StorageBackend>,
     coverage: Option<&ReplayCoverage>,
-    replay_fs: Option<&Arc<dyn Fs>>,
+    replay_fs: Option<&Arc<dyn ReadFs>>,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
     observations.set_phase("planner")?;
     let local_root: Arc<dyn Fs> =
         Arc::new(crate::io::RealFs::new(local).map_err(FsError::into_midge)?);
-    let ledger = crate::runtime::wal_history::WalHistory::read(&crate::io::subdirectory(
-        Arc::clone(&local_root),
-        crate::wal::WAL_DIR,
-    ))?
-    .ok_or_else(|| MidgeError::Internal("the prepared cache has no WAL ledger".into()))?;
+    let wal_dir: Arc<dyn ReadFs> =
+        crate::io::subdirectory(Arc::clone(&local_root), crate::wal::WAL_DIR);
+    let ledger = crate::runtime::wal_history::WalHistory::read(&wal_dir)?
+        .ok_or_else(|| MidgeError::Internal("the prepared cache has no WAL ledger".into()))?;
     let recovered = StreamingCloudWalRecovery::build(
         &local_root,
         Some(&ledger),
@@ -495,7 +494,7 @@ fn incompressible_value(sequence: u64) -> Vec<u8> {
     value
 }
 
-fn buffered_wal(bytes: &[u8]) -> MidgeResult<Arc<dyn Fs>> {
+fn buffered_wal(bytes: &[u8]) -> MidgeResult<Arc<dyn ReadFs>> {
     let memory: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
     let name = crate::wal::segment_file_name(1);
     memory
@@ -573,7 +572,7 @@ fn cached_coverage(
 }
 
 fn replay_fixture(
-    fs: &dyn Fs,
+    fs: &dyn ReadFs,
     segments: &crate::wal::recovery::ReplaySegments,
     memtables: &mut HashMap<u32, Arc<SkipListMemtable>>,
     coverage: Option<&ReplayCoverage>,

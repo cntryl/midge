@@ -4,7 +4,7 @@
 use super::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{
-    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions,
+    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions, ReadFs,
 };
 use bytes::Bytes;
 use std::path::Path;
@@ -201,7 +201,7 @@ fn storage_error(error: crate::storage::StorageError) -> FsError {
     }
 }
 
-fn read_only_error() -> FsError {
+fn immutable_sst_error() -> FsError {
     FsError::Unsupported("remote SST views are read only".into())
 }
 
@@ -262,16 +262,48 @@ impl File for Arc<RemoteSstFile> {
         Ok(Bytes::from(bytes))
     }
     fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
     fn append(&mut self, _data: Bytes) -> FsResult<u64> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
     fn len(&self) -> FsResult<u64> {
         Ok(self.metadata.size)
     }
     fn sync(&mut self, _dur: Durability) -> FsResult<()> {
         Ok(())
+    }
+}
+
+impl ReadFs for RemoteSstFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        if self.pinned.is_none() {
+            match self.local.metadata(path) {
+                Ok(metadata) => return Ok(metadata),
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Metadata {
+            len: self.remote_file(path)?.metadata.size,
+            is_dir: false,
+        })
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        match self.metadata(path) {
+            Ok(_) => Ok(true),
+            Err(FsError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.local.list_dir(path)
     }
 }
 
@@ -351,7 +383,7 @@ impl Fs for RemoteSstFs {
             }
         }
         if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
-            return Err(read_only_error());
+            return Err(immutable_sst_error());
         }
         Ok(Box::new(self.remote_file(path)?))
     }
@@ -360,38 +392,15 @@ impl Fs for RemoteSstFs {
             return self.local.open_persistent_handle(path, opts);
         }
         if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
-            return Err(read_only_error());
+            return Err(immutable_sst_error());
         }
         Ok(Box::new(self.remote_file(path)?))
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        if self.pinned.is_none() {
-            match self.local.metadata(path) {
-                Ok(metadata) => return Ok(metadata),
-                Err(FsError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(Metadata {
-            len: self.remote_file(path)?.metadata.size,
-            is_dir: false,
-        })
-    }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        match self.metadata(path) {
-            Ok(_) => Ok(true),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(error) => Err(error),
-        }
     }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.local.remove_file(path)
     }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.local.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.local.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.local.remove_dir_all(path)
@@ -404,45 +413,54 @@ impl Fs for RemoteSstFs {
     }
 }
 
+impl ReadFs for VerifiedLocalSstFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn metadata(&self, _path: &FsPath) -> FsResult<Metadata> {
+        self.local.metadata(&self.path)
+    }
+
+    fn exists(&self, _path: &FsPath) -> FsResult<bool> {
+        self.local.exists(&self.path)
+    }
+
+    fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        Err(immutable_sst_error())
+    }
+}
+
 impl Fs for VerifiedLocalSstFs {
     fn coordination_key(&self) -> u64 {
         self.local.coordination_key()
     }
     fn open(&self, _path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
-            return Err(read_only_error());
+            return Err(immutable_sst_error());
         }
         self.local.open(&self.path, opts)
     }
     fn open_persistent_handle(&self, _path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
-            return Err(read_only_error());
+            return Err(immutable_sst_error());
         }
         self.local.open_persistent_handle(&self.path, opts)
     }
-    fn metadata(&self, _path: &FsPath) -> FsResult<Metadata> {
-        self.local.metadata(&self.path)
-    }
-    fn exists(&self, _path: &FsPath) -> FsResult<bool> {
-        self.local.exists(&self.path)
-    }
     fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
     fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
-    }
-    fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
     fn remove_dir_all(&self, _path: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
     fn sync_dir(&self, _path: &FsPath, _dur: Durability) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
     fn rename_atomic(&self, _from: &FsPath, _to: &FsPath) -> FsResult<()> {
-        Err(read_only_error())
+        Err(immutable_sst_error())
     }
 }
 
@@ -939,6 +957,24 @@ mod tests {
         }
     }
 
+    impl ReadFs for PublicationRecordingFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for PublicationRecordingFs {
         fn host_addressing(&self) -> Option<HostAddressing<'_>> {
             self.inner.host_addressing()
@@ -949,17 +985,8 @@ mod tests {
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_file(path)
         }
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_dir_all(path)

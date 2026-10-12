@@ -1616,6 +1616,8 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("Expectation::Chain", "#843"),
     ("OpenTail", "#843"),
     ("cloud_segment::object_key", "#843"),
+    ("read_only_error", "#844"),
+    ("require_read_only", "#844"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
@@ -1872,7 +1874,6 @@ fn should_keep_wal_scope_free_of_compatibility_paths() {
 
 /// Replay views read; they implement no mutator (#853).
 #[test]
-#[ignore = "#844: replay views implement the read-only ReadFs"]
 fn should_keep_replay_views_read_only() {
     // Arrange
     let files = source_scan::production_files();

@@ -3,7 +3,7 @@
 
 use super::accounting::{Ledger, Payload};
 use crate::io::traits::{DirEntry, Metadata, ReadObserver};
-use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
+use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -46,6 +46,24 @@ fn payload(path: &FsPath) -> Payload {
         Payload::Journal
     } else {
         Payload::OtherMetadata
+    }
+}
+
+impl ReadFs for AccountedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
     }
 }
 
@@ -104,17 +122,8 @@ impl Fs for AccountedFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_file(path))
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.create_dir_all(path))
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_dir_all(path))

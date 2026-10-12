@@ -407,17 +407,12 @@ mod tests {
         fail_next_rename: AtomicBool,
     }
 
-    impl crate::io::Fs for FlakyRenameFs {
-        fn open(
+    impl crate::io::ReadFs for FlakyRenameFs {
+        fn open_read(
             &self,
             path: &crate::io::FsPath,
-            options: crate::io::OpenOptions,
         ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
-            self.inner.remove_file(path)
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
         }
 
         fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
@@ -431,15 +426,29 @@ mod tests {
             self.inner.metadata(path)
         }
 
-        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
-            self.inner.create_dir_all(path)
-        }
-
         fn list_dir(
             &self,
             path: &crate::io::FsPath,
         ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
             self.inner.list_dir(path)
+        }
+    }
+
+    impl crate::io::Fs for FlakyRenameFs {
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.create_dir_all(path)
         }
 
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
@@ -788,12 +797,30 @@ mod tests {
 mod validity_anchor_tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
-    use crate::io::{Durability, File, FsPath, FsResult, OpenOptions};
+    use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
 
     /// Stalls every rename, as a slow NFS commit would.
     struct SlowRenameFs {
         inner: MockFs,
         stall: Duration,
+    }
+
+    impl ReadFs for SlowRenameFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
     }
 
     impl Fs for SlowRenameFs {
@@ -803,17 +830,8 @@ mod validity_anchor_tests {
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_file(path)
         }
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_dir_all(path)

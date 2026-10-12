@@ -586,7 +586,7 @@ impl Drop for FsWalWriterIo {
 mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
-    use crate::io::{Durability, File, FsResult, OpenOptions};
+    use crate::io::{Durability, File, FsResult, OpenOptions, ReadFs};
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -661,6 +661,24 @@ mod tests {
         durable_sync_count: Arc<AtomicUsize>,
     }
 
+    impl ReadFs for SyncCountingFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for SyncCountingFs {
         fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             self.inner.open(path, options)
@@ -685,20 +703,8 @@ mod tests {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -762,6 +768,24 @@ mod tests {
         }
     }
 
+    impl ReadFs for GatedNoSpaceFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for GatedNoSpaceFs {
         fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             self.inner.open(path, options)
@@ -787,20 +811,8 @@ mod tests {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

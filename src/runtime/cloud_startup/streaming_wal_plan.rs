@@ -5,7 +5,7 @@ use super::{CloudStartupRecovery, CloudWalRecoveryPlan};
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::RecoveryPolicy;
 use crate::io::FsError;
-use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
+use crate::io::{Fs, FsPath, OpenMode, OpenOptions, ReadFs};
 use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
 use crate::wal::format::ChainLink;
 use crate::wal::ledger::{SegmentId, WalLedger};
@@ -51,7 +51,7 @@ fn sealed_link(prefix: &VerifiedWalPrefix) -> Option<ChainLink> {
 }
 
 pub(crate) struct StreamingCloudWalRecovery {
-    pub(crate) fs: Arc<dyn Fs>,
+    pub(crate) fs: Arc<dyn ReadFs>,
     /// The planned WAL files in `fs`, in replay order.
     pub(crate) segments: ReplaySegments,
     pub(crate) plan: CloudWalRecoveryPlan,
@@ -233,7 +233,7 @@ impl StreamingCloudWalRecovery {
         )?;
         scope.check("cloud WAL planning completion")?;
         Ok(Self {
-            fs: crate::io::scope_fs(Arc::new(replay_fs), scope.clone()),
+            fs: crate::io::scope_read_fs(Arc::new(replay_fs), scope.clone()),
             segments,
             plan,
             next_remote_id,
@@ -519,9 +519,9 @@ fn remote_source(
     // Inspection also uses the bounded range window even for a large frame.
     let mut buffered = StreamingWalFs::new(read_window)?;
     let canonical = crate::wal::segment_file_name(publication.segment_id);
-    buffered.insert(canonical.clone(), Arc::clone(&fs), path.clone())?;
+    buffered.insert(canonical.clone(), fs.clone(), path.clone())?;
     let file = buffered
-        .open(&FsPath::new(canonical), READ_ONLY)
+        .open_read(&FsPath::new(canonical))
         .map_err(FsError::into_midge)?;
     let prefix = inspect_sealed_wal_file(file.as_ref(), &path, limits)?;
     let header = prefix.scan.as_ref().map(|scan| *scan.header());

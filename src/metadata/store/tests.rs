@@ -1,6 +1,6 @@
 use super::*;
 use crate::common::MidgeError;
-use crate::io::traits::{DirEntry, Durability, File, FsResult, Metadata, OpenOptions};
+use crate::io::traits::{DirEntry, Durability, File, FsResult, Metadata, OpenOptions, ReadFs};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -36,6 +36,29 @@ impl File for NoSpaceFile<'_> {
     }
 }
 
+impl ReadFs for ObservedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        if self.fail_stats_after_journal_write.load(Ordering::SeqCst)
+            && self.journal_written.load(Ordering::SeqCst)
+        {
+            return Err(FsError::Io("stat failed".into()));
+        }
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for ObservedFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let file = self.inner.open(path, opts)?;
@@ -57,22 +80,8 @@ impl Fs for ObservedFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        if self.fail_stats_after_journal_write.load(Ordering::SeqCst)
-            && self.journal_written.load(Ordering::SeqCst)
-        {
-            return Err(FsError::Io("stat failed".into()));
-        }
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_dir_all(path)

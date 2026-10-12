@@ -136,7 +136,7 @@ pub mod __internal {
         pub use crate::io::traits::{DirEntry, Metadata};
         pub use crate::io::{
             Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, MockFs, OpenMode,
-            OpenOptions, RealFs,
+            OpenOptions, ReadFs, RealFs,
         };
     }
     pub mod memtable {

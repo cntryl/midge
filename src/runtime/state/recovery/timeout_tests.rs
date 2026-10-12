@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::RecoveryPolicy;
 use crate::io::traits::{DirEntry, HostAddressing, Metadata};
-use crate::io::{Durability, File, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -96,6 +96,29 @@ impl File for TimedReadFile<'_> {
     }
 }
 
+impl ReadFs for TimedReadFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        let entries = self.inner.list_dir(path)?;
+        self.evidence.completed_lists.fetch_add(1, Ordering::AcqRel);
+        if self.evidence.read_failed.load(Ordering::Acquire) {
+            return Err(FsError::Timeout("timed local quarantine inventory".into()));
+        }
+        Ok(entries)
+    }
+}
+
 impl Fs for TimedReadFs {
     fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let inner = self.inner.open(path, options)?;
@@ -116,23 +139,6 @@ impl Fs for TimedReadFs {
 
     fn coordination_key(&self) -> u64 {
         self.inner.coordination_key()
-    }
-
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        let entries = self.inner.list_dir(path)?;
-        self.evidence.completed_lists.fetch_add(1, Ordering::AcqRel);
-        if self.evidence.read_failed.load(Ordering::Acquire) {
-            return Err(FsError::Timeout("timed local quarantine inventory".into()));
-        }
-        Ok(entries)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -457,6 +463,24 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
 /// Forwards to the host, except that every directory listing fails.
 struct ListingFailsFs(crate::io::RealFs);
 
+impl ReadFs for ListingFailsFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn File + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.0.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.0.metadata(path)
+    }
+
+    fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        Err(FsError::Io("injected directory listing failure".into()))
+    }
+}
+
 impl Fs for ListingFailsFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         self.0.open(path, opts)
@@ -464,17 +488,8 @@ impl Fs for ListingFailsFs {
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.0.remove_file(path)
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.0.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.0.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.0.create_dir_all(path)
-    }
-    fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        Err(FsError::Io("injected directory listing failure".into()))
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.0.remove_dir_all(path)
