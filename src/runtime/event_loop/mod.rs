@@ -389,7 +389,11 @@ impl EventLoop {
             self.wal_transition
                 .initialize_gc_pins(self.state.wal.open_segment(), self.state.sequence);
         }
-        self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)
+        self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)?;
+        if self.cloud_coordinator.hybrid_storage.is_some() {
+            self.state.extend_cloud_frontier_over_unwritten_sequences();
+        }
+        Ok(())
     }
 
     /// The compaction publisher shares the flush worker's inline mode so

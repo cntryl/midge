@@ -1289,6 +1289,21 @@ impl RuntimeState {
         Ok(sealed)
     }
 
+    /// Extend the cloud durability frontier over sequences no WAL record
+    /// holds (#843): those after the last record before the open segment and
+    /// below the open segment's first sequence, which an earlier process
+    /// reserved or no record took before a rotation. Once the cloud holds
+    /// every record through the segment before the open one, it holds every
+    /// record below the open one.
+    pub(crate) fn extend_cloud_frontier_over_unwritten_sequences(&mut self) {
+        let open = self.wal.history.ledger().open_member().open;
+        if self.wal.frontiers.cloud_durable() >= open.prev.last_seq {
+            self.wal
+                .frontiers
+                .advance_cloud_to(open.first_seq.saturating_sub(1));
+        }
+    }
+
     pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
         self.raise_sequence_to(self.compaction_output_generation);
         let generation = *self.allocate_sequences(1)?.end();

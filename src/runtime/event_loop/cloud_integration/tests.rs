@@ -9928,3 +9928,56 @@ fn should_not_owe_a_zero_record_segment_after_restart() -> crate::common::MidgeR
         .exists());
     Ok(())
 }
+
+#[test]
+fn should_extend_cloud_frontier_over_reserved_sequences_without_records(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: an earlier process reserved sequences through 1000 and the
+    // cloud holds every record it wrote, through sequence 3; nothing is owed.
+    let directory = tempfile::tempdir()?;
+    let db_path = directory.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    state.wal.history.reserve(1000)?;
+    state.raise_sequence_to(3);
+    state.wal.frontiers.reset_cloud_for_recovery(3);
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+                .expect("create cloud backend"),
+        ),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        hybrid_storage: Some(hybrid_storage),
+        writer_epoch: 1,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+
+    // Act
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+
+    // Assert: sequences 4..=1000 hold no record, so the cloud holds every
+    // record below the new open segment.
+    assert_eq!(event_loop.state.sequence, 1000);
+    assert_eq!(
+        event_loop
+            .state
+            .wal
+            .history
+            .ledger()
+            .open_member()
+            .open
+            .first_seq,
+        1001
+    );
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1000);
+    Ok(())
+}
