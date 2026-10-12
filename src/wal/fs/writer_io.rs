@@ -5,7 +5,7 @@
 //!
 //! Architectural rules (Maintainer: read carefully and DO NOT modify):
 //! ---------------------------------------------------------------
-//! • `FsWalWriterIo` ONLY appends bytes to the active WAL file `wal.log`.
+//! • `FsWalWriterIo` ONLY appends bytes to the WAL ledger's open segment.
 //! • It NEVER assigns sequence numbers.
 //! • It NEVER rotates WAL segments.
 //! • It NEVER writes metadata beyond the encoded WAL record format.
@@ -31,7 +31,7 @@ const MAX_WAIT_ATTEMPTS: u32 = 50;
 
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
-/// This struct is responsible ONLY for writing bytes to `wal.log`.
+/// This struct is responsible ONLY for writing bytes to the open segment.
 /// It does not manage segment rotation, sequence assignment, recovery,
 /// or any other higher-level concerns. Those belong to the WAL actor.
 pub struct FsWalWriterIo {
@@ -65,7 +65,8 @@ pub struct FsWalWriterIo {
     io_timeout: Duration,
 }
 impl FsWalWriterIo {
-    /// Create a new WAL writer targeting `wal.log` using the provided filesystem.
+    /// Create a new WAL writer appending to the file at `path_str` in the
+    /// provided filesystem.
     ///
     /// # Errors
     ///

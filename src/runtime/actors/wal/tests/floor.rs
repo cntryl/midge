@@ -48,7 +48,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     let wal_path = directory
         .path()
         .join("wal")
-        .join(crate::wal::ACTIVE_FILE_NAME);
+        .join(crate::wal::segment_file_name(1));
     assert_eq!(
         std::fs::metadata(&wal_path)?.len(),
         0,
@@ -125,9 +125,12 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
     drop(state);
     let wal_directory = directory.path().join("wal");
     std::fs::rename(
-        wal_directory.join(crate::wal::ACTIVE_FILE_NAME),
+        wal_directory.join(crate::wal::segment_file_name(1)),
         wal_directory.join(crate::wal::segment_file_name(7)),
     )?;
+    let wal: Arc<dyn crate::io::Fs> =
+        Arc::new(crate::io::RealFs::new(&wal_directory).map_err(crate::io::FsError::into_midge)?);
+    crate::runtime::wal_history::fixture::replace(&wal, &[7], 8)?;
 
     // Act
     let mut recovered = RuntimeState::try_new(

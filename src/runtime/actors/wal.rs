@@ -253,6 +253,9 @@ pub struct WalActor {
     leader_holder_id: String,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
+    /// The segment ledger (#842): which WAL files are history. Rotation and
+    /// retirement change it only through this actor. `None` in memory mode.
+    history: Option<crate::runtime::wal_history::WalHistory>,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -261,6 +264,14 @@ pub struct WalActor {
     // WAL append instrumentation
     append_calls: u64,
     append_total: Duration,
+}
+
+/// Where a WAL actor's records go.
+pub(crate) enum WalBacking {
+    /// Nowhere durable: memory mode.
+    Memory,
+    /// Segment files, named by their ledger.
+    Files(crate::runtime::wal_history::WalHistory),
 }
 
 mod apply_op;
@@ -605,40 +616,42 @@ impl WalActor {
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
-        let fs: Arc<dyn Fs> = if memory_mode {
-            Arc::new(crate::io::MockFs::new())
+        let backing = if memory_mode {
+            WalBacking::Memory
         } else {
-            Arc::new(crate::io::RealFs::new(wal_dir).map_err(FsError::into_midge)?)
+            let fs: Arc<dyn Fs> =
+                Arc::new(crate::io::RealFs::new(wal_dir).map_err(FsError::into_midge)?);
+            WalBacking::Files(crate::runtime::wal_history::WalHistory::open(fs, 1)?)
         };
         Self::open(
-            fs,
+            backing,
             durability_policy,
             batch_config,
-            memory_mode,
             writer_epoch,
             storage_io_timeout,
         )
     }
 
-    /// Open the WAL actor over `wal`, the database's WAL directory view.
-    pub fn open(
-        wal: Arc<dyn Fs>,
+    /// Open the WAL actor over `backing`; a file-backed WAL appends to its
+    /// ledger's open segment.
+    pub(crate) fn open(
+        backing: WalBacking,
         durability_policy: DurabilityPolicy,
         batch_config: BatchConfig,
-        memory_mode: bool,
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
         let counters = crate::telemetry::CounterSink::default();
-        let io = if memory_mode {
-            WalIoState::Memory
-        } else {
-            let fs = wal;
-            let factory = FsWalFactoryIo::new(Arc::clone(&fs))
-                .with_io_timeout(storage_io_timeout)
-                .with_counters(counters.clone());
-            let writer = factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?;
-            WalIoState::Open { fs, writer }
+        let (io, history) = match backing {
+            WalBacking::Memory => (WalIoState::Memory, None),
+            WalBacking::Files(history) => {
+                let fs = history.wal();
+                let factory = FsWalFactoryIo::new(Arc::clone(&fs))
+                    .with_io_timeout(storage_io_timeout)
+                    .with_counters(counters.clone());
+                let writer = factory.open_segment(history.ledger().open_segment())?;
+                (WalIoState::Open { fs, writer }, Some(history))
+            }
         };
 
         let actor = Self {
@@ -662,6 +675,7 @@ impl WalActor {
             leader_store: None,
             leader_holder_id: String::new(),
             max_replayable_txn_bytes: None,
+            history,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -845,6 +859,43 @@ impl WalActor {
 
     pub(crate) fn current_segment_max_sequence(&self) -> u64 {
         self.segment_max_sequence
+    }
+
+    /// The segment ledger; `None` in memory mode.
+    pub(crate) fn ledger(&self) -> Option<&crate::wal::ledger::WalLedger> {
+        self.history
+            .as_ref()
+            .map(crate::runtime::wal_history::WalHistory::ledger)
+    }
+
+    /// Retire every WAL segment below `to` through the ledger. Memory mode
+    /// keeps no segments and retires nothing.
+    ///
+    /// # Errors
+    ///
+    /// Refuses while the actor is fenced: a fenced writer changes no
+    /// history. Otherwise returns the ledger's error, having removed nothing.
+    pub(crate) fn retire_wal_below(
+        &mut self,
+        to: crate::wal::ledger::SegmentId,
+    ) -> MidgeResult<crate::runtime::wal_history::RetiredWal> {
+        if self.is_fenced() {
+            return Err(self
+                .io_error()
+                .unwrap_or_else(|| MidgeError::RecoveryFailed("the WAL is fenced".to_string())));
+        }
+        match self.history.as_mut() {
+            Some(history) => history.retire_below(to),
+            None => Ok(crate::runtime::wal_history::RetiredWal::default()),
+        }
+    }
+
+    /// The segment ledger itself, for tests that stage a history.
+    #[cfg(test)]
+    pub(crate) fn history_for_test(
+        &mut self,
+    ) -> Option<&mut crate::runtime::wal_history::WalHistory> {
+        self.history.as_mut()
     }
 
     #[cfg(test)]

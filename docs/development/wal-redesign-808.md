@@ -24,7 +24,7 @@ names the stage whose pull request turns a case GREEN:
 | Stage | Scope | Issues |
 |---|---|---|
 | 1 | Injected storage root: every engine file effect goes through one `Fs`, then the qualified crash simulator | #813, #814, #815, #816, #827, #825; simulator #817 (crash filesystem), #830 (object store, scheduler), #831 (oracle, local campaigns), #837 (fixture re-targeting, campaign budgets), #835 (lease control), #838 (cloud campaigns) |
-| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818; #841 (contiguous publication, upload retries) |
+| 2 | Segment ledger, linked segment format, sequence reservations, contiguous catalog publication | #818: #841 (contiguous publication, upload retries), #848 (replay takes segment lists), #842 (segment ledger, prefix-only retention), #843 (linked segments, reservations), #844 (chained catalog, recovery planner) |
 | 3 | Per-family flush frontiers; replay and retention cut over from SST coverage proofs | #819 |
 | 4 | Ownership, lineage and storage-enforced fencing | #820 |
 | 5 | One salvage rule | #821 |
@@ -55,6 +55,18 @@ Decisions that refine the #808 target design:
   The queue is WAL-only.
 - Rotation does not pre-open the next segment, because the next header links
   the previous segment's final digest.
+- Genesis records the holder identity and the first open segment. A fresh
+  cloud cache starts one past the catalog's last segment. A ledger whose open
+  segment is below that was succeeded by another writer, which alone
+  publishes there; its local WAL is set aside and history continues past
+  the catalog.
+- Salvage drops a suffix of the ledger with `SetAside{from, open}`, after
+  copying the dropped files into `wal/salvaged-<millis>/`. Nothing is renamed.
+- Files the ledger does not name are orphans. The writable open sweeps them,
+  and fails closed on one holding data above every id the ledger handed out.
+- An idle column family pins every later local segment until a flush covers
+  its own: prefix-only retirement accepts that growth. Cloud acknowledgements
+  that arrive out of order keep later local copies until the prefix catches up.
 
 ## Named regressions
 
@@ -79,6 +91,28 @@ open must preserve those values on a later healthy open.
 
 The failed-unlink fixture injects a `remove_file` error on the older retired
 segment through the same device, so it runs on every platform (#837).
+
+The segment ledger (#842) turns `restarted-segment-id` and
+`failed-local-unlink` GREEN. Ids come from the ledger, which never hands out
+one it recorded, and the ledger records a new log start before a file is
+unlinked, so a file whose removal fails is never replayed. The matching
+campaign detections became controls. `predecessor-cache` moved to stage 4:
+a segment id cannot tell a predecessor's stale tail from a successor's
+history once the successor's catalog entries retire, so it needs ownership
+(#820). A cache whose ledger is behind the catalog
+belongs to a writer another one succeeded: it sets its local WAL aside,
+replays only the catalog, and continues past it, since an unpublished tail is
+not history once another writer has taken over.
+
+Three fixtures lost their scenario under the ledger and were re-targeted to
+reproduce the same defects:
+- `substitute-upload-collision` now crashes before the ledger retires the
+  local copy, so the intact local member is still history when the remote
+  copy is damaged.
+- `lost-buffered-delete` fails the WAL sync that the post-flush prune would
+  otherwise win the race with.
+- The #811 stale-lease-lock detection now powers off after a clean shutdown,
+  since every open's ledger publication makes the earlier unlink durable.
 
 ## Baseline execution
 

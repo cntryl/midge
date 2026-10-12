@@ -80,6 +80,9 @@ fn publish_records(
         &encoded,
     )
     .expect("publish catalog mirror");
+    // The segment comes from a writer whose cache is not this one, so this
+    // cache starts its WAL history again, past the published segment.
+    std::fs::remove_dir_all(path.join("wal")).expect("drop the local WAL cache");
     bytes
 }
 

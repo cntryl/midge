@@ -2,24 +2,28 @@
 //
 // Rotation step classification (see the module docs in `wal.rs`):
 //
-// | step                                   | reversible? | failure outcome        |
-// |----------------------------------------|-------------|------------------------|
-// | ticket / existing-file preflight       | yes         | `Open`, retryable      |
-// | drop active writer                     | yes*        | reopened or `Fenced`   |
-// | rename `wal.log` -> `wal-N`            | no          | `Fenced`, sealed = N   |
-// | directory sync after rename            | no          | `Fenced`, sealed = N   |
-// | create replacement writer              | no          | `Fenced`, sealed = N   |
-// | directory sync after writer creation   | no          | `Fenced`, sealed = N   |
-// | return to `Open` + advance segment id  | no          | `Fenced`, sealed = N   |
+// | step                                         | reversible? | failure outcome        |
+// |----------------------------------------------|-------------|------------------------|
+// | ticket / ledger agreement                    | no          | `Fenced`, sealed none  |
+// | heal the ledger, create the next segment     | yes         | `Open`, retryable      |
+// | open segment missing, next one holds data    | no          | `Fenced`, sealed none  |
+// | drop the writer of the open segment          | no          | `Fenced`, sealed none  |
+// | record `Rotate` in the segment ledger        | no          | `Fenced`, sealed = N   |
+// | open a writer on the next segment            | no          | `Fenced`, sealed = N   |
+// | return to `Open` + advance segment id        | no          | `Fenced`, sealed = N   |
 //
-// * Dropping the writer closes the file. If the rename then fails the writer
-//   is reopened on the same path; if that reopen fails the actor fences.
+// Nothing is appended to the next segment until the ledger records it, so a
+// crash before that leaves at most an empty file no history names, which the
+// next rotation adopts. A failed ledger write may still have become durable,
+// so it counts as sealing segment N.
 use super::{WalActor, WalRotationReceipt, WalTransitionOperation};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Durability, Fs, FsError, FsPath};
+use crate::io::Fs;
 use crate::runtime::state::RuntimeState;
+use crate::runtime::wal_history::PreparedRotation;
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+use crate::wal::ledger::SegmentId;
 use crate::wal::FsWalFactoryIo;
 use std::sync::Arc;
 
@@ -85,9 +89,33 @@ impl WalActor {
                 max_sequence,
             });
         };
-
-        self.seal_active_segment(state, &fs, old_segment)?;
-        self.install_replacement_writer_after_seal(state, &fs, old_segment)?;
+        self.begin_io_transition(WalTransitionOperation::Rotate)?;
+        if let Err(error) = self.ensure_ledger_agrees(old_segment, next_segment) {
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        let prepared = match self.prepare_next_segment() {
+            Ok(prepared) => prepared,
+            // History is damaged: the open segment's records are gone, or
+            // the next segment holds data no ledger edit accounts for.
+            Err(error @ (MidgeError::RecoveryFailed(_) | MidgeError::Corruption(_))) => {
+                self.fence_transition(state, error.to_string());
+                return Err(error);
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.finish_io_transition() {
+                    self.fence_transition(
+                        state,
+                        format!(
+                            "WAL segment creation failed and the reversible transition could not be rolled back: {rollback_error}"
+                        ),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        self.record_rotation(state, prepared, old_segment)?;
+        self.install_next_writer(state, &fs, old_segment, next_segment)?;
         if let Err(error) = self.finish_io_transition() {
             self.fence_transition(
                 state,
@@ -106,164 +134,104 @@ impl WalActor {
         })
     }
 
-    fn seal_active_segment(
-        &mut self,
-        state: &mut RuntimeState,
-        fs: &Arc<dyn Fs>,
-        old_segment: u64,
-    ) -> MidgeResult<bool> {
-        let old_path = FsPath::new(crate::wal::ACTIVE_FILE_NAME);
-        let new_path = FsPath::new(crate::wal::segment_file_name(old_segment));
-        self.begin_io_transition(WalTransitionOperation::Rotate)?;
-        let sealed_segment_exists = match fs.exists(&new_path) {
-            Ok(exists) => exists,
-            Err(error) => {
-                let error = FsError::into_midge(error);
-                if let Err(rollback_error) = self.finish_io_transition() {
-                    self.fence_transition(
-                        state,
-                        format!(
-                            "WAL rotation preflight failed and the reversible transition could not be rolled back: {rollback_error}"
-                        ),
-                    );
-                }
-                return Err(error);
-            }
-        };
-        if sealed_segment_exists {
-            let error = MidgeError::RecoveryFailed(format!(
-                "refusing to overwrite existing sealed WAL segment {old_segment}"
-            ));
-            self.fence_transition(state, error.to_string());
-            return Err(error);
+    fn ensure_ledger_agrees(&self, old_segment: SegmentId, next: SegmentId) -> MidgeResult<()> {
+        let history = self.history.as_ref().ok_or_else(|| {
+            MidgeError::Internal("a file-backed WAL rotated without its segment ledger".to_string())
+        })?;
+        let ledger = history.ledger();
+        if ledger.open_segment() != old_segment || ledger.next_segment_id() != next {
+            return Err(MidgeError::Internal(format!(
+                "the WAL ledger (open segment {}, next {}) disagrees with the actor (segment {old_segment}, next {next})",
+                ledger.open_segment(),
+                ledger.next_segment_id()
+            )));
         }
-
-        if let Err(error) = WalTransitionBoundary::BeforeRename.check() {
-            self.finish_io_transition()?;
-            return Err(error);
-        }
-        if let Err(error) = Self::before_rename_boundary() {
-            self.finish_io_transition()?;
-            return Err(error);
-        }
-
-        if let Err(error) = self.ensure_lease_validity() {
-            self.finish_io_transition()?;
-            return Err(error);
-        }
-        drop(self.take_transition_writer());
-        self.ensure_transition_authority(state)?;
-        let sealed_file_created = match fs.rename_atomic(&old_path, &new_path) {
-            Ok(()) => true,
-            Err(FsError::NotFound(_)) if self.can_ignore_missing_active_segment() => {
-                tracing::debug!(
-                    old_segment,
-                    "WAL rotate ignored missing empty active segment"
-                );
-                false
-            }
-            Err(FsError::NotFound(_)) => {
-                // Records were appended to a file that no longer exists. A
-                // later fsync could not make them durable, so the actor must
-                // not continue as though the accepted writes were intact.
-                let error = MidgeError::RecoveryFailed(format!(
-                    "active WAL segment disappeared while {} buffered records (through sequence {}) were pending",
-                    self.pending_sync_count, self.segment_max_sequence
-                ));
-                self.fence_transition(state, error.to_string());
-                tracing::error!(
-                    old_segment,
-                    "WAL rotate found no active segment for pending records"
-                );
-                return Err(error);
-            }
-            Err(error) => {
-                let original = FsError::into_midge(error);
-                if let Err(reopen_error) = self.restore_active_writer_after_failed_rotate(fs) {
-                    self.fence_transition(
-                        state,
-                        format!(
-                            "WAL rename failed and the active writer could not be restored: {reopen_error}"
-                        ),
-                    );
-                }
-                tracing::error!(old_segment, error = %original, "WAL rotate failed before sealing active segment");
-                return Err(original);
-            }
-        };
-
-        if sealed_file_created {
-            self.mark_transition_sealed(old_segment);
-            if let Err(error) = WalTransitionBoundary::AfterRename.check() {
-                self.fence_transition(state, error.to_string());
-                return Err(error);
-            }
-            self.ensure_transition_authority(state)?;
-            if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
-                let error = FsError::into_midge(error);
-                self.fence_transition(state, format!("sealed WAL directory sync failed: {error}"));
-                return Err(error);
-            }
-        }
-        Ok(sealed_file_created)
+        Ok(())
     }
 
-    fn install_replacement_writer_after_seal(
+    /// The reversible step: make the ledger writable again after an earlier
+    /// failed write, then create the next segment, empty and durable. An
+    /// empty file an earlier attempt left is adopted.
+    fn prepare_next_segment(&mut self) -> MidgeResult<PreparedRotation> {
+        WalTransitionBoundary::BeforeSegmentCreate.check()?;
+        Self::before_segment_create_boundary()?;
+        self.ensure_lease_validity()?;
+        let prepared = self
+            .history
+            .as_mut()
+            .ok_or_else(|| {
+                MidgeError::Internal("a file-backed WAL rotated without its segment ledger".into())
+            })?
+            .prepare_rotation()?;
+        WalTransitionBoundary::AfterSegmentCreate.check()?;
+        Ok(prepared)
+    }
+
+    /// The irreversible step: stop writing the open segment, then make the
+    /// ledger record it sealed and the next segment open.
+    fn record_rotation(
         &mut self,
         state: &mut RuntimeState,
-        fs: &Arc<dyn Fs>,
-        old_segment: u64,
+        prepared: PreparedRotation,
+        old_segment: SegmentId,
     ) -> MidgeResult<()> {
-        if let Err(error) = Self::after_rename_boundary() {
-            self.fence_transition(state, error.to_string());
+        drop(self.take_transition_writer());
+        self.ensure_transition_authority(state)?;
+        let recorded = match self.history.as_mut() {
+            Some(history) => history.record_rotation(prepared),
+            None => Err(MidgeError::Internal(
+                "a file-backed WAL rotated without its segment ledger".to_string(),
+            )),
+        };
+        self.mark_transition_sealed(old_segment);
+        if let Err(error) = recorded {
+            self.fence_transition(
+                state,
+                format!("the WAL ledger could not record the rotation: {error}"),
+            );
+            tracing::error!(old_segment, error = %error, "WAL rotate could not record the sealed segment");
             return Err(error);
         }
-        if let Err(error) = WalTransitionBoundary::BeforeWriterCreate.check() {
-            self.fence_transition(state, error.to_string());
-            return Err(error);
-        }
-
-        match self.create_replacement_writer(fs) {
-            Ok(writer) => {
-                if let Err(error) = self.install_transition_writer(writer) {
-                    self.fence_transition(state, error.to_string());
-                    return Err(error);
-                }
-                if let Err(error) = Self::after_writer_create_boundary() {
-                    self.fence_transition(state, error.to_string());
-                    return Err(error);
-                }
-                if let Err(error) = WalTransitionBoundary::AfterWriterCreate.check() {
-                    self.fence_transition(state, error.to_string());
-                    return Err(error);
-                }
-                self.ensure_transition_authority(state)?;
-                if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
-                    let error = FsError::into_midge(error);
-                    self.fence_transition(
-                        state,
-                        format!("replacement WAL directory sync failed: {error}"),
-                    );
-                    return Err(error);
-                }
-            }
-            Err(error) => {
-                self.fence_transition(
-                    state,
-                    format!(
-                        "WAL segment was sealed but replacement writer creation failed: {error}"
-                    ),
-                );
-                tracing::error!(old_segment, error = %error, "WAL rotate could not install replacement writer");
-                return Err(error);
-            }
-        }
-
-        if let Err(error) = WalTransitionBoundary::AfterReplacementDirectorySync.check() {
+        if let Err(error) = WalTransitionBoundary::AfterLedgerRotate.check() {
             self.fence_transition(state, error.to_string());
             return Err(error);
         }
         Ok(())
+    }
+
+    fn install_next_writer(
+        &mut self,
+        state: &mut RuntimeState,
+        fs: &Arc<dyn Fs>,
+        old_segment: SegmentId,
+        next_segment: SegmentId,
+    ) -> MidgeResult<()> {
+        if let Err(error) = Self::after_ledger_rotate_boundary() {
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        let writer = match self.segment_writer(fs, next_segment) {
+            Ok(writer) => writer,
+            Err(error) => {
+                self.fence_transition(
+                    state,
+                    format!(
+                        "WAL segment {old_segment} was sealed but no writer could open segment {next_segment}: {error}"
+                    ),
+                );
+                tracing::error!(old_segment, error = %error, "WAL rotate could not install the next writer");
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.install_transition_writer(writer) {
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        if let Err(error) = Self::after_writer_create_boundary() {
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        self.ensure_transition_authority(state)
     }
 
     fn ensure_transition_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
@@ -278,47 +246,26 @@ impl WalActor {
         Ok(())
     }
 
-    fn can_ignore_missing_active_segment(&self) -> bool {
-        self.segment_max_sequence == 0 && !self.has_pending_data()
-    }
-
-    fn create_replacement_writer(
+    fn segment_writer(
         &self,
         fs: &Arc<dyn Fs>,
+        segment: SegmentId,
     ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
-        let factory = FsWalFactoryIo::new(Arc::clone(fs))
+        FsWalFactoryIo::new(Arc::clone(fs))
             .with_io_timeout(self.storage_io_timeout)
             .with_counters(self.counters.clone())
-            .with_write_authority(self.write_authority());
-        factory.create_writer(crate::wal::ACTIVE_FILE_NAME)
-    }
-
-    fn restore_active_writer_after_failed_rotate(&mut self, fs: &Arc<dyn Fs>) -> MidgeResult<()> {
-        let factory = FsWalFactoryIo::new(Arc::clone(fs))
-            .with_io_timeout(self.storage_io_timeout)
-            .with_counters(self.counters.clone())
-            .with_write_authority(self.write_authority());
-        match factory.create_writer(crate::wal::ACTIVE_FILE_NAME) {
-            Ok(writer) => {
-                self.install_transition_writer(writer)?;
-                self.finish_io_transition()
-            }
-            Err(error) => {
-                tracing::error!(
-                    error = ?error,
-                    "failed to reopen active WAL writer after rotate failure"
-                );
-                Err(error)
-            }
-        }
+            .with_write_authority(self.write_authority())
+            .open_segment(segment)
     }
 
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn before_rename_boundary() -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::wal::inject_fail_before_rename", |_| Err(
-            MidgeError::Internal("failpoint: WAL rotation failed before rename".to_string(),)
+    fn before_segment_create_boundary() -> MidgeResult<()> {
+        crate::failpoints::fail_point!("midge::wal::inject_fail_before_segment_create", |_| Err(
+            MidgeError::Internal(
+                "failpoint: WAL rotation failed before creating the next segment".to_string(),
+            )
         ));
         Ok(())
     }
@@ -326,11 +273,12 @@ impl WalActor {
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn after_rename_boundary() -> MidgeResult<()> {
+    fn after_ledger_rotate_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!(
-            "midge::wal::inject_fail_after_rename_before_writer_create",
+            "midge::wal::inject_fail_after_ledger_rotate_before_writer_create",
             |_| Err(MidgeError::Internal(
-                "failpoint: replacement WAL writer creation failed after rename".to_string(),
+                "failpoint: the next WAL writer failed after the ledger recorded the rotation"
+                    .to_string(),
             ))
         );
         Ok(())

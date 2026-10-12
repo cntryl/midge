@@ -1,9 +1,7 @@
 //! Bounded fixture construction. Source data is deterministic and independent
 //! of Midge reads; no complete backlog or expected-value ledger is kept in RAM.
 
-use cntryl_midge::__internal::wal::{
-    cloud_segment_object_key, encoding, frame, WalOpKind, WalRecord,
-};
+use cntryl_midge::__internal::wal::{encoding, frame, segment_object_key, WalOpKind, WalRecord};
 use cntryl_midge::{
     CloudObjectLayout, CloudProviderConfig, CloudStorageLocation, Engine, MemoryBudget,
     OpenOptions, TransactionMode, WriteOptions,
@@ -241,7 +239,7 @@ impl Campaign {
                 self.records += 1;
                 sequence += 1;
             }
-            let object_key = cloud_segment_object_key(segment_id, epoch);
+            let object_key = segment_object_key(segment_id, epoch);
             self.request("PUT", &object_key, &bytes);
             segments.insert(segment_id.to_string(), json!({
                 "segment_id": segment_id, "writer_epoch": epoch, "max_sequence": sequence - 1,

@@ -2445,12 +2445,20 @@ mod local_wal_retention {
         tx.get(key).expect("get").map(|value| value.to_vec())
     }
 
+    /// Sealed WAL segments on disk: every segment but the newest, which is
+    /// the open one.
     fn sealed_segments(path: &Path) -> usize {
         std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name() != "wal.log")
+            .filter(|entry| {
+                cntryl_midge::__internal::wal::parse_segment_id(
+                    &entry.file_name().to_string_lossy(),
+                )
+                .is_some()
+            })
             .count()
+            .saturating_sub(1)
     }
 
     /// Copies a live database directory as a crash image, leaving out the
@@ -2659,6 +2667,8 @@ mod local_wal_retention {
 
     // ---- audit V1 (LT-A) ----
 
+    /// Ids of the sealed WAL segments on disk: every segment but the
+    /// newest, which is the open one.
     fn wal_segment_ids(path: &Path) -> Vec<u64> {
         let mut ids: Vec<u64> = std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
@@ -2669,6 +2679,7 @@ mod local_wal_retention {
             })
             .collect();
         ids.sort_unstable();
+        ids.pop();
         ids
     }
 
@@ -2689,8 +2700,10 @@ mod local_wal_retention {
     }
 
     #[cfg(feature = "internal-testing")]
+    /// Ids of the sealed WAL segments on `device`: every segment but the
+    /// newest, which is the open one.
     fn device_segment_ids(device: &CrashDevice) -> Vec<u64> {
-        device
+        let mut ids: Vec<u64> = device
             .files()
             .keys()
             .filter_map(|path| {
@@ -2699,7 +2712,10 @@ mod local_wal_retention {
                     .parse::<u64>()
                     .ok()
             })
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids.pop();
+        ids
     }
 
     /// LT-A, removal-failure variant. Segment 1 holds `put k`; segment 2 holds
@@ -2751,7 +2767,6 @@ mod local_wal_retention {
 
     #[test]
     #[cfg(feature = "internal-testing")]
-    #[ignore = "#808 stage 3: failed-local-unlink"]
     fn should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails() {
         // Arrange
         let fail_older_removal = true;
@@ -2800,11 +2815,10 @@ mod local_wal_retention {
         epochs
     }
 
-    /// LT-C: segment ids are derived from the files present at open, so a
-    /// full prune followed by a restart hands out id 1 again.
+    /// LT-C: segment ids come from the WAL ledger (#842), so a full prune
+    /// followed by a restart never hands out an id an earlier run used.
     #[test]
     #[cfg(feature = "internal-testing")]
-    #[ignore = "#808 stage 2: restarted-segment-id"]
     fn should_allocate_wal_segment_ids_above_previous_runs_when_all_sealed_segments_were_pruned() {
         // Arrange: run 1 seals and fully retires segments 1 and 2.
         let temp = tempfile::TempDir::new().expect("temp");

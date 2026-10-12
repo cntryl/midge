@@ -207,7 +207,7 @@ mod tests {
             max_sequence: segment_id * 10,
             size_bytes: 64,
             content_crc32c: u32::try_from(segment_id).unwrap(),
-            object_key: crate::wal::cloud_segment_object_key(segment_id, 1),
+            object_key: crate::wal::segment_object_key(segment_id, 1),
         }
     }
 

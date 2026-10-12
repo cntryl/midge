@@ -36,6 +36,7 @@ mod search;
 #[path = "wal_campaigns/workload.rs"]
 mod workload;
 
+use cntryl_midge::__internal::simulation::{Fault, FaultEffect, FaultError, FaultOp};
 use config::{Config, Mode, StoreFaults, RENEWING_LEASE_TTL_MILLIS};
 use harness::{Campaign, FindingKind, Stop, LEASE_LOCK};
 use images::{assert_clean, assert_reproduced, load_image};
@@ -62,8 +63,10 @@ fn should_find_no_violation_when_synced_writes_survive_crashes() {
 
 #[test]
 fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
-    // Arrange: segment-name reuse after restarts is the known
-    // `restarted-segment-id`, reported by its own campaign.
+    // Arrange: a power loss can cut a rotation between creating its segment
+    // and recording it in the ledger; the open sweeps that empty orphan and
+    // the next rotation creates the same name again. The ledger never named
+    // the first file, but the reuse check counts names on the device.
     let workloads = control_seeds(32);
     let config = Config {
         segment_reuse: false,
@@ -117,37 +120,38 @@ fn should_reproduce_best_effort_delete_when_campaigning() {
     });
 }
 
+/// Formerly the detection of `failed-local-unlink`: a failed removal of a
+/// flushed WAL segment left its file in `wal/`, and the next open listed the
+/// directory and replayed it, bringing a deleted key back. Retirement now
+/// makes the ledger's new log start durable before it unlinks, so a file
+/// whose removal fails is an orphan recovery never replays and the next open
+/// sweeps (#842).
 #[test]
-fn should_reproduce_failed_local_unlink_when_campaigning() {
+fn should_keep_deleted_keys_absent_when_wal_removals_fail() {
     // Arrange
-    let config = Config {
-        segment_reuse: false,
-        ..Config::default()
-    };
+    let workloads = control_seeds(32);
 
     // Act
-    let finding = campaign(Profile::FailedUnlink, DETECTION_SEEDS, 30, config);
+    let finding = campaign(Profile::FailedUnlink, workloads, 30, Config::default());
 
-    // Assert: a deleted key came back after a WAL removal failed.
-    assert_reproduced("failed-local-unlink", finding, |finding| {
-        resurrects(&finding.kind) && finding.faults_fired > 0
-    });
+    // Assert
+    assert_clean("failed-unlink-control", finding);
 }
 
+/// Formerly the detection of `restarted-segment-id`: once flushes retired
+/// every sealed segment, a restart allocated its segment id from what the
+/// WAL directory still listed and durably gave a retired name again. The
+/// segment ledger now allocates every id past each one it ever named (#842).
 #[test]
-fn should_reproduce_restarted_segment_id_when_campaigning() {
+fn should_not_reuse_segment_names_when_flushes_retire_every_sealed_segment() {
     // Arrange
-    let workloads = DETECTION_SEEDS;
+    let workloads = control_seeds(32);
 
     // Act
     let finding = campaign(Profile::SegmentRetirement, workloads, 16, Config::default());
 
     // Assert
-    assert_reproduced(
-        "restarted-segment-id",
-        finding,
-        |finding| matches!(&finding.kind, FindingKind::SegmentReuse(name) if name.starts_with("wal/")),
-    );
+    assert_clean("segment-retirement-control", finding);
 }
 
 #[test]
@@ -169,18 +173,31 @@ fn should_reproduce_recovered_tail_loss_when_campaigning() {
     });
 }
 
+/// #811: a completed lease release unlinks its acquisition lock without a
+/// directory sync, so a power loss before any later one brings the lock back
+/// and refuses every open. Every open republishes the segment ledger and
+/// syncs `wal/` after taking its lease (#842), and on the simulated device a
+/// directory sync commits every earlier namespace change, the unlink
+/// included. The release a clean shutdown completes has no open after it.
 #[test]
 fn should_reproduce_stale_lease_lock_when_power_is_lost() {
-    // Arrange: #811, found by power losses; the operator's workaround is off.
+    // Arrange: the operator's workaround is off.
     let config = Config {
         clear_stale_lease_lock: false,
         ..Config::default()
     };
+    let workload = [
+        Op::Put {
+            family: 0,
+            key: 1,
+            durability: Durability::Sync,
+        },
+        Op::PowerLossAfterShutdown,
+    ];
 
     // Act
-    let found = DETECTION_SEEDS
-        .map(|seed| (seed, Profile::CrashControl.workload(seed, 24, Mode::Local)))
-        .find_map(|(seed, workload)| Campaign::run(seed, &workload, config).err())
+    let found = Campaign::run(0, &workload, config)
+        .err()
         .map(|finding| *finding);
 
     // Assert
@@ -243,6 +260,12 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
 /// control's nightly budget: a buffered delete is flushed into an SST, a power
 /// loss drops its unsynced WAL record, and compaction then drops the flushed
 /// tombstone together with the put it shadowed, so recovery replays the put.
+///
+/// A completed flush wakes its caller before the event loop syncs the WAL to
+/// seal the active segment for pruning, so whether the delete's record is
+/// still unsynced when power is lost is a race the event loop often wins. The
+/// WAL's next sync fails and drops its writeback, so either way the device
+/// keeps the WAL from before the delete.
 #[test]
 #[ignore = "#808 stage 3: lost-buffered-delete"]
 fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
@@ -252,9 +275,14 @@ fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
     campaign.recover(Stop::Clean).expect("first open");
     campaign.write(0, 1, false, Durability::Sync);
     campaign.write(0, 1, true, Durability::Buffered);
-    campaign
-        .apply(&Op::Flush { family: 0 }, &[])
-        .expect("flush");
+    campaign.inject(Fault {
+        op: FaultOp::Sync,
+        path: "wal".into(),
+        nth: 1,
+        effect: FaultEffect::Before,
+        error: FaultError::Io,
+    });
+    campaign.flush(0).expect("flush the buffered delete");
     campaign.lose_power_with(|_| 0);
     let recovered = campaign.recover(Stop::PowerLoss);
 
@@ -275,8 +303,10 @@ fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
 
 #[test]
 fn should_find_no_violation_when_provider_writes_survive_takeovers() {
-    // Arrange: segment-name reuse after restarts is the known
-    // `restarted-segment-id`, reported by its own campaign.
+    // Arrange: a power loss can cut a rotation between creating its segment
+    // and recording it in the ledger; the open sweeps that empty orphan and
+    // the next rotation creates the same name again. The ledger never named
+    // the first file, but the reuse check counts names on the device.
     let workloads = control_seeds(16);
     let config = Config {
         segment_reuse: false,
@@ -292,8 +322,10 @@ fn should_find_no_violation_when_provider_writes_survive_takeovers() {
 
 #[test]
 fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
-    // Arrange: segment-name reuse after restarts is the known
-    // `restarted-segment-id`, reported by its own campaign.
+    // Arrange: a power loss can cut a rotation between creating its segment
+    // and recording it in the ledger; the open sweeps that empty orphan and
+    // the next rotation creates the same name again. The ledger never named
+    // the first file, but the reuse check counts names on the device.
     let workloads = control_seeds(16);
     let config = Config {
         segment_reuse: false,

@@ -573,7 +573,10 @@ fn should_remain_healthy_when_successful_clients_resume_before_watchdog_expiry()
     }));
 }
 
-fn assert_database_stays_empty(workload: &Path) {
+/// Recovery may only progress through completed work, never disk churn: the
+/// local cache, which holds only its WAL ledger, never changes while the
+/// sampler watches the recovery wait.
+fn assert_local_cache_stays_unchanged(workload: &Path) {
     let samples = fs::read_to_string(workload.join("resource-samples.csv"))
         .expect("retained recovery sampler observations");
     let disk_bytes: Vec<_> = samples
@@ -592,7 +595,7 @@ fn assert_database_stays_empty(workload: &Path) {
         "sampler must observe the recovery wait"
     );
     assert!(
-        disk_bytes.iter().all(|&bytes| bytes == 0),
+        disk_bytes.iter().all(|&bytes| bytes == disk_bytes[0]),
         "recovery fixture must not acquire progress from disk growth: {disk_bytes:?}"
     );
 }
@@ -632,7 +635,7 @@ fn assert_successful_recovery_work(output: &Output, workload: &Path) -> Value {
     assert!(result["progress_units"]
         .as_u64()
         .is_some_and(|units| units > 0));
-    assert_database_stays_empty(workload);
+    assert_local_cache_stays_unchanged(workload);
     result
 }
 
@@ -688,7 +691,7 @@ fn should_report_no_progress_when_actual_cloud_recovery_holds_first_range() {
     assert_eq!(observations["completed_range_reads"], 0);
     assert_eq!(observations["completed_range_bytes"], 0);
     assert_eq!(observations["local_wal_bytes"], 0);
-    assert_database_stays_empty(&workload);
+    assert_local_cache_stays_unchanged(&workload);
 }
 
 fn should_report_no_progress_when_actual_inventory_holds_first_head() {
@@ -719,7 +722,7 @@ fn should_report_no_progress_when_actual_inventory_holds_first_head() {
     assert_eq!(observations["completed_inventory_size_validations"], 0);
     assert_eq!(observations["completed_range_reads"], 0);
     assert_eq!(observations["local_wal_bytes"], 0);
-    assert_database_stays_empty(&workload);
+    assert_local_cache_stays_unchanged(&workload);
 }
 
 fn should_remain_healthy_when_actual_inventory_validates_delayed_heads() {

@@ -581,8 +581,9 @@ pub(super) fn discover_frontiers(
     let mut read_ns = 0;
     let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("frontier_scan");
     for path in paths {
+        // Replay stops at a missing member, so discovery does too.
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut read_ns)? else {
-            continue;
+            break;
         };
         let source = frame_reader::source(&*file, &path.path, limits);
         let mut pos = 0;
@@ -630,7 +631,19 @@ fn replay_paths(
     for (index, path) in paths.iter().enumerate() {
         let Some(file) = open_wal_replay_file(storage, &path.path, &mut state.stats.wal_read_ns)?
         else {
-            continue;
+            // Every planned file is history: one that is gone lost its
+            // records, so nothing after it may replay (#842).
+            return state.stop_at(
+                storage,
+                paths,
+                index,
+                0,
+                policy,
+                ReplayFailure::Record(MidgeError::Corruption(format!(
+                    "WAL segment {} is history but its file is missing",
+                    path.path
+                ))),
+            );
         };
         let source = frame_reader::source(&*file, &path.path, state.limits);
         // End of the last frame this file replayed: the verified prefix.
@@ -744,16 +757,12 @@ impl ReplayState<'_> {
                     valid_bytes,
                     "wal replay stopped at corrupt verified-prefix boundary"
                 );
-                let unreplayed_paths: Vec<FsPath> = paths[index + 1..]
-                    .iter()
-                    .map(|file| file.path.clone())
-                    .collect();
                 let mut max_unreplayed_sequence = None;
-                for path in &unreplayed_paths {
+                for unreplayed in &paths[index + 1..] {
                     max_unreplayed_sequence =
                         max_unreplayed_sequence.max(max_verified_sequence_from_offset(
                             storage,
-                            path,
+                            &unreplayed.path,
                             self.limits,
                             0,
                             self.options,
@@ -775,7 +784,6 @@ impl ReplayState<'_> {
                 self.stats.salvage_stop = Some(WalSalvageStop {
                     path: path.path.clone(),
                     valid_bytes,
-                    unreplayed_paths,
                     max_unreplayed_sequence,
                 });
                 Ok(())

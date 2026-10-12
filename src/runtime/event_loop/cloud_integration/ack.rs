@@ -301,12 +301,13 @@ impl EventLoop {
         ready_segment_ids: &[u64],
     ) {
         for ready_segment_id in ready_segment_ids {
-            if self.remove_cloud_durable_local_wal_segment(*ready_segment_id) {
-                if let Err(error) = self.wal_transition.retire_cloud_durable(*ready_segment_id) {
-                    self.fence_wal_transition(&error, Some(*ready_segment_id));
-                    tracing::error!(%error, segment_id = *ready_segment_id, "cloud WAL obligation retirement fenced");
-                    return;
-                }
+            if let Err(error) = self.retire_cloud_local_wal(
+                *ready_segment_id,
+                crate::runtime::event_loop::coordination::LocalRetirement::CLOUD_DURABLE,
+            ) {
+                self.fence_wal_transition(&error, Some(*ready_segment_id));
+                tracing::error!(%error, segment_id = *ready_segment_id, "cloud WAL obligation retirement fenced");
+                return;
             }
         }
         if let Err(error) = WalTransitionBoundary::AfterCommitBeforeReturn.check() {
@@ -343,10 +344,14 @@ impl EventLoop {
             tracing::debug!(segment_id, "ignored stale cloud WAL prune completion");
             return;
         }
-        // Catalog retirement does not disable startup replay of a local copy.
-        // Keep deletion proof until unlink and its directory barrier both settle.
-        if self.remove_cloud_durable_local_wal_segment(segment_id) {
-            self.wal_transition.retire_gc_pin(segment_id);
+        // Catalog retirement does not stop startup replaying a local member,
+        // so its tombstone GC pin holds until the ledger retires it.
+        if let Err(error) = self.retire_cloud_local_wal(
+            segment_id,
+            crate::runtime::event_loop::coordination::LocalRetirement::GC_PIN,
+        ) {
+            self.fence_wal_transition(&error, Some(segment_id));
+            tracing::error!(%error, segment_id, "cloud WAL obligation retirement fenced");
         }
         self.background_compaction_schedule.mark_due();
         match result {
@@ -469,7 +474,12 @@ impl EventLoop {
             return;
         };
         let local_path = crate::wal::segment_key(segment_id);
-        if matches!(self.state.fs.exists(&local_path), Ok(true)) {
+        // Only a ledger member's file is history worth uploading again.
+        let member = self
+            .wal_actor
+            .ledger()
+            .is_some_and(|ledger| ledger.is_member(segment_id));
+        if member && matches!(self.state.fs.exists(&local_path), Ok(true)) {
             self.cloud_coordinator
                 .cloud_wal
                 .upload_backlog

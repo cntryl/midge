@@ -105,11 +105,13 @@ impl StartupEpochFloor {
         if let Some(scope) = scope {
             storage = crate::io::scope_fs(storage, scope.clone());
         }
-        let result = crate::runtime::wal_history::listed_segments(
-            storage.as_ref(),
-            &crate::io::FsPath::new(""),
-        )
-        .and_then(|segments| {
+        // Read only: the lease is not held yet, so nothing may change.
+        let result = crate::runtime::wal_history::WalHistory::read(&storage).and_then(|ledger| {
+            let Some(ledger) = ledger else {
+                return Ok(0);
+            };
+            let segments =
+                crate::runtime::wal_history::replay_segments(&ledger, &crate::io::FsPath::new(""));
             crate::wal::recovery::max_writer_epoch(storage.as_ref(), &segments, replay_policy)
         });
         if let Some(scope) = scope {

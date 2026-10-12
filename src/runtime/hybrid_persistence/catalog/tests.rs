@@ -139,11 +139,7 @@ impl CatalogExpiryFixture {
         let publication_path = directory.path().join("second.wal");
         std::fs::write(&publication_path, &second_wal).unwrap();
         storage
-            .compare_exchange_remote_object(
-                &crate::wal::cloud_segment_object_key(2, 7),
-                None,
-                second_wal,
-            )
+            .compare_exchange_remote_object(&crate::wal::segment_object_key(2, 7), None, second_wal)
             .unwrap();
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
         catalog
@@ -385,13 +381,23 @@ fn should_preserve_catalog_when_validity_expires_during_provider_read() {
     }
 }
 
+/// Plans strict recovery as cloud startup does, over a cache whose WAL
+/// ledger starts past every cataloged segment.
 fn strict_recovery(
     root: &std::path::Path,
     remote: &Arc<dyn crate::storage::StorageBackend>,
     catalog: &WalPublicationCatalog,
 ) -> crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery {
+    let wal: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(root.join("wal")).unwrap());
+    let first_open = catalog
+        .segments
+        .keys()
+        .next_back()
+        .map_or(1, |last| last + 1);
+    let history = crate::runtime::wal_history::WalHistory::open(wal, first_open).unwrap();
     crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery::build(
         &crate::io::real::test_root(root),
+        history.ledger(),
         remote,
         catalog,
         crate::config::RecoveryPolicy::Strict,
@@ -472,12 +478,14 @@ fn successor_storage(remote: &Arc<dyn crate::storage::StorageBackend>) -> CloudP
 
 #[test]
 fn should_preserve_republished_wal_when_predecessor_validity_expires_before_delete() {
-    // Arrange: retain the valid local seal, as a failed unlink does.
+    // Arrange: retain the valid local seal, as a cache whose ledger has not
+    // retired it yet does.
     let fixture = CatalogExpiryFixture::new("gc-republication");
     let retained = fixture.directory.path().join("retained");
     std::fs::create_dir_all(retained.join("wal")).unwrap();
     let seal = retained.join("wal").join(crate::wal::segment_file_name(1));
     std::fs::write(&seal, framed_wal_bytes(1)).unwrap();
+    crate::runtime::wal_history::fixture::record_at(&retained, &[1], 2).unwrap();
     let target = fixture.candidate.validated.proof.clone();
     let retired = super::super::retire_covered_wal_catalog_prefix_within(
         &fixture.storage,
@@ -533,7 +541,13 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
         .remote_object_proof(&fixture.segment.object_key)
         .unwrap();
     assert!(republished.metadata().same_version(target.metadata()));
-    std::fs::remove_file(&seal).unwrap();
+    let wal: Arc<dyn crate::io::Fs> =
+        Arc::new(crate::io::RealFs::new(retained.join("wal")).unwrap());
+    crate::runtime::wal_history::WalHistory::open(wal, 1)
+        .unwrap()
+        .retire_below(2)
+        .unwrap();
+    assert!(!seal.exists());
     release_tx.send(()).unwrap();
     let completion = wait_prune_completion(&fixture.storage);
 
@@ -635,7 +649,7 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
                     max_sequence: segment_id + 1,
                     size_bytes: 1,
                     content_crc32c: 0,
-                    object_key: crate::wal::cloud_segment_object_key(segment_id, 7),
+                    object_key: crate::wal::segment_object_key(segment_id, 7),
                 }],
             )
             .unwrap();

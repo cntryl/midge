@@ -296,16 +296,26 @@ fn verify_storage_root(
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
 
-    let wal_stats = crate::runtime::wal_history::listed_segments(fs.as_ref(), &FsPath::new("wal"))
-        .and_then(|segments| {
-            crate::wal::recovery::validate_wal_with_policy(
-                fs.as_ref(),
-                &segments,
-                crate::wal::recovery::ReplayPolicy::Strict,
-                deadline,
-            )
-        })
-        .map_err(|error| verification_stage_error("WAL verification failed", error))?;
+    let wal_stats = crate::runtime::wal_history::WalHistory::read(&crate::io::subdirectory(
+        Arc::clone(fs),
+        crate::wal::WAL_DIR,
+    ))
+    .and_then(|ledger| {
+        let segments =
+            ledger.map_or_else(crate::wal::recovery::ReplaySegments::default, |ledger| {
+                crate::runtime::wal_history::replay_segments(
+                    &ledger,
+                    &FsPath::new(crate::wal::WAL_DIR),
+                )
+            });
+        crate::wal::recovery::validate_wal_with_policy(
+            fs.as_ref(),
+            &segments,
+            crate::wal::recovery::ReplayPolicy::Strict,
+            deadline,
+        )
+    })
+    .map_err(|error| verification_stage_error("WAL verification failed", error))?;
     let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(fs)
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
@@ -738,8 +748,13 @@ mod tests {
             let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
             crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");
         }
-        std::fs::write(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME), wal)
-            .expect("write WAL");
+        std::fs::write(
+            db_path.join("wal").join(crate::wal::segment_file_name(1)),
+            wal,
+        )
+        .expect("write WAL");
+        crate::runtime::wal_history::fixture::record_at(&db_path, &[], 1)
+            .expect("record WAL history");
         let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act

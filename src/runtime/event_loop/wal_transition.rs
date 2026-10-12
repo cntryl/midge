@@ -166,7 +166,6 @@ mod tests {
     #[cfg(feature = "failpoints")]
     use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
     use crate::runtime::{ResponseRouter, RuntimeConfig};
-    use crate::wal::{FsWalFactoryIo, ACTIVE_FILE_NAME};
     use std::sync::Arc;
 
     fn create_local_event_loop() -> EventLoop {
@@ -180,15 +179,33 @@ mod tests {
             state,
             false,
             router,
-            config,
+            config.clone(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )
         .expect("create event loop");
+        // A file-backed WAL over a mock directory, so rotations go through
+        // its segment ledger without touching the host.
         let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
-        let writer = FsWalFactoryIo::new(Arc::clone(&fs))
-            .create_writer(ACTIVE_FILE_NAME)
-            .expect("create mock WAL writer");
-        event_loop.wal_actor.install_filesystem_for_test(fs, writer);
+        let history = crate::runtime::wal_history::WalHistory::open(
+            Arc::clone(&fs),
+            event_loop.state.wal.current_segment_id,
+        )
+        .expect("start the mock WAL ledger");
+        let mut wal_actor = crate::runtime::actors::WalActor::open(
+            crate::runtime::actors::wal::WalBacking::Files(history),
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            config.writer_epoch,
+            config.storage_io_timeout,
+        )
+        .expect("open the mock WAL");
+        EventLoop::configure_wal_actor(
+            &event_loop.state,
+            &mut wal_actor,
+            &config,
+            event_loop.read_resources.as_ref(),
+        );
+        event_loop.wal_actor = wal_actor;
         event_loop
     }
 
@@ -279,7 +296,7 @@ mod tests {
             // Assert
             assert!(matches!(error, MidgeError::Internal(_)), "{boundary:?}");
             assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
-            let irreversible = boundary != WalTransitionBoundary::BeforeRename;
+            let irreversible = boundary == WalTransitionBoundary::AfterLedgerRotate;
             assert_eq!(
                 event_loop.wal_actor.is_fenced(),
                 irreversible,

@@ -47,6 +47,30 @@ impl FsWalFactoryIo {
         self
     }
 
+    /// A writer appending to segment `id`, which the segment ledger already
+    /// records: a missing file is corruption, never recreated empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the segment is missing or the writer cannot be
+    /// created.
+    pub(crate) fn open_segment(
+        &self,
+        id: crate::wal::ledger::SegmentId,
+    ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
+        let name = crate::wal::segment_file_name(id);
+        if !self
+            .fs
+            .exists(&crate::io::FsPath::new(&name))
+            .map_err(crate::io::FsError::into_midge)?
+        {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "WAL segment {name} is in the WAL ledger but missing"
+            )));
+        }
+        self.create_writer(&name)
+    }
+
     /// Create a new WAL writer using the `io::Fs` backend
     ///
     /// # Errors
@@ -68,15 +92,15 @@ impl FsWalFactoryIo {
 mod tests {
 
     #[test]
-    fn should_sync_wal_directory_when_creating_initial_active_wal() {
+    fn should_sync_wal_directory_when_creating_a_wal_segment_writer() {
         // Arrange
         let mock = std::sync::Arc::new(crate::io::MockFs::new());
         let factory = FsWalFactoryIo::new(mock.clone());
 
         // Act
         let _writer = factory
-            .create_writer(crate::wal::ACTIVE_FILE_NAME)
-            .expect("create active WAL");
+            .create_writer(&crate::wal::segment_file_name(1))
+            .expect("create WAL segment writer");
 
         // Assert
         assert!(
@@ -84,11 +108,53 @@ mod tests {
                 .iter()
                 .any(|(path, durability)| path.0 == "."
                     && *durability == crate::io::Durability::Durable),
-            "creating wal.log must make its directory entry durable"
+            "creating a WAL segment must make its directory entry durable"
         );
     }
 
     use super::*;
+
+    #[test]
+    fn should_refuse_writer_when_ledger_segment_is_missing() {
+        // Arrange: the ledger names segment 4, but no file holds it.
+        let factory = FsWalFactoryIo::new(std::sync::Arc::new(crate::io::MockFs::new()));
+
+        // Act
+        let result = factory.open_segment(4);
+
+        // Assert: a missing member is lost history, never recreated empty.
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_append_to_existing_ledger_segment_when_opening_it() {
+        // Arrange
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let name = crate::wal::segment_file_name(4);
+        drop(
+            mock.open(
+                &crate::io::FsPath::new(&name),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create segment"),
+        );
+        let factory = FsWalFactoryIo::new(mock.clone());
+
+        // Act
+        let writer = factory.open_segment(4);
+
+        // Assert
+        assert!(writer.is_ok());
+        assert!(mock.get_file(&name).is_some());
+    }
 
     #[test]
     fn should_create_writer() -> MidgeResult<()> {
@@ -97,7 +163,7 @@ mod tests {
         let factory = FsWalFactoryIo::new(fs);
 
         // Act
-        let writer = factory.create_writer("wal.log")?;
+        let writer = factory.create_writer(&crate::wal::segment_file_name(1))?;
 
         // Assert
         assert_eq!(writer.current_pos(), 0);

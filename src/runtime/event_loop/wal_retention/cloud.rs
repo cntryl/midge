@@ -324,54 +324,63 @@ impl Drop for EventLoop {
 }
 
 impl EventLoop {
-    pub(in crate::runtime::event_loop) fn remove_cloud_durable_local_wal_segment(
+    /// Queue `segment_id`'s local copy for retirement once cloud durability
+    /// or catalog pruning makes it unneeded locally, then retire the leading
+    /// run of queued segments (#842). A segment still needed locally holds
+    /// every later one: only a prefix of the ledger retires. Each retired
+    /// segment then releases its runtime obligations.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transition protocol's refusal to release an obligation;
+    /// the caller fences. A ledger that cannot retire only retains WAL.
+    pub(in crate::runtime::event_loop) fn retire_cloud_local_wal(
         &mut self,
         segment_id: u64,
-    ) -> bool {
-        if self.state.is_memory_mode() {
-            return true;
-        }
-
-        let local_path = crate::wal::segment_key(segment_id);
-        let local_bytes = self
-            .state
-            .fs
-            .metadata(&local_path)
-            .ok()
-            .map(|metadata| metadata.len);
-        crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
-        let removed = match self.state.fs.remove_file(&local_path) {
-            Ok(()) => true,
-            Err(crate::io::FsError::NotFound(_)) => false,
-            Err(error) => {
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(segment_id, %error, "local WAL removal failed; retaining deletion proof");
-                return false;
-            }
-        };
-        // NotFound may follow an earlier unlink whose directory sync failed.
-        // Absence alone cannot prove the old file will stay absent after power loss.
-        if let Err(error) = self.state.fs.sync_dir(
-            &crate::io::FsPath::new("wal"),
-            crate::io::Durability::Durable,
-        ) {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(segment_id, %error, "local WAL deletion directory sync failed; retaining deletion proof");
-            return false;
-        }
-        if removed {
-            if let (Some(storage), Some(bytes)) =
-                (&self.cloud_coordinator.hybrid_storage, local_bytes)
-            {
-                storage.release_local_wal_bytes(bytes);
+        release: crate::runtime::event_loop::coordination::LocalRetirement,
+    ) -> crate::common::MidgeResult<()> {
+        self.cloud_coordinator
+            .cloud_wal
+            .local_retirement
+            .queue(segment_id, release);
+        if let Some(to) = self.wal_actor.ledger().map(|ledger| {
+            (
+                self.cloud_coordinator
+                    .cloud_wal
+                    .local_retirement
+                    .retire_point(ledger),
+                ledger.log_start(),
+            )
+        }) {
+            let (to, log_start) = to;
+            if to > log_start {
+                crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
+                if let Some(retired) = self.retire_wal_below_or_retain(to) {
+                    if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
+                        storage.release_local_wal_bytes(retired.removed_bytes());
+                    }
+                }
             }
         }
-        tracing::debug!(
-            segment_id,
-            path = local_path.0,
-            "Durably removed cloud-durable local WAL segment"
-        );
-        true
+        // Memory mode keeps no local copies, so everything queued is retired.
+        let log_start = self
+            .wal_actor
+            .ledger()
+            .map_or(u64::MAX, crate::wal::ledger::WalLedger::log_start);
+        let released = self
+            .cloud_coordinator
+            .cloud_wal
+            .local_retirement
+            .drain_below(log_start);
+        for (segment_id, release) in released {
+            if release.cloud_durable {
+                self.wal_transition.retire_cloud_durable(segment_id)?;
+            }
+            if release.gc_pin {
+                self.wal_transition.retire_gc_pin(segment_id);
+            }
+        }
+        Ok(())
     }
 }
 

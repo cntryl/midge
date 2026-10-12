@@ -609,7 +609,7 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
     let bytes = valid_wal_bytes(max_sequence);
     let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write stale publisher local WAL");
-    let object_key = crate::wal::cloud_segment_object_key(segment_id, 1);
+    let object_key = crate::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
     storage
         .fence_cloud_wal_catalog(3)
@@ -650,7 +650,7 @@ fn should_converge_catalog_copies_after_publication() {
     let bytes = valid_wal_bytes(max_sequence);
     let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write mirrored catalog local WAL");
-    let object_key = crate::wal::cloud_segment_object_key(segment_id, 1);
+    let object_key = crate::wal::segment_object_key(segment_id, 1);
     write_cloud_object(&storage, &object_key, bytes);
 
     // Act

@@ -4,7 +4,7 @@ use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::RecoveryPolicy;
 use crate::io::FsError;
 use crate::runtime::RuntimeState;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 mod metadata;
@@ -21,11 +21,6 @@ fn preserve_timeout(error: MidgeError, context: &str) -> MidgeError {
 
 #[cfg(test)]
 mod tests;
-
-type LocalWalPaths = (
-    std::collections::BTreeMap<u64, Vec<PathBuf>>,
-    Option<PathBuf>,
-);
 
 /// Why an authoritative cloud SST failed validation during recovery.
 enum SstLoss {
@@ -357,74 +352,6 @@ impl CloudStartupRecovery {
         ))
     }
 
-    /// Local WAL files under the root's `wal/`, as root-relative paths.
-    ///
-    /// A directory that exists but cannot be listed fails the open under
-    /// every policy: it may hold acknowledged writes that never reached the
-    /// cloud, so planning as if it held none would drop them.
-    pub(crate) fn collect_local_wal_paths(
-        fs: &dyn crate::io::Fs,
-    ) -> MidgeResult<Option<LocalWalPaths>> {
-        let entries = match fs.list_dir(&crate::io::FsPath::new(crate::wal::WAL_DIR)) {
-            Ok(entries) => entries,
-            Err(FsError::NotFound(_)) => return Ok(None),
-            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
-            Err(error) => {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to list intact local WAL directory '{}': {error}",
-                    crate::wal::WAL_DIR
-                )))
-            }
-        };
-        let wal_dir = Path::new(crate::wal::WAL_DIR);
-        let mut segment_paths = std::collections::BTreeMap::<u64, Vec<PathBuf>>::new();
-        let mut active_path = None;
-        for entry in entries {
-            if entry.is_dir {
-                continue;
-            }
-            let source_path = wal_dir.join(&entry.name);
-            if entry.name == crate::wal::ACTIVE_FILE_NAME {
-                active_path = Some(source_path);
-                continue;
-            }
-            let Some(segment_id) = crate::wal::parse_segment_id(&entry.name) else {
-                continue;
-            };
-            segment_paths
-                .entry(segment_id)
-                .or_default()
-                .push(source_path);
-        }
-        Ok(Some((segment_paths, active_path)))
-    }
-
-    /// Rename a local WAL file aside, beside itself, through `fs`.
-    pub(crate) fn quarantine_local_wal_alias(
-        fs: &dyn crate::io::Fs,
-        path: &crate::io::FsPath,
-    ) -> MidgeResult<()> {
-        Self::quarantine_local_wal_alias_with_authority(fs, path, &|| Ok(()))
-    }
-
-    pub(crate) fn quarantine_local_wal_alias_with_authority(
-        fs: &dyn crate::io::Fs,
-        path: &crate::io::FsPath,
-        validate: &dyn Fn() -> MidgeResult<()>,
-    ) -> MidgeResult<()> {
-        let retained_path = Self::unused_retained_path(fs, path)?;
-        validate()?;
-        fs.rename_atomic(path, &retained_path).map_err(|error| {
-            if let FsError::Timeout(message) = error {
-                return MidgeError::Timeout(message);
-            }
-            MidgeError::RecoveryFailed(format!(
-                "failed to quarantine local WAL alias '{}' as '{}': {error}",
-                path.0, retained_path.0
-            ))
-        })
-    }
-
     /// Durably copy a local WAL file beside itself before salvage rewrites
     /// it, so the discarded bytes stay available for inspection. The caller
     /// syncs the WAL directory before cutting the original.
@@ -432,51 +359,18 @@ impl CloudStartupRecovery {
         fs: &dyn crate::io::Fs,
         path: &crate::io::FsPath,
     ) -> MidgeResult<()> {
-        const COPY_CHUNK: u64 = 1024 * 1024;
         let retained_path = Self::unused_retained_path(fs, path)?;
-        (|| {
-            let source = fs.open(
-                path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?;
-            let mut retained = fs.open(
-                &retained_path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: false,
-                    create_new: true,
-                    truncate: false,
-                },
-            )?;
-            let length = source.len()?;
-            let mut offset = 0;
-            while offset < length {
-                let chunk = source.read_at(offset, COPY_CHUNK.min(length - offset))?;
-                if chunk.is_empty() {
-                    return Err(FsError::Io(format!(
-                        "short read copying '{}' at byte {offset}",
-                        path.0
-                    )));
+        crate::io::copy_durably(fs, path, &retained_path)
+            .map(|_| ())
+            .map_err(|error| {
+                if let FsError::Timeout(message) = error {
+                    return MidgeError::Timeout(message);
                 }
-                offset += chunk.len() as u64;
-                retained.append(chunk)?;
-            }
-            retained.sync(crate::io::Durability::Durable)
-        })()
-        .map_err(|error| {
-            if let FsError::Timeout(message) = error {
-                return MidgeError::Timeout(message);
-            }
-            MidgeError::RecoveryFailed(format!(
-                "failed to retain a copy of local WAL '{}' as '{}': {error}",
-                path.0, retained_path.0
-            ))
-        })
+                MidgeError::RecoveryFailed(format!(
+                    "failed to retain a copy of local WAL '{}' as '{}': {error}",
+                    path.0, retained_path.0
+                ))
+            })
     }
 
     fn unused_retained_path(

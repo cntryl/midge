@@ -72,6 +72,9 @@ pub(crate) enum Op {
     PowerLoss {
         seed: u64,
     },
+    /// A clean shutdown, then a power loss that keeps nothing unsynced: the
+    /// shutdown's completed lease release unlinked its lock last (#811).
+    PowerLossAfterShutdown,
     /// Fail the `nth` later removal of a file below `wal/`.
     FailWalRemoval {
         nth: u64,

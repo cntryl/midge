@@ -1,7 +1,8 @@
-//! Actual aborts at salvage floor, quarantine, and catalog boundaries.
+//! Actual aborts at salvage floor, ledger set-aside, and catalog boundaries.
 use super::*;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::storage::HybridStorage;
+use std::path::PathBuf;
 
 #[allow(dead_code)]
 #[path = "../../../../../tests/common/crash.rs"]
@@ -44,8 +45,12 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
         Arc::clone(&cloud),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
+    let wal: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(case.root.join("local/wal")).map_err(FsError::into_midge)?);
+    let mut history = crate::runtime::wal_history::WalHistory::open(wal, 1)?;
     let recovered = StreamingCloudWalRecovery::build(
         &crate::io::real::test_root(case.root.join("local")),
+        history.ledger(),
         &cloud,
         &catalog,
         RecoveryPolicy::Salvage,
@@ -59,7 +64,8 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
         &persistence,
         9,
         &catalog,
-        &crate::io::real::test_root(case.root.join("local")),
+        &mut history,
+        recovered.next_remote_id,
     )?;
     // Assert
     panic!("salvage crash boundary was not reached");
@@ -70,9 +76,8 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
     // Arrange
     let tuples = [
         ("midge::recovery::after_salvage_floor_before_quarantine", 1),
-        ("midge::recovery::after_salvage_quarantine_rename", 1),
-        ("midge::recovery::after_salvage_quarantine_rename", 2),
-        ("midge::recovery::after_salvage_quarantine_rename", 3),
+        ("midge::recovery::after_salvage_member_moved", 1),
+        ("midge::recovery::after_salvage_member_moved", 2),
         ("midge::recovery::before_salvage_catalog_retirement", 1),
     ];
     let artifacts = PathBuf::from(
@@ -113,7 +118,8 @@ fn should_preserve_floor_when_salvage_aborts_at_each_publication_boundary() -> M
                     &persistence(&fixture),
                     9,
                     &fixture.catalog,
-                    &crate::io::real::test_root(fixture.directory.path().join("local")),
+                    &mut fixture.history()?,
+                    recovered.next_remote_id,
                 )?;
                 fixture.catalog =
                     WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
@@ -170,9 +176,11 @@ fn prepare_case(
     for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
         let bytes = framed_wal(id, epoch, b"value");
         fixture.publish(id, id, epoch, &bytes)?;
-        fixture.local(&crate::wal::segment_file_name(id), &bytes)?;
+        fixture.local(id, &bytes)?;
     }
-    fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(4, 7, b"active"))?;
+    fixture.active(&framed_wal(4, 7, b"active"))?;
+    // The child process opens the ledger this records.
+    drop(fixture.history()?);
     let catalog_path = fixture
         .directory
         .path()
@@ -199,7 +207,7 @@ fn prepare_case(
 #[test]
 fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floor(
 ) -> MidgeResult<()> {
-    for after_rename in [false, true] {
+    for after_set_aside in [false, true] {
         // Arrange
         let _guard = crate::failpoints::test_failpoint_guard();
         let _scenario = fail::FailScenario::setup();
@@ -210,12 +218,12 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
             .activate(9, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
-        let active = fixture.directory.path().join("local/wal/wal.log");
+        let active = fixture.segment(4);
         let successor = framed_wal(5, 10, b"successor");
         let changed_active = active.clone();
         let changed_bytes = successor.clone();
-        let boundary = if after_rename {
-            "midge::recovery::after_salvage_quarantine_rename"
+        let boundary = if after_set_aside {
+            "midge::recovery::before_salvage_catalog_retirement"
         } else {
             "midge::recovery::after_salvage_floor_before_quarantine"
         };
@@ -224,18 +232,21 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
             std::fs::write(&changed_active, &changed_bytes).unwrap();
         })
         .unwrap();
+        let mut history = fixture.history()?;
         // Act
-        let result = recovered.plan.commit_set_aside_with_authority(
+        let result = recovered.plan.commit_set_aside_within(
             &persistence(&fixture),
             9,
             &fixture.catalog,
-            &crate::io::real::test_root(fixture.directory.path().join("local")),
+            &mut history,
+            recovered.next_remote_id,
             &|| {
                 check
                     .remaining(9)
                     .map(|_| ())
                     .map_err(|error| error.into_validation_error("salvage writer validity"))
             },
+            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
         );
         // Assert
         assert!(matches!(result, Err(MidgeError::Fenced(_))));
@@ -243,16 +254,7 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
         let catalog = WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
         assert_eq!(catalog.sequence_floor, 4);
         assert_eq!(catalog.segments.len(), 3);
-        let renamed = std::fs::read_dir(active.parent().unwrap())?
-            .map(Result::unwrap)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("salvage-retained")
-            })
-            .count();
-        assert_eq!(renamed, usize::from(after_rename));
+        assert_eq!(fixture.salvaged(4).is_some(), after_set_aside);
     }
     Ok(())
 }

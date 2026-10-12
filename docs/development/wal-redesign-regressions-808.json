@@ -22,12 +22,11 @@
     },
     {
       "id": "failed-local-unlink",
-      "fixing_pr_stage": 3,
+      "fixing_pr_stage": 2,
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails",
-      "baseline": "red",
-      "failure_marker": "deleted key resurrected: segments before idle flush"
+      "baseline": "green"
     },
     {
       "id": "retired-local-cloud-copy",
@@ -74,7 +73,7 @@
     },
     {
       "id": "predecessor-cache",
-      "fixing_pr_stage": 2,
+      "fixing_pr_stage": 4,
       "target": "fault_injection",
       "source": "tests/fault_injection/wal_authority_regressions.rs",
       "test": "should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache",
@@ -96,8 +95,7 @@
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_allocate_wal_segment_ids_above_previous_runs_when_all_sealed_segments_were_pruned",
-      "baseline": "red",
-      "failure_marker": "run 2 reused a segment id"
+      "baseline": "green"
     },
     {
       "id": "noncorruption-salvage",

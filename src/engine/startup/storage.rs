@@ -75,8 +75,82 @@ fn initialize_startup_state(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Open the WAL ledger of a cloud cache, after sweeping files it does not
+/// name. A cache without one starts its history past every cataloged
+/// segment. The FORMAT marker comes first, as in local recovery: a WAL file
+/// without it reads as state of an unknown format.
+fn open_cloud_wal_history(
+    path: &StartupStoragePath,
+    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
+    // Bounded by the startup deadline, like local recovery; the scope stops
+    // bounding once startup completes.
+    let root = &scope.map_or_else(
+        || Arc::clone(&path.root),
+        |scope| crate::io::scope_fs(Arc::clone(&path.root), scope.clone()),
+    );
+    crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
+    let first_open = match catalog.segments.keys().next_back() {
+        Some(last) => last.checked_add(1).ok_or_else(|| {
+            MidgeError::ResourceLimit("WAL segment identity space exhausted".into())
+        })?,
+        None => 1,
+    };
+    let history = crate::runtime::wal_history::WalHistory::open(
+        crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR),
+        first_open,
+    )?;
+    Ok(history)
+}
+
+/// Plan cloud WAL recovery over the cache's ledger and make any salvage
+/// set-aside durable. Returns the plan and replay view, and the ledger that
+/// history continues in.
+fn recover_cloud_wal(
+    opts: &OpenOptions,
+    storage_path: &StartupStoragePath,
+    backend: &Arc<dyn crate::storage::StorageBackend>,
+    storage: &Arc<crate::storage::HybridStorage>,
+    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    lease: &StartupLease,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<(
+    crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery,
+    crate::runtime::wal_history::WalHistory,
+)> {
+    let limits = super::streaming_recovery::CloudReplay::limits(opts);
+    let mut history = open_cloud_wal_history(storage_path, catalog, scope)?;
+    let streaming = super::timing::measure("wal_plan", || {
+        build_wal_plan(
+            &storage_path.root,
+            history.ledger(),
+            backend,
+            catalog,
+            opts.recovery_policy(),
+            opts.storage_io_timeout(),
+            super::streaming_recovery::CloudReplay::read_window(opts, limits),
+            limits,
+            scope,
+        )
+    })?;
+    commit_salvage_plan(
+        &streaming.plan,
+        &CloudPersistence::new(Arc::clone(storage)),
+        lease.writer_epoch,
+        catalog,
+        &mut history,
+        streaming.next_remote_id,
+        &|| lease.ensure_healthy("during WAL salvage set aside"),
+        scope,
+    )?;
+    Ok((streaming, history))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_wal_plan(
     root: &Arc<dyn crate::io::Fs>,
+    ledger: &crate::wal::ledger::WalLedger,
     remote: &Arc<dyn crate::storage::StorageBackend>,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     policy: RecoveryPolicy,
@@ -89,6 +163,7 @@ fn build_wal_plan(
     if let Some(scope) = scope {
         StreamingCloudWalRecovery::build_within(
             root,
+            ledger,
             remote,
             catalog,
             policy,
@@ -100,6 +175,7 @@ fn build_wal_plan(
     } else {
         StreamingCloudWalRecovery::build(
             root,
+            ledger,
             remote,
             catalog,
             policy,
@@ -110,27 +186,33 @@ fn build_wal_plan(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_salvage_plan(
     plan: &crate::runtime::cloud_startup::CloudWalRecoveryPlan,
     persistence: &CloudPersistence,
     epoch: u64,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-    root: &Arc<dyn crate::io::Fs>,
+    history: &mut crate::runtime::wal_history::WalHistory,
+    next_remote_id: crate::wal::ledger::SegmentId,
     validate: &dyn Fn() -> MidgeResult<()>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
-    if let Some(scope) = scope {
-        plan.commit_set_aside_with_authority_within(
-            persistence,
-            epoch,
-            catalog,
-            root,
-            validate,
-            scope,
-        )
+    let unbounded;
+    let scope = if let Some(scope) = scope {
+        scope
     } else {
-        plan.commit_set_aside_with_authority(persistence, epoch, catalog, root, validate)
-    }
+        unbounded = DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+        &unbounded
+    };
+    plan.commit_set_aside_within(
+        persistence,
+        epoch,
+        catalog,
+        history,
+        next_remote_id,
+        validate,
+        scope,
+    )
 }
 
 fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority> {
@@ -805,30 +887,18 @@ impl RuntimeStorageMaterialization {
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&cloud.hybrid_storage, scope)?;
 
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let streaming = super::timing::measure("wal_plan", || {
-            build_wal_plan(
-                &storage_path.root,
-                &backend,
-                &wal_catalog,
-                opts.recovery_policy(),
-                opts.storage_io_timeout(),
-                super::streaming_recovery::CloudReplay::read_window(opts, limits),
-                limits,
-                scope,
-            )
-        })?;
-        let recovery_plan = streaming.plan;
-        commit_salvage_plan(
-            &recovery_plan,
-            &CloudPersistence::new(Arc::clone(&cloud.hybrid_storage)),
-            startup_lease.writer_epoch,
+        let (streaming, history) = recover_cloud_wal(
+            opts,
+            storage_path,
+            &backend,
+            &cloud.hybrid_storage,
             &wal_catalog,
-            &storage_path.root,
-            &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
+            startup_lease,
             scope,
         )?;
+        let recovery_plan = streaming.plan;
         let mut state = initialize_startup_state(opts, storage_path, false, scope)?;
-        state.wal.current_segment_id = streaming.next_segment_id;
+        state.adopt_wal_history(history);
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -947,30 +1017,18 @@ impl RuntimeStorageMaterialization {
             scope,
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let streaming = super::timing::measure("wal_plan", || {
-            build_wal_plan(
-                &storage_path.root,
-                &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
-                &wal_catalog,
-                opts.recovery_policy(),
-                opts.storage_io_timeout(),
-                super::streaming_recovery::CloudReplay::read_window(opts, limits),
-                limits,
-                scope,
-            )
-        })?;
-        let recovery_plan = streaming.plan;
-        commit_salvage_plan(
-            &recovery_plan,
-            &CloudPersistence::new(Arc::clone(&hybrid_storage)),
-            startup_lease.writer_epoch,
+        let (streaming, history) = recover_cloud_wal(
+            opts,
+            storage_path,
+            &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
+            &hybrid_storage,
             &wal_catalog,
-            &storage_path.root,
-            &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
+            startup_lease,
             scope,
         )?;
+        let recovery_plan = streaming.plan;
         let mut state = initialize_startup_state(opts, storage_path, false, scope)?;
-        state.wal.current_segment_id = streaming.next_segment_id;
+        state.adopt_wal_history(history);
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();

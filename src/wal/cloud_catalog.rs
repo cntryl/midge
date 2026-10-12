@@ -36,7 +36,7 @@ impl PublishedWalSegment {
             max_sequence,
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             content_crc32c: crc32c::crc32c(bytes),
-            object_key: crate::wal::cloud_segment_object_key(segment_id, writer_epoch),
+            object_key: crate::wal::segment_object_key(segment_id, writer_epoch),
         }
     }
 
@@ -225,8 +225,7 @@ impl WalPublicationCatalog {
                     segment.writer_epoch, self.fencing_epoch
                 ));
             }
-            let expected_key =
-                crate::wal::cloud_segment_object_key(*segment_id, segment.writer_epoch);
+            let expected_key = crate::wal::segment_object_key(*segment_id, segment.writer_epoch);
             if segment.object_key != expected_key {
                 return Err(format!(
                     "cloud WAL catalog segment {segment_id} object key '{}' does not match '{}'",
@@ -249,7 +248,7 @@ mod tests {
             max_sequence: segment_id * 10,
             size_bytes: 42,
             content_crc32c: 7,
-            object_key: crate::wal::cloud_segment_object_key(segment_id, writer_epoch),
+            object_key: crate::wal::segment_object_key(segment_id, writer_epoch),
         }
     }
 

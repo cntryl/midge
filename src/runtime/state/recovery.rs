@@ -191,7 +191,8 @@ impl RuntimeState {
             salvaged_local_ssts: std::collections::HashSet::new(),
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal: WalState {
-                current_segment_id: wal_recovery.next_segment_id,
+                current_segment_id: wal_recovery.open_segment,
+                history: wal_recovery.history,
                 frontiers: crate::runtime::frontiers::WalFrontiers::recovered_at(
                     wal_recovery.recovered_sequence,
                 ),
@@ -305,6 +306,37 @@ impl RuntimeState {
             .fold(0_usize, usize::saturating_add)
     }
 
+    /// Continue WAL history in `history`'s open segment; the event loop
+    /// hands the ledger to the WAL actor.
+    pub(crate) fn adopt_wal_history(&mut self, history: crate::runtime::wal_history::WalHistory) {
+        self.wal.current_segment_id = history.ledger().open_segment();
+        self.wal.history = Some(history);
+    }
+
+    /// What the WAL actor writes through: nothing durable in memory mode,
+    /// otherwise the ledger recovery adopted, handed over once.
+    ///
+    /// # Errors
+    ///
+    /// A file-backed state whose ledger is gone, or was already handed over.
+    pub(crate) fn take_wal_backing(
+        &mut self,
+        memory_mode: bool,
+    ) -> MidgeResult<crate::runtime::actors::wal::WalBacking> {
+        if memory_mode {
+            return Ok(crate::runtime::actors::wal::WalBacking::Memory);
+        }
+        self.wal
+            .history
+            .take()
+            .map(crate::runtime::actors::wal::WalBacking::Files)
+            .ok_or_else(|| {
+                MidgeError::Internal(
+                    "a file-backed WAL started without its segment ledger".to_string(),
+                )
+            })
+    }
+
     fn empty_wal_recovery(
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
@@ -312,7 +344,8 @@ impl RuntimeState {
         WalRecoveryState {
             column_families,
             recovered_sequence: Self::manifest_visible_sequence_floor(manifest),
-            next_segment_id: 1,
+            open_segment: 1,
+            history: None,
             records_replayed: 0,
             bytes_replayed: 0,
             opened_in_salvage_mode: false,
@@ -495,21 +528,29 @@ impl RuntimeState {
         column_families: HashMap<u32, ColumnFamilyState>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<WalRecoveryState> {
-        let mut wal_recovery = Self::replay_wal_within(
-            memory_mode,
-            root,
-            replay_dir,
-            recovery_policy,
-            manifest,
-            column_families,
-            scope,
-        )?;
+        let mut wal_recovery = if memory_mode {
+            Self::empty_wal_recovery(manifest, column_families)
+        } else {
+            check_scope(scope, "WAL ledger")?;
+            let wal = crate::io::subdirectory(Arc::clone(root), "wal");
+            let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1)?;
+            let mut recovered = Self::replay_wal_storage_within(
+                replay_dir,
+                root,
+                recovery_policy,
+                manifest,
+                column_families,
+                scope,
+                wal.as_ref(),
+                &mut history,
+            )?;
+            recovered.open_segment = history.ledger().open_segment();
+            recovered.history = Some(history);
+            recovered
+        };
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
             .max(Self::manifest_visible_sequence_floor(manifest));
-        let wal = crate::io::subdirectory(Arc::clone(root), "wal");
-        wal_recovery.next_segment_id =
-            Self::recover_next_segment_id(memory_mode, wal.as_ref(), scope)?;
         Ok(wal_recovery)
     }
 
@@ -531,63 +572,7 @@ impl RuntimeState {
         )
     }
 
-    #[cfg(test)]
-    fn replay_wal(
-        memory_mode: bool,
-        root: &Arc<dyn Fs>,
-        replay_dir: &std::path::Path,
-        recovery_policy: crate::config::RecoveryPolicy,
-        manifest: &Manifest,
-        column_families: HashMap<u32, ColumnFamilyState>,
-    ) -> MidgeResult<WalRecoveryState> {
-        Self::replay_wal_within(
-            memory_mode,
-            root,
-            replay_dir,
-            recovery_policy,
-            manifest,
-            column_families,
-            None,
-        )
-    }
-
-    fn replay_wal_within(
-        memory_mode: bool,
-        root: &Arc<dyn Fs>,
-        replay_dir: &std::path::Path,
-        recovery_policy: crate::config::RecoveryPolicy,
-        manifest: &Manifest,
-        column_families: HashMap<u32, ColumnFamilyState>,
-        scope: Option<&DeadlineScope>,
-    ) -> MidgeResult<WalRecoveryState> {
-        check_scope(scope, "local WAL replay")?;
-        let wal_exists = !memory_mode
-            && root
-                .exists(&crate::io::FsPath::new("wal"))
-                .map_err(FsError::into_midge)?;
-        if !wal_exists {
-            return Ok(WalRecoveryState {
-                column_families,
-                recovered_sequence: 0,
-                next_segment_id: 1,
-                records_replayed: 0,
-                bytes_replayed: 0,
-                opened_in_salvage_mode: false,
-            });
-        }
-
-        let storage = crate::io::subdirectory(Arc::clone(root), "wal");
-        Self::replay_wal_storage_within(
-            replay_dir,
-            root,
-            recovery_policy,
-            manifest,
-            column_families,
-            scope,
-            storage.as_ref(),
-        )
-    }
-
+    #[allow(clippy::too_many_arguments)] // One recovery, its inputs and its ledger.
     fn replay_wal_storage_within(
         replay_dir: &std::path::Path,
         root: &Arc<dyn Fs>,
@@ -596,6 +581,7 @@ impl RuntimeState {
         mut column_families: HashMap<u32, ColumnFamilyState>,
         scope: Option<&DeadlineScope>,
         storage: &dyn Fs,
+        history: &mut crate::runtime::wal_history::WalHistory,
     ) -> MidgeResult<WalRecoveryState> {
         check_scope(scope, "local WAL replay filesystem")?;
         let mut recovery_memtables = HashMap::new();
@@ -628,22 +614,22 @@ impl RuntimeState {
                 .as_ref()
                 .is_some_and(|coverage| coverage.covers_wal_record(record))),
         };
-        let segments =
-            crate::runtime::wal_history::listed_segments(storage, &crate::io::FsPath::new(""));
-        let stats = match segments.and_then(|segments| {
-            crate::wal::recovery::replay_wal_with_manifest_filter_within(
-                storage,
-                &segments,
-                &mut recovery_memtables,
-                replay_policy,
-                &should_apply,
-                scope,
-            )
-        }) {
+        let segments = crate::runtime::wal_history::replay_segments(
+            history.ledger(),
+            &crate::io::FsPath::new(""),
+        );
+        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter_within(
+            storage,
+            &segments,
+            &mut recovery_memtables,
+            replay_policy,
+            &should_apply,
+            scope,
+        ) {
             Ok(stats) => stats,
             Err(error) => {
                 return Self::handle_local_wal_replay_failure(
-                    storage,
+                    history,
                     recovery_policy,
                     error,
                     column_families,
@@ -661,9 +647,23 @@ impl RuntimeState {
         }
         let mut recovered_sequence = stats.max_sequence.unwrap_or(0);
         if let Some(stop) = &stats.salvage_stop {
-            Self::quarantine_wal_files(storage, Some(stop), &stop.unreplayed_paths).map_err(
-                |error| preserve_timeout(error, "failed to set aside WAL beyond the salvage point"),
-            )?;
+            let segment = crate::wal::parse_segment_id(&stop.path.0).ok_or_else(|| {
+                MidgeError::Corruption(format!("salvage stopped in non-segment file {}", stop.path))
+            })?;
+            // A segment replay took nothing from leaves history whole.
+            let set_aside = if stop.valid_bytes == 0 {
+                crate::runtime::wal_history::SetAside::From(segment)
+            } else {
+                crate::runtime::wal_history::SetAside::After(
+                    crate::runtime::wal_history::SalvageCut {
+                        segment,
+                        valid_bytes: stop.valid_bytes,
+                    },
+                )
+            };
+            history.set_aside(set_aside, 0).map_err(|error| {
+                preserve_timeout(error, "failed to set aside WAL beyond the salvage point")
+            })?;
             recovered_sequence = recovered_sequence.max(stop.max_unreplayed_sequence.unwrap_or(0));
         }
         check_scope(scope, "local WAL replay completion")?;
@@ -679,7 +679,8 @@ impl RuntimeState {
         Ok(WalRecoveryState {
             column_families,
             recovered_sequence,
-            next_segment_id: 1,
+            open_segment: 1,
+            history: None,
             records_replayed: stats.record_count,
             bytes_replayed: stats.bytes,
             opened_in_salvage_mode,
@@ -687,7 +688,7 @@ impl RuntimeState {
     }
 
     fn handle_local_wal_replay_failure(
-        storage: &dyn Fs,
+        history: &mut crate::runtime::wal_history::WalHistory,
         recovery_policy: crate::config::RecoveryPolicy,
         error: MidgeError,
         column_families: HashMap<u32, ColumnFamilyState>,
@@ -697,12 +698,12 @@ impl RuntimeState {
         }
         if recovery_policy == crate::config::RecoveryPolicy::Salvage {
             // Salvage continues without the WAL's state, so set every
-            // WAL file aside first: new records must not land behind
-            // them or reuse the sequences they hold.
-            let files = Self::replayable_wal_files(storage).and_then(|files| {
-                Self::quarantine_wal_files(storage, None, &files).map(|()| files)
-            });
-            if let Err(quarantine_error) = files {
+            // member aside first: new records must not land behind them or
+            // reuse the sequences they hold.
+            let log_start = history.ledger().log_start();
+            if let Err(quarantine_error) =
+                history.set_aside(crate::runtime::wal_history::SetAside::From(log_start), 0)
+            {
                 if matches!(quarantine_error, MidgeError::Timeout(_)) {
                     return Err(quarantine_error);
                 }
@@ -718,115 +719,6 @@ impl RuntimeState {
         )
     }
 
-    /// WAL files that replay would read, relative to the WAL directory.
-    fn replayable_wal_files(storage: &dyn crate::io::Fs) -> MidgeResult<Vec<crate::io::FsPath>> {
-        let mut files: Vec<_> = storage
-            .list_dir(&crate::io::FsPath::new(""))
-            .map_err(FsError::into_midge)?
-            .into_iter()
-            .filter(|entry| {
-                !entry.is_dir
-                    && (entry.name == crate::wal::ACTIVE_FILE_NAME
-                        || crate::wal::parse_segment_id(&entry.name).is_some())
-            })
-            .map(|entry| crate::io::FsPath::new(entry.name))
-            .collect();
-        files.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(files)
-    }
-
-    /// Move WAL that salvage did not replay into `salvaged-<millis>/`, which
-    /// replay and segment numbering ignore. With a stop point, its file keeps
-    /// the replayed prefix live (a full copy is preserved first) because the
-    /// recovered memtables still depend on it. Nothing is deleted.
-    fn quarantine_wal_files(
-        storage: &dyn crate::io::Fs,
-        stop: Option<&crate::wal::recovery::WalSalvageStop>,
-        unreplayed: &[crate::io::FsPath],
-    ) -> MidgeResult<()> {
-        use crate::io::{Durability, FsPath};
-
-        if stop.is_none() && unreplayed.is_empty() {
-            return Ok(());
-        }
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_millis());
-        let quarantine = FsPath::new(format!("salvaged-{millis}"));
-        storage
-            .create_dir_all(&quarantine)
-            .map_err(FsError::into_midge)?;
-        let target = |path: &FsPath| FsPath::new(format!("{}/{}", quarantine.0, path.0));
-
-        if let Some(stop) = stop {
-            let file = storage
-                .open(
-                    &stop.path,
-                    crate::io::OpenOptions {
-                        mode: crate::io::OpenMode::ReadOnly,
-                        create: false,
-                        create_new: false,
-                        truncate: false,
-                    },
-                )
-                .map_err(FsError::into_midge)?;
-            let bytes = file
-                .read_at(0, file.len().map_err(FsError::into_midge)?)
-                .map_err(FsError::into_midge)?;
-            drop(file);
-            let mut copy = storage
-                .open(
-                    &target(&stop.path),
-                    crate::io::OpenOptions {
-                        mode: crate::io::OpenMode::ReadWrite,
-                        create: true,
-                        create_new: true,
-                        truncate: false,
-                    },
-                )
-                .map_err(FsError::into_midge)?;
-            copy.write_at(0, bytes).map_err(FsError::into_midge)?;
-            copy.sync(Durability::Durable)
-                .map_err(FsError::into_midge)?;
-        }
-        for path in unreplayed {
-            storage
-                .rename_atomic(path, &target(path))
-                .map_err(FsError::into_midge)?;
-        }
-        storage
-            .sync_dir(&quarantine, Durability::Durable)
-            .map_err(FsError::into_midge)?;
-        storage
-            .sync_dir(&FsPath::new(""), Durability::Durable)
-            .map_err(FsError::into_midge)?;
-
-        if let Some(stop) = stop {
-            let mut file = storage
-                .open(
-                    &stop.path,
-                    crate::io::OpenOptions {
-                        mode: crate::io::OpenMode::ReadWrite,
-                        create: false,
-                        create_new: false,
-                        truncate: false,
-                    },
-                )
-                .map_err(FsError::into_midge)?;
-            file.truncate(stop.valid_bytes)
-                .map_err(FsError::into_midge)?;
-            file.sync(Durability::Durable)
-                .map_err(FsError::into_midge)?;
-        }
-        tracing::warn!(
-            quarantine = %quarantine.0,
-            stop_file = ?stop.map(|stop| &stop.path.0),
-            moved = unreplayed.len(),
-            "set aside WAL that salvage recovery did not replay"
-        );
-        Ok(())
-    }
-
     /// Cut the active WAL back to its verified prefix before the writer
     /// reopens it for append. Otherwise new frames land after the torn bytes,
     /// and the next recovery sees mid-file corruption instead of a tail.
@@ -834,31 +726,16 @@ impl RuntimeState {
         storage: &dyn crate::io::Fs,
         tail: &crate::wal::recovery::ToleratedActiveTail,
     ) -> MidgeResult<()> {
-        let mut file = storage
-            .open(
-                &tail.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
+        let discarded = crate::io::truncate_durably(storage, &tail.path, tail.valid_bytes)
             .map_err(FsError::into_midge)?;
-        let length = file.len().map_err(FsError::into_midge)?;
-        if length <= tail.valid_bytes {
-            return Ok(());
+        if discarded > 0 {
+            tracing::warn!(
+                path = %tail.path,
+                discarded_bytes = discarded,
+                valid_bytes = tail.valid_bytes,
+                "truncated torn active WAL tail before reopening for append"
+            );
         }
-        file.truncate(tail.valid_bytes)
-            .map_err(FsError::into_midge)?;
-        file.sync(crate::io::Durability::Durable)
-            .map_err(FsError::into_midge)?;
-        tracing::warn!(
-            path = %tail.path,
-            discarded_bytes = length - tail.valid_bytes,
-            valid_bytes = tail.valid_bytes,
-            "truncated torn active WAL tail before reopening for append"
-        );
         Ok(())
     }
 
@@ -874,7 +751,8 @@ impl RuntimeState {
         Ok(WalRecoveryState {
             column_families,
             recovered_sequence: 0,
-            next_segment_id: 1,
+            open_segment: 1,
+            history: None,
             records_replayed: 0,
             bytes_replayed: 0,
             opened_in_salvage_mode: true,
@@ -923,41 +801,6 @@ impl RuntimeState {
                 tracing::warn!(cf_id, "ignoring WAL records for unknown column family");
             }
         }
-    }
-
-    /// The next WAL segment id: one past the highest sealed segment present.
-    /// A directory that cannot be listed fails the open, because guessing
-    /// would restart ids below segments that still hold acknowledged writes.
-    fn recover_next_segment_id(
-        memory_mode: bool,
-        wal: &dyn Fs,
-        scope: Option<&DeadlineScope>,
-    ) -> MidgeResult<u64> {
-        check_scope(scope, "WAL segment identity discovery")?;
-        let root = crate::io::FsPath::new("");
-        if memory_mode || !wal.exists(&root).map_err(FsError::into_midge)? {
-            return Ok(1);
-        }
-        let mut max_segment_id: u64 = 0;
-        for entry in wal.list_dir(&root).map_err(FsError::into_midge)? {
-            check_scope(scope, "WAL segment identity entry")?;
-            if entry.is_dir {
-                continue;
-            }
-            let Some(stem) = entry.name.strip_suffix(".wal") else {
-                continue;
-            };
-            if stem.eq_ignore_ascii_case("wal") {
-                continue;
-            }
-            if let Ok(id) = stem.parse::<u64>() {
-                max_segment_id = max_segment_id.max(id);
-            }
-        }
-        max_segment_id
-            .checked_add(1)
-            .map(|next| next.max(1))
-            .ok_or_else(|| MidgeError::ResourceLimit("WAL segment identity space exhausted".into()))
     }
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {
@@ -1601,17 +1444,110 @@ mod salvage_quarantine_tests {
         frame
     }
 
-    /// `1.wal` writes `k` at sequence 7; `wal.log` writes a different value
-    /// for `k` at the same sequence.
+    /// Sealed segment 1 writes `k` at sequence 7; open segment 2 writes a
+    /// different value for `k` at the same sequence.
     fn conflicting_repeated_sequence(wal_dir: &std::path::Path) {
         write(
             &wal_dir.join(crate::wal::segment_file_name(1)),
             &[frame_with_value(b"k", b"a", 7)],
         );
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(2)),
             &[frame_with_value(b"k", b"b", 7)],
         );
+        record_history(wal_dir, &[1], 2);
+    }
+
+    /// Record `sealed`, then `open`, as the WAL history under `wal_dir`.
+    fn record_history(wal_dir: &std::path::Path, sealed: &[u64], open: u64) {
+        crate::runtime::wal_history::fixture::record_at(
+            wal_dir.parent().expect("database root"),
+            sealed,
+            open,
+        )
+        .expect("record WAL history");
+    }
+
+    /// Recover the WAL under `wal_dir` the way opening the database does.
+    fn recover(
+        wal_dir: &std::path::Path,
+        policy: crate::config::RecoveryPolicy,
+    ) -> MidgeResult<WalRecoveryState> {
+        RuntimeState::recover_wal_state(
+            false,
+            &crate::io::real::test_root(wal_dir.parent().expect("database root")),
+            wal_dir,
+            policy,
+            &Manifest::default(),
+            HashMap::new(),
+            None,
+        )
+    }
+
+    /// The ledger the recovery left, as `(sealed members, open segment)`.
+    fn history_of(recovered: &WalRecoveryState) -> (Vec<u64>, u64) {
+        let ledger = recovered
+            .history
+            .as_ref()
+            .expect("a file-backed recovery opens the WAL ledger")
+            .ledger();
+        (ledger.sealed().collect(), ledger.open_segment())
+    }
+
+    /// Segments 1..=3 write `k` at 1, `k` again at 2 and `z` at 3, as
+    /// recorded history, with segment 3 open; then segment 2's file is lost.
+    fn history_missing_its_middle_segment(wal_dir: &std::path::Path) {
+        for (id, key, value) in [(1, b"k", b"a"), (2, b"k", b"b"), (3, b"z", b"z")] {
+            write(
+                &wal_dir.join(crate::wal::segment_file_name(id)),
+                &[frame_with_value(key, value, id)],
+            );
+        }
+        record_history(wal_dir, &[1, 2], 3);
+        std::fs::remove_file(wal_dir.join(crate::wal::segment_file_name(2)))
+            .expect("lose segment 2");
+    }
+
+    #[test]
+    fn should_fail_strict_recovery_when_a_ledger_member_file_is_missing() {
+        // Arrange: replaying 1 then 3 would skip 2's writes and keep 3's.
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        history_missing_its_middle_segment(&wal_dir);
+
+        // Act
+        let result = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
+
+        // Assert
+        match result {
+            Err(MidgeError::RecoveryFailed(_) | MidgeError::Corruption(_)) => {}
+            Err(error) => panic!("unexpected error class: {error}"),
+            Ok(recovered) => panic!(
+                "strict recovery replayed {} records past a missing member",
+                recovered.records_replayed
+            ),
+        }
+    }
+
+    #[test]
+    fn should_stop_salvage_at_a_missing_ledger_member() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        history_missing_its_middle_segment(&wal_dir);
+
+        // Act
+        let recovered =
+            recover(&wal_dir, crate::config::RecoveryPolicy::Salvage).expect("salvage opens");
+
+        // Assert: history keeps segment 1 and continues past every id it
+        // handed out; segment 3 is set aside, not replayed after the hole.
+        assert!(recovered.opened_in_salvage_mode);
+        assert_eq!(history_of(&recovered), (vec![1], 4));
+        assert_eq!(recovered.records_replayed, 1);
+        assert!(recovered.recovered_sequence >= 3);
     }
 
     #[test]
@@ -1624,14 +1560,7 @@ mod salvage_quarantine_tests {
         conflicting_repeated_sequence(&wal_dir);
 
         // Act
-        let result = RuntimeState::replay_wal(
-            false,
-            &crate::io::real::test_root(directory.path()),
-            &wal_dir,
-            crate::config::RecoveryPolicy::Strict,
-            &Manifest::default(),
-            HashMap::new(),
-        );
+        let result = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
 
         // Assert
         let Err(error) = result else {
@@ -1670,7 +1599,7 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(1)),
             &[
                 frame_with_value(b"k", b"a", 7),
                 frame_with_value(b"k", b"b", 7),
@@ -1678,6 +1607,7 @@ mod salvage_quarantine_tests {
                 frame_with_value(b"y", b"y", 9),
             ],
         );
+        record_history(&wal_dir, &[], 1);
 
         // Act
         let recovered = salvage_replay(&wal_dir);
@@ -1700,8 +1630,9 @@ mod salvage_quarantine_tests {
         file.sync_all().expect("sync wal file");
     }
 
-    /// `3.wal` holds two good frames, then a CRC-corrupt frame, then a good
-    /// one; `4.wal` and `wal.log` hold later sequences salvage never reaches.
+    /// Sealed segment 3 holds two good frames, then a CRC-corrupt frame,
+    /// then a good one; sealed segment 4 and open segment 5 hold later
+    /// sequences salvage never reaches.
     fn corrupt_middle_segment(wal_dir: &std::path::Path) -> u64 {
         let prefix = [frame(b"a", 1), frame(b"b", 2)];
         let mut corrupt = frame(b"c", 3);
@@ -1722,22 +1653,15 @@ mod salvage_quarantine_tests {
             &[frame(b"e", 5)],
         );
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(5)),
             &[frame(b"f", 6)],
         );
+        record_history(wal_dir, &[3, 4], 5);
         prefix_len as u64
     }
 
     fn salvage_replay(wal_dir: &std::path::Path) -> WalRecoveryState {
-        RuntimeState::replay_wal(
-            false,
-            &crate::io::real::test_root(wal_dir.parent().expect("database root")),
-            wal_dir,
-            crate::config::RecoveryPolicy::Salvage,
-            &Manifest::default(),
-            HashMap::new(),
-        )
-        .expect("salvage replay")
+        recover(wal_dir, crate::config::RecoveryPolicy::Salvage).expect("salvage replay")
     }
 
     #[test]
@@ -1764,21 +1688,30 @@ mod salvage_quarantine_tests {
                 .len(),
             prefix_len
         );
+        assert_eq!(
+            history_of(&recovered),
+            (vec![3], 6),
+            "history continues in a new segment after the replayed prefix"
+        );
         assert!(!wal_dir.join(crate::wal::segment_file_name(4)).exists());
-        assert!(!wal_dir.join(crate::wal::ACTIVE_FILE_NAME).exists());
+        assert!(!wal_dir.join(crate::wal::segment_file_name(5)).exists());
         let quarantine = std::fs::read_dir(&wal_dir)
             .expect("read wal dir")
             .filter_map(Result::ok)
             .find(|entry| entry.file_name().to_string_lossy().starts_with("salvaged-"))
             .expect("quarantine directory")
             .path();
-        for name in [
-            crate::wal::segment_file_name(3),
-            crate::wal::segment_file_name(4),
-            crate::wal::ACTIVE_FILE_NAME.to_string(),
-        ] {
+        for id in [3, 4, 5] {
+            let name = crate::wal::segment_file_name(id);
             assert!(quarantine.join(&name).exists(), "{name} must be preserved");
         }
+        assert!(
+            std::fs::metadata(quarantine.join(crate::wal::segment_file_name(3)))
+                .expect("stop segment copy")
+                .len()
+                > prefix_len,
+            "the stop segment copy keeps the bytes salvage cut"
+        );
     }
 
     #[test]
@@ -1788,21 +1721,14 @@ mod salvage_quarantine_tests {
         let wal_dir = directory.path().join("wal");
         std::fs::create_dir(&wal_dir).expect("create wal dir");
         corrupt_middle_segment(&wal_dir);
-        salvage_replay(&wal_dir);
+        let (_, open) = history_of(&salvage_replay(&wal_dir));
         write(
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &wal_dir.join(crate::wal::segment_file_name(open)),
             &[frame(b"after", 7)],
         );
 
         // Act
-        let reopened = RuntimeState::replay_wal(
-            false,
-            &crate::io::real::test_root(directory.path()),
-            &wal_dir,
-            crate::config::RecoveryPolicy::Strict,
-            &Manifest::default(),
-            HashMap::new(),
-        );
+        let reopened = recover(&wal_dir, crate::config::RecoveryPolicy::Strict);
 
         // Assert
         let reopened = reopened.expect("writes after salvage must not sit behind corruption");

@@ -826,7 +826,14 @@ fn should_account_for_recovered_wal_memtable_bytes_when_reopening() {
     let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
     let mut frame = Vec::new();
     crate::wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
-    std::fs::write(temp_dir.path().join("wal").join("wal.log"), frame).expect("write retained WAL");
+    std::fs::write(
+        temp_dir
+            .path()
+            .join("wal")
+            .join(crate::wal::segment_file_name(1)),
+        frame,
+    )
+    .expect("write retained WAL");
 
     // Act
     let reopened = RuntimeState::try_new(
@@ -882,33 +889,6 @@ fn should_initialize_wal_state_with_defaults() {
     assert_eq!(wal.pending_writes, 0);
     assert_eq!(wal.frontiers.local_durable(), 0);
     assert_eq!(wal.frontiers.cloud_durable(), 0);
-}
-
-#[test]
-fn should_reject_recovery_when_wal_segment_identity_space_is_exhausted() -> MidgeResult<()> {
-    // Arrange
-    let dir = tempfile::tempdir()?;
-    drop(RuntimeState::try_new(
-        dir.path(),
-        false,
-        crate::config::RecoveryPolicy::Strict,
-    )?);
-    let wal_dir = dir.path().join("wal");
-    std::fs::create_dir_all(&wal_dir)?;
-    std::fs::write(wal_dir.join(crate::wal::segment_file_name(u64::MAX)), [])?;
-
-    // Act
-    let result = RuntimeState::try_new(dir.path(), false, crate::config::RecoveryPolicy::Strict);
-
-    // Assert
-    match result {
-        Err(MidgeError::ResourceLimit(message)) => {
-            assert!(message.contains("segment identity space exhausted"));
-        }
-        Err(error) => panic!("unexpected recovery error: {error:?}"),
-        Ok(_) => panic!("recovery unexpectedly reused the exhausted WAL segment identity"),
-    }
-    Ok(())
 }
 
 // =========== CompactionState Tests ===========

@@ -183,6 +183,27 @@ fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
     ))
 }
 
+/// Replace the WAL history recovery opened for `state` with one recording
+/// `sealed`, then `open`, for segment files a test wrote by hand under
+/// `db_path`. A member the test did not write is created empty.
+pub(in crate::runtime::event_loop) fn record_wal_history(
+    state: &mut RuntimeState,
+    db_path: &std::path::Path,
+    sealed: &[u64],
+    open: u64,
+) {
+    drop(state.wal.history.take());
+    let wal: Arc<dyn crate::io::Fs> = Arc::new(
+        crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).expect("open the WAL directory"),
+    );
+    crate::runtime::wal_history::fixture::replace(&wal, sealed, open)
+        .expect("record the WAL history");
+    state.wal.history = Some(
+        crate::runtime::wal_history::WalHistory::open(wal, open).expect("open the WAL ledger"),
+    );
+    state.wal.current_segment_id = open;
+}
+
 // Helper to create a minimal runtime state for testing
 pub(in crate::runtime::event_loop) fn create_test_state() -> RuntimeState {
     RuntimeState::new("/tmp/test_event_loop".into(), true) // Memory mode
@@ -454,6 +475,10 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     crate::wal::frame::append_frame(&mut segment_bytes, &payload)
         .expect("frame recovered WAL record");
     std::fs::write(&local_segment, &segment_bytes).expect("write recovered local WAL segment");
+    let wal: Arc<dyn crate::io::Fs> =
+        Arc::new(crate::io::RealFs::new(&wal_dir).expect("open the WAL directory"));
+    crate::runtime::wal_history::fixture::replace(&wal, &[2, 3], 4)
+        .expect("record the WAL history");
 
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;
@@ -506,7 +531,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     let remote_segment = db_path
         .join("cloud_store")
-        .join(crate::wal::cloud_segment_object_key(2, 0));
+        .join(crate::wal::segment_object_key(2, 0));
     std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
         .expect("create remote WAL directory");
     std::fs::write(remote_segment, segment_bytes).expect("publish resumed WAL segment");
@@ -1958,11 +1983,14 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         &second_bytes,
     )
     .expect("write second recovered WAL");
-    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), &active_bytes)
-        .expect("write recovered active WAL");
+    std::fs::write(
+        wal_dir.join(crate::wal::segment_file_name(3)),
+        &active_bytes,
+    )
+    .expect("write recovered active WAL");
+    record_wal_history(&mut state, &db_path, &[1, 2], 3);
 
     state.sequence = 3;
-    state.wal.current_segment_id = 3;
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),
@@ -2046,8 +2074,8 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
     let local_path = wal_dir.join(crate::wal::segment_file_name(1));
     std::fs::write(&local_path, cloud_recovery_wal_bytes(1)).expect("write validated local copy");
+    record_wal_history(&mut state, &db_path, &[1], 2);
     state.sequence = 1;
-    state.wal.current_segment_id = 2;
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),

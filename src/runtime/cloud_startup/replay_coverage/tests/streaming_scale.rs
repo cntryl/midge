@@ -180,9 +180,17 @@ impl ScaleFixture {
         Ok(())
     }
 
+    /// Plans recovery as cloud startup does, over a cache whose WAL ledger
+    /// starts past every cataloged segment.
     fn recovery(&self) -> MidgeResult<StreamingCloudWalRecovery> {
+        let wal: Arc<dyn Fs> = Arc::new(
+            crate::io::RealFs::new(self.directory.path().join("local/wal"))
+                .map_err(FsError::into_midge)?,
+        );
+        let history = crate::runtime::wal_history::WalHistory::open(wal, OPEN_SEGMENT)?;
         StreamingCloudWalRecovery::build(
             &crate::io::real::test_root(self.directory.path().join("local")),
+            history.ledger(),
             &self.cloud,
             &self.catalog,
             RecoveryPolicy::Strict,
@@ -212,14 +220,26 @@ impl ScaleFixture {
         for object in &self.objects {
             assert_eq!(std::fs::read(&object.path)?, object.bytes);
         }
+        let mut local_wal: Vec<String> =
+            std::fs::read_dir(self.directory.path().join("local/wal"))?
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .collect::<Result<_, _>>()?;
+        local_wal.sort();
         assert_eq!(
-            std::fs::read_dir(self.directory.path().join("local/wal"))?.count(),
-            0,
+            local_wal,
+            vec![
+                crate::wal::segment_file_name(OPEN_SEGMENT),
+                crate::wal::ledger_store::LEDGER_FILE.to_string(),
+            ],
+            "recovery stages no local WAL copies"
         );
         assert!(!self.directory.path().join("local/cloud_recovery").exists());
         Ok(())
     }
 }
+
+/// The open segment of a cache whose only cataloged segment is 1.
+const OPEN_SEGMENT: u64 = 2;
 
 fn seeded_records() -> Vec<WalRecord> {
     (0..SST_COUNT * SLOTS_PER_SST)

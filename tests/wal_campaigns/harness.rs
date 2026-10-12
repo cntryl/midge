@@ -5,8 +5,8 @@ use crate::config::Config;
 use crate::workload::{Durability, Op, DEFAULT, KEYS};
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
-    Commit, CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultId, FaultOp, Histories,
-    Key, Recovery, SimulatedClock, SimulatedObjectStore, StoreImage, Violation, FAILURE_MESSAGE,
+    Commit, CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultOp, Histories, Key,
+    Recovery, SimulatedClock, SimulatedObjectStore, StoreImage, Violation, FAILURE_MESSAGE,
 };
 use cntryl_midge::{Clock, Engine, OpenOptions, TransactionMode};
 use serde::{Deserialize, Serialize};
@@ -76,8 +76,6 @@ pub(crate) struct Finding {
     pub(crate) seed: u64,
     pub(crate) workload: Vec<Op>,
     pub(crate) image: Image,
-    /// Injected faults that fired before the finding.
-    pub(crate) faults_fired: usize,
 }
 
 /// How the engine stopped before a recovery.
@@ -88,17 +86,19 @@ pub(crate) enum Stop {
     PowerLoss,
     /// A process crash, then a takeover by a process with an empty cache.
     FreshCache,
+    /// A clean shutdown, then a power loss that keeps nothing unsynced.
+    PowerLossAfterShutdown,
 }
 
 impl Stop {
     /// Whether the stopping process died rather than shut down.
     fn crashes_process(self) -> bool {
-        self != Self::Clean
+        !matches!(self, Self::Clean | Self::PowerLossAfterShutdown)
     }
 
     /// Whether the device lost power, dropping what was not durable.
     fn loses_power(self) -> bool {
-        self == Self::PowerLoss
+        matches!(self, Self::PowerLoss | Self::PowerLossAfterShutdown)
     }
 
     /// What the next process recovers from.
@@ -131,7 +131,6 @@ pub(crate) struct Campaign {
     restored_names: BTreeMap<String, u64>,
     values: u64,
     images: Vec<Image>,
-    faults: Vec<FaultId>,
     /// Resurrected lease locks removed after power losses (#811).
     stale_lease_locks: usize,
     config: Config,
@@ -176,7 +175,6 @@ impl Campaign {
             restored_names,
             values: image.values,
             images: Vec::new(),
-            faults: Vec::new(),
             stale_lease_locks: 0,
             config: image.config,
         }
@@ -216,13 +214,6 @@ impl Campaign {
             let id = name.strip_prefix("wal/")?.strip_suffix(".wal")?;
             (count > 1 && id.bytes().all(|byte| byte.is_ascii_digit())).then_some(name)
         })
-    }
-
-    fn faults_fired(&self) -> usize {
-        self.faults
-            .iter()
-            .filter(|fault| self.device.fired(**fault))
-            .count()
     }
 
     /// Record a recovery point for replay.
@@ -386,6 +377,22 @@ impl Campaign {
         }
     }
 
+    /// Flush `family`; the history counts it flushed only if the flush
+    /// succeeded.
+    pub(crate) fn flush(&mut self, family: usize) -> cntryl_midge::MidgeResult<()> {
+        let name = self.family(family);
+        let engine = self.engine();
+        let handle = engine.get_column_family(&name).expect("family exists");
+        engine.flush_cf(&handle)?;
+        self.history.flushed(&name);
+        Ok(())
+    }
+
+    /// Fail a later device call; see [`Fault`].
+    pub(crate) fn inject(&self, fault: Fault) {
+        let _ = self.device.inject(fault);
+    }
+
     /// The process dies: it reaches neither its device nor the store again.
     pub(crate) fn crash_process(&mut self) {
         self.device.process_crash();
@@ -433,6 +440,11 @@ impl Campaign {
             if engine.shutdown(Duration::from_secs(10)).is_ok() {
                 self.history.shut_down();
             }
+            drop(engine);
+            if stop.loses_power() {
+                self.device.process_crash();
+                self.device.power_loss_with(|_| 0);
+            }
         }
         self.snapshot(remaining, stop);
         self.recover(stop)
@@ -451,12 +463,7 @@ impl Campaign {
                 durability,
             } => self.write(*family, *key, true, *durability),
             Op::Flush { family } => {
-                let name = self.family(*family);
-                let engine = self.engine();
-                let handle = engine.get_column_family(&name).expect("family exists");
-                if engine.flush_cf(&handle).is_ok() {
-                    self.history.flushed(&name);
-                }
+                let _ = self.flush(*family);
             }
             Op::Compact => {
                 let _ = self.engine().compact_all();
@@ -472,20 +479,20 @@ impl Campaign {
             Op::ProcessCrash => self.restart(Stop::ProcessCrash, remaining, 0)?,
             Op::PowerLoss { seed } => self.restart(Stop::PowerLoss, remaining, *seed)?,
             Op::FreshCache => self.restart(Stop::FreshCache, remaining, 0)?,
+            Op::PowerLossAfterShutdown => {
+                self.restart(Stop::PowerLossAfterShutdown, remaining, 0)?;
+            }
             Op::LandLate => {
                 let _ = self.store.land_late_effects();
             }
             Op::Settle => self.settle(),
-            Op::FailWalRemoval { nth } => {
-                let fault = self.device.inject(Fault {
-                    op: FaultOp::RemoveFile,
-                    path: "wal".into(),
-                    nth: *nth,
-                    effect: FaultEffect::Before,
-                    error: FaultError::Io,
-                });
-                self.faults.push(fault);
-            }
+            Op::FailWalRemoval { nth } => self.inject(Fault {
+                op: FaultOp::RemoveFile,
+                path: "wal".into(),
+                nth: *nth,
+                effect: FaultEffect::Before,
+                error: FaultError::Io,
+            }),
         }
         self.reused_segment()
             .map_or(Ok(()), |reuse| Err(FindingKind::SegmentReuse(reuse)))
@@ -517,7 +524,6 @@ impl Campaign {
         campaign.drive(workload, Stop::Clean).map_err(|kind| {
             Box::new(Finding {
                 image: campaign.image_for(&kind),
-                faults_fired: campaign.faults_fired(),
                 kind,
                 seed,
                 workload: workload.to_vec(),
