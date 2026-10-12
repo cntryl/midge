@@ -69,7 +69,10 @@ Decisions that refine the #808 target design:
   it holds none, so no sealed segment is empty. Then a `Reserve` edit makes
   the next block of sequences durable before any is handed out, and the
   sequence continues past every earlier reservation, so a commit whose
-  unsynced record a power loss dropped never has its sequence reused.
+  unsynced record a power loss dropped never has its sequence reused. No
+  record holds the skipped sequences, so once the cloud holds every record
+  before the open segment its frontier extends to the open segment's first
+  sequence.
 - Genesis records the holder identity and the first open segment. A fresh
   cloud cache starts one past the catalog's last segment, linked to the
   catalog head. A ledger whose open segment is below that was succeeded by
