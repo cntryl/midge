@@ -1544,6 +1544,63 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_dropped_family_inactive_when_startup_replays_its_create_and_drop(
+    ) -> MidgeResult<()> {
+        use crate::lease::PrimaryLease as _;
+
+        // Arrange: the registry holds a family's create and drop, and the
+        // local manifest already holds the drop tombstone (a same-cache restart).
+        let temp = tempfile::tempdir()?;
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+            cloud.clone(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        let lease = provider_test_lease(&cloud, &temp.path().join("lease"));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let authority = provider_test_authority(&lease);
+        let deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        fence_remote_registry_on_startup(&storage, &authority, &deadline)?;
+        let mut state = RuntimeState::new(temp.path().join("state"), false);
+        let create = create_edit(&state, "dropped-cf")?;
+        execute_within(
+            &mut state,
+            Some(&storage),
+            &create,
+            Some(&authority),
+            &deadline,
+        )?;
+        let ManifestEdit::CreateColumnFamily { id, .. } = create else {
+            unreachable!("create_edit builds a create");
+        };
+        let drop = drop_edit(&state, id, false)?;
+        execute_within(
+            &mut state,
+            Some(&storage),
+            &drop,
+            Some(&authority),
+            &deadline,
+        )?;
+        assert!(state.get_cf(id).is_none());
+
+        // Act
+        reconcile_startup(&mut state, Some(&storage), Some(&authority))?;
+
+        // Assert: runtime family state follows the manifest tombstone.
+        assert!(
+            state.get_cf(id).is_none(),
+            "replaying the original create must not revive a dropped family's runtime state"
+        );
+        assert!(state
+            .manifest
+            .get_column_family_by_name("dropped-cf")
+            .is_none());
+        lease.release().expect("release lease");
+        Ok(())
+    }
+
+    #[test]
     fn should_reject_missing_ddl_registry_when_lease_metadata_is_committed() -> MidgeResult<()> {
         use crate::lease::PrimaryLease as _;
 

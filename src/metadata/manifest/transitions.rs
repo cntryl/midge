@@ -102,7 +102,9 @@ impl<'a> FamilyLifecycleEdit<'a> {
     }
 
     /// Whether `manifest` already holds the state this decision produces: the
-    /// family live under this identity, or dropped at this sequence.
+    /// family live under this identity, or dropped at this sequence. The exact
+    /// original create also counts once a later drop left its tombstone, so
+    /// replaying it cannot revive a dropped family.
     pub(crate) fn is_reflected_in(self, manifest: &Manifest) -> bool {
         let frontier = manifest.flushed_through.get(self.id());
         manifest.column_families.iter().any(|cf| {
@@ -113,8 +115,11 @@ impl<'a> FamilyLifecycleEdit<'a> {
                     } => {
                         cf.name == name
                             && cf.created_at == created_at
-                            && cf.deleted_at.is_none()
-                            && matches!(frontier, Ok(FamilyFrontier::Live { .. }))
+                            && match frontier {
+                                Ok(FamilyFrontier::Live { .. }) => cf.deleted_at.is_none(),
+                                Ok(FamilyFrontier::Dropped) => cf.deleted_at.is_some(),
+                                Err(_) => false,
+                            }
                     }
                     Self::Drop { drop_sequence, .. } => {
                         cf.deleted_at.is_some()
