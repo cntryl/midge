@@ -197,7 +197,7 @@ impl WalHistory {
             prev: anchor,
         };
         let ledger = WalLedger::genesis(holder, anchor, open)?;
-        create_segment(wal.as_ref(), &header(holder, &open))?;
+        create_segment(wal.as_ref(), &open.header(holder.bytes()))?;
         let store = LedgerStore::create(Arc::clone(&wal), &ledger)?;
         let history = Self {
             segments: Some(wal),
@@ -261,7 +261,7 @@ impl WalHistory {
     /// back this history.
     fn create(&self, open: &OpenFacts) -> MidgeResult<()> {
         match &self.segments {
-            Some(wal) => create_segment(wal.as_ref(), &header(self.ledger().holder(), open)),
+            Some(wal) => create_segment(wal.as_ref(), &open.header(self.ledger().holder().bytes())),
             None => Ok(()),
         }
     }
@@ -287,12 +287,14 @@ impl WalHistory {
         self.journal.heal()?;
         let ledger = self.ledger();
         let seal = ledger.open_segment();
-        if sealed.link.id != seal || first_seq <= sealed.link.last_seq {
-            return Err(MidgeError::Internal(format!(
-                "cannot rotate WAL segment {seal} with facts for segment {} through sequence {} into a segment starting at {first_seq}",
-                sealed.link.id, sealed.link.last_seq
-            )));
-        }
+        let open = self.opening(ledger.next_segment_id(), first_seq, sealed.link);
+        let rotation = LedgerEdit::Rotate {
+            sealed: sealed.clone(),
+            open,
+        };
+        ledger.check(&rotation).map_err(|error| {
+            MidgeError::Internal(format!("cannot rotate WAL segment {seal}: {error}"))
+        })?;
         if let Some(wal) = &self.segments {
             let open_file = FsPath::new(crate::wal::segment_file_name(seal));
             if !wal.exists(&open_file).map_err(FsError::into_midge)? {
@@ -301,7 +303,6 @@ impl WalHistory {
                 )));
             }
         }
-        let open = self.opening(ledger.next_segment_id(), first_seq, sealed.link);
         self.create(&open)?;
         Ok(PreparedRotation { sealed, open })
     }
@@ -735,17 +736,6 @@ pub(crate) fn replay_segments(ledger: &WalLedger, wal_dir: &FsPath) -> ReplaySeg
     ReplaySegments::from_ledger(ledger, |id| {
         join(wal_dir, &crate::wal::segment_file_name(id))
     })
-}
-
-/// The header of segment `open` in the history of `holder`.
-fn header(holder: HolderId, open: &OpenFacts) -> SegmentHeader {
-    SegmentHeader {
-        id: open.id,
-        epoch: open.epoch,
-        holder: holder.bytes(),
-        first_seq: open.first_seq,
-        prev: open.prev,
-    }
 }
 
 /// Create the segment `header` names, holding only its header, durably:

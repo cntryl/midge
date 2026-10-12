@@ -25,9 +25,8 @@
 //! every walker over a segment feeds it the header, then each verified frame,
 //! then each decoded record's sequence and family.
 
-use super::link::{ChainLink, Digest128};
+use super::link::{ChainLink, Digest128, OpenFacts, SegmentId};
 use crate::common::{MidgeError, MidgeResult};
-use crate::wal::ledger::SegmentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use xxhash_rust::xxh3::Xxh3;
@@ -61,6 +60,17 @@ pub struct SegmentHeader {
 }
 
 impl SegmentHeader {
+    /// The facts this header fixes besides its holder.
+    #[must_use]
+    pub(crate) fn open_facts(&self) -> OpenFacts {
+        OpenFacts {
+            id: self.id,
+            epoch: self.epoch,
+            first_seq: self.first_seq,
+            prev: self.prev,
+        }
+    }
+
     /// The header bytes, checksum included.
     #[must_use]
     pub fn encode(&self) -> [u8; HEADER_LEN] {

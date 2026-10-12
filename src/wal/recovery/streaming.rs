@@ -737,12 +737,7 @@ fn admit_segment(
     chain.admit(&header, path.id)?;
     let expected = match &path.expect {
         Expectation::Member { member, holder } => {
-            let actual = crate::wal::ledger::OpenFacts {
-                id: header.id,
-                epoch: header.epoch,
-                first_seq: header.first_seq,
-                prev: header.prev,
-            };
+            let actual = header.open_facts();
             if header.holder != *holder {
                 Err(format!(
                     "its header names holder {:02x?}, not this ledger's {holder:02x?}",

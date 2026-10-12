@@ -4,8 +4,10 @@
 
 use super::segment::SegmentHeader;
 use crate::common::{MidgeError, MidgeResult};
-use crate::wal::ledger::SegmentId;
 use serde::{Deserialize, Serialize};
+
+/// A WAL segment id; segment `id` is the file `segment_file_name(id)`.
+pub type SegmentId = u64;
 
 /// An xxh3-128 digest, little-endian.
 pub type Digest128 = [u8; 16];
@@ -28,6 +30,74 @@ impl ChainLink {
         last_seq: 0,
         digest: [0; 16],
     };
+}
+
+/// What a segment's header fixes besides its holder: its id, the writer
+/// epoch that created it, the least sequence its records may hold, and the
+/// link of the segment before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OpenFacts {
+    pub(crate) id: SegmentId,
+    /// The writer epoch that created the segment.
+    pub(crate) epoch: u64,
+    /// Every record in the segment is at least this.
+    pub(crate) first_seq: u64,
+    /// The link of the segment before it.
+    pub(crate) prev: ChainLink,
+}
+
+impl OpenFacts {
+    /// The header of a segment with these facts, written for `holder`.
+    pub(crate) fn header(self, holder: [u8; 16]) -> SegmentHeader {
+        SegmentHeader {
+            id: self.id,
+            epoch: self.epoch,
+            holder,
+            first_seq: self.first_seq,
+            prev: self.prev,
+        }
+    }
+}
+
+/// The chain rule (#843): whether a segment with header facts `open` may
+/// follow the segment whose link is `prev`, after segments written by
+/// `min_epoch`. It must link `prev`, start past `prev`'s last sequence,
+/// carry a greater id, and not lower the epoch.
+///
+/// # Errors
+///
+/// Why it may not, naming both segments.
+pub(crate) fn follows(
+    prev: ChainLink,
+    min_epoch: Option<u64>,
+    open: &OpenFacts,
+) -> Result<(), String> {
+    if open.prev != prev {
+        return Err(format!(
+            "segment {} links segment {} (last sequence {}), not segment {} (last sequence {}) before it",
+            open.id, open.prev.id, open.prev.last_seq, prev.id, prev.last_seq
+        ));
+    }
+    if open.first_seq <= prev.last_seq {
+        return Err(format!(
+            "segment {} starts at sequence {}, not past {}",
+            open.id, open.first_seq, prev.last_seq
+        ));
+    }
+    if let Some(epoch) = min_epoch.filter(|epoch| open.epoch < *epoch) {
+        return Err(format!(
+            "segment {} has epoch {} below epoch {epoch}",
+            open.id, open.epoch
+        ));
+    }
+    if open.id <= prev.id {
+        return Err(format!(
+            "segment {} does not follow segment {}",
+            open.id, prev.id
+        ));
+    }
+    Ok(())
 }
 
 /// Admits WAL segments in replay order. See [`Chain::admit`].
@@ -74,28 +144,10 @@ impl Chain {
                 header.id
             )));
         }
-        if let Some(expected) = self.expected_prev {
-            if header.prev != expected {
-                return Err(corruption(format!(
-                    "WAL segment {id} links segment {} (last sequence {}), not segment {} (last sequence {}) before it",
-                    header.prev.id, header.prev.last_seq, expected.id, expected.last_seq
-                )));
-            }
-        }
-        if let Some(epoch) = self.epoch {
-            if header.epoch < epoch {
-                return Err(corruption(format!(
-                    "WAL segment {id} has writer epoch {} below epoch {epoch} before it",
-                    header.epoch
-                )));
-            }
-        }
-        if header.first_seq <= header.prev.last_seq {
-            return Err(corruption(format!(
-                "WAL segment {id} starts at sequence {}, not past its predecessor's {}",
-                header.first_seq, header.prev.last_seq
-            )));
-        }
+        // Before the first segment an unknown anchor is whatever it links.
+        let prev = self.expected_prev.unwrap_or(header.prev);
+        follows(prev, self.epoch, &header.open_facts())
+            .map_err(|reason| corruption(format!("WAL {reason}")))?;
         self.epoch = Some(header.epoch);
         self.open = true;
         Ok(())

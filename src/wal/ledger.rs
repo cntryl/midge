@@ -20,12 +20,10 @@
 //! by the edits applied to it.
 
 use crate::wal::format::{ChainLink, SealedFacts};
+pub(crate) use crate::wal::format::{OpenFacts, SegmentId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
-
-/// A WAL segment id; segment `id` is the file `segment_file_name(id)`.
-pub(crate) type SegmentId = u64;
 
 /// The identity of the database a ledger belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,19 +67,6 @@ impl TryFrom<String> for HolderId {
         }
         Ok(Self(uuid))
     }
-}
-
-/// What a member's header holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct OpenFacts {
-    pub(crate) id: SegmentId,
-    /// The writer epoch that created the segment.
-    pub(crate) epoch: u64,
-    /// Every record in the segment is at least this.
-    pub(crate) first_seq: u64,
-    /// The link of the segment before it.
-    pub(crate) prev: ChainLink,
 }
 
 /// One ledger member: its header facts and, once sealed, its footer facts.
@@ -432,6 +417,15 @@ impl WalLedger {
         }
     }
 
+    /// Whether `edit` would apply, without applying it.
+    ///
+    /// # Errors
+    ///
+    /// The error [`Self::apply`] would return.
+    pub(crate) fn check(&self, edit: &LedgerEdit) -> Result<(), LedgerError> {
+        self.clone().apply(edit)
+    }
+
     /// The holder identity genesis recorded.
     pub(crate) fn holder(&self) -> HolderId {
         self.holder
@@ -521,31 +515,7 @@ fn following(open: SegmentId) -> Result<SegmentId, LedgerError> {
 /// Whether `open` may follow `prev`: it links it, starts past it, and does
 /// not lower the epoch below `epoch`.
 fn opens_after(open: &OpenFacts, prev: ChainLink, epoch: Option<u64>) -> Result<(), LedgerError> {
-    if open.prev != prev {
-        return Err(LedgerError::BrokenChain(format!(
-            "segment {} links segment {}, not segment {}",
-            open.id, open.prev.id, prev.id
-        )));
-    }
-    if open.first_seq <= prev.last_seq {
-        return Err(LedgerError::BrokenChain(format!(
-            "segment {} starts at sequence {}, not past {}",
-            open.id, open.first_seq, prev.last_seq
-        )));
-    }
-    if let Some(epoch) = epoch.filter(|epoch| open.epoch < *epoch) {
-        return Err(LedgerError::BrokenChain(format!(
-            "segment {} has epoch {} below epoch {epoch}",
-            open.id, open.epoch
-        )));
-    }
-    if open.id <= prev.id {
-        return Err(LedgerError::BrokenChain(format!(
-            "segment {} does not follow segment {}",
-            open.id, prev.id
-        )));
-    }
-    Ok(())
+    crate::wal::format::follows(prev, epoch, open).map_err(LedgerError::BrokenChain)
 }
 
 /// Whether `sealed` can seal the member whose header is `open`.
