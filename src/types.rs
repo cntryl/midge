@@ -25,6 +25,7 @@ impl SharedGenerationId {
     pub const FIRST: Self = Self(1);
 
     /// A nonzero committed publication ordinal.
+    #[cfg(test)]
     #[must_use]
     pub const fn new(value: u64) -> Option<Self> {
         if value == 0 {
@@ -64,15 +65,6 @@ pub enum EntryType {
     // only tests construct it.
     #[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
     Merge = 3,
-}
-
-impl EntryType {
-    /// Whether this entry writes a value (a put or an insert), as opposed to
-    /// deleting one or carrying an unsupported merge operand.
-    #[must_use]
-    pub const fn is_value_write(self) -> bool {
-        matches!(self, Self::Put | Self::Insert)
-    }
 }
 
 impl fmt::Display for EntryType {
