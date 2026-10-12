@@ -392,10 +392,9 @@ fn replay_local(
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions {
             deadline,
-            selection,
             salvage_record_errors: true,
             spill_pending_txns: true,
-            ..streaming::ReplayOptions::default()
+            ..streaming::ReplayOptions::new(selection)
         },
         &mut |_, _| Ok(()),
     )
@@ -443,10 +442,11 @@ pub(crate) fn replay_wal_with_frontiers_within(
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions {
             scope,
-            selection: crate::wal::replay::ReplaySelection::Frontiers(frontiers),
             salvage_record_errors: true,
             spill_pending_txns: true,
-            ..streaming::ReplayOptions::default()
+            ..streaming::ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(
+                frontiers,
+            ))
         },
         &mut |_, _| Ok(()),
     )

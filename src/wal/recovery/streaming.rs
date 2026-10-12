@@ -116,8 +116,10 @@ impl StreamingReplayLimits {
     }
 }
 
-/// Replay behaviour only local recovery needs; cloud replay uses the defaults.
-#[derive(Clone, Copy, Default)]
+/// How a replay admits units, and what local recovery adds: a deadline or
+/// scope, salvage of record errors, and spilled transactions. Every replay
+/// names its selection; see [`ReplayOptions::new`].
+#[derive(Clone, Copy)]
 pub(crate) struct ReplayOptions<'a> {
     /// Stop with `Timeout` between frames once this expires.
     pub deadline: Option<&'a crate::common::OperationDeadline>,
@@ -135,7 +137,19 @@ pub(crate) struct ReplayOptions<'a> {
     pub spill_pending_txns: bool,
 }
 
-impl ReplayOptions<'_> {
+impl<'a> ReplayOptions<'a> {
+    /// Admit units by `selection`, with no deadline and neither salvage nor
+    /// spill behaviour.
+    pub(crate) const fn new(selection: crate::wal::replay::ReplaySelection<'a>) -> Self {
+        Self {
+            deadline: None,
+            scope: None,
+            selection,
+            salvage_record_errors: false,
+            spill_pending_txns: false,
+        }
+    }
+
     fn check(self) -> MidgeResult<()> {
         ensure_deadline(self.deadline)?;
         self.scope.map_or(Ok(()), |scope| scope.check("WAL replay"))
@@ -254,7 +268,7 @@ pub(crate) fn replay_wal_with_checkpoint(
         memtables,
         replay_policy,
         limits,
-        ReplayOptions::default(),
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::All),
         checkpoint,
     )
 }

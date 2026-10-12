@@ -148,7 +148,9 @@ fn replayed_sequences(device: &CrashDevice, history: &WalHistory) -> Vec<u64> {
         &mut memtables,
         crate::wal::recovery::ReplayPolicy::Strict,
         crate::wal::recovery::streaming::StreamingReplayLimits::local(),
-        crate::wal::recovery::streaming::ReplayOptions::default(),
+        crate::wal::recovery::streaming::ReplayOptions::new(
+            crate::wal::replay::ReplaySelection::All,
+        ),
         &mut |_, _| Ok(()),
     )
     .expect("strict replay");

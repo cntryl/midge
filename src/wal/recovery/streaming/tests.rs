@@ -867,10 +867,7 @@ fn should_replay_complete_batch_when_frontier_precedes_commit() {
         &mut tables,
         ReplayPolicy::Strict,
         limits(),
-        ReplayOptions {
-            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-            ..ReplayOptions::default()
-        },
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
         &mut |_, _| Ok(()),
     )
     .unwrap();
@@ -911,8 +908,7 @@ fn should_replay_complete_spooled_transaction_when_frontier_precedes_commit() {
         StreamingReplayLimits::local(),
         ReplayOptions {
             spill_pending_txns: true,
-            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-            ..ReplayOptions::default()
+            ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
         },
         &mut |_, _| Ok(()),
     )
@@ -964,8 +960,7 @@ fn should_skip_complete_transaction_when_commit_is_already_flushed() {
             StreamingReplayLimits::local(),
             ReplayOptions {
                 spill_pending_txns: spool,
-                selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-                ..ReplayOptions::default()
+                ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
             },
             &mut |_, _| Ok(()),
         )
@@ -996,10 +991,7 @@ fn should_validate_transaction_shape_when_its_family_is_already_flushed() {
         &mut HashMap::new(),
         ReplayPolicy::Strict,
         StreamingReplayLimits::local(),
-        ReplayOptions {
-            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-            ..ReplayOptions::default()
-        },
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
         &mut |_, _| Ok(()),
     );
 
@@ -1028,8 +1020,7 @@ fn should_refuse_missing_family_authority_when_replaying_under_salvage_policy() 
         StreamingReplayLimits::local(),
         ReplayOptions {
             salvage_record_errors: true,
-            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-            ..ReplayOptions::default()
+            ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
         },
         &mut |_, _| Ok(()),
     );
@@ -1074,7 +1065,7 @@ fn should_preserve_complete_units_when_a_batch_overlaps_prior_frames_under_stric
             target_memtable_encoded_bytes: 1,
             ..limits()
         },
-        ReplayOptions::default(),
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::All),
         &mut |tables, _| {
             checkpoints += 1;
             tables.clear();
@@ -1118,7 +1109,7 @@ fn should_preserve_complete_units_when_a_batch_overlaps_prior_frames_under_salva
         limits(),
         ReplayOptions {
             salvage_record_errors: true,
-            ..ReplayOptions::default()
+            ..ReplayOptions::new(crate::wal::replay::ReplaySelection::All)
         },
         &mut |_, _| {
             checkpoints += 1;
@@ -1158,10 +1149,7 @@ fn should_validate_overlapping_batch_sequences_when_its_family_is_already_flushe
         &mut tables,
         ReplayPolicy::Strict,
         limits(),
-        ReplayOptions {
-            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-            ..ReplayOptions::default()
-        },
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
         &mut |_, _| Ok(()),
     );
 
@@ -1214,7 +1202,7 @@ fn should_reject_batch_spans_before_the_segment_first_sequence() {
             &mut tables,
             ReplayPolicy::Strict,
             limits(),
-            ReplayOptions::default(),
+            ReplayOptions::new(crate::wal::replay::ReplaySelection::All),
             &mut |_, _| Ok(()),
         );
 

@@ -435,10 +435,7 @@ fn replay_fixture(
         memtables,
         ReplayPolicy::Strict,
         StreamingReplayLimits::local(),
-        ReplayOptions {
-            selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-            ..ReplayOptions::default()
-        },
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
         &mut |_, _| Ok(()),
     )
 }

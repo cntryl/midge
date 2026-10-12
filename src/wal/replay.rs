@@ -3,9 +3,12 @@
 use crate::common::MidgeResult;
 use crate::metadata::frontiers::{FamilyFrontier, FlushFrontiers};
 
-#[derive(Clone, Copy, Default)]
+/// How a replay admits complete units. Every replay names one, so none can
+/// fall back to reapplying units a family frontier already covers.
+#[derive(Clone, Copy)]
 pub(crate) enum ReplaySelection<'a> {
-    #[default]
+    /// Apply every unit, ignoring family frontiers.
+    #[cfg(test)]
     All,
     Frontiers(&'a FlushFrontiers),
     ValidateOnly,
@@ -21,6 +24,7 @@ impl ReplaySelection<'_> {
 
     pub(crate) fn should_apply(self, cf_id: u32, commit_sequence: u64) -> MidgeResult<bool> {
         match self {
+            #[cfg(test)]
             Self::All => Ok(true),
             Self::ValidateOnly => Ok(false),
             Self::Frontiers(frontiers) => Ok(match frontiers.get(cf_id)? {

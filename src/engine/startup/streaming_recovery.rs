@@ -103,8 +103,7 @@ impl CloudReplay {
             self.limits,
             ReplayOptions {
                 scope: scope.as_ref(),
-                selection: crate::wal::replay::ReplaySelection::Frontiers(&frontiers),
-                ..ReplayOptions::default()
+                ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
             },
             &mut |tables, boundary| {
                 checkpoint(
