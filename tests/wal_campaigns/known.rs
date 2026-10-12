@@ -9,10 +9,3 @@ pub(crate) fn resurrects(kind: &FindingKind) -> bool {
         mismatch.observed.is_some() && mismatch.allowed == [None]
     }))
 }
-
-/// A value recovery had to keep came back absent.
-pub(crate) fn loses_required_value(kind: &FindingKind) -> bool {
-    matches!(kind, FindingKind::Data(violation) if violation.keys.iter().any(|mismatch| {
-        mismatch.observed.is_none() && mismatch.allowed.iter().all(Option::is_some)
-    }))
-}

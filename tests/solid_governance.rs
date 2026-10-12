@@ -1393,7 +1393,7 @@ const WAL_SCOPE_REMOVALS: &[(&str, &str)] = &[
 const WAL_SCOPE_CUTS: &[(&str, &str)] = &[
     (
         "src/runtime/wal_history.rs",
-        "salvage: a copy of the cut segment, then the cut once the ledger records it",
+        "salvage: a copy of the cut segment, then the cut and its footer before the ledger records it",
     ),
     (
         "src/runtime/state/recovery.rs",
@@ -1589,6 +1589,30 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("WalBacking", "#843"),
     ("take_wal_backing", "#843"),
     ("adopt_wal_history", "#843"),
+    ("EpochPolicy", "#843"),
+    ("WriterEpochFrontiers", "#843"),
+    ("max_writer_epoch", "#843"),
+    ("max_epoch_seen", "#843"),
+    ("stale_records_skipped", "#843"),
+    ("discover_frontiers", "#843"),
+    ("duplicate_before", "#843"),
+    ("DUPLICATE_RESCANS", "#843"),
+    ("WRITER_EPOCH", "#843"),
+    ("has_current_record_prefix", "#843"),
+    ("segment_max_sequence", "#843"),
+    ("record_segment_sequence", "#843"),
+    ("current_segment_max_sequence", "#843"),
+    ("inspect_local_bytes", "#843"),
+    ("inspect_local_sealed_wal_file", "#843"),
+    ("RecoveredCloudActiveWal", "#843"),
+    ("recovered_cloud_active_wal", "#843"),
+    ("restore_recovered_cloud_active_wal", "#843"),
+    ("seal_recovered_cloud_active_segment", "#843"),
+    ("flush_recovered_cloud_wal_within", "#843"),
+    ("commit_set_aside", "#843"),
+    ("commit_set_aside_within", "#843"),
+    ("EmptyHolder", "#843"),
+    ("loses_required_value", "#843"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a
