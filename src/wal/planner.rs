@@ -338,7 +338,8 @@ struct Hole {
 }
 
 /// Plan cloud recovery over `catalog` and, when the cache has one, its
-/// `ledger`, placed by `lineage`, from `probes`.
+/// `ledger`, from `probes`. The planner derives their lineage from these
+/// history facts, so a caller cannot supply a different classification.
 ///
 /// Positions are ordered catalog entries, then (when Joined) the cache's
 /// tail, and admitted in that order to one [`Chain`] from the catalog's
@@ -355,9 +356,9 @@ pub(crate) fn plan(
     policy: RecoveryPolicy,
     catalog: &WalPublicationCatalog,
     ledger: Option<&WalLedger>,
-    lineage: Lineage,
     probes: &Probes,
 ) -> Result<RecoveryPlan, PlanError> {
+    let lineage = lineage(catalog, ledger);
     let salvage = policy == RecoveryPolicy::Salvage;
     let mut planner = Planner {
         salvage,

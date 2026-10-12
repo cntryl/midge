@@ -126,7 +126,7 @@ impl StreamingCloudWalRecovery {
                 probes.local.insert(id, probe);
             }
         }
-        let plan = crate::wal::planner::plan(policy, catalog, ledger, lineage, &probes)?;
+        let plan = crate::wal::planner::plan(policy, catalog, ledger, &probes)?;
         if let Some(cut) = plan.open_cut {
             apply_open_cut(local.as_ref(), cut)?;
         }
@@ -350,7 +350,7 @@ fn probe_sealed_member(
 /// The highest sequence any verified frame of a damaged segment holds: its
 /// verified prefix, then whatever verifies past the damage.
 fn verified_maximum(
-    file: &dyn crate::io::File,
+    file: &dyn crate::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<u64> {
@@ -444,7 +444,10 @@ fn probe_open_member(
 
 /// A ledger member's file, which must exist: one that is gone lost its
 /// records.
-fn open_member<'a>(fs: &'a dyn Fs, path: &FsPath) -> MidgeResult<Box<dyn crate::io::File + 'a>> {
+fn open_member<'a>(
+    fs: &'a dyn Fs,
+    path: &FsPath,
+) -> MidgeResult<Box<dyn crate::io::ReadFile + 'a>> {
     fs.open_read(path).map_err(|error| match error {
         FsError::NotFound(_) => MidgeError::Corruption(format!(
             "WAL segment {path} is history but its file is missing"

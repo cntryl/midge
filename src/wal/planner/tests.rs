@@ -211,13 +211,7 @@ fn should_join_a_ledger_whose_chain_holds_the_catalog_head() {
     let probes = whole(&members, &[], &ledger);
 
     // Act
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        lineage(&catalog, Some(&ledger)),
-        &probes,
-    );
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes);
 
     // Assert: the shared members replay from the catalog, nothing is owed,
     // and the ledger stands.
@@ -246,14 +240,7 @@ fn should_retire_members_at_or_below_the_catalog_anchor() {
     let probes = whole(&members[1..], &[], &ledger);
 
     // Act
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    )
-    .expect("plan");
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes).expect("plan");
 
     // Assert
     assert_eq!(ids(&plan), vec![(2, Source::Remote)]);
@@ -279,14 +266,7 @@ fn should_replay_the_tail_after_the_catalog_head_from_the_cache() {
         .insert(3, open_probe(&ledger, 1, members[1].link().last_seq + 1));
 
     // Act
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    )
-    .expect("plan");
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes).expect("plan");
 
     // Assert: the unpublished member is owed; the open member replays last.
     assert_eq!(
@@ -301,6 +281,31 @@ fn should_replay_the_tail_after_the_catalog_head_from_the_cache() {
 }
 
 #[test]
+fn should_preserve_a_joined_tail_when_planning_from_the_history_facts() {
+    // Arrange: the catalog has retired the shared member, and the cache's
+    // unpublished tail still belongs to that history.
+    let members = chain(ChainLink::GENESIS, 1..=2, 7);
+    let ledger = ledger(ChainLink::GENESIS, &members, 3, 7);
+    let mut catalog = catalog(&members[..1]);
+    catalog
+        .retire_prefix(9, &[members[0].entry()])
+        .expect("retire");
+    let probes = whole(&[], &members[1..], &ledger);
+
+    // Act
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes).expect("plan");
+
+    // Assert: an empty catalog still names shared history via its anchor.
+    assert_eq!(ids(&plan), vec![(2, Source::Local)]);
+    assert_eq!(
+        plan.history,
+        HistoryAction::Keep {
+            retire_local_below: Some(2)
+        }
+    );
+}
+
+#[test]
 fn should_rebase_onto_the_catalog_when_another_writer_published_the_same_id() {
     // Arrange: the cache sealed its own segment 1; the catalog holds another
     // writer's segment 1.
@@ -312,14 +317,7 @@ fn should_rebase_onto_the_catalog_when_another_writer_published_the_same_id() {
 
     // Act
     let lineage = lineage(&catalog, Some(&ledger));
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        lineage,
-        &probes,
-    )
-    .expect("plan");
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes).expect("plan");
 
     // Assert: a fork, not a hole: strict recovery replays the catalog and
     // continues after it.
@@ -350,14 +348,7 @@ fn should_rebase_strictly_when_the_catalog_set_this_history_aside() {
 
     // Act
     let lineage = lineage(&catalog, Some(&ledger));
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        lineage,
-        &probes,
-    )
-    .expect("plan");
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes).expect("plan");
 
     // Assert
     assert_eq!(lineage, Lineage::Behind { covered: true });
@@ -384,20 +375,8 @@ fn should_fail_strict_recovery_when_the_catalog_lost_retired_history() {
     let lineage = lineage(&catalog, Some(&ledger));
 
     // Act
-    let strict = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        lineage,
-        &probes,
-    );
-    let salvage = plan(
-        RecoveryPolicy::Salvage,
-        &catalog,
-        Some(&ledger),
-        lineage,
-        &probes,
-    );
+    let strict = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes);
+    let salvage = plan(RecoveryPolicy::Salvage, &catalog, Some(&ledger), &probes);
 
     // Assert: salvage rebases and persists a floor over the lost history.
     assert_eq!(lineage, Lineage::Behind { covered: false });
@@ -423,21 +402,9 @@ fn should_stop_at_the_first_segment_whose_header_breaks_the_chain() {
     let probes = whole(&published, &tail, &ledger);
 
     // Act
-    let strict = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    );
-    let salvage = plan(
-        RecoveryPolicy::Salvage,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    )
-    .expect("salvage plans");
+    let strict = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes);
+    let salvage =
+        plan(RecoveryPolicy::Salvage, &catalog, Some(&ledger), &probes).expect("salvage plans");
 
     // Assert
     assert!(
@@ -471,21 +438,9 @@ fn should_fall_back_to_the_cached_copy_when_a_shared_object_is_damaged() {
     );
 
     // Act
-    let strict = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    );
-    let salvage = plan(
-        RecoveryPolicy::Salvage,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    )
-    .expect("salvage plans");
+    let strict = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes);
+    let salvage =
+        plan(RecoveryPolicy::Salvage, &catalog, Some(&ledger), &probes).expect("salvage plans");
 
     // Assert
     assert!(matches!(strict, Err(PlanError::Unreplayable(_))));
@@ -516,14 +471,8 @@ fn should_set_aside_the_catalog_suffix_from_a_lost_object() {
     );
 
     // Act
-    let plan = plan(
-        RecoveryPolicy::Salvage,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    )
-    .expect("salvage plans");
+    let plan =
+        plan(RecoveryPolicy::Salvage, &catalog, Some(&ledger), &probes).expect("salvage plans");
 
     // Assert: one catalog change drops 2 and 3 and lifts the floor over the
     // cache's tail; every member is set aside behind the new head.
@@ -553,14 +502,7 @@ fn should_raise_floor_to_the_catalog_head_when_every_entry_retired() {
         .expect("retire");
 
     // Act
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        None,
-        Lineage::Fresh,
-        &Probes::default(),
-    )
-    .expect("plan");
+    let plan = plan(RecoveryPolicy::Strict, &catalog, None, &Probes::default()).expect("plan");
 
     // Assert: nothing replays, but new history starts after the head.
     assert_eq!(plan.replay, []);
@@ -595,14 +537,7 @@ fn should_cut_a_torn_open_member_without_keeping_a_copy() {
     );
 
     // Act
-    let plan = plan(
-        RecoveryPolicy::Strict,
-        &catalog,
-        Some(&ledger),
-        Lineage::Joined,
-        &probes,
-    )
-    .expect("plan");
+    let plan = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes).expect("plan");
 
     // Assert
     assert_eq!(
@@ -639,8 +574,8 @@ proptest::proptest! {
         let hole = damaged.iter().copied().find(|id| *id < open);
 
         // Act
-        let strict = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), Lineage::Joined, &probes);
-        let salvage = plan(RecoveryPolicy::Salvage, &catalog, Some(&ledger), Lineage::Joined, &probes).unwrap();
+        let strict = plan(RecoveryPolicy::Strict, &catalog, Some(&ledger), &probes);
+        let salvage = plan(RecoveryPolicy::Salvage, &catalog, Some(&ledger), &probes).unwrap();
 
         // Assert
         proptest::prop_assert_eq!(strict.is_err(), hole.is_some());
