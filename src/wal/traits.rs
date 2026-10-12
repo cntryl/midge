@@ -108,9 +108,7 @@ pub trait WalWriter: Send + Sync {
     fn current_pos(&self) -> WalPos;
 
     /// The records acknowledged into the segment so far.
-    fn tail(&self) -> SegmentTail {
-        SegmentTail::default()
-    }
+    fn tail(&self) -> SegmentTail;
 
     /// The facts that seal the segment as it stands: its digest and the
     /// records in it. Waits, at most `timeout`, for queued writes to land;
@@ -119,12 +117,7 @@ pub trait WalWriter: Send + Sync {
     /// # Errors
     ///
     /// The writer's failure, or `Timeout` when writes do not drain.
-    fn seal_facts(&self, timeout: Duration) -> MidgeResult<SealedFacts> {
-        let _ = timeout;
-        Err(MidgeError::Internal(
-            "this WAL writer cannot seal its segment".to_string(),
-        ))
-    }
+    fn seal_facts(&self, timeout: Duration) -> MidgeResult<SealedFacts>;
 
     /// Write the footer sealing `facts`, which must still describe the
     /// segment, and sync it. The writer appends nothing afterwards.
@@ -132,10 +125,29 @@ pub trait WalWriter: Send + Sync {
     /// # Errors
     ///
     /// The write or sync error; the footer may or may not be durable.
-    fn write_footer(&self, facts: &SealedFacts, timeout: Duration) -> MidgeResult<()> {
-        let _ = (facts, timeout);
+    fn write_footer(&self, facts: &SealedFacts, timeout: Duration) -> MidgeResult<()>;
+}
+
+/// The answers of a test writer that holds no segment: it tracks no
+/// records and refuses to seal.
+#[cfg(test)]
+pub(crate) mod unsealable {
+    use crate::common::{MidgeError, MidgeResult};
+    use crate::wal::format::{SealedFacts, SegmentTail};
+
+    pub(crate) fn tail() -> SegmentTail {
+        SegmentTail::default()
+    }
+
+    pub(crate) fn seal() -> MidgeResult<SealedFacts> {
         Err(MidgeError::Internal(
-            "this WAL writer cannot seal its segment".to_string(),
+            "this test WAL writer holds no segment to seal".to_string(),
+        ))
+    }
+
+    pub(crate) fn write_footer() -> MidgeResult<()> {
+        Err(MidgeError::Internal(
+            "this test WAL writer holds no segment to seal".to_string(),
         ))
     }
 }

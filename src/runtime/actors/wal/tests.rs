@@ -575,6 +575,28 @@ impl crate::wal::WalWriter for FsyncFailingWriter {
     fn current_pos(&self) -> u64 {
         self.inner.current_pos()
     }
+
+    fn tail(&self) -> crate::wal::format::SegmentTail {
+        self.inner.tail()
+    }
+
+    fn seal_facts(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MidgeResult<crate::wal::format::SealedFacts> {
+        self.inner.seal_facts(timeout)
+    }
+
+    /// Sealing syncs the footer, which fails like every other sync.
+    fn write_footer(
+        &self,
+        _facts: &crate::wal::format::SealedFacts,
+        _timeout: std::time::Duration,
+    ) -> MidgeResult<()> {
+        Err(MidgeError::Io(std::io::Error::other(
+            "injected fsync failure",
+        )))
+    }
 }
 
 #[test]

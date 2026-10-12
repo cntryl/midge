@@ -525,6 +525,25 @@ mod tests {
         fn current_pos(&self) -> u64 {
             0
         }
+
+        fn tail(&self) -> crate::wal::format::SegmentTail {
+            crate::wal::traits::unsealable::tail()
+        }
+
+        fn seal_facts(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> crate::common::MidgeResult<crate::wal::format::SealedFacts> {
+            crate::wal::traits::unsealable::seal()
+        }
+
+        fn write_footer(
+            &self,
+            _facts: &crate::wal::format::SealedFacts,
+            _timeout: std::time::Duration,
+        ) -> crate::common::MidgeResult<()> {
+            crate::wal::traits::unsealable::write_footer()
+        }
     }
 
     fn create_event_loop_with_policy(
