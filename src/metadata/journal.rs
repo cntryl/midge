@@ -492,6 +492,11 @@ pub(crate) fn append_validated_edit_with_id_observed(
     edit_id: u64,
     observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<u64> {
+    // A batch writes the same record either way; route it through the batch
+    // path so its storage-fault boundaries stay reachable.
+    if let ManifestEdit::Batch(batch) = edit {
+        return append_validated_edit_batch_with_id_observed(fs, batch, edit_id, observation);
+    }
     let record = encode_journal_record(
         edit.record_type(),
         &JournalEditEnvelope {

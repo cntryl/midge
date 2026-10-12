@@ -348,6 +348,30 @@ fn should_not_read_snapshot_when_appending_journal_edit() {
     assert_eq!((first, second), (2, 3));
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_reach_batch_fault_boundary_when_batch_is_appended_as_one_edit() {
+    // Arrange: callers now journal a prepared `ManifestEdit::Batch` through
+    // `append`, so the batch storage-fault boundary must still apply.
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = ManifestStore::new(observed(&directory));
+    fail::cfg(
+        "midge::manifest::inject_no_space_on_append_edit_batch",
+        "return",
+    )
+    .expect("configure batch append failure");
+
+    // Act
+    let result = store.append(&ManifestEdit::Batch(vec![add_sst(1)]));
+    fail::remove("midge::manifest::inject_no_space_on_append_edit_batch");
+    scenario.teardown();
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))), "{result:?}");
+}
+
 #[test]
 fn should_not_read_metadata_when_current_caller_saves_snapshot() {
     // Arrange
