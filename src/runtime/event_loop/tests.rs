@@ -193,14 +193,14 @@ pub(in crate::runtime::event_loop) fn record_wal_history(
     open: u64,
 ) {
     // Release the ledger recovery opened before the fixture replaces it.
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     let wal: Arc<dyn crate::io::Fs> = Arc::new(
         crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).expect("open the WAL directory"),
     );
     crate::runtime::wal_history::fixture::replace(&wal, sealed, open)
         .expect("record the WAL history");
     state.wal.history =
-        crate::runtime::wal_history::WalHistory::open(wal, open).expect("open the WAL ledger");
+        crate::runtime::wal_history::WalHistory::open(wal, open, 0).expect("open the WAL ledger");
 }
 
 // Helper to create a minimal runtime state for testing
@@ -228,7 +228,9 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
 
-    let state = RuntimeState::new(db_path.clone(), false);
+    // The history starts under the event loop's lease, so its first segment
+    // stays open.
+    let state = RuntimeState::new_in_epoch(&db_path, false, 1);
     let router = Arc::new(ResponseRouter::new());
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
@@ -467,7 +469,6 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         bytes::Bytes::from_static(b"recovered-gap"),
         Some(bytes::Bytes::from_static(b"value")),
         2,
-        0,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode recovered WAL record");
     let mut segment_bytes = Vec::new();
@@ -533,7 +534,12 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         .join(crate::wal::segment_object_key(2, 0));
     std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
         .expect("create remote WAL directory");
-    std::fs::write(remote_segment, segment_bytes).expect("publish resumed WAL segment");
+    // The upload publishes the sealed local segment's bytes.
+    std::fs::write(
+        remote_segment,
+        std::fs::read(&local_segment).expect("read the sealed local segment"),
+    )
+    .expect("publish resumed WAL segment");
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id: 2,
         max_sequence: 2,
@@ -1956,7 +1962,6 @@ fn cloud_recovery_wal_bytes(sequence: u64) -> Vec<u8> {
         bytes::Bytes::from(format!("key-{sequence}")),
         Some(bytes::Bytes::from_static(b"value")),
         sequence,
-        0,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode recovery WAL record");
     let mut framed = Vec::new();
@@ -1994,10 +1999,12 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),
     );
+    // Each sealed segment adds its header and footer to the record.
     let max_segment_bytes = first_bytes
         .len()
         .max(second_bytes.len())
-        .max(active_bytes.len()) as u64;
+        .max(active_bytes.len()) as u64
+        + 256;
     let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -2008,13 +2015,9 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&storage)),
+        // The recovered open segment 3 is sealed when the event loop opens
+        // and owed to the cloud with segments 1 and 2.
         recovered_local_wal_segments: std::collections::BTreeMap::from([(1, 1), (2, 2)]),
-        recovered_cloud_active_wal: Some(crate::runtime::RecoveredCloudActiveWal {
-            max_sequence: 3,
-            writer_epoch: 0,
-            record_count: 1,
-            valid_bytes: active_bytes.len(),
-        }),
         writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };

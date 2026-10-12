@@ -196,7 +196,6 @@ fn should_roundtrip_wal_record_through_internal_test_api() {
         cntryl_midge::Bytes::from_static(b"governance-key"),
         Some(cntryl_midge::Bytes::from_static(b"governance-value")),
         7,
-        1,
     );
 
     // Act

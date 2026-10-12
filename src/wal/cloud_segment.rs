@@ -16,10 +16,15 @@ pub(crate) struct DataCoverageRecord {
     pub(crate) seq: u64,
 }
 
+/// What a sealed segment's header and footer prove about it (#843).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SegmentValidation {
+    /// The footer's last sequence.
     pub(crate) max_sequence: u64,
+    /// The header's writer epoch.
     pub(crate) writer_epoch: u64,
+    /// The header's segment id.
+    pub(crate) id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +32,6 @@ pub(crate) struct SegmentReadback {
     pub(crate) validation: SegmentValidation,
     pub(crate) data_records: Vec<DataCoverageRecord>,
 }
-
-use super::recovery::EpochPolicy;
 
 #[must_use]
 pub(crate) fn object_key(segment_id: u64, writer_epoch: u64) -> String {
@@ -49,6 +52,31 @@ pub(crate) fn validate_bytes(
     Ok(validation)
 }
 
+/// Validate the bytes of published segment `segment_id`: its header must
+/// name that id and `writer_epoch`, and its footer `max_sequence` (#843).
+pub(crate) fn validate_published_bytes(
+    key: &str,
+    data: &[u8],
+    segment_id: u64,
+    writer_epoch: u64,
+    max_sequence: u64,
+) -> Result<SegmentValidation, String> {
+    let validation = validate_bytes(key, data, max_sequence)?;
+    if validation.id != segment_id {
+        return Err(format!(
+            "cloud WAL segment '{key}' header names segment {}, not {segment_id}",
+            validation.id
+        ));
+    }
+    if validation.writer_epoch != writer_epoch {
+        return Err(format!(
+            "cloud WAL segment '{key}' header names writer epoch {}, not {writer_epoch}",
+            validation.writer_epoch
+        ));
+    }
+    Ok(validation)
+}
+
 /// Validate a segment and collect the records prune coverage compares.
 pub(crate) fn validate_bytes_with_coverage(
     key: &str,
@@ -63,7 +91,7 @@ pub(crate) fn validate_bytes_with_coverage(
 /// Frame-, CRC- and shape-check every record, returning only the segment's
 /// validation summary.
 pub(crate) fn validate_segment_bytes(key: &str, data: &[u8]) -> Result<SegmentValidation, String> {
-    inspect(key, data, false, EpochPolicy::SingleEpoch).map(|readback| readback.validation)
+    inspect(key, data, false, true).map(|readback| readback.validation)
 }
 
 fn check_expected_max_sequence(
@@ -85,31 +113,28 @@ fn check_expected_max_sequence(
     Ok(())
 }
 
+/// Inspect a sealed segment the cloud holds or will hold: it must hold a
+/// record.
 pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, String> {
-    inspect(key, data, true, EpochPolicy::SingleEpoch)
+    inspect(key, data, true, true)
 }
 
-/// Inspect a locally sealed segment, which may span a restart and so hold
-/// rising writer epochs and stale records from a fenced writer. The reported
-/// epoch is the newest one.
-pub(crate) fn inspect_local_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, String> {
-    inspect(key, data, true, EpochPolicy::SkipStale)
+/// Inspect a locally sealed segment for retention, which may hold no record.
+pub(crate) fn inspect_sealed_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, String> {
+    inspect(key, data, true, false)
 }
 
+/// Read a whole sealed segment: its header, every record frame, and the
+/// footer that must end it, with one [`SegmentScan`].
 fn inspect(
     key: &str,
     data: &[u8],
     collect_coverage: bool,
-    epoch_policy: EpochPolicy,
+    require_records: bool,
 ) -> Result<SegmentReadback, String> {
-    if data.is_empty() {
-        return Err(format!("cloud WAL segment '{key}' is empty"));
-    }
-
-    let mut pos = 0u64;
-    let mut records = 0usize;
-    let mut observed_max_sequence = 0u64;
-    let mut observed_writer_epoch = None;
+    let mut scan = super::format::SegmentScan::start(data)
+        .map_err(|error| format!("cloud WAL segment '{key}' header: {error}"))?;
+    let mut pos = super::format::HEADER_LEN as u64;
     let mut data_records = Vec::new();
     loop {
         // A sealed segment is complete by construction, so any short or torn
@@ -120,28 +145,37 @@ fn inspect(
             super::frame::FrameStep::Eof => break,
             super::frame::FrameStep::Frame { payload, next_pos } => (payload, next_pos),
         };
+        let scanned = scan
+            .frame(&payload)
+            .map_err(|error| format!("cloud WAL segment '{key}': {error}"))?;
+        pos = next_pos;
+        if scanned == super::format::ScannedFrame::Footer {
+            if pos != data.len() as u64 {
+                return Err(format!(
+                    "cloud WAL segment '{key}': bytes follow its footer"
+                ));
+            }
+            break;
+        }
         let record = super::encoding::decode(payload.as_ref())
             .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
-        observed_writer_epoch = Some(
-            epoch_policy
-                .admit(observed_writer_epoch, record.writer_epoch)
-                .map_err(|error| format!("cloud WAL segment '{key}' {error}"))?,
-        );
-        observed_max_sequence = observed_max_sequence.max(record.seq);
+        scan.observe(record.seq, record.cf_id)
+            .map_err(|error| format!("cloud WAL segment '{key}': {error}"))?;
         if collect_coverage {
             append_data_coverage_records(key, &record, &mut data_records)?;
         }
-        records += 1;
-        pos = next_pos;
     }
-
-    if records == 0 {
+    let Some(footer) = scan.footer() else {
+        return Err(format!("cloud WAL segment '{key}' ends without its footer"));
+    };
+    if require_records && footer.record_count == 0 {
         return Err(format!("cloud WAL segment '{key}' contains no records"));
     }
     Ok(SegmentReadback {
         validation: SegmentValidation {
-            max_sequence: observed_max_sequence,
-            writer_epoch: observed_writer_epoch.unwrap_or_default(),
+            max_sequence: footer.last_seq,
+            writer_epoch: scan.header().epoch,
+            id: scan.header().id,
         },
         data_records,
     })
@@ -223,66 +257,86 @@ fn push_data_coverage_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::format::segment::SegmentBuilder;
+    use crate::wal::format::ChainLink;
     use bytes::Bytes;
 
-    fn append_record_frame(bytes: &mut Vec<u8>, sequence: u64, writer_epoch: u64) {
-        let record = WalRecord::new(
+    fn put(sequence: u64) -> WalRecord {
+        WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             sequence,
-            writer_epoch,
-        );
-        let payload = crate::wal::encoding::encode(&record).unwrap();
-        crate::wal::frame::append_frame(bytes, &payload).unwrap();
+        )
     }
 
     #[test]
-    fn should_reject_segment_given_records_from_multiple_writer_epochs() {
+    fn should_report_header_identity_and_footer_sequence_when_validating() {
         // Arrange
-        let mut bytes = Vec::new();
-        append_record_frame(&mut bytes, 1, 41);
-        append_record_frame(&mut bytes, 2, 42);
+        let (bytes, _) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
+            .record(&put(1))
+            .record(&put(2))
+            .seal();
 
         // Act
-        let result = inspect_bytes("wal/00000000000000000001.wal", &bytes);
+        let validation = validate_segment_bytes("wal/x", &bytes).expect("valid segment");
+
+        // Assert
+        assert_eq!(
+            validation,
+            SegmentValidation {
+                max_sequence: 2,
+                writer_epoch: 41,
+                id: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn should_reject_object_whose_header_epoch_differs_from_catalog() {
+        // Arrange: the catalog says epoch 42; the object's header says 41.
+        let (bytes, _) = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
+            .record(&put(1))
+            .seal();
+
+        // Act
+        let wrong_epoch = validate_published_bytes("wal/x", &bytes, 4, 42, 1);
+        let wrong_id = validate_published_bytes("wal/x", &bytes, 5, 41, 1);
+        let matching = validate_published_bytes("wal/x", &bytes, 4, 41, 1);
+
+        // Assert
+        assert!(wrong_epoch.unwrap_err().contains("writer epoch 41"));
+        assert!(wrong_id.unwrap_err().contains("segment 4"));
+        assert!(matching.is_ok());
+    }
+
+    #[test]
+    fn should_reject_unsealed_segment_as_cloud_object() {
+        // Arrange: an open segment, records but no footer.
+        let bytes = SegmentBuilder::new(4, 41, ChainLink::GENESIS)
+            .record(&put(1))
+            .open();
+
+        // Act
+        let result = inspect_bytes("wal/x", &bytes);
 
         // Assert
         let error = result.unwrap_err();
-        assert!(error.contains("mixes writer epochs 41 and 42"), "{error}");
+        assert!(error.contains("without its footer"), "{error}");
     }
 
     #[test]
-    fn should_accept_rising_writer_epochs_when_local_segment_spans_restart() {
+    fn should_reject_sealed_segment_without_records_as_cloud_object() {
         // Arrange
-        let mut bytes = Vec::new();
-        append_record_frame(&mut bytes, 1, 41);
-        append_record_frame(&mut bytes, 2, 42);
+        let (bytes, _) = SegmentBuilder::new(4, 41, ChainLink::GENESIS).seal();
 
         // Act
-        let readback = inspect_local_bytes("wal/00000000000000000001.wal", &bytes).unwrap();
+        let cloud = inspect_bytes("wal/x", &bytes);
+        let local = inspect_sealed_bytes("wal/x", &bytes);
 
         // Assert
-        assert_eq!(readback.validation.writer_epoch, 42);
-        assert_eq!(readback.validation.max_sequence, 2);
-        assert_eq!(readback.data_records.len(), 2);
-    }
-
-    #[test]
-    fn should_accept_stale_record_when_fenced_writer_appended_after_successor() {
-        // Arrange: replay skips the fenced writer's record as stale.
-        let mut bytes = Vec::new();
-        append_record_frame(&mut bytes, 1, 42);
-        append_record_frame(&mut bytes, 2, 41);
-        append_record_frame(&mut bytes, 3, 42);
-
-        // Act
-        let readback = inspect_local_bytes("wal/00000000000000000001.wal", &bytes).unwrap();
-
-        // Assert
-        assert_eq!(readback.validation.writer_epoch, 42);
-        assert_eq!(readback.validation.max_sequence, 3);
-        assert_eq!(readback.data_records.len(), 3);
+        assert!(cloud.unwrap_err().contains("no records"));
+        assert_eq!(local.expect("local retention reads it").data_records, []);
     }
 
     #[test]
@@ -294,26 +348,23 @@ mod tests {
             Bytes::from_static(b"put-key"),
             Some(Bytes::from_static(b"put-value")),
             2,
-            7,
         );
         put.expiration = Some(123_456);
         put.txn_id = Some(11);
         let mut delete = WalRecord::new_cf(
-            4,
+            3,
             WalOpKind::Delete,
             Bytes::from_static(b"delete-key"),
             None,
             3,
-            7,
         );
         delete.txn_id = Some(11);
         let mut delete_range = WalRecord::new_cf(
-            5,
+            3,
             WalOpKind::DeleteRange,
             Bytes::from_static(b"range-start"),
             None,
             4,
-            7,
         );
         delete_range.range_end = Some(Bytes::from_static(b"range-end"));
         delete_range.txn_id = Some(11);
@@ -321,22 +372,21 @@ mod tests {
             11,
             1,
             5,
-            7,
+            3,
             &[put, delete, delete_range],
         )
         .expect("encode transaction batch");
         let mut batch = WalRecord::new_cf(
-            0,
+            3,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload),
             5,
-            7,
         );
         batch.txn_id = Some(11);
-        let encoded = crate::wal::encoding::encode(&batch).expect("encode outer batch record");
-        let mut bytes = Vec::new();
-        crate::wal::frame::append_frame(&mut bytes, &encoded).expect("append batch frame");
+        let (bytes, _) = SegmentBuilder::new(1, 7, ChainLink::GENESIS)
+            .record(&batch)
+            .seal();
 
         // Act
         let readback = inspect_bytes("wal/00000000000000000001.wal", &bytes)
@@ -356,7 +406,7 @@ mod tests {
                     seq: 2,
                 },
                 DataCoverageRecord {
-                    cf_id: 4,
+                    cf_id: 3,
                     op: WalOpKind::Delete,
                     key: b"delete-key".to_vec(),
                     value: None,
@@ -365,7 +415,7 @@ mod tests {
                     seq: 3,
                 },
                 DataCoverageRecord {
-                    cf_id: 5,
+                    cf_id: 3,
                     op: WalOpKind::DeleteRange,
                     key: b"range-start".to_vec(),
                     value: None,

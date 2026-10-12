@@ -253,11 +253,11 @@ impl From<LedgerError> for MidgeError {
         match error {
             LedgerError::SegmentIdsExhausted => Self::ResourceLimit(format!("WAL ledger: {error}")),
             LedgerError::UnreachableState(_) => Self::Corruption(format!("WAL ledger: {error}")),
-            LedgerError::EmptyHolder
-            | LedgerError::NotOpenSegment { .. }
+            LedgerError::NotOpenSegment { .. }
             | LedgerError::NotNextSegment { .. }
             | LedgerError::BadLogStart { .. }
             | LedgerError::BadSetAside { .. }
+            | LedgerError::BrokenChain(_)
             | LedgerError::ReservationNotRaised { .. } => {
                 Self::Internal(format!("invalid WAL ledger edit: {error}"))
             }

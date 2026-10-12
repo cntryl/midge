@@ -1070,7 +1070,6 @@ mod tests {
             Bytes::from_static(key),
             Some(Bytes::from(vec![7u8; 4096])),
             sequence,
-            1,
         )
     }
 
@@ -1175,7 +1174,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             sequence,
-            1,
         );
         record.expiration = expiration;
         record

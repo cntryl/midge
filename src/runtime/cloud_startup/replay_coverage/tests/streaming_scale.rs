@@ -29,7 +29,7 @@ const COVERED_PER_SST: usize = 128;
 const SLOTS_PER_SST: usize = COVERED_PER_SST + 1;
 const HOLE_SLOT: usize = COVERED_PER_SST / 2;
 const BATCH_OPERATIONS: usize = 32;
-const WRITER_EPOCH: u64 = 7;
+const SEGMENT_EPOCH: u64 = 7;
 const CATALOG_EPOCH: u64 = 9;
 const COVERAGE_BUDGET: usize = 2 * 1_024 * 1_024;
 
@@ -160,11 +160,17 @@ impl ScaleFixture {
     }
 
     fn seed_wal(&mut self) -> MidgeResult<()> {
-        let bytes = encoded_batches(&self.records)?;
+        let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+            1,
+            SEGMENT_EPOCH,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .bytes(&encoded_batches(&self.records)?)
+        .seal();
         let publication = PublishedWalSegment::from_validated_bytes(
             1,
             final_sequence(&self.records),
-            WRITER_EPOCH,
+            SEGMENT_EPOCH,
             &bytes,
         );
         publication.validate_bytes(&bytes).expect("real sealed WAL");
@@ -187,10 +193,10 @@ impl ScaleFixture {
             crate::io::RealFs::new(self.directory.path().join("local/wal"))
                 .map_err(FsError::into_midge)?,
         );
-        let history = crate::runtime::wal_history::WalHistory::open(wal, OPEN_SEGMENT)?;
+        let history = crate::runtime::wal_history::WalHistory::open(wal, OPEN_SEGMENT, 0)?;
         StreamingCloudWalRecovery::build(
             &crate::io::real::test_root(self.directory.path().join("local")),
-            history.ledger(),
+            Some(history.ledger()),
             &self.cloud,
             &self.catalog,
             RecoveryPolicy::Strict,
@@ -253,7 +259,6 @@ fn seeded_records() -> Vec<WalRecord> {
                 Bytes::from(format!("key-{sst:03}-{slot:03}")),
                 Some(seeded_value(ordinal)),
                 sequence,
-                WRITER_EPOCH,
             );
             record.txn_id = Some(batch + 1);
             record
@@ -285,7 +290,7 @@ fn encoded_batches(records: &[WalRecord]) -> MidgeResult<Vec<u8>> {
             txn_id,
             first.seq - 1,
             commit,
-            WRITER_EPOCH,
+            first.cf_id,
             batch,
         )?;
         let mut outer = WalRecord::new(
@@ -293,7 +298,6 @@ fn encoded_batches(records: &[WalRecord]) -> MidgeResult<Vec<u8>> {
             Bytes::from_static(b"txn"),
             Some(payload),
             commit,
-            WRITER_EPOCH,
         );
         outer.txn_id = Some(txn_id);
         let payload = crate::wal::encoding::encode(&outer)?;
@@ -338,8 +342,6 @@ fn assert_frontier(fixture: &ScaleFixture, stats: &RecoveryStats) {
         u64::try_from(fixture.records.len() / BATCH_OPERATIONS).unwrap()
     );
     assert_eq!(stats.max_sequence, Some(final_sequence(&fixture.records)));
-    assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);
-    assert_eq!(stats.stale_records_skipped, 0);
     assert!(!stats.had_corruption);
     assert!(stats.tolerated_active_tail.is_none());
     assert!(stats.salvage_stop.is_none());

@@ -13,7 +13,7 @@
 use super::super::OpenOptions;
 use super::StartupStoragePath;
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
-use crate::config::{RecoveryPolicy, Storage};
+use crate::config::Storage;
 use crate::io::FsError;
 use std::sync::Arc;
 
@@ -48,7 +48,7 @@ impl StartupEpochFloor {
         if storage_path.memory_mode {
             return Ok(0);
         }
-        let local_wal = Self::local_wal_epoch(&storage_path.root, opts.recovery_policy(), scope)?;
+        let local_wal = Self::local_wal_epoch(&storage_path.root, scope)?;
         let catalog = match opts.storage() {
             Storage::Cloud { topology, .. } => {
                 let wal = crate::storage::providers::build_class_store(
@@ -84,11 +84,12 @@ impl StartupEpochFloor {
         Ok(local_wal.max(catalog))
     }
 
-    /// WAL failures surface as `RecoveryFailed`, the same classification
-    /// replay itself would report for them.
+    /// The newest writer epoch the WAL ledger records (#843): every segment
+    /// header names the epoch that wrote it, and epochs never fall along the
+    /// chain, so no segment is read. Failures surface as `RecoveryFailed`,
+    /// the classification recovery reports for them.
     fn local_wal_epoch(
         root: &Arc<dyn crate::io::Fs>,
-        recovery_policy: RecoveryPolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
         if !root
@@ -97,23 +98,13 @@ impl StartupEpochFloor {
         {
             return Ok(0);
         }
-        let replay_policy = match recovery_policy {
-            RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
-            RecoveryPolicy::Salvage => crate::wal::recovery::ReplayPolicy::SalvageValidPrefix,
-        };
         let mut storage = crate::io::subdirectory(Arc::clone(root), "wal");
         if let Some(scope) = scope {
             storage = crate::io::scope_fs(storage, scope.clone());
         }
         // Read only: the lease is not held yet, so nothing may change.
-        let result = crate::runtime::wal_history::WalHistory::read(&storage).and_then(|ledger| {
-            let Some(ledger) = ledger else {
-                return Ok(0);
-            };
-            let segments =
-                crate::runtime::wal_history::replay_segments(&ledger, &crate::io::FsPath::new(""));
-            crate::wal::recovery::max_writer_epoch(storage.as_ref(), &segments, replay_policy)
-        });
+        let result = crate::runtime::wal_history::WalHistory::read(&storage)
+            .map(|ledger| ledger.map_or(0, |ledger| ledger.newest_epoch()));
         if let Some(scope) = scope {
             scope.check("local WAL epoch discovery")?;
         }
@@ -166,5 +157,38 @@ impl StartupEpochFloor {
             }
         }
         Ok(floor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StartupEpochFloor;
+    use crate::common::MidgeResult;
+    use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+    use std::sync::Arc;
+
+    #[test]
+    fn should_discover_epoch_floor_from_ledger_without_reading_segments() -> MidgeResult<()> {
+        // Arrange: epoch 7 opened the newest segment the ledger names, and
+        // every open of that segment's file fails.
+        let device = CrashDevice::new();
+        let root: Arc<dyn crate::io::Fs> = Arc::new(device.fs());
+        let wal = crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR);
+        drop(crate::runtime::wal_history::WalHistory::open(wal, 1, 7)?);
+        let segment_open = device.inject(Fault {
+            op: FaultOp::Open,
+            path: format!("wal/{}", crate::wal::segment_file_name(1)),
+            nth: 1,
+            effect: FaultEffect::Before,
+            error: FaultError::Io,
+        });
+
+        // Act
+        let floor = StartupEpochFloor::local_wal_epoch(&root, None)?;
+
+        // Assert
+        assert_eq!(floor, 7);
+        assert!(!device.fired(segment_open), "discovery read a segment");
+        Ok(())
     }
 }

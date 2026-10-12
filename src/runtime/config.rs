@@ -12,14 +12,6 @@ pub(crate) struct RecoveredCloudWalSegment {
     pub writer_epoch: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RecoveredCloudActiveWal {
-    pub max_sequence: u64,
-    pub writer_epoch: u64,
-    pub record_count: usize,
-    pub valid_bytes: usize,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct CloudWalSealPolicy {
     pub min_segment_bytes: usize,
@@ -92,9 +84,6 @@ pub struct RuntimeConfig {
     pub(crate) recovered_local_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_local_wal_segments` by segment id.
     pub(crate) recovered_local_wal_segment_epochs: BTreeMap<u64, u64>,
-    /// A recovered active WAL file that must be sealed and enqueued after the
-    /// runtime has installed its cloud upload pipeline.
-    pub(crate) recovered_cloud_active_wal: Option<RecoveredCloudActiveWal>,
     pub compression_policy: crate::codec::CompressionPolicy,
     pub block_cache_size: usize,
     pub block_cache_policy: crate::sst::cache::CachePolicyType,
@@ -147,7 +136,6 @@ impl Default for RuntimeConfig {
             recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),
             recovered_local_wal_segment_epochs: BTreeMap::new(),
-            recovered_cloud_active_wal: None,
             compression_policy: crate::codec::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
             block_cache_policy: crate::sst::cache::CachePolicyType::Lru,

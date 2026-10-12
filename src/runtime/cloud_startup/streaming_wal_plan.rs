@@ -7,12 +7,12 @@ use crate::config::RecoveryPolicy;
 use crate::io::FsError;
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
 use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
+use crate::wal::format::ChainLink;
 use crate::wal::ledger::{SegmentId, WalLedger};
 use crate::wal::recovery::streaming::{
-    inspect_local_sealed_wal_file, inspect_sealed_wal_file, inspect_wal_file,
-    max_verified_suffix_sequence, StreamingReplayLimits,
+    inspect_sealed_wal_file, inspect_wal_file, max_verified_suffix_sequence, StreamingReplayLimits,
 };
-use crate::wal::recovery::ReplaySegments;
+use crate::wal::recovery::{Expectation, ReplaySegments, VerifiedWalPrefix};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +30,24 @@ const READ_ONLY: OpenOptions = OpenOptions {
 struct ReplaySource {
     fs: Arc<dyn Fs>,
     path: FsPath,
+    /// What replay checks the segment's header and footer against.
+    expect: Expectation,
+}
+
+/// The open member as a replay source, with what its records reach.
+struct ActiveSource {
+    source: ReplaySource,
+    max_sequence: u64,
+    writer_epoch: u64,
+}
+
+/// The footer link a verified sealed segment ends with.
+fn sealed_link(prefix: &VerifiedWalPrefix) -> Option<ChainLink> {
+    prefix
+        .scan
+        .as_ref()
+        .and_then(|scan| scan.footer())
+        .map(|footer| footer.sealed_facts().link)
 }
 
 pub(crate) struct StreamingCloudWalRecovery {
@@ -42,11 +60,22 @@ pub(crate) struct StreamingCloudWalRecovery {
     pub(crate) next_remote_id: SegmentId,
 }
 
+/// Rejoin past the catalog: every local member is kept aside, replay reads
+/// only what the catalog published, and history continues in a new segment
+/// linked to the catalog's head.
+fn warn_failed_back(ledger: &WalLedger, next_remote_id: SegmentId) {
+    tracing::warn!(
+        open_segment = ledger.open_segment(),
+        next_remote_id,
+        "another writer published past this cache; setting its local WAL aside"
+    );
+}
+
 impl StreamingCloudWalRecovery {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn build(
         local: &Arc<dyn Fs>,
-        ledger: &WalLedger,
+        ledger: Option<&WalLedger>,
         remote: &Arc<dyn StorageBackend>,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
         policy: RecoveryPolicy,
@@ -68,12 +97,13 @@ impl StreamingCloudWalRecovery {
     }
 
     /// Plan recovery over `local`, the database root, whose WAL members
-    /// `ledger` names. Every local WAL mutation (retained copy, truncation)
-    /// goes through `local`, so fault injection reaches them.
+    /// `ledger` names; a cache without a ledger replays only the catalog.
+    /// Every local WAL mutation (retained copy, truncation) goes through
+    /// `local`, so fault injection reaches them.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn build_within(
         local: &Arc<dyn Fs>,
-        ledger: &WalLedger,
+        ledger: Option<&WalLedger>,
         remote: &Arc<dyn StorageBackend>,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
         policy: RecoveryPolicy,
@@ -88,27 +118,13 @@ impl StreamingCloudWalRecovery {
         // This ledger records each seal before it uploads, so only another
         // writer publishes at or past its open segment: that writer took
         // over, and this cache's unpublished tail is not history.
-        let failed_back = ledger.open_segment() < next_remote_id;
+        let failed_back = ledger.is_some_and(|ledger| ledger.open_segment() < next_remote_id);
         let mut replay_fs = StreamingWalFs::new(read_window)?;
-        let mut plan = CloudWalRecoveryPlan {
-            remote_segments: BTreeMap::new(),
-            local_segments: BTreeMap::new(),
-            active_wal: None,
-            opened_in_salvage_mode: false,
-            unreplayed_segments: Vec::new(),
-            max_unreplayed_sequence: catalog.sequence_floor,
-            set_aside_from: None,
-        };
-        if failed_back {
-            // Rejoin past the catalog: keep every local member aside, replay
-            // only what the catalog published, and continue in a new segment.
-            tracing::warn!(
-                open_segment = ledger.open_segment(),
-                next_remote_id,
-                "another writer published past this cache; setting its local WAL aside"
-            );
-            plan.set_aside(ledger.log_start());
+        let mut plan = CloudWalRecoveryPlan::new(catalog.sequence_floor, failed_back);
+        if let (true, Some(ledger)) = (failed_back, ledger) {
+            warn_failed_back(ledger, next_remote_id);
         }
+        let mut catalog_links = BTreeMap::new();
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
         for (segment_id, publication) in &catalog.segments {
@@ -123,12 +139,13 @@ impl StreamingCloudWalRecovery {
                 limits,
                 scope,
             );
-            let Some(source) =
+            let Some((source, link)) =
                 recover_or_salvage(result, policy, &mut plan.opened_in_salvage_mode)?
             else {
                 skipped.insert(*segment_id);
                 continue;
             };
+            catalog_links.insert(*segment_id, link);
             sources.insert(*segment_id, source);
             plan.remote_segments.insert(
                 *segment_id,
@@ -138,40 +155,52 @@ impl StreamingCloudWalRecovery {
                 },
             );
         }
-        let context = WalPlanningContext {
-            local,
-            ledger,
-            policy,
-            read_window,
-            limits,
-            scope,
-        };
-        let LocalSources {
-            active: mut active_source,
-            skipped: skipped_local,
-        } = merge_local_sources(&context, &mut plan, &mut sources)?;
-        skipped.extend(skipped_local);
+        let mut active_source = None;
+        if let Some(ledger) = ledger.filter(|_| !failed_back) {
+            let context = WalPlanningContext {
+                local,
+                ledger,
+                policy,
+                read_window,
+                limits,
+                scope,
+            };
+            let LocalSources {
+                active,
+                skipped: skipped_local,
+            } = merge_local_sources(&context, &mut plan, &mut sources)?;
+            active_source = active;
+            skipped.extend(skipped_local);
+        }
         enforce_epoch_order(
             &mut plan,
             &mut sources,
             &mut active_source,
-            ledger.open_segment(),
+            ledger.map(WalLedger::open_segment),
             policy,
             &mut skipped,
             scope,
         )?;
         stop_at_first_hole(
-            &context,
+            local,
+            ledger.filter(|_| !failed_back),
+            limits,
+            scope,
             catalog,
             &skipped,
             &mut plan,
             &mut sources,
             &mut active_source,
         )?;
+        plan.catalog_head_link = plan
+            .remote_segments
+            .keys()
+            .next_back()
+            .and_then(|id| catalog_links.get(id).copied().flatten());
         let segments = assemble_planned_sources(
             &mut replay_fs,
             sources,
-            active_source.map(|source| (ledger.open_segment(), source)),
+            active_source.map(|active| (ledger.map_or(0, WalLedger::open_segment), active.source)),
             scope,
         )?;
         scope.check("cloud WAL planning completion")?;
@@ -192,22 +221,26 @@ fn assemble_planned_sources(
     active_source: Option<(SegmentId, ReplaySource)>,
     scope: &DeadlineScope,
 ) -> MidgeResult<ReplaySegments> {
-    let mut sealed = Vec::with_capacity(sources.len());
+    // The catalog's first entry has no anchor to check until #844; every
+    // later segment, the open one included, must link the one before.
+    let mut segments = ReplaySegments::new(None);
     for (segment_id, source) in sources {
         scope.check("cloud WAL source assembly")?;
         let name = crate::wal::segment_file_name(segment_id);
-        sealed.push(FsPath::new(format!("{}/{name}", crate::wal::WAL_DIR)));
+        let path = FsPath::new(format!("{}/{name}", crate::wal::WAL_DIR));
         replay_fs.insert(name, source.fs, source.path)?;
+        segments.push_sealed(segment_id, path, source.expect);
     }
-    let active = match active_source {
-        Some((segment_id, source)) => {
-            let name = crate::wal::segment_file_name(segment_id);
-            replay_fs.insert(name.clone(), source.fs, source.path)?;
-            Some(FsPath::new(format!("{}/{name}", crate::wal::WAL_DIR)))
-        }
-        None => None,
-    };
-    Ok(ReplaySegments::new(sealed, active))
+    if let Some((segment_id, source)) = active_source {
+        let name = crate::wal::segment_file_name(segment_id);
+        replay_fs.insert(name.clone(), source.fs, source.path)?;
+        segments.push_open(
+            segment_id,
+            FsPath::new(format!("{}/{name}", crate::wal::WAL_DIR)),
+            source.expect,
+        );
+    }
+    Ok(segments)
 }
 
 fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {
@@ -227,7 +260,7 @@ struct WalPlanningContext<'a> {
 }
 
 struct LocalSources {
-    active: Option<ReplaySource>,
+    active: Option<ActiveSource>,
     /// Local-only segments that failed validation and were not replayed.
     skipped: BTreeSet<u64>,
 }
@@ -271,6 +304,11 @@ fn merge_local_sources(
             limits,
             &mut plan.opened_in_salvage_mode,
         )?;
+        let expect = ledger
+            .expected(segment_id)
+            .map_or(Expectation::Chain, |member| {
+                Expectation::Member(member.clone())
+            });
         let Some((path, segment)) = selected else {
             skipped.insert(segment_id);
             continue;
@@ -292,6 +330,7 @@ fn merge_local_sources(
                 ReplaySource {
                     fs: Arc::clone(local),
                     path,
+                    expect,
                 },
             );
             plan.local_segments.insert(segment_id, segment);
@@ -301,7 +340,8 @@ fn merge_local_sources(
     let active = if plan_sets_aside(plan.set_aside_from, open) {
         None
     } else {
-        active_local_source(local, open, policy, limits, plan)?
+        let expect = Expectation::Member(ledger.open_member().clone());
+        active_local_source(local, open, expect, policy, limits, plan)?
     };
     Ok(LocalSources { active, skipped })
 }
@@ -369,7 +409,7 @@ fn remote_source(
     read_window: usize,
     limits: StreamingReplayLimits,
     scope: &DeadlineScope,
-) -> MidgeResult<ReplaySource> {
+) -> MidgeResult<(ReplaySource, Option<ChainLink>)> {
     scope.check("cloud WAL HEAD submission")?;
     let deadline = if scope.deadline().is_bounded() {
         scope.deadline()
@@ -447,15 +487,25 @@ fn remote_source(
         .open(&FsPath::new(canonical), READ_ONLY)
         .map_err(FsError::into_midge)?;
     let prefix = inspect_sealed_wal_file(file.as_ref(), &path, limits)?;
+    let header_id = prefix.scan.as_ref().map(|scan| scan.header().id);
     if prefix.max_sequence != publication.max_sequence
         || prefix.writer_epoch != publication.writer_epoch
+        || header_id != Some(publication.segment_id)
     {
         return Err(MidgeError::Corruption(format!(
-            "cloud WAL {} sequence or epoch differs from its catalog proof",
+            "cloud WAL {} sequence, epoch or segment differs from its catalog proof",
             publication.object_key
         )));
     }
-    Ok(ReplaySource { fs, path })
+    let link = sealed_link(&prefix);
+    Ok((
+        ReplaySource {
+            fs,
+            path,
+            expect: Expectation::Epoch(publication.writer_epoch),
+        },
+        link,
+    ))
 }
 
 fn select_local_segment(
@@ -468,7 +518,7 @@ fn select_local_segment(
     let path = crate::wal::segment_key(segment_id);
     let result = (|| {
         let file = open_member(fs.as_ref(), &path)?;
-        inspect_local_sealed_wal_file(file.as_ref(), &path, limits)
+        inspect_sealed_wal_file(file.as_ref(), &path, limits)
     })();
     Ok(recover_or_salvage(result, policy, salvaged)?.map(|prefix| {
         (
@@ -488,10 +538,11 @@ fn select_local_segment(
 fn active_local_source(
     fs: &Arc<dyn Fs>,
     open: SegmentId,
+    expect: Expectation,
     policy: RecoveryPolicy,
     limits: StreamingReplayLimits,
     plan: &mut CloudWalRecoveryPlan,
-) -> MidgeResult<Option<ReplaySource>> {
+) -> MidgeResult<Option<ActiveSource>> {
     let path = crate::wal::segment_key(open);
     let Some(file) = recover_or_salvage(
         open_member(fs.as_ref(), &path),
@@ -549,23 +600,22 @@ fn active_local_source(
     if prefix.record_count == 0 {
         return Ok(None);
     }
-    plan.active_wal = Some(crate::runtime::RecoveredCloudActiveWal {
+    Ok(Some(ActiveSource {
+        source: ReplaySource {
+            fs: Arc::clone(fs),
+            path,
+            expect,
+        },
         max_sequence: prefix.max_sequence,
         writer_epoch: prefix.writer_epoch,
-        record_count: prefix.record_count,
-        valid_bytes: prefix.valid_bytes,
-    });
-    Ok(Some(ReplaySource {
-        fs: Arc::clone(fs),
-        path,
     }))
 }
 
 fn enforce_epoch_order(
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
-    active: &mut Option<ReplaySource>,
-    open: SegmentId,
+    active: &mut Option<ActiveSource>,
+    open: Option<SegmentId>,
     policy: RecoveryPolicy,
     skipped: &mut BTreeSet<u64>,
     scope: &DeadlineScope,
@@ -601,8 +651,8 @@ fn enforce_epoch_order(
         plan.remote_segments.remove(&segment_id);
         plan.local_segments.remove(&segment_id);
     }
-    if plan
-        .active_wal
+    if active
+        .as_ref()
         .is_some_and(|wal| wal.writer_epoch < highest_epoch)
     {
         if policy == RecoveryPolicy::Strict {
@@ -612,11 +662,11 @@ fn enforce_epoch_order(
         }
         plan.opened_in_salvage_mode = true;
         tracing::warn!("skipping stale-epoch active WAL during salvage recovery");
-        if let Some(wal) = plan.active_wal.take() {
+        if let Some(wal) = active.take() {
             plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(wal.max_sequence);
-        }
-        if active.take().is_some() {
-            plan.set_aside(open);
+            if let Some(open) = open {
+                plan.set_aside(open);
+            }
         }
     }
     Ok(())
@@ -659,21 +709,18 @@ fn verified_max_sequence(
 /// undone while newer writes stay visible. Later sources are set aside
 /// (local members dropped from the ledger, cloud objects kept) and the
 /// sequence floor is lifted above them.
+#[allow(clippy::too_many_arguments)] // The plan, its sources and the cache they come from.
 fn stop_at_first_hole(
-    context: &WalPlanningContext<'_>,
+    local: &Arc<dyn Fs>,
+    ledger: Option<&WalLedger>,
+    limits: StreamingReplayLimits,
+    scope: &DeadlineScope,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     skipped: &BTreeSet<u64>,
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
-    active: &mut Option<ReplaySource>,
+    active: &mut Option<ActiveSource>,
 ) -> MidgeResult<()> {
-    let WalPlanningContext {
-        local,
-        ledger,
-        limits,
-        scope,
-        ..
-    } = *context;
     // Segments upload and retire in id order, so a local file below the
     // oldest cataloged segment was already retired, meaning SSTs cover it.
     // A leaked, corrupt copy of it is not a hole.
@@ -692,13 +739,16 @@ fn stop_at_first_hole(
     // Every member at or past the hole goes, including failed copies, or the
     // next open would find the same hole and drop newer writes. The open
     // member is always among them: every skipped id is below it.
-    for segment_id in ledger.members().filter(|segment_id| *segment_id >= hole) {
-        scope.check("WAL salvage frontier")?;
-        // A corrupt local-only file is in neither the catalog nor the plan;
-        // its verified prefix is the best record of what it held.
-        max_sequence = max_sequence.max(verified_max_sequence(local.as_ref(), segment_id, limits)?);
+    if let Some(ledger) = ledger {
+        for segment_id in ledger.members().filter(|segment_id| *segment_id >= hole) {
+            scope.check("WAL salvage frontier")?;
+            // A corrupt local-only file is in neither the catalog nor the
+            // plan; its verified prefix is the best record of what it held.
+            max_sequence =
+                max_sequence.max(verified_max_sequence(local.as_ref(), segment_id, limits)?);
+        }
+        plan.set_aside(hole);
     }
-    plan.set_aside(hole);
     let dropped: Vec<u64> = sources.range(hole..).map(|(id, _)| *id).collect();
     for segment_id in dropped {
         sources.remove(&segment_id);
@@ -720,12 +770,11 @@ fn stop_at_first_hole(
     for publication in &plan.unreplayed_segments {
         max_sequence = max_sequence.max(publication.max_sequence);
     }
-    if let Some(wal) = plan.active_wal.take() {
+    // Dropped from the ledger only after startup persists the floor that
+    // covers them; see `CloudWalRecoveryPlan::commit_within`.
+    if let Some(wal) = active.take() {
         max_sequence = max_sequence.max(wal.max_sequence);
     }
-    // Dropped from the ledger only after startup persists the floor that
-    // covers them; see `CloudWalRecoveryPlan::commit_set_aside_within`.
-    active.take();
     plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(max_sequence);
     Ok(())
 }

@@ -8,7 +8,8 @@
 //!
 //! Payload wire format:
 //! - `MAGIC: [u8; 2]` (currently `b"MW"`)
-//! - `VERSION: u8` (currently `1`)
+//! - `VERSION: u8` (currently `2`; #843 dropped the per-record writer epoch,
+//!   which the segment header carries)
 //! - repeated TLV fields:
 //!   - `tag: u8`
 //!   - `len: u32` (little-endian)
@@ -16,6 +17,10 @@
 //!
 //! Required fields:
 //! - OP, `CF_ID`, SEQ, KEY
+//!
+//! Transaction frames (`TxnBegin`, `TxnCommit`, `TxnBatch`) carry the
+//! transaction's column family in `CF_ID`; every operation in a batch
+//! payload belongs to it.
 //!
 //! Optional fields:
 //! - VALUE, EXPIRATION, `RANGE_END`, `TXN_ID`, COMPRESSION
@@ -28,7 +33,7 @@ use crate::wal::types::{WalOpKind, WalOpRole, WalRecord};
 use bytes::{Buf, Bytes};
 
 const MAGIC: [u8; 2] = *b"MW";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const TXN_BATCH_MAGIC: [u8; 2] = *b"TB";
 const TXN_BATCH_VERSION: u8 = 1;
 const PREFIX_LEN: usize = 3; // MAGIC (2) + VERSION (1)
@@ -46,7 +51,6 @@ pub mod tags {
     pub const RANGE_END: u8 = 7;
     pub const TXN_ID: u8 = 8;
     pub const COMPRESSION: u8 = 9;
-    pub const WRITER_EPOCH: u8 = 10;
 }
 
 /// Borrowed zero-copy WAL record view.
@@ -62,7 +66,6 @@ pub struct WalRecordView<'a> {
     pub expiration: Option<u64>,
     pub range_end: Option<&'a [u8]>,
     pub txn_id: Option<u64>,
-    pub writer_epoch: u64,
     pub compression: Option<u8>,
 }
 
@@ -87,7 +90,6 @@ pub struct TxnBatchEncodeRecord<'a> {
     pub expiration: Option<u64>,
     pub range_end: Option<&'a [u8]>,
     pub txn_id: Option<u64>,
-    pub writer_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +97,6 @@ pub struct DecodedTxnBatch {
     pub txn_id: u64,
     pub begin_seq: u64,
     pub commit_seq: u64,
-    pub writer_epoch: u64,
     pub records: Vec<TxnBatchRecord>,
 }
 
@@ -116,8 +117,11 @@ fn corruption(msg: impl Into<String>) -> MidgeError {
     MidgeError::Corruption(msg.into())
 }
 
-pub(super) fn has_current_record_prefix(data: &[u8]) -> bool {
-    data.len() >= PREFIX_LEN && data[..2] == MAGIC && data[2] == VERSION
+/// Whether `data` starts like a payload a v2 segment frame holds: a record
+/// or the footer.
+pub(super) fn has_segment_frame_prefix(data: &[u8]) -> bool {
+    (data.len() >= PREFIX_LEN && data[..2] == MAGIC && data[2] == VERSION)
+        || crate::wal::format::segment::is_footer_payload(data)
 }
 
 fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
@@ -141,8 +145,6 @@ fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
     if record.txn_id.is_some() {
         capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
     }
-    // writer_epoch is always present
-    capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
 
     Ok(capacity)
 }
@@ -293,8 +295,6 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
     put_u64(buf, tags::SEQ, record.seq)?;
     put_tlv(buf, tags::KEY, &record.key)?;
 
-    put_u64(buf, tags::WRITER_EPOCH, record.writer_epoch)?;
-
     if let Some(v) = &record.value {
         // Replay decompresses VALUE under a fixed ceiling. Compression can
         // shrink the frame below the frame limit, so check the uncompressed
@@ -405,7 +405,6 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
     let mut expiration = None;
     let mut range_end = None;
     let mut txn_id = None;
-    let mut writer_epoch = None;
     let mut compression = None;
 
     scan_tlvs(&data[PREFIX_LEN..], |tag, val| {
@@ -455,14 +454,6 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
                     val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
                 ]));
             }
-            tags::WRITER_EPOCH => {
-                if val.len() != 8 {
-                    return Err(corruption("bad WRITER_EPOCH length"));
-                }
-                writer_epoch = Some(u64::from_le_bytes([
-                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
-                ]));
-            }
             tags::COMPRESSION => {
                 if val.len() != 1 {
                     return Err(corruption("bad COMPRESSION length"));
@@ -488,7 +479,6 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
         expiration,
         range_end,
         txn_id,
-        writer_epoch: writer_epoch.ok_or_else(|| corruption("missing WRITER_EPOCH"))?,
         compression,
     })
 }
@@ -531,8 +521,6 @@ pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
         expiration: view.expiration,
         range_end: view.range_end.map(Bytes::copy_from_slice),
         txn_id: view.txn_id,
-        // Decompressed — the decoded record no longer carries a compression tag.
-        writer_epoch: view.writer_epoch,
     })
 }
 
@@ -622,7 +610,7 @@ pub fn encode_txn_batch_payload(
     txn_id: u64,
     begin_seq: u64,
     commit_seq: u64,
-    writer_epoch: u64,
+    cf_id: u32,
     records: &[WalRecord],
 ) -> MidgeResult<Bytes> {
     let records: Vec<_> = records
@@ -636,10 +624,9 @@ pub fn encode_txn_batch_payload(
             expiration: record.expiration,
             range_end: record.range_end.as_ref().map(Bytes::as_ref),
             txn_id: record.txn_id,
-            writer_epoch: record.writer_epoch,
         })
         .collect();
-    encode_txn_batch_payload_records(txn_id, begin_seq, commit_seq, writer_epoch, &records)
+    encode_txn_batch_payload_records(txn_id, begin_seq, commit_seq, cf_id, &records)
 }
 
 /// Encode borrowed WAL record views as a nested transaction batch payload.
@@ -648,12 +635,13 @@ pub fn encode_txn_batch_payload(
 ///
 /// Returns an error if the batch is empty, sequence metadata is inconsistent,
 /// a record contains nested transaction markers, metadata does not match the
-/// outer transaction, or encoded lengths exceed `u32::MAX`.
+/// outer transaction, a record belongs to a family other than `cf_id`, or
+/// encoded lengths exceed `u32::MAX`.
 pub fn encode_txn_batch_payload_records(
     txn_id: u64,
     begin_seq: u64,
     commit_seq: u64,
-    writer_epoch: u64,
+    cf_id: u32,
     records: &[TxnBatchEncodeRecord<'_>],
 ) -> MidgeResult<Bytes> {
     if records.is_empty() {
@@ -707,10 +695,10 @@ pub fn encode_txn_batch_payload_records(
                 record.txn_id
             )));
         }
-        if record.writer_epoch != writer_epoch {
+        if record.cf_id != cf_id {
             return Err(MidgeError::InvalidArgument(format!(
-                "transaction batch record {index} has mismatched writer_epoch {} (expected {writer_epoch})",
-                record.writer_epoch
+                "transaction batch record {index} belongs to column family {} (the transaction's is {cf_id})",
+                record.cf_id
             )));
         }
 
@@ -760,12 +748,20 @@ pub fn decode_txn_batch_payload(
     if !input.is_empty() {
         return Err(corruption("transaction batch payload has trailing bytes"));
     }
+    if let Some(member) = records
+        .iter()
+        .find(|record| record.cf_id != outer_record.cf_id)
+    {
+        return Err(corruption(format!(
+            "transaction batch member at sequence {} belongs to column family {}, not the transaction's {}",
+            member.seq, member.cf_id, outer_record.cf_id
+        )));
+    }
 
     Ok(DecodedTxnBatch {
         txn_id: header.txn_id,
         begin_seq: header.begin_seq,
         commit_seq: header.commit_seq,
-        writer_epoch: outer_record.writer_epoch,
         records,
     })
 }
@@ -945,7 +941,6 @@ mod tests {
             Bytes::from_static(b"txn"),
             Some(Bytes::from(vec![0_u8; oversized])),
             1,
-            1,
         );
 
         // Act
@@ -970,7 +965,6 @@ mod tests {
                 crate::wal::frame::WAL_MAX_VALUE_LEN
             ])),
             1,
-            1,
         );
 
         // Act
@@ -990,7 +984,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
-            1,
         );
 
         // Act
@@ -1008,7 +1001,7 @@ mod tests {
     #[test]
     fn should_roundtrip_delete_when_value_absent() {
         // Arrange
-        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"k"), None, 7, 1);
+        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"k"), None, 7);
 
         // Act
         let encoded = encode(&record).unwrap();
@@ -1028,7 +1021,6 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"unexpected")),
             7,
-            1,
         );
 
         // Act
@@ -1045,7 +1037,7 @@ mod tests {
     #[test]
     fn should_reject_put_record_missing_value_when_decoding() {
         // Arrange
-        let record = WalRecord::new(WalOpKind::Put, Bytes::from_static(b"k"), None, 7, 1);
+        let record = WalRecord::new(WalOpKind::Put, Bytes::from_static(b"k"), None, 7);
 
         // Act
         let encoded = encode(&record).unwrap();
@@ -1061,7 +1053,7 @@ mod tests {
     #[test]
     fn should_reject_delete_range_record_missing_range_end_when_decoding() {
         // Arrange
-        let record = WalRecord::new(WalOpKind::DeleteRange, Bytes::from_static(b"a"), None, 7, 1);
+        let record = WalRecord::new(WalOpKind::DeleteRange, Bytes::from_static(b"a"), None, 7);
 
         // Act
         let encoded = encode(&record).unwrap();
@@ -1077,16 +1069,15 @@ mod tests {
     #[test]
     fn should_reject_txn_batch_nested_put_missing_value_when_decoding() {
         // Arrange
-        let mut put = WalRecord::new_cf(7, WalOpKind::Put, Bytes::from_static(b"k"), None, 11, 9);
+        let mut put = WalRecord::new_cf(7, WalOpKind::Put, Bytes::from_static(b"k"), None, 11);
         put.txn_id = Some(42);
-        let payload = encode_txn_batch_payload(42, 10, 12, 9, &[put]).unwrap();
+        let payload = encode_txn_batch_payload(42, 10, 12, 7, &[put]).unwrap();
         let mut outer = WalRecord::new_cf(
-            0,
+            7,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload.clone()),
             12,
-            9,
         );
         outer.txn_id = Some(42);
 
@@ -1109,17 +1100,15 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"unexpected")),
             11,
-            9,
         );
         delete.txn_id = Some(42);
-        let payload = encode_txn_batch_payload(42, 10, 12, 9, &[delete]).unwrap();
+        let payload = encode_txn_batch_payload(42, 10, 12, 7, &[delete]).unwrap();
         let mut outer = WalRecord::new_cf(
-            0,
+            7,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload.clone()),
             12,
-            9,
         );
         outer.txn_id = Some(42);
 
@@ -1141,7 +1130,6 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"")),
             8,
-            1,
         );
 
         // Act
@@ -1154,24 +1142,102 @@ mod tests {
     }
 
     #[test]
-    fn should_roundtrip_writer_epoch() {
-        // Arrange
-        let mut record = WalRecord::new(
+    fn should_not_encode_writer_epoch_tag() {
+        // Arrange: tag 10 carried the writer epoch in record v1.
+        let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             99,
-            1,
         );
-        record.writer_epoch = 0x1234_5678_9abc_def0;
 
         // Act
         let encoded = encode(&record).unwrap();
-        let decoded = decode(&encoded[..]).unwrap();
+        let mut tags_seen = Vec::new();
+        scan_tlvs(&encoded[PREFIX_LEN..], |tag, _| {
+            tags_seen.push(tag);
+            Ok(())
+        })
+        .unwrap();
 
         // Assert
-        assert_eq!(decoded.seq, 99);
-        assert_eq!(decoded.writer_epoch, record.writer_epoch);
+        assert_eq!(encoded[2], 2, "records are MW version 2");
+        assert!(!tags_seen.contains(&10), "{tags_seen:?}");
+    }
+
+    #[test]
+    fn should_reject_record_v1_payload() {
+        // Arrange: a v2 record relabelled as v1.
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            99,
+        );
+        let mut encoded = encode(&record).unwrap().to_vec();
+        encoded[2] = 1;
+
+        // Act
+        let result = decode(&encoded[..]);
+
+        // Assert
+        assert!(
+            matches!(&result, Err(MidgeError::Corruption(message)) if message.contains("version")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_batch_member_from_another_family() {
+        // Arrange: family 7's transaction holds an operation of family 3.
+        let mut member = WalRecord::new_cf(
+            3,
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            11,
+        );
+        member.txn_id = Some(42);
+        let payload = encode_txn_batch_payload(42, 10, 12, 3, &[member]).unwrap();
+        let mut outer = WalRecord::new_cf(
+            7,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload.clone()),
+            12,
+        );
+        outer.txn_id = Some(42);
+
+        // Act
+        let result = decode_txn_batch_payload(&outer, &payload);
+
+        // Assert
+        assert!(
+            matches!(&result, Err(MidgeError::Corruption(message)) if message.contains("column family 3")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_refuse_to_encode_batch_spanning_families() {
+        // Arrange
+        let mut first = WalRecord::new_cf(
+            7,
+            WalOpKind::Put,
+            Bytes::from_static(b"a"),
+            Some(Bytes::from_static(b"v")),
+            11,
+        );
+        first.txn_id = Some(42);
+        let mut second = first.clone();
+        second.cf_id = 3;
+        second.seq = 12;
+
+        // Act
+        let result = encode_txn_batch_payload(42, 10, 13, 7, &[first, second]);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
     }
 
     #[test]
@@ -1181,7 +1247,6 @@ mod tests {
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
-            1,
             1,
         );
         let mut encoded = encode(&record).unwrap().to_vec();
@@ -1259,30 +1324,27 @@ mod tests {
             Bytes::from_static(b"k1"),
             Some(Bytes::from_static(b"v1")),
             11,
-            9,
         );
         put.txn_id = Some(42);
 
         let mut delete_range = WalRecord::new_cf(
-            3,
+            7,
             WalOpKind::DeleteRange,
             Bytes::from_static(b"a"),
             None,
             12,
-            9,
         );
         delete_range.txn_id = Some(42);
         delete_range.range_end = Some(Bytes::from_static(b"z"));
 
         let payload =
-            encode_txn_batch_payload(42, 10, 13, 9, &[put.clone(), delete_range.clone()]).unwrap();
+            encode_txn_batch_payload(42, 10, 13, 7, &[put.clone(), delete_range.clone()]).unwrap();
         let mut outer = WalRecord::new_cf(
-            0,
+            7,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload.clone()),
             13,
-            9,
         );
         outer.txn_id = Some(42);
 
@@ -1313,10 +1375,9 @@ mod tests {
                 expiration: Some(123),
                 range_end: None,
                 txn_id: Some(42),
-                writer_epoch: 9,
             },
             TxnBatchEncodeRecord {
-                cf_id: 3,
+                cf_id: 7,
                 op: WalOpKind::DeleteRange,
                 key: b"a".as_ref(),
                 value: None,
@@ -1324,13 +1385,12 @@ mod tests {
                 expiration: None,
                 range_end: Some(b"z".as_ref()),
                 txn_id: Some(42),
-                writer_epoch: 9,
             },
         ];
 
         // Act
         let expected_len = txn_batch_payload_records_encoded_len(&records).unwrap();
-        let payload = encode_txn_batch_payload_records(42, 10, 13, 9, &records).unwrap();
+        let payload = encode_txn_batch_payload_records(42, 10, 13, 7, &records).unwrap();
 
         // Assert
         assert_eq!(expected_len, payload.len());
@@ -1345,11 +1405,10 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             12,
-            5,
         );
         put.txn_id = Some(77);
 
-        let error = encode_txn_batch_payload(77, 10, 12, 5, &[put]).unwrap_err();
+        let error = encode_txn_batch_payload(77, 10, 12, 0, &[put]).unwrap_err();
         // Act
         // Assert
         assert!(error.to_string().contains("non-contiguous sequence"));
@@ -1380,7 +1439,6 @@ mod tests {
             Bytes::from_static(b"txn"),
             Some(Bytes::from(payload.clone())),
             commit_seq,
-            9,
         );
         outer.txn_id = Some(txn_id);
 
@@ -1436,17 +1494,15 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(large_value),
             11,
-            9,
         );
         inner.txn_id = Some(42);
-        let payload = encode_txn_batch_payload(42, 10, 12, 9, &[inner]).unwrap();
+        let payload = encode_txn_batch_payload(42, 10, 12, 0, &[inner]).unwrap();
         let mut outer = WalRecord::new_cf(
             0,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload),
             12,
-            9,
         );
         outer.txn_id = Some(42);
 
@@ -1473,14 +1529,12 @@ mod tests {
             Bytes::from_static(b"raw"),
             Some(raw_value.clone()),
             1,
-            7,
         );
         let compressed_record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"big"),
             Some(compressible_value.clone()),
             2,
-            7,
         );
 
         // Act
@@ -1515,17 +1569,15 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             2,
-            1,
         );
         put.txn_id = Some(5);
-        let payload = encode_txn_batch_payload(5, 1, 3, 1, &[put]).unwrap();
+        let payload = encode_txn_batch_payload(5, 1, 3, 0, &[put]).unwrap();
         let mut outer = WalRecord::new_cf(
             0,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload.clone()),
             99,
-            1,
         );
         outer.txn_id = Some(6);
 
@@ -1540,7 +1592,6 @@ mod tests {
         fn should_roundtrip_arbitrary_put_records(
             cf_id in any::<u32>(),
             seq in any::<u64>(),
-            writer_epoch in any::<u64>(),
             key in proptest::collection::vec(any::<u8>(), 1..33),
             value in proptest::collection::vec(any::<u8>(), 0..65),
             expiration in proptest::option::of(any::<u64>()),
@@ -1553,7 +1604,6 @@ mod tests {
                 Bytes::from(key.clone()),
                 Some(Bytes::from(value.clone())),
                 seq,
-                writer_epoch,
             );
             record.expiration = expiration;
             record.txn_id = txn_id;
@@ -1566,7 +1616,6 @@ mod tests {
             prop_assert_eq!(decoded.cf_id, cf_id);
             prop_assert_eq!(decoded.op, WalOpKind::Put);
             prop_assert_eq!(decoded.seq, seq);
-            prop_assert_eq!(decoded.writer_epoch, writer_epoch);
             prop_assert_eq!(decoded.key, Bytes::from(key));
             prop_assert_eq!(decoded.value, Some(Bytes::from(value)));
             prop_assert_eq!(decoded.expiration, expiration);

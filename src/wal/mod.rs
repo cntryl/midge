@@ -177,7 +177,7 @@ mod tests {
             parse_segment_object_key(&file),
             parse_segment_object_key(&format!("wal/{file}")),
             parse_segment_object_key("wal/epochs/7/00000000000000000042.wal"),
-            parse_segment_object_key(&format!("wal/epochs/00000000000000000007/42.wal")),
+            parse_segment_object_key("wal/epochs/00000000000000000007/42.wal"),
             parse_segment_object_key(&format!("wal/epochs/00000000000000000007/x/{file}")),
         ];
 

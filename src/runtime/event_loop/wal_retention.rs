@@ -71,8 +71,8 @@ impl EventLoop {
     }
 
     /// Finds the leading run of sealed segments that may retire: each is
-    /// below the recovery floor, empty, or has every record exactly in the
-    /// manifest's SSTs. Only a prefix retires (#842), so the first segment
+    /// below the recovery floor, holds no record, or has every record
+    /// exactly in the manifest's SSTs. Only a prefix retires (#842), so the first segment
     /// that may not stops the run, and an idle column family's segment holds
     /// every later one until a flush covers it.
     ///
@@ -131,16 +131,16 @@ impl EventLoop {
                 }
             };
             bytes_read = bytes_read.saturating_add(bytes.len() as u64);
-            if !bytes.is_empty() {
-                let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes)
-                {
-                    Ok(readback) => readback,
-                    Err(error) => {
-                        outcome.anomaly = true;
-                        tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
-                        break;
-                    }
-                };
+            let readback = match crate::wal::cloud_segment::inspect_sealed_bytes(&path.0, &bytes) {
+                Ok(readback) => readback,
+                Err(error) => {
+                    outcome.anomaly = true;
+                    tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
+                    break;
+                }
+            };
+            // A segment holding no record has nothing to prove.
+            if !readback.data_records.is_empty() {
                 let verifier = match (&mut coverage, identity_cache.take()) {
                     (Some(built), _) => &*built,
                     (slot @ None, Some(cache)) => slot.insert(VerifiedManifestWalCoverage::open(
@@ -224,21 +224,16 @@ impl EventLoop {
     /// Seals the active WAL segment so it can be retired later. In local
     /// mode this is the only place segments are sealed, so it must happen
     /// even while some memtable is unflushed, or the open segment would grow
-    /// without bound. An empty active segment has nothing to seal (#490): rotating it
-    /// would only create an empty sealed file for the loop below to delete.
+    /// without bound. An active segment holding no record has nothing to
+    /// seal (#490): rotating it would only create a sealed segment holding
+    /// nothing for the loop below to delete.
     ///
-    /// The on-disk length is a sound emptiness test because an append returns
-    /// only after the writer thread has written its bytes, and appends run on
-    /// this thread, so none is in flight here. A failed stat seals as before.
-    /// Returns false when pruning must stop.
+    /// The writer's tail is a sound test: an append returns only after the
+    /// writer thread has written its bytes and counted its records, and
+    /// appends run on this thread, so none is in flight here. Returns false
+    /// when pruning must stop.
     pub(super) fn seal_active_wal_for_prune(&mut self) -> bool {
-        let active = crate::wal::segment_key(self.state.wal.open_segment());
-        if self
-            .state
-            .fs
-            .metadata(&active)
-            .is_ok_and(|metadata| metadata.len == 0)
-        {
+        if self.wal_actor.open_tail().record_count == 0 {
             return true;
         }
         if let Err(error) = self.sync_local_wal_before_prune_rotation() {

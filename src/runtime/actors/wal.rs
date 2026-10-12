@@ -63,6 +63,8 @@ static TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID: AtomicU64 =
 
 struct TxnSequencePlan {
     txn_id: u64,
+    /// The one column family the transaction writes; its WAL frames carry it.
+    cf_id: crate::types::ColumnFamilyId,
     begin_seq: u64,
     first_op_seq: u64,
     commit_seq: u64,
@@ -234,8 +236,6 @@ pub struct WalActor {
     durability_policy: DurabilityPolicy,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
-    /// Highest sequence actually appended to the current WAL segment.
-    segment_max_sequence: u64,
     /// Batch configuration governing `max_delay_ms` and `max_bytes`
     batch_config: BatchConfig,
     /// Last wall-clock time we performed a WAL fsync
@@ -594,10 +594,6 @@ impl WalActor {
         });
     }
 
-    fn record_segment_sequence(&mut self, sequence: u64) {
-        self.segment_max_sequence = self.segment_max_sequence.max(sequence);
-    }
-
     /// Open the WAL actor over `state`'s segment ledger: a file-backed WAL
     /// appends to the ledger's open segment, a memory-mode one nowhere.
     pub(crate) fn open(
@@ -627,7 +623,6 @@ impl WalActor {
             pending_sync_count: 0,
             durability_policy,
             bytes_since_sync: 0,
-            segment_max_sequence: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
             append_calls: 0,
@@ -821,8 +816,18 @@ impl WalActor {
         self.bytes_since_sync
     }
 
-    pub(crate) fn current_segment_max_sequence(&self) -> u64 {
-        self.segment_max_sequence
+    /// The records the open segment holds: what sealing it would cover.
+    /// Memory mode holds none.
+    pub(crate) fn open_tail(&self) -> crate::wal::format::SegmentTail {
+        self.writer()
+            .map(crate::wal::WalWriter::tail)
+            .unwrap_or_default()
+    }
+
+    /// The highest sequence the open segment holds, or zero when it holds
+    /// none: what a seal ticket names.
+    pub(crate) fn open_segment_max_sequence(&self) -> u64 {
+        self.open_tail().last_seq.unwrap_or(0)
     }
 
     /// Retire every WAL segment below `to` through `state`'s ledger. Memory

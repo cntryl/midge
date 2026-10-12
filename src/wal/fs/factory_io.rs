@@ -48,12 +48,14 @@ impl FsWalFactoryIo {
     }
 
     /// A writer appending to segment `id`, which the segment ledger already
-    /// records: a missing file is corruption, never recreated empty.
+    /// records and which holds only its header: a missing file is
+    /// corruption, never recreated, and a writer never appends behind
+    /// records or a footer.
     ///
     /// # Errors
     ///
-    /// Returns an error if the segment is missing or the writer cannot be
-    /// created.
+    /// Returns an error if the segment is missing, holds more than its
+    /// header, or the writer cannot be created.
     pub(crate) fn open_segment(
         &self,
         id: crate::wal::ledger::SegmentId,
@@ -68,15 +70,22 @@ impl FsWalFactoryIo {
                 "WAL segment {name} is in the WAL ledger but missing"
             )));
         }
-        self.create_writer(&name)
+        self.writer(&name)
     }
 
-    /// Create a new WAL writer using the `io::Fs` backend
+    /// A writer over a new segment `path_str`, created with a header for a
+    /// history of its own, for tests that write one segment directly.
     ///
     /// # Errors
     ///
-    /// Returns an error if the writer cannot be created.
+    /// Returns an error if the segment cannot be created or opened.
+    #[cfg(test)]
     pub fn create_writer(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
+        super::writer_io::create_test_segment(self.fs.as_ref(), path_str)?;
+        self.writer(path_str)
+    }
+
+    fn writer(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
         let writer = super::FsWalWriterIo::new_with_authority(
             path_str,
             Arc::clone(&self.fs),
@@ -90,27 +99,6 @@ impl FsWalFactoryIo {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn should_sync_wal_directory_when_creating_a_wal_segment_writer() {
-        // Arrange
-        let mock = std::sync::Arc::new(crate::io::MockFs::new());
-        let factory = FsWalFactoryIo::new(mock.clone());
-
-        // Act
-        let _writer = factory
-            .create_writer(&crate::wal::segment_file_name(1))
-            .expect("create WAL segment writer");
-
-        // Assert
-        assert!(
-            mock.sync_dir_calls()
-                .iter()
-                .any(|(path, durability)| path.0 == "."
-                    && *durability == crate::io::Durability::Durable),
-            "creating a WAL segment must make its directory entry durable"
-        );
-    }
 
     use super::*;
 
@@ -134,18 +122,8 @@ mod tests {
         // Arrange
         let mock = std::sync::Arc::new(crate::io::MockFs::new());
         let name = crate::wal::segment_file_name(4);
-        drop(
-            mock.open(
-                &crate::io::FsPath::new(&name),
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: true,
-                    create_new: true,
-                    truncate: false,
-                },
-            )
-            .expect("create segment"),
-        );
+        crate::wal::fs::writer_io::create_test_segment(mock.as_ref(), &name)
+            .expect("create segment");
         let factory = FsWalFactoryIo::new(mock.clone());
 
         // Act
@@ -153,7 +131,67 @@ mod tests {
 
         // Assert
         assert!(writer.is_ok());
-        assert!(mock.get_file(&name).is_some());
+        assert_eq!(
+            mock.get_file(&name).map(|bytes| bytes.len()),
+            Some(crate::wal::format::HEADER_LEN)
+        );
+    }
+
+    #[test]
+    fn should_refuse_writer_on_segment_with_records() {
+        // Arrange: segment 4 already holds a record past its header.
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let name = crate::wal::segment_file_name(4);
+        crate::wal::fs::writer_io::create_test_segment(mock.as_ref(), &name)
+            .expect("create segment");
+        let factory = FsWalFactoryIo::new(mock.clone());
+        factory
+            .open_segment(4)
+            .expect("open the empty segment")
+            .append_record(&crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"key"),
+                Some(bytes::Bytes::from_static(b"value")),
+                1,
+            ))
+            .expect("append");
+
+        // Act
+        let result = factory.open_segment(4);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn should_report_sealed_last_sequence_from_writer_tail() -> MidgeResult<()> {
+        // Arrange: segment 4 receives records at sequences 5 and 9.
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let name = crate::wal::segment_file_name(4);
+        crate::wal::fs::writer_io::create_test_segment(mock.as_ref(), &name)?;
+        let writer = FsWalFactoryIo::new(mock).open_segment(4)?;
+        for sequence in [5, 9] {
+            writer.append_record(&crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"key"),
+                Some(bytes::Bytes::from_static(b"value")),
+                sequence,
+            ))?;
+        }
+
+        // Act
+        let tail = writer.tail();
+        let facts = writer.seal_facts(std::time::Duration::from_secs(5))?;
+
+        // Assert
+        assert_eq!((tail.record_count, tail.last_seq), (2, Some(9)));
+        assert_eq!((facts.link.id, facts.link.last_seq), (4, 9));
+        assert_eq!(facts.record_count, 2);
+        Ok(())
     }
 
     #[test]
@@ -166,7 +204,7 @@ mod tests {
         let writer = factory.create_writer(&crate::wal::segment_file_name(1))?;
 
         // Assert
-        assert_eq!(writer.current_pos(), 0);
+        assert_eq!(writer.current_pos(), crate::wal::format::HEADER_LEN as u64);
         Ok(())
     }
 }

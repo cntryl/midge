@@ -58,7 +58,7 @@ impl WalActor {
             self.validate_assertion_only_spill(state, &assertions, start_sequence)?;
             return Ok((state.sequence, 0, false));
         }
-        Self::validate_spilled_transaction(
+        let cf_id = Self::validate_spilled_transaction(
             state,
             self.read_resources.clone(),
             source,
@@ -72,7 +72,7 @@ impl WalActor {
         if self.max_replayable_txn_bytes.is_some() {
             self.ensure_replayable_transaction(Self::spilled_replay_bytes(source)?)?;
         }
-        let sequence_plan = Self::allocate_transaction_sequences(state, source.len())?;
+        let sequence_plan = Self::allocate_transaction_sequences(state, source.len(), cf_id)?;
         let commit_time_millis = state.observed_time_millis();
         source.for_each(|ordinal, op| {
             let sequence = sequence_plan
@@ -175,7 +175,17 @@ impl WalActor {
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
         conflict_policy: crate::runtime::ConflictPolicy,
-    ) -> MidgeResult<()> {
+    ) -> MidgeResult<crate::types::ColumnFamilyId> {
+        // A transaction writes one family; check before anything is read.
+        let mut families = Vec::new();
+        source.for_each(|_, op| {
+            let cf_id = crate::runtime::transaction_spill::op_cf_id(&op);
+            if !families.contains(&cf_id) {
+                families.push(cf_id);
+            }
+            Ok(())
+        })?;
+        let family = Self::transaction_family(families.into_iter())?;
         // Assertions are enforced regardless of ConflictPolicy — see the
         // in-memory counterpart in validate_transaction_preconditions.
         // One snapshot per family serves assertions and conflict checks.
@@ -231,7 +241,7 @@ impl WalActor {
                 "transaction spill operation count does not match its header".to_string(),
             ));
         }
-        Ok(())
+        Ok(family)
     }
 
     fn ensure_no_write_conflict_for_op(
@@ -300,19 +310,17 @@ impl WalActor {
         }
 
         let mut begin = WalRecord::new_cf(
-            0,
+            sequence_plan.cf_id,
             WalOpKind::TxnBegin,
             Bytes::from_static(b"txn"),
             None,
             sequence_plan.begin_seq,
-            self.current_epoch,
         );
         begin.txn_id = Some(sequence_plan.txn_id);
         let mut total_bytes = begin.estimated_size();
         let append_started_at = Instant::now();
         self.append_spilled_record(&begin, wal_may_have_changed)?;
 
-        let epoch = self.current_epoch;
         source.for_each(|ordinal, op| {
             let sequence = sequence_plan
                 .first_op_seq
@@ -323,7 +331,7 @@ impl WalActor {
                     )
                 })?;
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
-            let record = apply_op.wal_record(sequence_plan.txn_id, epoch);
+            let record = apply_op.wal_record(sequence_plan.txn_id);
             total_bytes = total_bytes.saturating_add(record.estimated_size());
             self.append_spilled_record(&record, wal_may_have_changed)
         })?;
@@ -336,18 +344,16 @@ impl WalActor {
             ))
         );
         let mut commit = WalRecord::new_cf(
-            0,
+            sequence_plan.cf_id,
             WalOpKind::TxnCommit,
             Bytes::from_static(b"txn"),
             None,
             sequence_plan.commit_seq,
-            self.current_epoch,
         );
         commit.txn_id = Some(sequence_plan.txn_id);
         total_bytes = total_bytes.saturating_add(commit.estimated_size());
         self.append_spilled_record(&commit, wal_may_have_changed)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
-        self.record_segment_sequence(sequence_plan.commit_seq);
         WalTransitionBoundary::AfterAppendBeforeAccounting.check()?;
         crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
         tracing::trace!(request_id, "appended split transaction WAL frames");

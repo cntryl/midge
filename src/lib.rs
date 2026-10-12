@@ -228,6 +228,14 @@ pub mod __internal {
         pub mod encoding {
             pub use crate::wal::encoding::{decode, decode_view, encode, encode_into};
         }
+        /// WAL segment format v2 (#843), for integration fixtures.
+        pub mod segment {
+            pub use crate::wal::format::link::ChainLink;
+            pub use crate::wal::format::segment::{
+                footer_link, header_epoch, is_footer_payload, records, SegmentBuilder,
+                SegmentHeader, HEADER_LEN,
+            };
+        }
         pub mod frame {
             pub use crate::wal::frame::{
                 append_frame, decode_frame_header, verify_frame_crc, WAL_FRAME_HEADER_LEN,

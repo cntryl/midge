@@ -289,7 +289,6 @@ fn should_require_exact_raw_state_when_streaming_wal_retirement() {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             7,
-            1,
         );
         record.expiration = wal_expiration;
         if wal_op != Put {
@@ -363,7 +362,6 @@ fn should_retire_cloud_wal_delete_range_only_when_sst_range_tombstones_cover_it(
             Bytes::from_static(b"k"),
             None,
             7,
-            1,
         );
         record.range_end = Some(Bytes::from_static(b"z"));
         let payload = crate::wal::encoding::encode(&record).expect("encode WAL");
@@ -422,13 +420,12 @@ fn should_retain_newer_wal_authority_when_streamed_oldest_segment_is_uncovered()
         Bytes::from_static(b"missing"),
         Some(Bytes::from_static(b"v")),
         1,
-        1,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode WAL");
     let mut wal = Vec::new();
     crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL");
     let first = write_authoritative_cloud_wal(&storage, 1, 1, wal);
-    let second = write_authoritative_cloud_wal(&storage, 2, 2, valid_wal_bytes(2));
+    let second = write_authoritative_cloud_wal(&storage, 2, 2, valid_wal_bytes(2, 2));
     let sst = valid_sst_bytes(b"k", b"v", 2);
     let manifest = manifest_covering_wal("prefix.sst", &sst, 2, Some(crc32c::crc32c(&sst)));
     write_cloud_object(
@@ -466,7 +463,7 @@ fn should_retain_cloud_wal_authority_when_retirement_memory_is_exhausted() {
     let (cloud, storage) = hybrid_with_mock_cloud();
     storage.enable_ephemeral_sst_cache(64 * 1024);
     let sequence = 8;
-    let key = write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(sequence));
+    let key = write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(1, sequence));
     cloud.clear_history();
 
     // Act
@@ -511,7 +508,7 @@ fn should_delete_range_verified_wal_with_filesystem_identity() {
         .fence_cloud_wal_catalog(2)
         .expect("initialize catalog");
     let sequence = 9;
-    let key = write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(sequence));
+    let key = write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(1, sequence));
     let name = "filesystem-prune.sst";
     let sst = valid_sst_bytes(b"k", b"v", sequence);
     let manifest = manifest_covering_wal(name, &sst, sequence, Some(crc32c::crc32c(&sst)));
@@ -533,7 +530,16 @@ fn should_retire_large_cloud_wal_without_whole_object_downloads() {
     let (cloud, storage) = hybrid_with_mock_cloud();
     storage.enable_ephemeral_sst_cache(64 * 1024);
     let sequence = 400;
-    let wal = (1..=sequence).flat_map(valid_wal_bytes).collect::<Vec<_>>();
+    let wal = (1..=sequence)
+        .flat_map(|sequence| {
+            frame_wal(&crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"k"),
+                Some(Bytes::from_static(b"v")),
+                sequence,
+            ))
+        })
+        .collect::<Vec<_>>();
     assert!(wal.len() > 16 * 1024);
     write_authoritative_cloud_wal(&storage, 1, sequence, wal);
     let name = "streamed-retirement.sst";
@@ -571,7 +577,7 @@ fn should_prune_wal_without_fetching_unrelated_ssts_when_local_cache_is_ephemera
     let (cloud, storage) = hybrid_with_mock_cloud();
     storage.enable_ephemeral_sst_cache(1024 * 1024);
     let sequence = 31;
-    write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(sequence));
+    write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(1, sequence));
     let name = "relevant.sst";
     let bytes = valid_sst_bytes(b"k", b"v", sequence);
     let mut manifest = manifest_covering_wal(name, &bytes, sequence, Some(crc32c::crc32c(&bytes)));
@@ -606,7 +612,7 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
     let tmp = tempfile::tempdir().expect("create stale publisher WAL dir");
     let segment_id = 1;
     let max_sequence = 11;
-    let bytes = valid_wal_bytes(max_sequence);
+    let bytes = valid_wal_bytes(segment_id, max_sequence);
     let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write stale publisher local WAL");
     let object_key = crate::wal::segment_object_key(segment_id, 1);
@@ -647,7 +653,7 @@ fn should_converge_catalog_copies_after_publication() {
     let tmp = tempfile::tempdir().expect("create mirrored catalog WAL dir");
     let segment_id = 1;
     let max_sequence = 11;
-    let bytes = valid_wal_bytes(max_sequence);
+    let bytes = valid_wal_bytes(segment_id, max_sequence);
     let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write mirrored catalog local WAL");
     let object_key = crate::wal::segment_object_key(segment_id, 1);
@@ -735,7 +741,7 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
 
     let segment_id = 1;
     let max_sequence = 11;
-    let bytes = valid_wal_bytes(max_sequence);
+    let bytes = valid_wal_bytes(segment_id, max_sequence);
     let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&local_path, &bytes).expect("write publisher local WAL");
     let object_key = crate::wal::cloud_segment::object_key(segment_id, 1);
@@ -788,7 +794,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
         &storage,
         retired_segment_id,
         retired_max_sequence,
-        valid_wal_bytes(retired_max_sequence),
+        valid_wal_bytes(retired_segment_id, retired_max_sequence),
     );
     let sst_name = "catalog-mutation-race.sst";
     let sst_bytes = valid_sst_bytes(b"k", b"v", retired_max_sequence);
@@ -806,7 +812,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
 
     let published_segment_id = 2;
     let published_max_sequence = 12;
-    let published_bytes = valid_wal_bytes(published_max_sequence);
+    let published_bytes = valid_wal_bytes(published_segment_id, published_max_sequence);
     let published_local_path = tmp
         .path()
         .join(crate::wal::segment_file_name(published_segment_id));
@@ -890,7 +896,7 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
 
     let holding_segment_id = 1;
     let holding_max_sequence = 11;
-    let holding_bytes = valid_wal_bytes(holding_max_sequence);
+    let holding_bytes = valid_wal_bytes(holding_segment_id, holding_max_sequence);
     let holding_local_path = tmp
         .path()
         .join(crate::wal::segment_file_name(holding_segment_id));
@@ -903,7 +909,7 @@ fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
 
     let waiting_segment_id = 2;
     let waiting_max_sequence = 12;
-    let waiting_bytes = valid_wal_bytes(waiting_max_sequence);
+    let waiting_bytes = valid_wal_bytes(waiting_segment_id, waiting_max_sequence);
     let waiting_local_path = tmp
         .path()
         .join(crate::wal::segment_file_name(waiting_segment_id));
@@ -1159,7 +1165,7 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
     ));
     // The sealed segment exists only in an in-memory root: the upload must
     // read it through the root, not from a host path.
-    let wal_bytes = valid_wal_bytes(17);
+    let wal_bytes = valid_wal_bytes(17, 17);
     let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
     crate::io::Fs::open(
         root.as_ref(),
@@ -1233,26 +1239,53 @@ fn valid_sst_bytes(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     writer.finish_bytes().expect("finish SST bytes")
 }
 
-fn valid_wal_bytes(seq: u64) -> Vec<u8> {
+/// Sealed segment `segment_id`, written by epoch 1, holding one put at
+/// `seq`.
+fn valid_wal_bytes(segment_id: u64, seq: u64) -> Vec<u8> {
     let record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
         Bytes::from_static(b"k"),
         Some(Bytes::from_static(b"v")),
         seq,
-        1,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+    sealed_wal(segment_id, &frame_wal(&record))
+}
+
+/// `record` as one bare WAL frame.
+fn frame_wal(record: &crate::wal::WalRecord) -> Vec<u8> {
+    let payload = crate::wal::encoding::encode(record).expect("encode WAL record");
     let mut bytes = Vec::new();
     crate::wal::frame::append_frame(&mut bytes, &payload).expect("append WAL frame");
     bytes
 }
 
+/// `body`, bare frames, sealed as segment `segment_id` written by epoch 1:
+/// the form every cloud WAL object takes (#843). Its first sequence is the
+/// lowest the chain allows; tests here do not replay the chain.
+fn sealed_wal(segment_id: u64, body: &[u8]) -> Vec<u8> {
+    crate::wal::format::segment::SegmentBuilder::new(
+        segment_id,
+        1,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .bytes(body)
+    .seal()
+    .0
+}
+
+/// Publish `bytes` as segment `segment_id` in the catalog. Bare frames are
+/// first sealed as that segment (see [`sealed_wal`]).
 fn write_authoritative_cloud_wal(
     storage: &HybridStorage,
     segment_id: u64,
     catalog_max_sequence: u64,
     bytes: Vec<u8>,
 ) -> String {
+    let bytes = if crate::wal::format::segment::SegmentHeader::decode(&bytes).is_ok() {
+        bytes
+    } else {
+        sealed_wal(segment_id, &bytes)
+    };
     let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
         segment_id,
         catalog_max_sequence,
@@ -2266,7 +2299,7 @@ fn should_reread_remote_wal_given_repeated_authoritative_validation() {
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
 
     mock_cloud.clear_history();
@@ -2307,7 +2340,7 @@ fn should_reject_cached_remote_wal_proof_when_cloud_object_is_deleted() {
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
 
     storage
@@ -2333,12 +2366,12 @@ fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
     let segment_id = 11;
     let max_sequence = 21;
     let key = crate::wal::cloud_segment::object_key(segment_id, 1);
-    write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
+    write_cloud_object(&storage, &key, valid_wal_bytes(segment_id, max_sequence));
     let stale_proof = storage
         .remote_object_proof(&key)
         .expect("initial remote object proof");
 
-    write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
+    write_cloud_object(&storage, &key, valid_wal_bytes(segment_id, max_sequence));
     storage
         .delete_remote_object_guarded(segment_id, stale_proof)
         .expect("schedule prune");
@@ -2358,7 +2391,7 @@ fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
     // Arrange
     let segment_id = 12;
     let key = crate::wal::cloud_segment::object_key(segment_id, 1);
-    let bytes = valid_wal_bytes(22);
+    let bytes = valid_wal_bytes(segment_id, 22);
     let backend = Arc::new(RacingReadDeleteBackend::new(bytes.clone()));
     let cloud: Arc<dyn StorageBackend> = backend.clone();
     let storage = Arc::new(CloudPersistence::new(Arc::new(HybridStorage::with_policy(
@@ -2406,7 +2439,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
     let sst_name = "missing-after-validation.sst";
     let sst_key = crate::cloud_layout::object_key(sst_name);
@@ -2462,7 +2495,7 @@ fn assert_wal_prune_rejects_manifest_crc_mismatch(ephemeral: bool) {
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
     let sst_name = "wrong-crc-prune-guard.sst";
     let sst_key = crate::cloud_layout::object_key(sst_name);
@@ -2519,7 +2552,7 @@ fn assert_sst_identity_change_retains_wal(ephemeral: bool) {
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
     let sst_name = "changed-after-validation.sst";
     let sst_key = crate::cloud_layout::object_key(sst_name);
@@ -2597,7 +2630,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
     let sst_name = "metadata-guard.sst";
     let sst_key = crate::cloud_layout::object_key(sst_name);
@@ -2669,7 +2702,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
         &storage,
         segment_id,
         max_sequence,
-        valid_wal_bytes(max_sequence),
+        valid_wal_bytes(segment_id, max_sequence),
     );
     let sst_name = "guard-valid.sst";
     let sst_key = crate::cloud_layout::object_key(sst_name);
@@ -2754,7 +2787,7 @@ fn should_reject_remote_wal_segment_with_sequence_beyond_expected_max() {
         &storage,
         segment_id,
         expected_max_sequence,
-        valid_wal_bytes(expected_max_sequence + 1),
+        valid_wal_bytes(segment_id, expected_max_sequence + 1),
     );
 
     let error = storage
@@ -2776,11 +2809,12 @@ fn should_not_overwrite_existing_remote_wal_during_upload() {
     let segment_id = 12;
     let upload_max_sequence = 22;
     let key = crate::wal::cloud_segment::object_key(segment_id, 1);
-    let existing_bytes = valid_wal_bytes(upload_max_sequence + 100);
+    let existing_bytes = valid_wal_bytes(segment_id, upload_max_sequence + 100);
     write_cloud_object(&storage, &key, existing_bytes.clone());
 
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
-    std::fs::write(&wal_path, valid_wal_bytes(upload_max_sequence)).expect("write local WAL");
+    std::fs::write(&wal_path, valid_wal_bytes(segment_id, upload_max_sequence))
+        .expect("write local WAL");
     storage
         .enqueue_wal_segment(
             &crate::io::FsLocation::host_file(&wal_path),
@@ -2838,7 +2872,7 @@ fn should_acknowledge_wal_upload_when_remote_object_holds_the_same_bytes() {
     let tmp = tempfile::tempdir().expect("create WAL dir");
     let segment_id = 14;
     let max_sequence = 24;
-    let bytes = valid_wal_bytes(max_sequence);
+    let bytes = valid_wal_bytes(segment_id, max_sequence);
     let key = crate::wal::cloud_segment::object_key(segment_id, 1);
     write_cloud_object(&storage, &key, bytes.clone());
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
@@ -2916,7 +2950,7 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     let segment_id = 9;
     let max_sequence = 13;
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
-    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+    std::fs::write(&wal_path, valid_wal_bytes(segment_id, max_sequence)).expect("write local WAL");
 
     mock_cloud.clear_history();
     storage
@@ -2988,7 +3022,7 @@ fn enqueue_test_wal_upload(
     max_sequence: u64,
 ) {
     let wal_path = dir.join(crate::wal::segment_file_name(segment_id));
-    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+    std::fs::write(&wal_path, valid_wal_bytes(segment_id, max_sequence)).expect("write local WAL");
     storage
         .enqueue_wal_segment(
             &crate::io::FsLocation::host_file(&wal_path),
@@ -3120,7 +3154,7 @@ fn should_end_wal_upload_without_attempting_it_when_writer_is_fenced() {
     let segment_id = 13;
     let max_sequence = 23;
     let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
-    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+    std::fs::write(&wal_path, valid_wal_bytes(segment_id, max_sequence)).expect("write local WAL");
     storage
         .enqueue_wal_segment(
             &crate::io::FsLocation::host_file(&wal_path),
@@ -3151,9 +3185,9 @@ fn should_reject_wal_upload_when_entry_or_byte_capacity_is_exhausted() {
     let cloud = Arc::new(NeverCompletesBackend::default());
     let first_path = tmp.path().join(crate::wal::segment_file_name(1));
     let second_path = tmp.path().join(crate::wal::segment_file_name(2));
-    let wal_bytes = valid_wal_bytes(1);
+    let wal_bytes = valid_wal_bytes(1, 1);
     std::fs::write(&first_path, &wal_bytes).expect("write first WAL");
-    std::fs::write(&second_path, &wal_bytes).expect("write second WAL");
+    std::fs::write(&second_path, valid_wal_bytes(2, 1)).expect("write second WAL");
     let limits = HybridQueueLimits {
         upload_entries: 1,
         upload_bytes: wal_bytes.len() as u64,
@@ -3214,8 +3248,8 @@ fn should_restore_wal_admission_after_upload_capacity_drains() {
     ));
     let first_path = tmp.path().join(crate::wal::segment_file_name(21));
     let second_path = tmp.path().join(crate::wal::segment_file_name(22));
-    std::fs::write(&first_path, valid_wal_bytes(21)).expect("write first WAL");
-    std::fs::write(&second_path, valid_wal_bytes(22)).expect("write second WAL");
+    std::fs::write(&first_path, valid_wal_bytes(21, 21)).expect("write first WAL");
+    std::fs::write(&second_path, valid_wal_bytes(22, 22)).expect("write second WAL");
     storage
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&first_path), 21, 21)
         .expect("enqueue first upload");
@@ -3264,7 +3298,7 @@ fn should_keep_storage_reservation_for_retry_when_upload_callbacks_are_lost() {
         ),
     ));
     let wal_path = tmp.path().join(crate::wal::segment_file_name(3));
-    std::fs::write(&wal_path, valid_wal_bytes(3)).expect("write WAL");
+    std::fs::write(&wal_path, valid_wal_bytes(3, 3)).expect("write WAL");
     storage
         .enqueue_wal_segment(&crate::io::FsLocation::host_file(&wal_path), 3, 3)
         .expect("enqueue WAL upload");
@@ -3368,7 +3402,6 @@ mod recovery_wal_coverage {
             bytes::Bytes::from_static(b"k"),
             value.map(bytes::Bytes::from_static),
             seq,
-            0,
         )
     }
 

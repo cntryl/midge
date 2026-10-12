@@ -64,10 +64,8 @@ impl super::EventLoop {
     pub(super) fn rotate_local_wal_transition(&mut self) -> MidgeResult<WalRotationReceipt> {
         self.wal_transition.ensure_ready()?;
         let segment_id = self.state.wal.open_segment();
-        let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
-        })?;
-        let max_sequence = self.wal_actor.current_segment_max_sequence();
+        let next_segment_id = self.state.wal.history.ledger().next_segment_id();
+        let max_sequence = self.wal_actor.open_segment_max_sequence();
         let ticket = self
             .wal_transition
             .begin_seal(segment_id, next_segment_id, max_sequence)?;
@@ -101,10 +99,8 @@ impl super::EventLoop {
     pub(super) fn seal_cloud_wal_without_enqueue_for_test(&mut self) -> MidgeResult<(u64, u64)> {
         self.wal_transition.ensure_ready()?;
         let segment_id = self.state.wal.open_segment();
-        let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
-        })?;
-        let max_sequence = self.wal_actor.current_segment_max_sequence();
+        let next_segment_id = self.state.wal.history.ledger().next_segment_id();
+        let max_sequence = self.wal_actor.open_segment_max_sequence();
         let ticket = self
             .wal_transition
             .begin_seal(segment_id, next_segment_id, max_sequence)?;
@@ -189,6 +185,7 @@ mod tests {
         event_loop.state.wal.history = crate::runtime::wal_history::WalHistory::open(
             Arc::clone(&fs),
             event_loop.state.wal.open_segment(),
+            0,
         )
         .expect("start the mock WAL ledger");
         let mut wal_actor = crate::runtime::actors::WalActor::open(
@@ -295,10 +292,16 @@ mod tests {
 
             // Assert
             assert!(matches!(error, MidgeError::Internal(_)), "{boundary:?}");
-            let irreversible = boundary == WalTransitionBoundary::AfterLedgerRotate;
+            // The footer is the first irreversible step (#843); only the
+            // ledger's rotation moves the open segment.
+            let irreversible = matches!(
+                boundary,
+                WalTransitionBoundary::AfterFooter | WalTransitionBoundary::AfterLedgerRotate
+            );
+            let rotated = boundary == WalTransitionBoundary::AfterLedgerRotate;
             assert_eq!(
                 event_loop.state.wal.open_segment(),
-                segment_id + u64::from(irreversible),
+                segment_id + u64::from(rotated),
                 "{boundary:?}: only a rotation the ledger recorded moves the open segment"
             );
             assert_eq!(

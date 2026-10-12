@@ -9,7 +9,6 @@ fn put(seq: u64, cf: u32) -> WalRecord {
         Bytes::from_static(b"key"),
         Some(Bytes::from_static(b"value")),
         seq,
-        1,
     )
 }
 

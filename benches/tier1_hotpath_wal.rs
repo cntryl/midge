@@ -29,7 +29,6 @@ fn small_put_record() -> WalRecord {
         Bytes::from_static(b"key"),
         Some(Bytes::from_static(b"value")),
         1,
-        1,
     )
 }
 
@@ -38,7 +37,6 @@ fn medium_put_record() -> WalRecord {
         WalOpKind::Put,
         Bytes::from_static(&[0u8; 64]),
         Some(Bytes::from_static(&[0u8; 256])),
-        1,
         1,
     )
 }
@@ -49,7 +47,6 @@ fn delete_record() -> WalRecord {
         Bytes::from_static(b"deleted_key"),
         None,
         1,
-        1,
     )
 }
 
@@ -59,7 +56,6 @@ fn variable_small_put_record(index: usize) -> WalRecord {
         Bytes::from(format!("key_{index:010}")),
         Some(Bytes::from(format!("value_{index:010}"))),
         usize_to_u64(index).wrapping_add(1),
-        1,
     )
 }
 
@@ -74,7 +70,6 @@ fn variable_medium_put_record(index: usize) -> WalRecord {
         Bytes::from(key),
         Some(Bytes::from(value)),
         usize_to_u64(index).wrapping_add(1),
-        1,
     )
 }
 
@@ -84,7 +79,6 @@ fn variable_delete_record(index: usize) -> WalRecord {
         Bytes::from(format!("deleted_key_{index:010}")),
         None,
         usize_to_u64(index).wrapping_add(1),
-        1,
     )
 }
 

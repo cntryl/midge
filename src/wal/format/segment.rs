@@ -130,7 +130,7 @@ impl SegmentHeader {
 
 /// The records a segment holds so far, as its writer or a scan counts them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SegmentTail {
+pub struct SegmentTail {
     pub(crate) record_count: u64,
     pub(crate) first_seq: Option<u64>,
     pub(crate) last_seq: Option<u64>,
@@ -145,15 +145,23 @@ impl SegmentTail {
     ///
     /// `Corruption` when `seq` does not exceed the last one.
     pub(crate) fn observe(&mut self, seq: u64, cf: u32) -> MidgeResult<()> {
-        if let Some(last) = self.last_seq {
-            if seq <= last {
-                return Err(MidgeError::Corruption(format!(
-                    "conflicting or repeated WAL sequence {seq} after {last}"
-                )));
-            }
-        }
+        self.check(seq)?;
         self.count(seq, cf);
         Ok(())
+    }
+
+    /// Whether [`Self::observe`] would accept `seq`, without counting it.
+    ///
+    /// # Errors
+    ///
+    /// `Corruption` when `seq` does not exceed the last one.
+    pub(crate) fn check(&self, seq: u64) -> MidgeResult<()> {
+        match self.last_seq {
+            Some(last) if seq <= last => Err(MidgeError::Corruption(format!(
+                "conflicting or repeated WAL sequence {seq} after {last}"
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// Count a record without the ordering check, for fixtures that build
@@ -170,7 +178,7 @@ impl SegmentTail {
 /// What sealing a segment fixes, as its footer and the ledger record it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SealedFacts {
+pub struct SealedFacts {
     /// The segment's id, last sequence (its predecessor's when it holds no
     /// record) and digest.
     pub(crate) link: ChainLink,
@@ -332,7 +340,7 @@ impl Footer {
 
 /// Whether a frame payload is a segment footer rather than a record.
 #[must_use]
-pub(crate) fn is_footer_payload(payload: &[u8]) -> bool {
+pub fn is_footer_payload(payload: &[u8]) -> bool {
     payload.len() >= 3 && payload[..2] == FOOTER_MAGIC && payload[2] == FOOTER_VERSION
 }
 
@@ -457,13 +465,32 @@ impl SegmentScan {
     /// `Corruption` when the sequence does not strictly increase or falls
     /// below the header's first sequence.
     pub(crate) fn observe(&mut self, seq: u64, cf: u32) -> MidgeResult<()> {
+        self.check_record(seq)?;
+        self.tail.observe(seq, cf)
+    }
+
+    /// Whether a record frame at `seq` may come next, without scanning it:
+    /// a caller that must stop between checking a record and accepting it
+    /// (a resumable inspection) checks first and scans once it accepted.
+    ///
+    /// # Errors
+    ///
+    /// `Corruption` when the segment is already sealed, or the sequence does
+    /// not strictly increase or falls below the header's first sequence.
+    pub(crate) fn check_record(&self, seq: u64) -> MidgeResult<()> {
+        if self.footer.is_some() {
+            return Err(MidgeError::Corruption(format!(
+                "bytes follow the footer of WAL segment {}",
+                self.header.id
+            )));
+        }
         if seq < self.header.first_seq {
             return Err(MidgeError::Corruption(format!(
                 "conflicting or repeated WAL sequence {seq}: segment {} starts at {}",
                 self.header.id, self.header.first_seq
             )));
         }
-        self.tail.observe(seq, cf)
+        self.tail.check(seq)
     }
 
     /// The facts sealing what the scan has read so far.
@@ -612,6 +639,12 @@ impl SegmentBuilder {
         self
     }
 
+    /// The length of the body appended so far.
+    #[must_use]
+    pub fn body_len(&self) -> usize {
+        self.body.len()
+    }
+
     /// The segment still open: its header and body.
     #[must_use]
     pub fn open(&self) -> Vec<u8> {
@@ -628,17 +661,29 @@ impl SegmentBuilder {
     #[must_use]
     pub fn seal(&self) -> (Vec<u8>, ChainLink) {
         let mut bytes = self.open();
-        let tail = lenient_tail(&self.body);
-        let digest = xxhash_rust::xxh3::xxh3_128(&bytes).to_le_bytes();
-        let facts = SealedFacts::of(&self.header, &tail, bytes.len() as u64, digest);
-        let first_seq = tail.first_seq.unwrap_or(self.header.first_seq);
-        bytes.extend(
-            Footer::new(&facts, first_seq)
-                .encode_frame()
-                .expect("encode fixture footer"),
-        );
-        (bytes, facts.link)
+        let footer = lenient_footer(&bytes).expect("a built header decodes");
+        bytes.extend(footer.encode_frame().expect("encode fixture footer"));
+        (bytes, footer.sealed_facts().link)
     }
+}
+
+/// The footer a fixture gives `bytes`, a header and a body that may be
+/// deliberately invalid: facts counted from whatever frames decode, over a
+/// digest of every byte.
+///
+/// # Errors
+///
+/// The header's decode error.
+#[cfg(any(test, feature = "internal-testing"))]
+pub(crate) fn lenient_footer(bytes: &[u8]) -> MidgeResult<Footer> {
+    let header = SegmentHeader::decode(bytes)?;
+    let tail = lenient_tail(&bytes[HEADER_LEN..]);
+    let digest = xxhash_rust::xxh3::xxh3_128(bytes).to_le_bytes();
+    let facts = SealedFacts::of(&header, &tail, bytes.len() as u64, digest);
+    Ok(Footer::new(
+        &facts,
+        tail.first_seq.unwrap_or(header.first_seq),
+    ))
 }
 
 /// The records a fixture body holds, up to its first frame that does not

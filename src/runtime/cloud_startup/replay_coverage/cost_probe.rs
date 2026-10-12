@@ -94,7 +94,6 @@ pub fn run_recovery_cost_probe(
             Bytes::from(key(file, entry)),
             Some(Bytes::from_static(b"value")),
             7,
-            1,
         );
         if !coverage.contains(&record) {
             return Err(MidgeError::Internal(

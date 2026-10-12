@@ -13,6 +13,12 @@ fn cloud_debt(
     cloud_debt_with_wal_records(files_per_cf, 1)
 }
 
+/// The last sequence of the WAL debt `cloud_debt_with_wal_records` seeds
+/// with `records` records.
+fn wal_debt_last_sequence(records: usize) -> u64 {
+    80 + u64::try_from(records).expect("record count fits u64")
+}
+
 fn cloud_debt_with_wal_records(
     files_per_cf: u64,
     wal_record_count: usize,
@@ -41,15 +47,25 @@ fn cloud_debt_with_wal_records(
         ),
     ));
     let other = el.state.create_cf("remaining-debt".into())?;
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
-        Bytes::from_static(b"prune-candidate"),
-        Some(Bytes::from_static(b"value")),
-        81,
-        el.state.writer_epoch,
-    );
-    seed_cloud_prune_candidate_with_records(&mut el, 81, 81, vec![record; wal_record_count]);
-    el.state.wal.frontiers.set_cloud_durable_for_test(81);
+    // Sequences strictly increase within a segment (#843): the records are
+    // versions 81.. of one key, and one more SST holds every version past
+    // 81, so each record stays exactly covered.
+    let last = wal_debt_last_sequence(wal_record_count);
+    let records = (81..=last)
+        .map(|sequence| {
+            crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"prune-candidate"),
+                Some(Bytes::from_static(b"value")),
+                sequence,
+            )
+        })
+        .collect();
+    seed_cloud_prune_candidate_with_records(&mut el, 81, last, records);
+    el.state.wal.frontiers.set_cloud_durable_for_test(last);
+    if last > 81 {
+        add_valid_versions_manifest_sst_for_test(&mut el, "wal-debt-versions.sst", 82..=last);
+    }
     for cf_id in [0, other] {
         el.state
             .manifest

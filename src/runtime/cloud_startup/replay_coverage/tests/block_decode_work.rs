@@ -59,7 +59,6 @@ fn should_bound_warm_reconstruction_when_exact_coverage_probes_one_real_block() 
                 Bytes::from(format!("key-{index:08}")),
                 Some(Bytes::from_static(b"value")),
                 7,
-                1,
             );
             record.expiration = Some(123);
             record

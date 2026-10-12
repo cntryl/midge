@@ -37,6 +37,11 @@ pub(super) fn next_frame(
     *read_ns = read_ns.saturating_add(source.read_ns().saturating_sub(before_read_ns));
     match step? {
         frame::FrameStep::Eof => Ok(NextWalFrame::Eof),
+        frame::FrameStep::Frame { payload, next_pos }
+            if crate::wal::format::segment::is_footer_payload(&payload) =>
+        {
+            Ok(NextWalFrame::Footer { payload, next_pos })
+        }
         frame::FrameStep::Frame { payload, next_pos } => {
             // Streaming replay buffers records, so reject one whose decoded
             // size would exceed the pending-transaction budget before
@@ -44,6 +49,7 @@ pub(super) fn next_frame(
             preflight_decoded_record(&payload, limits.max_pending_txn_bytes)?;
             Ok(NextWalFrame::Frame(ReplayedWalFrame {
                 record: encoding::decode(payload.as_ref())?,
+                payload,
                 next_pos,
             }))
         }

@@ -912,12 +912,15 @@ fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) ->
         bytes::Bytes::from_static(key),
         Some(bytes::Bytes::from_static(b"value")),
         sequence,
-        writer_epoch,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
-    let mut bytes = Vec::new();
-    crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
-    bytes
+    crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        writer_epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&record)
+    .seal()
+    .0
 }
 
 #[test]

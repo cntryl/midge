@@ -69,10 +69,12 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     Ok(())
 }
 
+/// Filesystem whose next write through a persistent handle (a WAL
+/// writer's) lands half its bytes and fails.
 #[derive(Default)]
-struct PartialAppendFs {
+pub(super) struct PartialAppendFs {
     inner: MockFs,
-    fail_next: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) fail_next: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct PartialAppendFile {
@@ -341,9 +343,11 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
                 .len,
             physical_before
         );
+        // The header is written when the segment is created, outside WAL
+        // admission.
         assert_eq!(
             setup.hybrid_storage.budget_snapshot().total_committed_bytes,
-            physical_before,
+            physical_before - crate::wal::format::HEADER_LEN as u64,
             "durably rolled-back WAL bytes must return their admission (spilled={spilled})"
         );
         assert!(state
@@ -516,7 +520,6 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
         crate::wal::WalOpKind::TxnBegin,
         Bytes::from_static(b"txn"),
         None,
-        u64::MAX,
         u64::MAX,
     );
     let begin_bound = crate::wal::encoding::record_frame_size_bound(&begin)? as u64;

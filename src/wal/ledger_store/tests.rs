@@ -2,16 +2,56 @@ use super::*;
 use crate::common::MidgeError;
 use crate::io::{MockFs, OpenMode, OpenOptions};
 use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
-use crate::wal::ledger::LedgerEdit;
+use crate::wal::format::{ChainLink, SealedFacts};
+use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts};
+
+/// Segment `k` of the canonical history these tests build holds the one
+/// record `k`: it starts at `k`, and its link names `k` as last sequence.
+fn link(id: u64) -> ChainLink {
+    if id == 0 {
+        return ChainLink::GENESIS;
+    }
+    ChainLink {
+        id,
+        last_seq: id,
+        digest: [u8::try_from(id % 251).expect("small"); 16],
+    }
+}
+
+fn opening(id: u64, after: u64) -> OpenFacts {
+    OpenFacts {
+        id,
+        epoch: 1,
+        first_seq: after + 1,
+        prev: link(after),
+    }
+}
 
 fn genesis_ledger() -> WalLedger {
-    WalLedger::genesis("holder-a", 1).expect("genesis")
+    let holder =
+        HolderId::try_from("1f5b0c8e-2a33-4c0d-8f5e-7d3c2b1a0f9e".to_string()).expect("holder");
+    WalLedger::genesis(holder, ChainLink::GENESIS, opening(1, 0)).expect("genesis")
 }
 
 fn rotate(seal: u64) -> LedgerEdit {
     LedgerEdit::Rotate {
-        seal,
-        open: seal + 1,
+        sealed: SealedFacts {
+            link: link(seal),
+            record_count: 1,
+            data_len: 200,
+            max_seq_per_cf: vec![(0, seal)],
+        },
+        open: opening(seal + 1, seal),
+    }
+}
+
+/// Drop every member from `from`, keeping sealed member `from - 1`, and
+/// open `open`.
+fn set_aside(from: u64, open: u64) -> LedgerEdit {
+    LedgerEdit::SetAside {
+        from,
+        cut: None,
+        open: opening(open, from - 1),
     }
 }
 
@@ -170,7 +210,7 @@ fn should_replay_appended_edits_when_ledger_reloads() {
         rotate(1),
         rotate(2),
         LedgerEdit::AdvanceLogStart { to: 2 },
-        LedgerEdit::SetAside { from: 3, open: 7 },
+        set_aside(3, 7),
     ];
     let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
 
@@ -618,7 +658,7 @@ fn should_drop_torn_tail_when_opening() {
     let mut store = LedgerStore::open(Arc::clone(&fs))
         .expect("open LEDGER")
         .expect("LEDGER exists");
-    let replacement = LedgerEdit::SetAside { from: 2, open: 9 };
+    let replacement = set_aside(2, 9);
     store.append(&replacement).expect("append after torn tail");
 
     // Assert
@@ -950,4 +990,39 @@ fn should_keep_loaded_state_when_power_fails_after_open() {
     for_each_power_loss(&device, |fs| {
         assert_eq!(loaded(fs), seen);
     });
+}
+
+#[test]
+fn should_round_trip_anchor_facts_and_reservation_when_compacting() {
+    // Arrange: a retired prefix moves the anchor, rotations record sealed
+    // facts, and a reservation is raised.
+    let fs = mock_fs();
+    let ledger = genesis_ledger();
+    let edits = [
+        rotate(1),
+        rotate(2),
+        LedgerEdit::AdvanceLogStart { to: 2 },
+        LedgerEdit::Reserve { through: 1 << 20 },
+    ];
+    let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    for edit in &edits {
+        store.append(edit).expect("append edit");
+    }
+
+    // Act
+    store.compact().expect("compact");
+    let (reloaded, tail) = loaded(&fs);
+
+    // Assert
+    let expected = applied(&ledger, &edits);
+    assert_eq!((reloaded.clone(), tail), (expected, LedgerTail::Clean));
+    assert_eq!(reloaded.anchor(), link(1));
+    assert_eq!(
+        reloaded
+            .expected(2)
+            .and_then(|member| member.sealed.as_ref())
+            .map(|facts| facts.link),
+        Some(link(2))
+    );
+    assert_eq!(reloaded.seq_reserved_through(), 1 << 20);
 }

@@ -582,6 +582,14 @@ impl CloudPersistence {
             max_sequence,
         )
         .map_err(MidgeError::Corruption)?;
+        if readback.validation.id != segment_id {
+            return Err(MidgeError::Corruption(format!(
+                "local WAL segment '{source}' holds the header of segment {}, not {segment_id}",
+                readback.validation.id
+            )));
+        }
+        // The object is named for the epoch of the writer that wrote it,
+        // which its header records (#843).
         let object_key =
             crate::wal::cloud_segment::object_key(segment_id, readback.validation.writer_epoch);
         self.enqueue_object_upload(segment_id, object_key.clone(), source.clone(), max_sequence)?;
@@ -749,6 +757,15 @@ impl CloudPersistence {
             expected_max_sequence,
         )
         .map_err(MidgeError::Internal)?;
+        if local_readback.id != segment_id {
+            return Err(PublicationError::Mismatch {
+                segment_id,
+                detail: format!(
+                    "local WAL segment '{source}' holds the header of segment {}",
+                    local_readback.id
+                ),
+            });
+        }
         let entry = PublishedWalSegment::from_validated_bytes(
             segment_id,
             expected_max_sequence,
@@ -1057,7 +1074,6 @@ mod exact_coverage_record_ref_tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from(vec![7; 1024 * 1024])),
             9,
-            1,
         );
 
         // Act

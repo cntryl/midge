@@ -178,7 +178,6 @@ mod tests {
                         Bytes::from(key),
                         Some(Bytes::from_static(b"v")),
                         seq,
-                        1,
                     );
                     let mut actual = Vec::new();
                     assert!(index
@@ -224,7 +223,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"v")),
             7,
-            1,
         );
         let scope = DeadlineScope::new(OperationDeadline::unbounded());
         scope.cancel();

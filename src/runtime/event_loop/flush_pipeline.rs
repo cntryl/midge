@@ -2338,7 +2338,6 @@ mod tests {
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             1,
-            1,
         );
         let mut frame = Vec::new();
         crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
@@ -2391,7 +2390,6 @@ mod tests {
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             5,
-            1,
         );
         let mut frame = Vec::new();
         crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
@@ -2461,7 +2459,6 @@ mod tests {
                 bytes::Bytes::from(format!("key-{segment_id}")),
                 Some(bytes::Bytes::from_static(b"value")),
                 segment_id,
-                1,
             );
             let mut frame = Vec::new();
             crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
@@ -2925,7 +2922,7 @@ mod tests {
     fn should_reject_publication_completion_after_lease_loss() -> crate::common::MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let state = crate::runtime::state::RuntimeState::new_in_epoch(directory.path(), false, 7);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
         let healthy = Arc::new(AtomicBool::new(true));
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(

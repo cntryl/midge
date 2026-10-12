@@ -74,16 +74,15 @@ fn initialize_startup_state(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Open the WAL ledger of a cloud cache, after sweeping files it does not
-/// name. A cache without one starts its history past every cataloged
-/// segment. The FORMAT marker comes first, as in local recovery: a WAL file
-/// without it reads as state of an unknown format.
-fn open_cloud_wal_history(
+/// The WAL history of a cloud cache: its ledger, opened after sweeping the
+/// files it does not name, or the WAL directory a new one starts in. The
+/// FORMAT marker comes first, as in local recovery: a WAL file without it
+/// reads as state of an unknown format.
+fn load_cloud_wal_history(
     path: &StartupStoragePath,
-    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    writer_epoch: u64,
     scope: Option<&DeadlineScope>,
-) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
+) -> MidgeResult<crate::runtime::cloud_startup::CacheHistory> {
     // Bounded by the startup deadline, like local recovery; the scope stops
     // bounding once startup completes.
     let root = &scope.map_or_else(
@@ -91,22 +90,20 @@ fn open_cloud_wal_history(
         |scope| crate::io::scope_fs(Arc::clone(&path.root), scope.clone()),
     );
     crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
-    let first_open = match catalog.segments.keys().next_back() {
-        Some(last) => last.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("WAL segment identity space exhausted".into())
-        })?,
-        None => 1,
-    };
-    let history = crate::runtime::wal_history::WalHistory::open(
-        crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR),
-        first_open,
-    )?;
-    Ok(history)
+    let wal = crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR);
+    Ok(
+        match crate::runtime::wal_history::WalHistory::load(Arc::clone(&wal), writer_epoch)? {
+            Some(history) => crate::runtime::cloud_startup::CacheHistory::Existing(history),
+            None => crate::runtime::cloud_startup::CacheHistory::Fresh(wal),
+        },
+    )
 }
 
-/// Plan cloud WAL recovery over the cache's ledger and make any salvage
-/// set-aside durable. Returns the plan and replay view, and the ledger that
-/// history continues in.
+/// Plan cloud WAL recovery over the cache's ledger, then make the history
+/// writes continue in durable: a new cache starts one linked to the
+/// catalog's head, a cache behind the catalog rebases onto it, and salvage
+/// sets aside what it does not replay. Returns the plan and replay view,
+/// and that history.
 fn recover_cloud_wal(
     opts: &OpenOptions,
     storage_path: &StartupStoragePath,
@@ -120,11 +117,15 @@ fn recover_cloud_wal(
     crate::runtime::wal_history::WalHistory,
 )> {
     let limits = super::streaming_recovery::CloudReplay::limits(opts);
-    let mut history = open_cloud_wal_history(storage_path, catalog, scope)?;
+    let cache = load_cloud_wal_history(storage_path, lease.writer_epoch, scope)?;
+    let ledger = match &cache {
+        crate::runtime::cloud_startup::CacheHistory::Existing(history) => Some(history.ledger()),
+        crate::runtime::cloud_startup::CacheHistory::Fresh(_) => None,
+    };
     let streaming = super::timing::measure("wal_plan", || {
         build_wal_plan(
             &storage_path.root,
-            history.ledger(),
+            ledger,
             backend,
             catalog,
             opts.recovery_policy(),
@@ -134,12 +135,12 @@ fn recover_cloud_wal(
             scope,
         )
     })?;
-    commit_salvage_plan(
+    let history = commit_wal_plan(
         &streaming.plan,
         &CloudPersistence::new(Arc::clone(storage)),
         lease.writer_epoch,
         catalog,
-        &mut history,
+        cache,
         streaming.next_remote_id,
         &|| lease.ensure_healthy("during WAL salvage set aside"),
         scope,
@@ -150,7 +151,7 @@ fn recover_cloud_wal(
 #[allow(clippy::too_many_arguments)]
 fn build_wal_plan(
     root: &Arc<dyn crate::io::Fs>,
-    ledger: &crate::wal::ledger::WalLedger,
+    ledger: Option<&crate::wal::ledger::WalLedger>,
     remote: &Arc<dyn crate::storage::StorageBackend>,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     policy: RecoveryPolicy,
@@ -187,16 +188,16 @@ fn build_wal_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_salvage_plan(
+fn commit_wal_plan(
     plan: &crate::runtime::cloud_startup::CloudWalRecoveryPlan,
     persistence: &CloudPersistence,
     epoch: u64,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-    history: &mut crate::runtime::wal_history::WalHistory,
+    cache: crate::runtime::cloud_startup::CacheHistory,
     next_remote_id: crate::wal::ledger::SegmentId,
     validate: &dyn Fn() -> MidgeResult<()>,
     scope: Option<&DeadlineScope>,
-) -> MidgeResult<()> {
+) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
     let unbounded;
     let scope = if let Some(scope) = scope {
         scope
@@ -204,11 +205,11 @@ fn commit_salvage_plan(
         unbounded = DeadlineScope::new(crate::common::OperationDeadline::unbounded());
         &unbounded
     };
-    plan.commit_set_aside_within(
+    plan.commit_within(
         persistence,
         epoch,
         catalog,
-        history,
+        cache,
         next_remote_id,
         validate,
         scope,
@@ -916,7 +917,6 @@ impl RuntimeStorageMaterialization {
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
             recovered_local_wal_segments: recovery_plan.local_max_sequences(),
             recovered_local_wal_segment_epochs: recovery_plan.local_writer_epochs(),
-            recovered_cloud_active_wal: recovery_plan.active_wal,
             max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
             ..Self::cloud_runtime_config(opts, startup_lease, cloud_runtime_policy, scope)
         };
@@ -1052,7 +1052,6 @@ impl RuntimeStorageMaterialization {
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
             recovered_local_wal_segments: recovery_plan.local_max_sequences(),
             recovered_local_wal_segment_epochs: recovery_plan.local_writer_epochs(),
-            recovered_cloud_active_wal: recovery_plan.active_wal,
             max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
             ..Self::cloud_runtime_config(opts, startup_lease, cloud_runtime_policy, scope)
         };
@@ -1114,7 +1113,9 @@ impl RuntimeStorageMaterialization {
             state: initialize_startup_state(
                 opts,
                 storage_path,
-                crate::runtime::state::RecoveryWal::Replay,
+                crate::runtime::state::RecoveryWal::Replay {
+                    writer_epoch: startup_lease.writer_epoch,
+                },
                 scope,
             )?,
             runtime_config,

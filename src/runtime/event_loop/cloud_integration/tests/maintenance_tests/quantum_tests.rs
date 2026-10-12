@@ -1,6 +1,10 @@
 use super::*;
 use crate::storage::{StorageBackend, StorageCallback};
 
+/// Records in the WAL debt the slow proofs read: far more ranges than fit a
+/// maintenance turn.
+const WAL_DEBT_RECORDS: usize = 30_000;
+
 struct SlowWalRanges {
     inner: Arc<crate::storage::filesystem::FileSystem>,
     calls: Arc<AtomicUsize>,
@@ -92,7 +96,7 @@ impl StorageBackend for SlowWalRanges {
 fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_quantum(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
-    let (mut el, worker, _) = cloud_debt_with_wal_records(4, 30_000)?;
+    let (mut el, worker, _) = cloud_debt_with_wal_records(4, WAL_DEBT_RECORDS)?;
     let cloud = Arc::new(SlowWalRanges {
         inner: Arc::new(crate::storage::filesystem::FileSystem::new(
             el.state.db_path.join("cloud_store"),
@@ -111,7 +115,7 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
     el.compaction_actor
         .set_execution_limits(1024 * 1024, 1024 * 1024);
     el.state.set_compaction_enabled(true);
-    queue_generation_for_maintenance_test(&mut el, 82)?;
+    queue_generation_for_maintenance_test(&mut el, wal_debt_last_sequence(WAL_DEBT_RECORDS) + 1)?;
     let flush_id = el.state.get_cf(0).unwrap().immutable_flushes[0].flush_id;
     el.state.mark_immutable_flush_failed(flush_id).unwrap();
     el.state.make_immutable_flush_retry_due(0);
@@ -217,7 +221,7 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: accepted data is already covered by SSTs and remote WAL. No
     // reclamation worker owns an in-flight proof or storage mutation yet.
-    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, 30_000)?;
+    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     let cloud = Arc::new(SlowWalRanges {
         inner: Arc::new(crate::storage::filesystem::FileSystem::new(
             el.state.db_path.join("cloud_store"),
@@ -238,8 +242,9 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
     el.state.set_compaction_enabled(false);
     el.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::WalRetirement;
-    assert_eq!(el.state.manifest.last_persisted_sequence, 81);
-    assert_eq!(el.state.wal.frontiers.cloud_durable(), 81);
+    let last = wal_debt_last_sequence(WAL_DEBT_RECORDS);
+    assert_eq!(el.state.manifest.last_persisted_sequence, last);
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), last);
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
     assert!(!el.flush_actor.is_inflight());
     assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
@@ -289,7 +294,7 @@ fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: flush and upload completions share this reclamation entry
     // point, even before shutdown reaches its final worker join.
-    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, 30_000)?;
+    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     el.compaction_actor
         .set_execution_limits(1024 * 1024, 1024 * 1024);
     el.state.set_compaction_enabled(false);
@@ -321,7 +326,7 @@ fn should_join_owned_wal_prune_read_before_acknowledging_shutdown() -> crate::co
     // Arrange: hold one already-admitted proof read open. Its worker owns the
     // publication gate before shutdown begins, so it must retain that ownership
     // until the provider completes rather than being detached at shutdown.
-    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, 30_000)?;
+    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     let (read_started, started) = crossbeam::channel::bounded(1);
     let (release, read_release) = crossbeam::channel::bounded(1);
     let cloud = Arc::new(SlowWalRanges {

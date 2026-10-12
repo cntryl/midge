@@ -28,41 +28,42 @@ fn options(path: &std::path::Path, budget: u64) -> OpenOptions {
 }
 
 fn publish_wal(path: &std::path::Path, records: u64) -> Vec<u8> {
-    publish_records(path, |epoch| {
-        (1..=records).map(|seq| record(seq, epoch)).collect()
-    })
+    publish_records(path, || (1..=records).map(record).collect())
 }
 
-fn record(sequence: u64, epoch: u64) -> crate::wal::WalRecord {
+fn record(sequence: u64) -> crate::wal::WalRecord {
     crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
         bytes::Bytes::from(sequence.to_be_bytes().to_vec()),
         Some(bytes::Bytes::from(value(sequence))),
         sequence,
-        epoch,
     )
 }
 
 fn publish_records(
     path: &std::path::Path,
-    make_records: impl FnOnce(u64) -> Vec<crate::wal::WalRecord>,
+    make_records: impl FnOnce() -> Vec<crate::wal::WalRecord>,
 ) -> Vec<u8> {
     let catalog_path = path.join("cloud_store/wal/publication-catalog.v1.json");
     let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("read catalog"),
     )
     .expect("decode catalog");
-    let records = make_records(catalog.fencing_epoch);
+    let records = make_records();
     let maximum = records
         .iter()
         .map(|record| record.seq)
         .max()
         .expect("records");
-    let mut bytes = Vec::new();
+    let mut segment = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        catalog.fencing_epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    );
     for record in &records {
-        let payload = crate::wal::encoding::encode(record).expect("encode record");
-        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame record");
+        segment = segment.record(record);
     }
+    let (bytes, _) = segment.seal();
     let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
         1,
         maximum,
@@ -404,33 +405,37 @@ fn should_bound_working_disk_at_publication_boundaries_when_recovering_large_wal
 }
 
 #[cfg(feature = "failpoints")]
-fn publish_cross_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8> {
-    publish_records(path, |epoch| {
-        let mut operations = vec![record(2, epoch), record(3, epoch)];
-        for operation in &mut operations {
-            operation.txn_id = Some(1);
-            operation.key = bytes::Bytes::from_static(b"atomic");
-        }
-        operations[1].cf_id = second_id;
-        let payload = crate::wal::encoding::encode_txn_batch_payload(1, 1, 4, epoch, &operations)
-            .expect("transaction payload");
+fn publish_two_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8> {
+    publish_records(path, || {
+        // A transaction is single-family (#843): the default family's write
+        // stands alone and the second family's commits as its own batch.
+        let mut first = record(2);
+        first.key = bytes::Bytes::from_static(b"atomic");
+        let mut operation = record(3);
+        operation.txn_id = Some(1);
+        operation.key = bytes::Bytes::from_static(b"atomic");
+        operation.cf_id = second_id;
+        let payload =
+            crate::wal::encoding::encode_txn_batch_payload(1, 2, 4, second_id, &[operation])
+                .expect("transaction payload");
         let mut batch = crate::wal::WalRecord::new(
             crate::wal::WalOpKind::TxnBatch,
             bytes::Bytes::from_static(b"txn"),
             Some(payload),
             4,
-            epoch,
         );
         batch.txn_id = Some(1);
-        std::iter::once(batch)
-            .chain((5..=384).map(|seq| record(seq, epoch)))
+        batch.cf_id = second_id;
+        [first, batch]
+            .into_iter()
+            .chain((5..=384).map(record))
             .collect()
     })
 }
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_recover_atomic_cross_family_write_after_only_first_family_checkpoint_is_published() {
+fn should_recover_every_family_after_only_first_family_checkpoint_is_published() {
     // Arrange
     let dir = tempfile::tempdir().expect("database directory");
     let budget = 256 * 1024;
@@ -444,7 +449,7 @@ fn should_recover_atomic_cross_family_write_after_only_first_family_checkpoint_i
         .shutdown(std::time::Duration::from_secs(10))
         .expect("shutdown");
     drop(engine);
-    let source = publish_cross_family_records(dir.path(), second_id);
+    let source = publish_two_family_records(dir.path(), second_id);
     let catalog_path = dir
         .path()
         .join("cloud_store/wal/publication-catalog.v1.json");

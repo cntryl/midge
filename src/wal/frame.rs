@@ -219,7 +219,6 @@ mod tests {
             bytes::Bytes::copy_from_slice(key),
             Some(bytes::Bytes::from_static(b"value")),
             sequence,
-            1,
         );
         let payload = crate::wal::encoding::encode(&record).expect("encode record");
         let mut framed = Vec::new();
@@ -661,7 +660,7 @@ fn hides_verified_frame<S: FrameBytes>(
         let len = usize_saturating((file_len - pos).min(max_frame_bytes as u64));
         let bytes = source.read(pos, len as u64).map_err(FrameError::Corrupt)?;
         for candidate_start in header_len..=bytes.len().saturating_sub(3) {
-            if !crate::wal::encoding::has_current_record_prefix(&bytes[candidate_start..]) {
+            if !crate::wal::encoding::has_segment_frame_prefix(&bytes[candidate_start..]) {
                 progress.completed_position();
                 continue;
             }
@@ -687,7 +686,7 @@ fn hides_verified_frame<S: FrameBytes>(
                 .read(absolute_start, payload_len as u64)
                 .map_err(FrameError::Corrupt)?;
             if verify_frame_crc(&payload, crc).is_ok()
-                && crate::wal::encoding::decode_view(&payload).is_ok()
+                && crate::wal::format::segment::decodes_as_segment_frame(&payload)
             {
                 progress.completed_frame(payload_len as u64);
                 progress.finish();
@@ -739,14 +738,14 @@ impl CandidateScanProgress {
 }
 
 /// Whether `bytes` contains a complete frame whose payload verifies and
-/// decodes, scanning for a current record prefix.
+/// decodes as a record or a footer, scanning for their prefixes.
 pub(crate) fn contains_verified_frame(bytes: &[u8]) -> bool {
     if bytes.len() < WAL_FRAME_HEADER_LEN.saturating_add(3) {
         return false;
     }
     let mut progress = CandidateScanProgress::new("wal_cached_suffix_scan");
     for payload_start in WAL_FRAME_HEADER_LEN..=bytes.len().saturating_sub(3) {
-        if !crate::wal::encoding::has_current_record_prefix(&bytes[payload_start..]) {
+        if !crate::wal::encoding::has_segment_frame_prefix(&bytes[payload_start..]) {
             progress.completed_position();
             continue;
         }
@@ -767,7 +766,7 @@ pub(crate) fn contains_verified_frame(bytes: &[u8]) -> bool {
         }
         let payload = &bytes[payload_start..payload_end];
         if verify_frame_crc(payload, expected_crc).is_ok()
-            && crate::wal::encoding::decode_view(payload).is_ok()
+            && crate::wal::format::segment::decodes_as_segment_frame(payload)
         {
             progress.completed_frame(payload.len() as u64);
             progress.finish();

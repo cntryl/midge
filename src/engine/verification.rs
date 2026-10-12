@@ -743,7 +743,6 @@ mod tests {
                 bytes::Bytes::from(format!("key-{sequence}")),
                 Some(bytes::Bytes::from_static(b"value")),
                 sequence,
-                1,
             );
             let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
             crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");

@@ -1253,28 +1253,40 @@ impl RuntimeState {
         self.sequence = self.sequence.max(floor);
     }
 
-    /// Start this process's WAL epoch, before it admits work (#843): every
-    /// sequence an earlier process may have handed out, which is everything
-    /// it reserved, counts as used, a new reservation is made durable past
-    /// it, and the local durable frontier covers it.
+    /// Start this process's WAL epoch `epoch`, before it admits work (#843).
+    ///
+    /// Every sequence an earlier process may have handed out, which is
+    /// everything it reserved, counts as used. The open segment recovery
+    /// left is sealed durably when it holds records, so nothing served from
+    /// it can be lost to a later power loss, and a new open segment starts
+    /// past every used sequence; an open segment holding no record is kept
+    /// or replaced instead. Then a new reservation is made durable past the
+    /// used sequences, and the local durable frontier covers them. Returns
+    /// the segment sealed, if any.
     ///
     /// # Errors
     ///
-    /// Returns the ledger error when the reservation cannot be persisted, or
-    /// `ResourceLimit` when the sequence space is exhausted.
-    pub(crate) fn begin_wal_epoch(&mut self) -> MidgeResult<()> {
+    /// Returns the segment or ledger error, or `ResourceLimit` when the
+    /// sequence space is exhausted.
+    pub(crate) fn begin_wal_epoch(
+        &mut self,
+        epoch: u64,
+    ) -> MidgeResult<Option<crate::runtime::wal_history::SealedSegment>> {
         let last = crate::wal::sequence::opening_last(
             self.sequence,
             self.compaction_output_generation,
             self.wal.history.ledger().seq_reserved_through(),
         );
+        let exhausted = || MidgeError::ResourceLimit("sequence space exhausted".to_string());
+        let first_seq = last.checked_add(1).ok_or_else(exhausted)?;
         let through = last
             .checked_add(crate::wal::sequence::RESERVATION_BLOCK)
-            .ok_or_else(|| MidgeError::ResourceLimit("sequence space exhausted".to_string()))?;
+            .ok_or_else(exhausted)?;
+        let sealed = self.wal.history.start_epoch(epoch, first_seq)?;
         self.wal.history.reserve(through)?;
         self.sequence = last;
         self.wal.frontiers.advance_local_to(last);
-        Ok(())
+        Ok(sealed)
     }
 
     pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {

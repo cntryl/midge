@@ -2798,21 +2798,11 @@ mod local_wal_retention {
         assert_eq!(value, None);
     }
 
+    /// The writer epoch in the header of the segment file `file` (#843).
     #[cfg(feature = "internal-testing")]
-    fn wal_record_epochs(file: &Path) -> Vec<u64> {
-        use cntryl_midge::__internal::wal::{encoding, frame};
+    fn segment_epoch(file: &Path) -> u64 {
         let bytes = std::fs::read(file).expect("read WAL file");
-        let mut epochs = Vec::new();
-        let mut offset = 0usize;
-        while offset < bytes.len() {
-            let header_end = offset + frame::WAL_FRAME_HEADER_LEN;
-            let (payload_len, _) =
-                frame::decode_frame_header(&bytes[offset..header_end]).expect("frame header");
-            let payload = &bytes[header_end..header_end + payload_len];
-            epochs.push(encoding::decode(payload).expect("decode").writer_epoch);
-            offset = header_end + payload_len;
-        }
-        epochs
+        cntryl_midge::__internal::wal::segment::header_epoch(&bytes).expect("segment header")
     }
 
     /// LT-C: segment ids come from the WAL ledger (#842), so a full prune
@@ -2852,7 +2842,7 @@ mod local_wal_retention {
         );
         let epochs: Vec<_> = after_run2
             .iter()
-            .map(|id| (id, wal_record_epochs(&segment_path(temp.path(), *id))))
+            .map(|id| (id, segment_epoch(&segment_path(temp.path(), *id))))
             .collect();
 
         // Assert

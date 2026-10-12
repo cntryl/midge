@@ -5,26 +5,29 @@
 //!
 //! Architectural rules (Maintainer: read carefully and DO NOT modify):
 //! ---------------------------------------------------------------
-//! • `FsWalWriterIo` ONLY appends bytes to the WAL ledger's open segment.
-//! • It NEVER assigns sequence numbers.
-//! • It NEVER rotates WAL segments.
-//! • It NEVER writes metadata beyond the encoded WAL record format.
+//! • `FsWalWriterIo` ONLY appends bytes to the WAL ledger's open segment,
+//!   which holds only its header when the writer opens it.
+//! • It NEVER assigns sequence numbers; it refuses a record whose sequence
+//!   would not follow the segment's last one.
+//! • It NEVER rotates WAL segments. It writes one frame beyond the records:
+//!   the footer that seals the segment, after which it appends nothing.
 //! • It MUST write records as: `<u32 length prefix><u32 crc32c><encoded record bytes>`.
 //! • It MUST update the write position monotonically.
 //! • It MUST flush/sync exactly and only when asked.
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::io::FsError;
 use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
+use crate::wal::format::{Footer, SealedFacts, SegmentHeader, SegmentTail, HEADER_LEN};
 use crate::wal::traits::{WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
+use super::writer_runner::{SegmentDigest, SyncState, WriterConfig, WriterRunner};
 
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
@@ -63,6 +66,15 @@ pub struct FsWalWriterIo {
 
     // Maximum wait for append, flush, sync, and close acknowledgements.
     io_timeout: Duration,
+
+    /// The header of the segment this writer appends to.
+    header: SegmentHeader,
+    /// The records acknowledged into the segment.
+    tail: Mutex<SegmentTail>,
+    /// The digest of every byte written, shared with the runner.
+    digest: Arc<Mutex<SegmentDigest>>,
+    /// The footer was written: nothing more may be appended.
+    sealed: std::sync::atomic::AtomicBool,
 }
 impl FsWalWriterIo {
     /// Create a new WAL writer appending to the file at `path_str` in the
@@ -112,6 +124,12 @@ impl FsWalWriterIo {
         io_timeout: Duration,
         counters: crate::telemetry::CounterSink,
     ) -> MidgeResult<Self> {
+        if !fs
+            .exists(&FsPath::new(path_str))
+            .map_err(FsError::into_midge)?
+        {
+            create_test_segment(fs.as_ref(), path_str)?;
+        }
         Self::new_with_authority(path_str, fs, io_timeout, counters, None)
     }
 
@@ -126,42 +144,33 @@ impl FsWalWriterIo {
             check()?;
         }
         let path = FsPath::new(path_str);
-
-        // Verify file exists or can be created by checking metadata
-        let mut file = fs
+        // The segment holds exactly its header, which the WAL history wrote
+        // and synced, directory entry included, before naming it.
+        let file = fs
             .open(
                 &path,
                 crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: true,
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
                     create_new: false,
                     truncate: false,
                 },
             )
             .map_err(FsError::into_midge)?;
-
-        // Get current file size
-        let metadata = fs.metadata(&path).map_err(FsError::into_midge)?;
-        let current_pos = metadata.len;
+        let current_pos = file.len().map_err(FsError::into_midge)?;
+        if current_pos != HEADER_LEN as u64 {
+            return Err(MidgeError::Corruption(format!(
+                "WAL segment {path} holds {current_pos} bytes; a writer opens only a segment holding just its header"
+            )));
+        }
+        let header_bytes = file
+            .read_at(0, HEADER_LEN as u64)
+            .map_err(FsError::into_midge)?;
+        let header = SegmentHeader::decode(&header_bytes)?;
+        drop(file);
         if let Some(check) = &authority {
             check()?;
         }
-        if current_pos == 0 {
-            // A new (or still empty) active WAL: frames fsynced into it later
-            // are lost after a crash unless its directory entry is durable.
-            file.sync(crate::io::Durability::Durable)
-                .map_err(FsError::into_midge)?;
-            let parent = std::path::Path::new(path_str)
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .map_or_else(
-                    || FsPath::new("."),
-                    |parent| FsPath::new(parent.to_string_lossy()),
-                );
-            fs.sync_dir(&parent, crate::io::Durability::Durable)
-                .map_err(FsError::into_midge)?;
-        }
-        drop(file);
 
         let writer = Self {
             fs,
@@ -176,6 +185,10 @@ impl FsWalWriterIo {
             writer_thread: Mutex::new(None),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             io_timeout,
+            header,
+            tail: Mutex::new(SegmentTail::default()),
+            digest: Arc::new(Mutex::new(SegmentDigest::of(&header_bytes))),
+            sealed: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Spawn background writer thread
@@ -191,6 +204,7 @@ impl FsWalWriterIo {
             current_pos: writer.current_pos.clone(),
             shutdown: writer.shutdown.clone(),
             counters: writer.counters.clone(),
+            digest: Arc::clone(&writer.digest),
         };
         let runner = WriterRunner::new(config);
         let handle = std::thread::Builder::new()
@@ -212,6 +226,68 @@ impl FsWalWriterIo {
             m.record_wal_encode(u64::try_from(e_elapsed.as_nanos()).unwrap_or(u64::MAX));
         });
         Ok(())
+    }
+
+    /// Refuse an append once the footer is written, or one whose records
+    /// would not follow the segment's last sequence: a segment's sequences
+    /// strictly increase from its header's first one.
+    fn admit_records<'a>(
+        &self,
+        records: impl IntoIterator<Item = &'a WalRecord>,
+    ) -> Result<(), WalAppendError> {
+        if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(WalAppendError::unchanged(MidgeError::Internal(format!(
+                "WAL segment {} is sealed; nothing more may be appended to it",
+                self.header.id
+            ))));
+        }
+        let mut last = self.tail.lock().last_seq;
+        for record in records {
+            if record.seq < self.header.first_seq || last.is_some_and(|last| record.seq <= last) {
+                return Err(WalAppendError::unchanged(MidgeError::Internal(format!(
+                    "WAL sequence {} does not follow {} in segment {} starting at {}",
+                    record.seq,
+                    last.unwrap_or_default(),
+                    self.header.id,
+                    self.header.first_seq
+                ))));
+            }
+            last = Some(record.seq);
+        }
+        Ok(())
+    }
+
+    /// Count records the runner acknowledged into the segment.
+    fn count_records<'a>(&self, records: impl IntoIterator<Item = &'a WalRecord>) {
+        let mut tail = self.tail.lock();
+        for record in records {
+            tail.count(record.seq, record.cf_id);
+        }
+    }
+
+    /// Wait, at most `timeout`, until every queued write is written: the
+    /// digest then covers the whole segment.
+    fn drained_digest(
+        &self,
+        timeout: Duration,
+    ) -> MidgeResult<parking_lot::MutexGuard<'_, SegmentDigest>> {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(error) = self.writer_failure() {
+                return Err(error);
+            }
+            let digest = self.digest.lock();
+            if self.queue.lock().is_empty() && digest.len == self.current_pos() {
+                return Ok(digest);
+            }
+            drop(digest);
+            if started.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(format!(
+                    "WAL writes did not drain within {timeout:?}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn take_buffer(&self) -> Vec<u8> {
@@ -322,11 +398,14 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
+        self.admit_records([record])?;
         let mut buf = self.take_buffer();
         buf.clear();
         self.encode_record_frame(record, &mut buf)
             .map_err(WalAppendError::unchanged)?;
-        self.enqueue_encoded_accounted(buf, self.io_timeout)
+        let position = self.enqueue_encoded_accounted(buf, self.io_timeout)?;
+        self.count_records([record]);
+        Ok(position)
     }
 
     fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
@@ -338,6 +417,7 @@ impl WalWriter for FsWalWriterIo {
         if records.is_empty() {
             return Ok(self.current_pos());
         }
+        self.admit_records(records)?;
         let mut buf = self.take_buffer();
         buf.clear();
         let mut last_record_offset = 0u64;
@@ -349,6 +429,7 @@ impl WalWriter for FsWalWriterIo {
                 .map_err(WalAppendError::unchanged)?;
         }
         let batch_start = self.enqueue_encoded_accounted(buf, self.io_timeout)?;
+        self.count_records(records);
         Ok(batch_start.saturating_add(last_record_offset))
     }
 
@@ -407,6 +488,87 @@ impl WalWriter for FsWalWriterIo {
     fn current_pos(&self) -> WalPos {
         self.current_pos.load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn tail(&self) -> SegmentTail {
+        self.tail.lock().clone()
+    }
+
+    fn seal_facts(&self, timeout: Duration) -> MidgeResult<SealedFacts> {
+        if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} is already sealed",
+                self.header.id
+            )));
+        }
+        let digest = self.drained_digest(timeout)?;
+        Ok(SealedFacts::of(
+            &self.header,
+            &self.tail.lock(),
+            digest.len,
+            digest.hasher.digest128().to_le_bytes(),
+        ))
+    }
+
+    fn write_footer(&self, facts: &SealedFacts, timeout: Duration) -> MidgeResult<()> {
+        let current = self.seal_facts(timeout)?;
+        if current != *facts {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} changed after its seal facts were taken",
+                self.header.id
+            )));
+        }
+        let first_seq = self.tail.lock().first_seq.unwrap_or(self.header.first_seq);
+        let frame = Footer::new(facts, first_seq).encode_frame()?;
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.enqueue_encoded_accounted(frame, timeout)
+            .map_err(|failure| failure.error)?;
+        self.sync_with_timeout(timeout)
+    }
+}
+
+/// Create `path` holding the header of segment 1 of a history of its own,
+/// synced with its directory entry, for tests that write a segment
+/// directly. A segment file name gives the header its id.
+///
+/// # Errors
+///
+/// The I/O error.
+#[cfg(test)]
+pub(crate) fn create_test_segment(fs: &dyn Fs, path: &str) -> MidgeResult<()> {
+    let path = FsPath::new(path);
+    let name = path.0.rsplit('/').next().unwrap_or_default();
+    let header = SegmentHeader {
+        id: crate::wal::parse_segment_file_name(name).unwrap_or(1),
+        epoch: 0,
+        holder: [0; 16],
+        first_seq: 1,
+        prev: crate::wal::format::ChainLink::GENESIS,
+    };
+    let mut file = fs
+        .open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            },
+        )
+        .map_err(FsError::into_midge)?;
+    file.write_at(0, bytes::Bytes::copy_from_slice(&header.encode()))
+        .map_err(FsError::into_midge)?;
+    file.sync(crate::io::Durability::Durable)
+        .map_err(FsError::into_midge)?;
+    drop(file);
+    let parent = std::path::Path::new(&path.0)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(
+            || FsPath::new("."),
+            |parent| FsPath::new(parent.to_string_lossy()),
+        );
+    fs.sync_dir(&parent, crate::io::Durability::Durable)
+        .map_err(FsError::into_midge)
 }
 
 impl Drop for FsWalWriterIo {
@@ -447,6 +609,16 @@ mod tests {
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             io_timeout: Duration::from_millis(10),
+            header: SegmentHeader {
+                id: 1,
+                epoch: 0,
+                holder: [0; 16],
+                first_seq: 1,
+                prev: crate::wal::format::ChainLink::GENESIS,
+            },
+            tail: Mutex::new(SegmentTail::default()),
+            digest: Arc::new(Mutex::new(SegmentDigest::of(&[]))),
+            sealed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -680,30 +852,23 @@ mod tests {
         // Act
         let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
 
-        // Assert: construction must actually create the backing WAL file
-        // (not just report success).
-        assert_eq!(writer.current_pos(), 0);
-        assert_eq!(
-            fs.get_file("wal.log"),
-            Some(Vec::new()),
-            "constructing the writer should create the WAL file on disk"
-        );
+        // Assert: construction must actually create the backing segment
+        // with its header (not just report success), and appends follow it.
+        assert_eq!(writer.current_pos(), HEADER_LEN as u64);
+        let created = fs.get_file("wal.log").expect("the WAL file exists");
+        assert_eq!(created.len(), HEADER_LEN);
+        SegmentHeader::decode(&created)?;
 
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
         writer.append_record(&record)?;
         drop(writer);
         let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
-
-        // Reopening the same file must resume from its existing length
-        // instead of always defaulting current_pos to zero.
-        let reopened = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
-        assert_eq!(reopened.current_pos(), written_len);
+        assert!(written_len > HEADER_LEN as u64);
         Ok(())
     }
 
@@ -764,7 +929,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
 
         // Act
@@ -805,7 +969,6 @@ mod tests {
             Bytes::from_static(b"close-key"),
             Some(Bytes::from_static(b"close-value")),
             1,
-            1,
         );
         writer.append_record(&record)?;
         let appended_pos = writer.current_pos();
@@ -834,15 +997,14 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             1,
-            7,
         );
 
         // Act
         let pos = writer.append_record(&record)?;
 
-        // Assert
-        assert_eq!(pos, 0);
-        assert!(writer.current_pos() > 0);
+        // Assert: the first record follows the segment header.
+        assert_eq!(pos, HEADER_LEN as u64);
+        assert!(writer.current_pos() > HEADER_LEN as u64);
         Ok(())
     }
 
@@ -854,7 +1016,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
-            7,
         );
         record.txn_id = Some(9);
         let payload = crate::wal::encoding::encode(&record)?;
@@ -879,6 +1040,7 @@ mod tests {
             .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
+        create_test_segment(fs.as_ref(), "wal.log")?;
         let writer = FsWalWriterIo::new_with_authority(
             "wal.log",
             fs.clone(),
@@ -914,6 +1076,7 @@ mod tests {
             .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
+        create_test_segment(fs.as_ref(), "wal.log")?;
         let writer = Arc::new(FsWalWriterIo::new_with_authority(
             "wal.log",
             fs.clone(),
@@ -934,7 +1097,6 @@ mod tests {
                 Bytes::from_static(b"key"),
                 Some(Bytes::from_static(b"value")),
                 1,
-                1,
             ))
         });
         let watchdog = std::time::Instant::now() + Duration::from_secs(5);
@@ -954,8 +1116,11 @@ mod tests {
                 unchanged: true
             })
         ));
-        assert_eq!(fs.metadata(&FsPath::new("wal.log")).unwrap().len, 0);
-        assert_eq!(writer.current_pos(), 0);
+        assert_eq!(
+            fs.metadata(&FsPath::new("wal.log")).unwrap().len,
+            HEADER_LEN as u64
+        );
+        assert_eq!(writer.current_pos(), HEADER_LEN as u64);
         Ok(())
     }
 
@@ -984,7 +1149,6 @@ mod tests {
                     WalOpKind::Put,
                     Bytes::from_static(b"key"),
                     Some(Bytes::from_static(b"value")),
-                    1,
                     1,
                 ))
             })

@@ -537,7 +537,7 @@ fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 4 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(
         &mut state.wal.history,
         state.limits.eventual_flush_segment_gap + 50,
@@ -576,7 +576,7 @@ fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 1024 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(
         &mut state.wal.history,
         state.limits.eventual_flush_segment_gap + 1,
@@ -610,7 +610,7 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 1024 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(
         &mut state.wal.history,
         state.limits.eventual_flush_segment_gap + 10,
@@ -640,7 +640,7 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
 fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(
         &mut state.wal.history,
         state.limits.eventual_flush_segment_gap + 20,
@@ -841,19 +841,22 @@ fn should_account_for_recovered_wal_memtable_bytes_when_reopening() {
         bytes::Bytes::from_static(b"recovered-key"),
         Some(bytes::Bytes::from(vec![0xA5; 4096])),
         1,
-        1,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
     let mut frame = Vec::new();
     crate::wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
-    std::fs::write(
-        temp_dir
-            .path()
-            .join("wal")
-            .join(crate::wal::segment_file_name(1)),
-        frame,
-    )
-    .expect("write retained WAL");
+    // The record follows the open segment's header.
+    let mut segment = std::fs::OpenOptions::new()
+        .append(true)
+        .open(
+            temp_dir
+                .path()
+                .join("wal")
+                .join(crate::wal::segment_file_name(1)),
+        )
+        .expect("open the retained WAL");
+    std::io::Write::write_all(&mut segment, &frame).expect("write retained WAL");
+    segment.sync_all().expect("sync retained WAL");
 
     // Act
     let reopened = RuntimeState::try_new(
@@ -901,7 +904,7 @@ fn should_initialize_wal_state_with_defaults() {
     // (no setup)
 
     // Act
-    let wal = WalState::new(crate::runtime::wal_history::WalHistory::in_memory());
+    let wal = WalState::new(crate::runtime::wal_history::WalHistory::in_memory(0));
 
     // Assert
     assert_eq!(wal.open_segment(), 1);
@@ -2112,7 +2115,7 @@ fn should_handle_multiple_column_families() {
 fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
         .expect("rotate the WAL ledger");
     let secondary = state.create_cf("floor-secondary".into()).unwrap();
@@ -2155,7 +2158,7 @@ fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
 fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
         .expect("rotate the WAL ledger");
     state
@@ -2175,7 +2178,7 @@ fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
 fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
         .expect("rotate the WAL ledger");
     state.next_flush_id = u64::MAX;
@@ -2458,7 +2461,7 @@ fn should_not_select_wal_bytes_flush_candidate_when_only_segments_advance() {
     // far behind in segments but not in bytes must not be flushed. This is
     // what keeps local eventual flushes from feeding each other (#552).
     let mut state = state_with_unflushed_default_family(100);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory();
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
     crate::runtime::wal_history::fixture::rotate_to(
         &mut state.wal.history,
         state.limits.eventual_flush_segment_gap + 100,
@@ -3513,7 +3516,7 @@ fn state_on_device(
         false,
         Arc::new(device.fs()),
         crate::config::RecoveryPolicy::Strict,
-        crate::runtime::state::RecoveryWal::Replay,
+        crate::runtime::state::RecoveryWal::Replay { writer_epoch: 1 },
         None,
     )
 }
