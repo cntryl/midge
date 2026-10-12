@@ -849,6 +849,52 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
 }
 
 #[test]
+#[ignore = "#844: D25 a fully retired catalog is history"]
+fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeResult<()> {
+    use crate::lease::PrimaryLease as _;
+
+    // Arrange: a writer published segment 1, then retired it once SSTs
+    // covered it, so the catalog lists nothing but still holds history.
+    let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
+        crate::storage::cloud::MockCloudBackend::new(),
+    ))?;
+    let epoch = fixture.lease.epoch();
+    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"key"),
+        Some(bytes::Bytes::from_static(b"value")),
+        1,
+    ))
+    .seal();
+    let entry =
+        crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(1, 1, epoch, &bytes);
+    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
+        .map_err(MidgeError::Internal)?;
+    catalog
+        .append_run(epoch, std::slice::from_ref(&entry))
+        .map_err(MidgeError::from)?;
+    catalog
+        .retire(epoch, &entry)
+        .map_err(MidgeError::Internal)?;
+
+    // Act
+    let result = fixture.bootstrap_with_catalog(&catalog);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::RecoveryFailed(_))),
+        "{result:?}"
+    );
+    fixture.assert_uncommitted();
+    Ok(())
+}
+
+#[test]
 fn should_reject_provider_bootstrap_when_split_sst_store_has_remote_objects() -> MidgeResult<()> {
     // Arrange: the control store has no metadata, but a separate SST class
     // store still contains bytes that could belong to an older database.

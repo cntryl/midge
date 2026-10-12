@@ -734,6 +734,78 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
 }
 
 #[test]
+#[ignore = "#844: R7 publication chains onto the catalog head"]
+fn should_refuse_publication_whose_first_segment_does_not_link_the_catalog_head() {
+    // Arrange: the catalog publishes segment 1; this writer's segment 2
+    // links a different segment 1.
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create unchained publisher WAL dir");
+    let put = |seq| {
+        crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            seq,
+        )
+    };
+    let (first, _) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        1,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&put(1))
+    .seal();
+    let stranger = crate::wal::format::ChainLink {
+        id: 1,
+        last_seq: 1,
+        digest: [0x5a; 16],
+    };
+    let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, 1, stranger)
+        .record(&put(2))
+        .seal();
+    let mut locations = Vec::new();
+    for (segment_id, bytes) in [(1, first), (2, second)] {
+        let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+        std::fs::write(&local_path, &bytes).expect("write unchained publisher local WAL");
+        write_cloud_object(
+            &storage,
+            &crate::wal::segment_object_key(segment_id, 1),
+            bytes,
+        );
+        locations.push(crate::io::FsLocation::host_file(&local_path));
+    }
+    storage
+        .publish_remote_wal_segment(
+            1,
+            1,
+            &locations[0],
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .expect("publish the catalog head");
+
+    // Act
+    let result = storage.publish_remote_wal_segment(
+        2,
+        2,
+        &locations[1],
+        2,
+        &crate::common::OperationDeadline::unbounded(),
+    );
+
+    // Assert: no retry can chain it, and the catalog keeps only segment 1.
+    assert!(
+        matches!(&result, Err(crate::common::MidgeError::Corruption(message)) if message.contains("catalog head")),
+        "{result:?}"
+    );
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    assert_eq!(
+        catalog.segments.keys().copied().collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[test]
 fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create takeover race test dir");

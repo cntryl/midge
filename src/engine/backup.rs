@@ -680,6 +680,49 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "#844: R9 backup enumerates the WAL from the ledger"]
+    fn should_capture_only_ledger_members_when_wal_directory_holds_orphans() {
+        // Arrange: the ledger names segments 1 and 2; the WAL directory also
+        // holds an orphan segment, a salvage directory and a retained copy.
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let wal = source.join("wal");
+        fs::create_dir_all(&wal).expect("create WAL directory");
+        crate::runtime::wal_history::fixture::record_at(&source, &[1], 2).expect("record ledger");
+        fs::write(wal.join(crate::wal::segment_file_name(9)), b"orphan").expect("seed orphan");
+        fs::create_dir(wal.join("salvaged-1")).expect("create salvage directory");
+        fs::write(
+            wal.join("salvaged-1")
+                .join(crate::wal::segment_file_name(1)),
+            b"set aside",
+        )
+        .expect("seed set-aside segment");
+        fs::write(
+            wal.join(format!(
+                "{}.salvage-retained",
+                crate::wal::segment_file_name(2)
+            )),
+            b"retained",
+        )
+        .expect("seed retained copy");
+
+        // Act
+        let pinned = pin_durable_files(&source, false, directory.path()).expect("pin WAL");
+
+        // Assert
+        let captured: Vec<PathBuf> = pinned.iter().map(|file| file.relative.clone()).collect();
+        assert_eq!(
+            captured,
+            [
+                crate::wal::ledger_store::LEDGER_FILE.to_string(),
+                crate::wal::segment_file_name(1),
+                crate::wal::segment_file_name(2),
+            ]
+            .map(|name| Path::new("wal").join(name))
+        );
+    }
+
+    #[test]
     fn should_reject_backslash_in_serialized_backup_inventory_path() {
         // Arrange
         let path = "wal\\segment.wal";

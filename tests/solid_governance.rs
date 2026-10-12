@@ -1685,3 +1685,320 @@ fn should_not_reintroduce_code_deleted_by_wal_redesign() {
     // Assert
     assert!(reintroduced.is_empty(), "{reintroduced:#?}");
 }
+
+/// The pure WAL core (#844): formats, the ledger, sequences, publication,
+/// the recovery planner and the catalog. Each file must exist.
+const WAL_CORE: &[&str] = &[
+    "src/wal/format/",
+    "src/wal/ledger.rs",
+    "src/wal/sequence.rs",
+    "src/wal/publish.rs",
+    "src/wal/planner.rs",
+    "src/wal/cloud_catalog.rs",
+    "src/wal/cloud_segment.rs",
+];
+
+/// What the pure WAL core may not reach: host I/O, threads, clocks, and the
+/// layers above it.
+const WAL_CORE_FORBIDDEN: &[&str] = &[
+    "std::fs",
+    "crate::io",
+    "std::thread",
+    "Instant::now",
+    "SystemTime::now",
+    "crate::runtime",
+    "crate::storage",
+    "crate::engine",
+    "crate::lease",
+];
+
+/// The WAL core decides; adapters do the I/O (#844).
+#[test]
+#[ignore = "#844: the pure WAL core lands with wal::planner"]
+fn should_keep_wal_core_free_of_io_and_runtime_dependencies() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let missing: Vec<&&str> = WAL_CORE
+        .iter()
+        .filter(|core| !files.iter().any(|file| file.relative.starts_with(**core)))
+        .collect();
+    let reaching: Vec<String> = files
+        .iter()
+        .filter(|file| WAL_CORE.iter().any(|core| file.relative.starts_with(core)))
+        .flat_map(|file| {
+            WAL_CORE_FORBIDDEN
+                .iter()
+                .filter(|token| file.production.contains(**token))
+                .map(move |token| format!("{} uses {token}", file.relative))
+        })
+        .collect();
+
+    // Assert
+    assert!(
+        missing.is_empty(),
+        "WAL core files are missing: {missing:?}"
+    );
+    assert!(
+        reaching.is_empty(),
+        "the WAL core reaches I/O or a higher layer: {reaching:#?}"
+    );
+}
+
+/// Production code where the WAL redesign keeps no compatibility path.
+const COMPATIBILITY_FREE_SCOPE: &[&str] = &[
+    "src/wal/",
+    "src/metadata/",
+    "src/runtime/actors/wal",
+    "src/runtime/wal_history",
+    "src/runtime/cloud_startup/streaming_wal_",
+];
+
+/// Compatibility names a later stage removes, each with its owner. Each must
+/// still be there.
+const DEFERRED_COMPATIBILITY: &[(&str, &str, &str)] = &[(
+    "src/wal/recovery/streaming.rs",
+    "legacy",
+    "#819 deletes the infallible coverage filter",
+)];
+
+/// The words of `text`: identifiers split at underscores and case changes,
+/// lowercased.
+fn words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for token in text.split(|character: char| !character.is_alphanumeric()) {
+        let mut word = String::new();
+        let mut previous_lower = false;
+        for character in token.chars() {
+            if character.is_uppercase() && previous_lower && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            previous_lower = character.is_lowercase() || character.is_ascii_digit();
+            word.extend(character.to_lowercase());
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+    }
+    words
+}
+
+/// Why `production` text keeps a compatibility path, if it does.
+fn compatibility_paths(production: &str) -> Vec<String> {
+    let mut found: Vec<String> = words(production)
+        .into_iter()
+        .filter(|word| word == "legacy" || word == "compat")
+        .collect();
+    let lower = production.to_lowercase();
+    for phrase in [
+        "backward compatible",
+        "backwards compatible",
+        "backward-compatible",
+        "backwards-compatible",
+        "#[deprecated",
+        "#[allow(dead_code)]",
+        "#[allow(unused",
+    ] {
+        if lower.contains(phrase) {
+            found.push(phrase.to_string());
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn should_find_compatibility_words_when_scanning_identifiers_and_comments() {
+    // Arrange
+    let source = "fn is_legacy_edit() {} // compat wrapper\nstruct CompatibilityError; /// forward-compatible";
+
+    // Act
+    let found = compatibility_paths(source);
+
+    // Assert
+    assert_eq!(found, ["compat", "legacy"]);
+}
+
+/// No WAL or metadata production code keeps a path for older formats or
+/// dead code (#844): FORMAT 7 rejects older state instead.
+#[test]
+#[ignore = "#844: metadata compatibility paths are deleted with FORMAT 7"]
+fn should_keep_wal_scope_free_of_compatibility_paths() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let found: std::collections::BTreeMap<String, Vec<String>> = files
+        .iter()
+        .filter(|file| {
+            COMPATIBILITY_FREE_SCOPE
+                .iter()
+                .any(|scope| file.relative.starts_with(scope))
+        })
+        .filter_map(|file| {
+            let paths: Vec<String> = compatibility_paths(&file.production)
+                .into_iter()
+                .filter(|word| {
+                    !DEFERRED_COMPATIBILITY
+                        .iter()
+                        .any(|(deferred, token, _)| *deferred == file.relative && token == word)
+                })
+                .collect();
+            (!paths.is_empty()).then(|| (file.relative.clone(), paths))
+        })
+        .collect();
+
+    // Assert
+    assert!(
+        found.is_empty(),
+        "WAL scope keeps compatibility paths: {found:#?}"
+    );
+    let stale: Vec<_> = DEFERRED_COMPATIBILITY
+        .iter()
+        .filter(|(deferred, token, _)| {
+            !files.iter().any(|file| {
+                file.relative == *deferred
+                    && compatibility_paths(&file.production).contains(&(*token).to_string())
+            })
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "remove stale DEFERRED_COMPATIBILITY entries: {stale:?}"
+    );
+}
+
+/// Replay views read; they implement no mutator (#853).
+#[test]
+#[ignore = "#844: replay views implement the read-only ReadFs"]
+fn should_keep_replay_views_read_only() {
+    // Arrange
+    let files = source_scan::production_files();
+    let view = files
+        .iter()
+        .find(|file| file.relative == "src/runtime/cloud_startup/streaming_wal_fs.rs")
+        .expect("the streaming replay view");
+    let replay: Vec<&source_scan::SourceFile> = files
+        .iter()
+        .filter(|file| {
+            file.relative == "src/wal/recovery.rs"
+                || file.relative == "src/wal/recovery/streaming.rs"
+        })
+        .collect();
+
+    // Act
+    let mutable_view = view.production.contains("Fs for StreamingWalFs")
+        && !view.production.contains("ReadFs for StreamingWalFs");
+    let refusing: Vec<&String> = files
+        .iter()
+        .filter(|file| file.production.contains("read_only_error"))
+        .map(|file| &file.relative)
+        .collect();
+    let writable_replay: Vec<&String> = replay
+        .iter()
+        .filter(|file| {
+            file.production.contains("&dyn Fs") || file.production.contains("dyn crate::io::Fs")
+        })
+        .map(|file| &file.relative)
+        .collect();
+
+    // Assert
+    assert!(!mutable_view, "StreamingWalFs implements the writable Fs");
+    assert!(
+        refusing.is_empty(),
+        "read-only views refuse mutators at runtime: {refusing:?}"
+    );
+    assert!(
+        writable_replay.is_empty(),
+        "replay takes a writable filesystem: {writable_replay:?}"
+    );
+}
+
+/// The cloud WAL upload tracker keeps its collections to itself (#852).
+#[test]
+#[ignore = "#844: the tracker owns its acknowledgement, backlog and prune state"]
+fn should_keep_cloud_wal_tracker_state_private() {
+    // Arrange
+    let files = source_scan::production_files();
+    let coordination = files
+        .iter()
+        .find(|file| file.relative == "src/runtime/event_loop/coordination.rs")
+        .expect("the cloud WAL upload tracker");
+
+    // Act
+    let declaration = coordination
+        .production
+        .split("struct CloudWalUploadTracker {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}").next())
+        .expect("the tracker's fields");
+    let public_fields: Vec<&str> = declaration
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("pub"))
+        .collect();
+    let reaching: Vec<String> = lines_calling(
+        &files,
+        &[
+            "cloud_wal.upload_backlog",
+            "cloud_wal.prune_inflight",
+            "cloud_wal.local_retirement",
+            "cloud_wal.acked_segments",
+        ],
+    )
+    .into_keys()
+    .collect();
+
+    // Assert
+    assert!(
+        public_fields.is_empty(),
+        "the tracker exposes fields: {public_fields:?}"
+    );
+    assert!(
+        reaching.is_empty(),
+        "code reaches into the tracker's collections: {reaching:?}"
+    );
+}
+
+/// Every catalog mutation is one read-modify-CAS (#858): only
+/// `mutate_wal_catalog_within` commits a catalog.
+#[test]
+#[ignore = "#844: catalog mutations share one read-modify-CAS path"]
+fn should_mutate_wal_catalog_through_one_path() {
+    // Arrange
+    let files = source_scan::production_files();
+    let catalog = files
+        .iter()
+        .find(|file| file.relative == "src/runtime/hybrid_persistence/catalog.rs")
+        .expect("the catalog adapter");
+
+    // Act
+    let committing: Vec<String> = lines_calling(&files, &["commit_catalog_"])
+        .into_keys()
+        .filter(|file| file != "src/runtime/hybrid_persistence/catalog.rs")
+        .collect();
+    let mutate = catalog
+        .production
+        .split("fn mutate_wal_catalog_within")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next());
+    let calls_outside_mutate = catalog
+        .production
+        .matches("commit_catalog_")
+        .count()
+        .saturating_sub(catalog.production.matches("fn commit_catalog_").count())
+        .saturating_sub(mutate.map_or(0, |body| body.matches("commit_catalog_").count()));
+
+    // Assert
+    assert!(mutate.is_some(), "mutate_wal_catalog_within is missing");
+    assert!(
+        committing.is_empty(),
+        "catalog commits outside the catalog adapter: {committing:?}"
+    );
+    assert_eq!(
+        calls_outside_mutate, 0,
+        "the catalog adapter commits outside mutate_wal_catalog_within"
+    );
+}

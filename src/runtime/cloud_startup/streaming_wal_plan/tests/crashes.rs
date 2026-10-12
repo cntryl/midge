@@ -192,6 +192,31 @@ fn prepare_case(
     for (id, epoch) in [(1, 8), (2, 7), (3, 9)] {
         fixture.publish(id, id, epoch, &framed_wal(id, b"value"))?;
     }
+    record_case(fixture, trigger, ordinal)
+}
+
+/// [`prepare_case`] whose hole is cataloged object 2, damaged, with
+/// epochs 8, 8 and 9.
+fn prepare_damaged_case(
+    trigger: &str,
+    ordinal: usize,
+) -> MidgeResult<(Fixture, PathBuf, std::process::Command)> {
+    let mut fixture = Fixture::new()?;
+    for (id, epoch) in [(1, 8), (2, 8), (3, 9)] {
+        fixture.publish(id, id, epoch, &framed_wal(id, b"value"))?;
+    }
+    corrupt_publication(&mut fixture, 2);
+    record_case(fixture, trigger, ordinal)
+}
+
+/// Write the cache's local segment 4 and open segment 5 after `fixture`'s
+/// catalog, record its ledger and catalog, and the child command that
+/// salvages it and aborts at `trigger`'s `ordinal`th hit.
+fn record_case(
+    mut fixture: Fixture,
+    trigger: &str,
+    ordinal: usize,
+) -> MidgeResult<(Fixture, PathBuf, std::process::Command)> {
     fixture.local_in_epoch(4, 9, &framed_wal(4, b"local"))?;
     fixture.active_in_epoch(9, &framed_wal(5, b"active"))?;
     // The child process opens the ledger this records.
@@ -280,5 +305,50 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
         assert_eq!(catalog.segments.len(), 3);
         assert_eq!(fixture.salvaged(5).is_some(), after_set_aside);
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "#844: R6 salvage commits its catalog suffix before the ledger"]
+fn should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_catalog_commit(
+) -> MidgeResult<()> {
+    // Arrange: cataloged object 2 is damaged and the cache holds no copy of
+    // it; local segment 4 and open segment 5 follow. Salvage stops after its
+    // catalog commit, before the ledger records the set-aside.
+    let trigger = "midge::recovery::after_salvage_floor_before_quarantine";
+    let (mut fixture, catalog_path, mut command) = prepare_damaged_case(trigger, 1)?;
+    let head = published_link(&fixture, 1)?;
+    crash::run_child_expect_abort(
+        &mut command,
+        "salvage-prefix",
+        trigger,
+        fixture.directory.path(),
+    );
+    fixture.catalog = WalPublicationCatalog::decode(&std::fs::read(&catalog_path)?).unwrap();
+
+    // Act: a strict open after the crash.
+    let reopened = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+    let history = commit(
+        &reopened,
+        &persistence(&fixture),
+        &fixture.catalog,
+        fixture.history()?,
+    )?;
+
+    // Assert: only the history before the hole replays, nothing salvage set
+    // aside comes back, and new writes start above all of it.
+    assert_eq!(
+        reopened
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(reopened.plan.local_segments.is_empty());
+    assert!(reopened.segments.open_segment().is_none());
+    assert_eq!(reopened.plan.max_unreplayed_sequence, 5);
+    assert_eq!(history.ledger().open_member().open.prev, head);
     Ok(())
 }

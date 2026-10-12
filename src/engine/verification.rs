@@ -567,6 +567,77 @@ mod tests {
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
 
+    /// Write segments `segments`, in order, and a catalog listing them
+    /// whether or not they chain, as both catalog copies of the simulated
+    /// cloud `store`.
+    fn write_catalog_listing(store: &std::path::Path, segments: &[(u64, Vec<u8>)]) {
+        let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7).unwrap();
+        for (segment_id, bytes) in segments {
+            let entry = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+                *segment_id,
+                *segment_id,
+                7,
+                bytes,
+            );
+            let path = store.join(&entry.object_key);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            catalog.append_run(7, &[entry]).unwrap();
+        }
+        let encoded = catalog.encode().unwrap();
+        for key in [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ] {
+            let path = store.join(key);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &encoded).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "#844: R10 verification checks the catalog chain"]
+    fn should_fail_simulated_cloud_verification_when_cataloged_segments_do_not_chain() {
+        // Arrange: the catalog lists segments 1 and 2, but segment 2's header
+        // links another segment 1.
+        let directory = tempfile::tempdir().unwrap();
+        let put = |seq| {
+            crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                seq,
+            )
+        };
+        let (first, _) = crate::wal::format::segment::SegmentBuilder::new(
+            1,
+            7,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .record(&put(1))
+        .seal();
+        let stranger = crate::wal::format::ChainLink {
+            id: 1,
+            last_seq: 1,
+            digest: [0x5a; 16],
+        };
+        let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, 7, stranger)
+            .record(&put(2))
+            .seal();
+        write_catalog_listing(directory.path(), &[(1, first), (2, second)]);
+        let store: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+
+        // Act
+        let result = StorageVerifier::verify_simulated_cloud_wal_catalog(&store);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn should_reject_memory_mode_without_constructing_engine() {
         // Arrange

@@ -580,6 +580,56 @@ fn should_preserve_republished_wal_when_predecessor_validity_expires_before_dele
 }
 
 #[test]
+#[ignore = "#844: R18 another catalog format is a compatibility error"]
+fn should_report_incompatible_catalog_version_without_repairing_from_mirror() {
+    // Arrange: the primary catalog is another format version; the mirror is
+    // a valid catalog of this one.
+    let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
+        Arc::new(CloudStorage::with_mock()),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    let primary = br#"{"format_version":99,"fencing_epoch":7,"segments":{}}"#.to_vec();
+    let mirror = WalPublicationCatalog::empty(7).unwrap().encode().unwrap();
+    storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            None,
+            primary.clone(),
+        )
+        .unwrap();
+    storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            None,
+            mirror.clone(),
+        )
+        .unwrap();
+
+    // Act
+    let result = storage.fence_cloud_wal_catalog(8);
+
+    // Assert: the open refuses before any write; neither copy changes.
+    assert!(
+        matches!(result, Err(MidgeError::CompatibilityError(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .unwrap()
+            .bytes(),
+        primary
+    );
+    assert_eq!(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+            .unwrap()
+            .bytes(),
+        mirror
+    );
+}
+
+#[test]
 fn should_share_catalog_budget_when_maintenance_is_not_yet_configured() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
