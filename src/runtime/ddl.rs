@@ -11,6 +11,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 use crate::io::FsError;
+use crate::metadata::manifest::FamilyLifecycleEdit;
 use crate::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
 use crate::runtime::RuntimeState;
 use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
@@ -227,16 +228,12 @@ impl DdlRegistry {
     }
 
     fn apply_edit(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
-        if !matches!(
-            edit,
-            ManifestEdit::CreateColumnFamily { .. } | ManifestEdit::DropColumnFamilyAt { .. }
-        ) {
-            return Err(MidgeError::InvalidArgument(
+        let edit = FamilyLifecycleEdit::of(edit).ok_or_else(|| {
+            MidgeError::InvalidArgument(
                 "remote DDL registry accepts only column-family edits".to_string(),
-            ));
-        }
-        crate::metadata::manifest::apply_column_family_lifecycle(&mut self.column_families, edit)?;
-        Ok(())
+            )
+        })?;
+        crate::metadata::manifest::apply_column_family_lifecycle(&mut self.column_families, edit)
     }
 }
 
@@ -542,35 +539,7 @@ pub(crate) fn require_empty_registry_for_metadata_bootstrap(
 }
 
 fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
-    match edit {
-        ManifestEdit::CreateColumnFamily {
-            id,
-            name,
-            created_at,
-        } => {
-            state.manifest.column_families.iter().any(|cf| {
-                cf.id == *id
-                    && cf.name == *name
-                    && cf.created_at == *created_at
-                    && cf.deleted_at.is_none()
-            }) && matches!(
-                state.manifest.flush_frontiers().get(*id),
-                Ok(crate::metadata::frontiers::FamilyFrontier::Live { .. })
-            )
-        }
-        ManifestEdit::DropColumnFamilyAt {
-            id, drop_sequence, ..
-        } => state.manifest.column_families.iter().any(|cf| {
-            cf.id == *id
-                && cf.deleted_at.is_some()
-                && cf.drop_sequence == Some(*drop_sequence)
-                && matches!(
-                    state.manifest.flush_frontiers().get(*id),
-                    Ok(crate::metadata::frontiers::FamilyFrontier::Dropped)
-                )
-        }),
-        _ => false,
-    }
+    FamilyLifecycleEdit::of(edit).is_some_and(|edit| edit.is_reflected_in(&state.manifest))
 }
 
 fn apply_remote_committed_visibility(
@@ -1068,6 +1037,53 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(serde_json::to_value(&registry).unwrap(), before);
         registry.apply_edit(&drop).unwrap();
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
+    }
+
+    #[test]
+    fn should_refuse_name_collisions_and_non_family_edits_when_the_registry_applies_an_edit() {
+        // Arrange: family 1 was created and dropped, then its name reused.
+        let mut registry = DdlRegistry::from_manifest(&Manifest::default());
+        let original = ManifestEdit::CreateColumnFamily {
+            id: 1,
+            name: "shared".into(),
+            created_at: 1,
+        };
+        registry.apply_edit(&original).unwrap();
+        registry
+            .apply_edit(&ManifestEdit::DropColumnFamilyAt {
+                id: 1,
+                drop_sequence: 7,
+                dropped_sst_names: Vec::new(),
+            })
+            .unwrap();
+        registry
+            .apply_edit(&ManifestEdit::CreateColumnFamily {
+                id: 2,
+                name: "shared".into(),
+                created_at: 2,
+            })
+            .unwrap();
+        let before = serde_json::to_value(&registry).unwrap();
+
+        // Act
+        let collision = registry.apply_edit(&ManifestEdit::CreateColumnFamily {
+            id: 3,
+            name: "shared".into(),
+            created_at: 3,
+        });
+        let replayed_original = registry.apply_edit(&original);
+        let not_a_family_edit = registry.apply_edit(&ManifestEdit::RemoveSst {
+            name: "000001.sst".into(),
+        });
+
+        // Assert
+        assert!(matches!(collision, Err(MidgeError::Corruption(_))));
+        assert!(matches!(replayed_original, Err(MidgeError::Corruption(_))));
+        assert!(matches!(
+            not_a_family_edit,
+            Err(MidgeError::InvalidArgument(_))
+        ));
         assert_eq!(serde_json::to_value(&registry).unwrap(), before);
     }
 

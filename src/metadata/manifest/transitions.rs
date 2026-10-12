@@ -54,24 +54,89 @@ pub(super) fn invalid_transition(message: impl Into<String>) -> MidgeError {
     MidgeError::Corruption(format!("invalid manifest transition: {}", message.into()))
 }
 
+/// The two schema decisions a column family's lifecycle records.
+#[derive(Clone, Copy)]
+pub(crate) enum FamilyLifecycleEdit<'a> {
+    Create {
+        id: u32,
+        name: &'a str,
+        created_at: u64,
+    },
+    Drop {
+        id: u32,
+        drop_sequence: u64,
+        dropped_sst_names: &'a [String],
+    },
+}
+
+impl<'a> FamilyLifecycleEdit<'a> {
+    /// The lifecycle decision `edit` records, if it records one.
+    pub(crate) fn of(edit: &'a ManifestEdit) -> Option<Self> {
+        match edit {
+            ManifestEdit::CreateColumnFamily {
+                id,
+                name,
+                created_at,
+            } => Some(Self::Create {
+                id: *id,
+                name,
+                created_at: *created_at,
+            }),
+            ManifestEdit::DropColumnFamilyAt {
+                id,
+                drop_sequence,
+                dropped_sst_names,
+            } => Some(Self::Drop {
+                id: *id,
+                drop_sequence: *drop_sequence,
+                dropped_sst_names,
+            }),
+            _ => None,
+        }
+    }
+
+    const fn id(self) -> u32 {
+        match self {
+            Self::Create { id, .. } | Self::Drop { id, .. } => id,
+        }
+    }
+
+    /// Whether `manifest` already holds the state this decision produces: the
+    /// family live under this identity, or dropped at this sequence.
+    pub(crate) fn is_reflected_in(self, manifest: &Manifest) -> bool {
+        let frontier = manifest.flushed_through.get(self.id());
+        manifest.column_families.iter().any(|cf| {
+            cf.id == self.id()
+                && match self {
+                    Self::Create {
+                        name, created_at, ..
+                    } => {
+                        cf.name == name
+                            && cf.created_at == created_at
+                            && cf.deleted_at.is_none()
+                            && matches!(frontier, Ok(FamilyFrontier::Live { .. }))
+                    }
+                    Self::Drop { drop_sequence, .. } => {
+                        cf.deleted_at.is_some()
+                            && cf.drop_sequence == Some(drop_sequence)
+                            && matches!(frontier, Ok(FamilyFrontier::Dropped))
+                    }
+                }
+        })
+    }
+}
+
 /// The DDL registry stores schema decisions, not recovery frontiers.
 pub(crate) fn apply_column_family_lifecycle(
     families: &mut Vec<ColumnFamilyMeta>,
-    edit: &ManifestEdit,
+    edit: FamilyLifecycleEdit<'_>,
 ) -> MidgeResult<()> {
-    let id = match edit {
-        ManifestEdit::CreateColumnFamily { id, .. }
-        | ManifestEdit::DropColumnFamilyAt { id, .. } => *id,
-        _ => {
-            return Err(invalid_transition(
-                "schema registry accepts only create/drop edits",
-            ))
-        }
-    };
-    let existing = families.iter().find(|cf| cf.id == id);
-    let collision = matches!(edit, ManifestEdit::CreateColumnFamily { name, .. }
-        if families.iter().any(|cf| cf.id != id && cf.name == *name && cf.deleted_at.is_none()));
-    let family = plan_family_lifecycle(edit, existing, collision)?;
+    let id = edit.id();
+    let live_names = families
+        .iter()
+        .filter(|cf| cf.deleted_at.is_none())
+        .map(|cf| (cf.id, cf.name.as_str()));
+    let family = plan_family_lifecycle(edit, families.iter().find(|cf| cf.id == id), live_names)?;
     if let Some(existing) = families.iter_mut().find(|cf| cf.id == id) {
         *existing = family;
     } else {
@@ -80,18 +145,23 @@ pub(crate) fn apply_column_family_lifecycle(
     Ok(())
 }
 
-fn plan_family_lifecycle(
-    edit: &ManifestEdit,
+/// The family a lifecycle decision produces from `existing`. A create must not
+/// take a name that another family in `live_names` holds.
+fn plan_family_lifecycle<'n>(
+    edit: FamilyLifecycleEdit<'_>,
     existing: Option<&ColumnFamilyMeta>,
-    collision: bool,
+    mut live_names: impl Iterator<Item = (u32, &'n str)>,
 ) -> MidgeResult<ColumnFamilyMeta> {
     match edit {
-        ManifestEdit::CreateColumnFamily {
+        FamilyLifecycleEdit::Create {
             id,
             name,
             created_at,
         } => {
-            if *id == 0 || name == "default" || collision {
+            if id == 0
+                || name == "default"
+                || live_names.any(|(other, live)| other != id && live == name)
+            {
                 return Err(invalid_transition("default or duplicate live family name"));
             }
             if let Some(existing) = existing {
@@ -99,7 +169,7 @@ fn plan_family_lifecycle(
                 // replay reaches its original create edit. Only the exact
                 // original identity is idempotent; a new family must use a
                 // fresh id and creation timestamp.
-                if existing.name == *name && existing.created_at == *created_at {
+                if existing.name == name && existing.created_at == created_at {
                     return Ok(existing.clone());
                 }
                 return Err(invalid_transition(format!(
@@ -107,27 +177,27 @@ fn plan_family_lifecycle(
                 )));
             }
             Ok(ColumnFamilyMeta {
-                id: *id,
-                name: name.clone(),
-                created_at: *created_at,
+                id,
+                name: name.to_owned(),
+                created_at,
                 deleted_at: None,
                 drop_sequence: None,
                 dropped_sst_names: Vec::new(),
                 reclaimed: false,
             })
         }
-        ManifestEdit::DropColumnFamilyAt {
+        FamilyLifecycleEdit::Drop {
             id,
             drop_sequence,
             dropped_sst_names,
         } => {
             let existing =
                 existing.ok_or_else(|| invalid_transition(format!("unknown family {id}")))?;
-            if *id == 0 {
+            if id == 0 {
                 return Err(invalid_transition("default family cannot be dropped"));
             }
             if existing.deleted_at.is_some() {
-                if existing.drop_sequence == Some(*drop_sequence) {
+                if existing.drop_sequence == Some(drop_sequence) {
                     return Ok(existing.clone());
                 }
                 return Err(invalid_transition(format!(
@@ -136,12 +206,11 @@ fn plan_family_lifecycle(
             }
             let mut family = existing.clone();
             family.deleted_at = Some(millis_since_epoch());
-            family.drop_sequence = Some(*drop_sequence);
-            family.dropped_sst_names.clone_from(dropped_sst_names);
+            family.drop_sequence = Some(drop_sequence);
+            family.dropped_sst_names = dropped_sst_names.to_vec();
             family.reclaimed = false;
             Ok(family)
         }
-        _ => Err(invalid_transition("expected family lifecycle edit")),
     }
 }
 
@@ -249,6 +318,50 @@ impl<'a> EditValidator<'a> {
         )
     }
 
+    fn create_family(&mut self, id: u32, name: &str, created_at: u64) -> MidgeResult<()> {
+        if self.family(id).is_some_and(|existing| {
+            existing.deleted_at.is_some()
+                && existing.name == name
+                && existing.created_at == created_at
+        }) {
+            // Recovery can replay the original create edit after a
+            // checkpoint installed its permanent tombstone. Recognize
+            // it before checking whether a later family reused the name.
+            return Ok(());
+        }
+        let live_names = self
+            .families
+            .values()
+            .chain(
+                self.base
+                    .column_families
+                    .iter()
+                    .filter(|cf| !self.families.contains_key(&cf.id)),
+            )
+            .filter(|cf| cf.deleted_at.is_none())
+            .map(|cf| (cf.id, cf.name.as_str()));
+        let create = FamilyLifecycleEdit::Create {
+            id,
+            name,
+            created_at,
+        };
+        let family = plan_family_lifecycle(create, self.family(id), live_names)?;
+        let frontier = if self.family(id).is_some() {
+            self.frontier(id)?
+        } else {
+            FamilyFrontier::Live {
+                through_sequence: 0,
+            }
+        };
+        if frontier == FamilyFrontier::Dropped {
+            return Err(invalid_transition("dropped family cannot be revived"));
+        }
+        self.families.insert(id, family.clone());
+        self.frontiers.insert(id, frontier);
+        self.steps.push(ManifestStep::Family(family, frontier));
+        Ok(())
+    }
+
     fn drop_family(
         &mut self,
         id: u32,
@@ -280,12 +393,12 @@ impl<'a> EditValidator<'a> {
                 return Err(invalid_transition("drop references another family's SST"));
             }
         }
-        let normalized = ManifestEdit::DropColumnFamilyAt {
+        let normalized = FamilyLifecycleEdit::Drop {
             id,
             drop_sequence,
-            dropped_sst_names: names,
+            dropped_sst_names: &names,
         };
-        let family = plan_family_lifecycle(&normalized, self.family(id), false)?;
+        let family = plan_family_lifecycle(normalized, self.family(id), std::iter::empty())?;
         self.families.insert(id, family.clone());
         self.frontiers.insert(id, FamilyFrontier::Dropped);
         self.steps
@@ -360,42 +473,7 @@ impl<'a> EditValidator<'a> {
                 id,
                 name,
                 created_at,
-            } => {
-                if self.family(*id).is_some_and(|existing| {
-                    existing.deleted_at.is_some()
-                        && existing.name == *name
-                        && existing.created_at == *created_at
-                }) {
-                    // Recovery can replay the original create edit after a
-                    // checkpoint installed its permanent tombstone. Recognize
-                    // it before checking whether a later family reused the name.
-                    return Ok(());
-                }
-                let collision = self
-                    .families
-                    .values()
-                    .chain(
-                        self.base
-                            .column_families
-                            .iter()
-                            .filter(|cf| !self.families.contains_key(&cf.id)),
-                    )
-                    .any(|cf| cf.id != *id && cf.name == *name && cf.deleted_at.is_none());
-                let family = plan_family_lifecycle(edit, self.family(*id), collision)?;
-                let frontier = if self.family(*id).is_some() {
-                    self.frontier(*id)?
-                } else {
-                    FamilyFrontier::Live {
-                        through_sequence: 0,
-                    }
-                };
-                if frontier == FamilyFrontier::Dropped {
-                    return Err(invalid_transition("dropped family cannot be revived"));
-                }
-                self.families.insert(*id, family.clone());
-                self.frontiers.insert(*id, frontier);
-                self.steps.push(ManifestStep::Family(family, frontier));
-            }
+            } => self.create_family(*id, name, *created_at)?,
             ManifestEdit::DropColumnFamilyAt {
                 id,
                 drop_sequence,

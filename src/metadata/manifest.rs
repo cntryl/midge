@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 mod transitions;
-pub(crate) use transitions::apply_column_family_lifecycle;
 pub use transitions::PreparedManifestEdit;
+pub(crate) use transitions::{apply_column_family_lifecycle, FamilyLifecycleEdit};
 use transitions::{invalid_transition, EditValidator};
 
 /// Core manifest structure tracking all SSTs and metadata
