@@ -153,10 +153,7 @@ impl CloudReplay {
             .state
             .check_startup_scope("cloud WAL replay installation")?;
         let runtime = &mut materialized.state;
-        runtime.sequence = runtime
-            .sequence
-            .max(stats.max_sequence.unwrap_or(0))
-            .max(self.sequence_floor);
+        runtime.raise_sequence_to(stats.max_sequence.unwrap_or(0).max(self.sequence_floor));
         runtime.wal.frontiers.advance_local_to(runtime.sequence);
         runtime.compaction_output_generation = runtime
             .compaction_output_generation

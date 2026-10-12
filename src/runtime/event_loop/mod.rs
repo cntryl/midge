@@ -239,6 +239,9 @@ impl EventLoop {
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
+        // Before anything reads the ledger or admits work: sequences an
+        // earlier process reserved are never handed out again (#843).
+        state.begin_wal_epoch()?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
             flush_worker_mode.worker_msg_tx(),

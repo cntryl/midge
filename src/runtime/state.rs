@@ -1178,22 +1178,110 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;
-    /// after that, duplicate sequence numbers would occur (documented limitation).
+    /// Allocate the next sequence number, through the reservation.
     #[cfg(test)]
     pub fn next_sequence(&mut self) -> u64 {
-        self.sequence = self.sequence.saturating_add(1);
-        self.sequence
+        *self
+            .allocate_sequences(1)
+            .expect("a test sequence fits the reservation")
+            .end()
+    }
+
+    /// Allocate `count` consecutive sequences, the only way a sequence is
+    /// handed out (#843). Every one lies at or below the reservation the WAL
+    /// ledger made durable, raised first when less than half a block would
+    /// remain. A failed raise is tolerated while the old reservation still
+    /// covers the allocation; otherwise the error returns before any WAL
+    /// byte names a sequence.
+    ///
+    /// # Errors
+    ///
+    /// The ledger error when the reservation cannot cover the allocation,
+    /// or `ResourceLimit` when the sequence space is exhausted.
+    pub(crate) fn allocate_sequences(
+        &mut self,
+        count: u64,
+    ) -> MidgeResult<std::ops::RangeInclusive<u64>> {
+        use crate::wal::sequence::{allocate, refill_due, Allocation};
+        let last = self.sequence;
+        let reserved = self.wal.history.ledger().seq_reserved_through();
+        if allocate(last, reserved, count).is_none() {
+            return Err(MidgeError::ResourceLimit(
+                "sequence space exhausted".to_string(),
+            ));
+        }
+        if let Some(through) = refill_due(last, reserved, count) {
+            if let Err(error) = self.wal.history.reserve(through) {
+                if !matches!(allocate(last, reserved, count), Some(Allocation::Ready(_))) {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    %error,
+                    through,
+                    reserved,
+                    "could not raise the WAL sequence reservation; the current one still covers this allocation"
+                );
+            }
+        }
+        let reserved = self.wal.history.ledger().seq_reserved_through();
+        match allocate(last, reserved, count) {
+            Some(Allocation::Ready(range)) => {
+                self.sequence = *range.end();
+                Ok(range)
+            }
+            Some(Allocation::NeedsReservation { through }) => Err(MidgeError::Internal(format!(
+                "sequence allocation through {through} exceeds the WAL reservation {reserved}"
+            ))),
+            None => Err(MidgeError::ResourceLimit(
+                "sequence space exhausted".to_string(),
+            )),
+        }
+    }
+
+    /// Give back `range`, the latest allocation, before any WAL byte named
+    /// one of its sequences, so the durable frontier never skips an unwritten
+    /// range.
+    pub(crate) fn release_sequences(&mut self, range: &std::ops::RangeInclusive<u64>) {
+        if self.sequence == *range.end() {
+            self.sequence = range.start().saturating_sub(1);
+        }
+    }
+
+    /// Raise the sequence to at least `floor`: recovered state proves every
+    /// sequence up to it was handed out.
+    pub(crate) fn raise_sequence_to(&mut self, floor: u64) {
+        self.sequence = self.sequence.max(floor);
+    }
+
+    /// Start this process's WAL epoch, before it admits work (#843): every
+    /// sequence an earlier process may have handed out, which is everything
+    /// it reserved, counts as used, a new reservation is made durable past
+    /// it, and the local durable frontier covers it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error when the reservation cannot be persisted, or
+    /// `ResourceLimit` when the sequence space is exhausted.
+    pub(crate) fn begin_wal_epoch(&mut self) -> MidgeResult<()> {
+        let last = crate::wal::sequence::opening_last(
+            self.sequence,
+            self.compaction_output_generation,
+            self.wal.history.ledger().seq_reserved_through(),
+        );
+        let through = last
+            .checked_add(crate::wal::sequence::RESERVATION_BLOCK)
+            .ok_or_else(|| MidgeError::ResourceLimit("sequence space exhausted".to_string()))?;
+        self.wal.history.reserve(through)?;
+        self.sequence = last;
+        self.wal.frontiers.advance_local_to(last);
+        Ok(())
     }
 
     pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
-        let current = self.compaction_output_generation.max(self.sequence);
-        let next = current.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("compaction output sequence exhausted".to_string())
-        })?;
-        self.compaction_output_generation = next;
-        self.sequence = next;
-        Ok(next)
+        self.raise_sequence_to(self.compaction_output_generation);
+        let generation = *self.allocate_sequences(1)?.end();
+        self.compaction_output_generation = generation;
+        Ok(generation)
     }
 
     pub fn restore_sequence_floor_from_manifest(&mut self) {

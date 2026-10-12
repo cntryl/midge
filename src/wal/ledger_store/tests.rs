@@ -442,20 +442,28 @@ fn should_fail_when_magic_is_wrong() {
 
 #[test]
 fn should_fail_when_version_is_unsupported() {
-    // Arrange
+    // Arrange: a LEDGER v1 journal (#842), and one from a newer build.
     let fs = mock_fs();
-    let (mut bytes, _) = image_with(&[]);
-    bytes[MAGIC.len()..HEADER_LEN].copy_from_slice(&(VERSION + 1).to_le_bytes());
-    write_ledger_bytes(&fs, &bytes);
+    let (bytes, _) = image_with(&[]);
+    let versioned = |version: u32| {
+        let mut bytes = bytes.clone();
+        bytes[MAGIC.len()..HEADER_LEN].copy_from_slice(&version.to_le_bytes());
+        bytes
+    };
 
     // Act
-    let result = LedgerStore::load(&fs);
+    let results = [1, VERSION + 1].map(|version| {
+        write_ledger_bytes(&fs, &versioned(version));
+        LedgerStore::load(&fs)
+    });
 
     // Assert
-    assert!(
-        matches!(result, Err(MidgeError::CompatibilityError(_))),
-        "{result:?}"
-    );
+    for result in results {
+        assert!(
+            matches!(result, Err(MidgeError::CompatibilityError(_))),
+            "{result:?}"
+        );
+    }
 }
 
 #[test]

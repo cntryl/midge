@@ -86,6 +86,9 @@ fn valid_edit(ledger: &WalLedger, random: &mut SplitMix64) -> LedgerEdit {
             from: log_start + random.below(open - log_start + 3),
             open: next + random.below(3),
         },
+        3 => LedgerEdit::Reserve {
+            through: ledger.seq_reserved_through() + 1 + random.below(1 << 20),
+        },
         _ => LedgerEdit::Rotate {
             seal: open,
             open: next,
@@ -96,10 +99,13 @@ fn valid_edit(ledger: &WalLedger, random: &mut SplitMix64) -> LedgerEdit {
 /// A random edit near `ledger`'s current ids, valid or not.
 fn arbitrary_edit(ledger: &WalLedger, random: &mut SplitMix64) -> LedgerEdit {
     let past_log_start = ledger.log_start() + random.below(4);
-    match random.below(3) {
+    match random.below(4) {
         0 => LedgerEdit::Rotate {
             seal: random.near(ledger.open_segment()),
             open: random.near(ledger.next_segment_id()),
+        },
+        3 => LedgerEdit::Reserve {
+            through: random.near(ledger.seq_reserved_through()),
         },
         1 => LedgerEdit::AdvanceLogStart {
             to: random.near(past_log_start),
@@ -130,6 +136,53 @@ fn modelled(ledger: &WalLedger, edit: &LedgerEdit) -> (Vec<SegmentId>, SegmentId
             members.push(*open);
             (members, open + 1)
         }
+        LedgerEdit::Reserve { .. } => (members, ledger.next_segment_id()),
+    }
+}
+
+#[test]
+fn should_raise_reservation_when_reserving() {
+    // Arrange
+    let mut ledger = ledger_at(1);
+
+    // Act
+    ledger
+        .apply(&LedgerEdit::Reserve { through: 1 << 20 })
+        .expect("a raise applies");
+
+    // Assert
+    assert_eq!(ledger.seq_reserved_through(), 1 << 20);
+    assert_invariants(&ledger);
+}
+
+#[test]
+fn should_reject_reserve_when_it_does_not_raise_the_reservation() {
+    // Arrange
+    let mut ledger = ledger_at(1);
+    ledger
+        .apply(&LedgerEdit::Reserve { through: 100 })
+        .expect("a raise applies");
+
+    // Act
+    let same = rejected(&ledger, &LedgerEdit::Reserve { through: 100 });
+    let lower = rejected(&ledger, &LedgerEdit::Reserve { through: 99 });
+
+    // Assert
+    for error in [same, lower] {
+        assert_eq!(
+            error,
+            LedgerError::ReservationNotRaised {
+                through: error_through(&error),
+                reserved_through: 100,
+            }
+        );
+    }
+}
+
+fn error_through(error: &LedgerError) -> u64 {
+    match error {
+        LedgerError::ReservationNotRaised { through, .. } => *through,
+        other => panic!("unexpected ledger error {other:?}"),
     }
 }
 
@@ -536,14 +589,14 @@ fn should_round_trip_when_ledger_is_serialized() {
 fn should_reject_snapshot_when_state_is_unreachable() {
     // Arrange
     let images = [
-        r#"{"holder":"h","members":[3,3],"next_segment_id":4}"#,
-        r#"{"holder":"h","members":[4,3],"next_segment_id":5}"#,
-        r#"{"holder":"h","members":[3],"next_segment_id":3}"#,
-        r#"{"holder":"h","members":[3],"next_segment_id":9}"#,
-        r#"{"holder":"","members":[3],"next_segment_id":4}"#,
-        r#"{"holder":"h","members":[],"next_segment_id":0}"#,
-        r#"{"holder":"","members":[],"next_segment_id":1}"#,
-        r#"{"holder":"h","members":[3],"next_segment_id":4,"extra":1}"#,
+        r#"{"holder":"h","members":[3,3],"next_segment_id":4,"seq_reserved_through":0}"#,
+        r#"{"holder":"h","members":[4,3],"next_segment_id":5,"seq_reserved_through":0}"#,
+        r#"{"holder":"h","members":[3],"next_segment_id":3,"seq_reserved_through":0}"#,
+        r#"{"holder":"h","members":[3],"next_segment_id":9,"seq_reserved_through":0}"#,
+        r#"{"holder":"","members":[3],"next_segment_id":4,"seq_reserved_through":0}"#,
+        r#"{"holder":"h","members":[],"next_segment_id":0,"seq_reserved_through":0}"#,
+        r#"{"holder":"","members":[],"next_segment_id":1,"seq_reserved_through":0}"#,
+        r#"{"holder":"h","members":[3],"next_segment_id":4,"seq_reserved_through":0,"extra":1}"#,
     ];
 
     // Act

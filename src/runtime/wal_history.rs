@@ -216,6 +216,17 @@ impl WalHistory {
         })
     }
 
+    /// Make the sequence reservation reach `through` (#843): every sequence
+    /// up to it may be handed out once this returns.
+    ///
+    /// # Errors
+    ///
+    /// The ledger's refusal or write error; the reservation may or may not
+    /// have become durable, so the caller hands out nothing past the old one.
+    pub(crate) fn reserve(&mut self, through: u64) -> MidgeResult<()> {
+        self.commit(&LedgerEdit::Reserve { through })
+    }
+
     /// Remove segment files the ledger does not name. Members are never
     /// touched.
     fn sweep_orphans(&self) -> MidgeResult<usize> {

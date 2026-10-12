@@ -34,13 +34,13 @@ fn copy_populated_fixture_as_current_format(destination: &Path) {
     ] {
         std::fs::copy(source.join(file), destination.join(file)).expect("copy fixture file");
     }
-    std::fs::write(destination.join("FORMAT"), "midge-format-version=5\n")
+    std::fs::write(destination.join("FORMAT"), "midge-format-version=6\n")
         .expect("write format marker");
 }
 
 fn write_empty_database(path: &Path) {
     std::fs::create_dir_all(path).expect("create database directory");
-    std::fs::write(path.join("FORMAT"), "midge-format-version=5\n").expect("write format marker");
+    std::fs::write(path.join("FORMAT"), "midge-format-version=6\n").expect("write format marker");
     std::fs::write(
         path.join("manifest.json"),
         serde_json::to_vec_pretty(&json!({
@@ -141,10 +141,10 @@ fn should_emit_v1_storage_error_json_given_missing_database_when_midge_verify_ru
 #[test]
 fn should_emit_v1_corruption_error_json_given_future_format_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/future_v6");
+    let path = fixture_path("tests/fixtures/compatibility/future_v7");
     let output_path = path.to_str().expect("fixture path");
     let expected_message = format!(
-        "Compatibility error: unsupported on-disk format version 6 at '{output_path}'; this build supports versions 5..=5"
+        "Compatibility error: unsupported on-disk format version 7 at '{output_path}'; this build supports versions 6..=6"
     );
     let expected_template = include_str!("fixtures/verification/corruption_error_v1.json").trim();
     let expected: Value = serde_json::from_str(&expected_template.replace(

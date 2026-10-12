@@ -2923,7 +2923,6 @@ mod sequence_reservation {
     }
 
     #[test]
-    #[ignore = "#843: a reopen hands out the sequences of a lost unsynced tail again"]
     fn should_not_reuse_sequences_of_a_lost_unsynced_tail_after_power_loss() {
         // Arrange: a synced commit, then a buffered one whose sequence the
         // engine reported; the process dies and the power loss keeps nothing

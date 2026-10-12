@@ -39,6 +39,7 @@ pub(crate) mod ledger_store;
 pub mod policy;
 pub(crate) mod publish;
 pub(crate) mod recovery;
+pub(crate) mod sequence;
 pub(crate) mod traits;
 pub mod types;
 

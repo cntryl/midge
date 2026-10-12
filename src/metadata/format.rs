@@ -3,11 +3,13 @@ use crate::io::{staging, Fs, FsError, FsPath};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Version 5 names WAL history by the segment ledger (`wal/LEDGER`, #842)
-/// instead of a directory listing and an active `wal.log`.
-pub const CURRENT_FORMAT_VERSION: u32 = 5;
+/// Version 6 links WAL segments with headers and sealed footers, writes
+/// records without a per-record writer epoch, and reserves sequences in the
+/// LEDGER v2 (#843). Version 5 named WAL history by the segment ledger
+/// (`wal/LEDGER`, #842) instead of a directory listing.
+pub const CURRENT_FORMAT_VERSION: u32 = 6;
 /// Oldest on-disk format this build opens. Older databases are rejected, not
-/// upgraded: their WAL has no ledger.
+/// upgraded: their WAL segments are unlinked.
 const MIN_SUPPORTED_FORMAT_VERSION: u32 = CURRENT_FORMAT_VERSION;
 const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
@@ -241,14 +243,14 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_open_given_format_version_older_than_five() {
+    fn should_reject_open_given_format_version_older_than_six() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             temp_dir.path().join(FORMAT_FILE),
-            format!("{FORMAT_PREFIX}2\n"),
+            format!("{FORMAT_PREFIX}5\n"),
         )
-        .expect("write version 2 marker");
+        .expect("write version 5 marker");
 
         // Act
         let error = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path())

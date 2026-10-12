@@ -3500,3 +3500,122 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
     );
     scenario.teardown();
 }
+
+// =========== Sequence reservation tests (#843) ===========
+
+/// A file-backed state over a simulated device, so a test can fault the
+/// LEDGER and read back what it persisted.
+fn state_on_device(
+    device: &crate::simulation::crash_fs::CrashDevice,
+) -> crate::common::MidgeResult<RuntimeState> {
+    RuntimeState::recover(
+        std::path::Path::new("/device"),
+        false,
+        Arc::new(device.fs()),
+        crate::config::RecoveryPolicy::Strict,
+        crate::runtime::state::RecoveryWal::Replay,
+        None,
+    )
+}
+
+/// The reservation LEDGER holds on `device`.
+fn persisted_reservation(device: &crate::simulation::crash_fs::CrashDevice) -> u64 {
+    let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+    crate::runtime::wal_history::WalHistory::read(&wal)
+        .expect("read the WAL ledger")
+        .expect("the WAL ledger exists")
+        .seq_reserved_through()
+}
+
+/// Append one put through the WAL actor, as a commit does.
+fn commit_put(state: &mut RuntimeState, key: &'static [u8]) -> crate::common::MidgeResult<u64> {
+    let mut actor = crate::runtime::actors::WalActor::open(
+        state,
+        crate::wal::DurabilityPolicy::Strict,
+        crate::wal::policy::BatchConfig::default(),
+        0,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let prepared = actor.prepare_transaction_append(
+        state,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 1,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(key),
+                value: bytes::Bytes::from_static(b"value"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    let results = actor.append_prepared_transactions(state, vec![prepared])?;
+    Ok(results[0].last_sequence)
+}
+
+#[test]
+fn should_persist_reservation_before_allocating_past_it() {
+    // Arrange
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let mut state = state_on_device(&device).expect("recover");
+
+    // Act
+    let last = commit_put(&mut state, b"reserved").expect("commit");
+
+    // Assert
+    assert!(
+        persisted_reservation(&device) >= last,
+        "sequence {last} was handed out past the persisted reservation {}",
+        persisted_reservation(&device)
+    );
+}
+
+#[test]
+fn should_return_error_without_wal_bytes_when_reservation_cannot_be_persisted() {
+    // Arrange: the first LEDGER sync after recovery fails.
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let mut state = state_on_device(&device).expect("recover");
+    let sequence_before = state.sequence;
+    let segment = format!(
+        "{}/{}",
+        crate::wal::WAL_DIR,
+        crate::wal::segment_file_name(state.wal.open_segment())
+    );
+    let segment_before = device.files()[&segment].clone();
+    let fault = device.inject(crate::simulation::crash_fs::Fault {
+        op: crate::simulation::crash_fs::FaultOp::Sync,
+        path: format!("{}/LEDGER", crate::wal::WAL_DIR),
+        nth: 1,
+        effect: crate::simulation::crash_fs::FaultEffect::Before,
+        error: crate::simulation::crash_fs::FaultError::Io,
+    });
+
+    // Act
+    let result = commit_put(&mut state, b"unreserved");
+
+    // Assert
+    assert!(device.fired(fault), "the reservation must reach the LEDGER");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(state.sequence, sequence_before);
+    assert_eq!(device.files()[&segment], segment_before);
+}
+
+#[test]
+fn should_allocate_compaction_generation_within_reservation() {
+    // Arrange
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let mut state = state_on_device(&device).expect("recover");
+
+    // Act
+    let generation = state
+        .next_compaction_output_generation()
+        .expect("allocate a generation");
+
+    // Assert
+    assert!(generation <= persisted_reservation(&device));
+    assert_eq!(state.sequence, generation);
+}

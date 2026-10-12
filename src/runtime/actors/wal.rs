@@ -68,6 +68,13 @@ struct TxnSequencePlan {
     commit_seq: u64,
 }
 
+impl TxnSequencePlan {
+    /// Every sequence the transaction took.
+    fn range(&self) -> std::ops::RangeInclusive<u64> {
+        self.begin_seq..=self.commit_seq
+    }
+}
+
 struct TxnWalBatch {
     wal_record: Option<WalRecord>,
     total_wal_bytes: usize,

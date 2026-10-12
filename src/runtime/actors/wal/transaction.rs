@@ -139,14 +139,14 @@ impl WalActor {
             Err(error) => {
                 // Nothing was written; give the sequences back so the
                 // durable frontier never skips over an unwritten range.
-                state.sequence = sequence_plan.begin_seq - 1;
+                state.release_sequences(&sequence_plan.range());
                 return Err(error);
             }
         };
 
         crate::failpoints::fail_point!("midge::wal::after_transaction_preparation");
         if let Err(error) = self.ensure_lease_validity() {
-            state.sequence = sequence_plan.begin_seq - 1;
+            state.release_sequences(&sequence_plan.range());
             return Err(error);
         }
         Ok(PreparedTransactionAppend {
@@ -350,25 +350,29 @@ impl WalActor {
             ops_count > 0,
             "append_transaction requires at least one operation"
         );
-        let ops_count_u64 = u64::try_from(ops_count).map_err(|_| {
-            MidgeError::ResourceLimit("transaction operation count exceeds sequence space".into())
-        })?;
-        let begin_seq = state.sequence.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let first_op_seq = begin_seq.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let commit_seq = first_op_seq.checked_add(ops_count_u64).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let txn_id = state.next_txn_id()?;
-        state.sequence = commit_seq;
+        // The begin marker, one sequence per operation, the commit marker.
+        let count = u64::try_from(ops_count)
+            .ok()
+            .and_then(|ops| ops.checked_add(2))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit(
+                    "transaction operation count exceeds sequence space".into(),
+                )
+            })?;
+        let range = state.allocate_sequences(count)?;
+        let txn_id = match state.next_txn_id() {
+            Ok(txn_id) => txn_id,
+            Err(error) => {
+                state.release_sequences(&range);
+                return Err(error);
+            }
+        };
+        let begin_seq = *range.start();
         Ok(TxnSequencePlan {
             txn_id,
             begin_seq,
-            first_op_seq,
-            commit_seq,
+            first_op_seq: begin_seq + 1,
+            commit_seq: *range.end(),
         })
     }
 

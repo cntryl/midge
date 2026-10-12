@@ -34,6 +34,9 @@ pub(crate) enum LedgerEdit {
     /// Salvage: drop every member at or above `from` (it must be at or above
     /// log start), and open `open`, which must be at least `next_segment_id`.
     SetAside { from: SegmentId, open: SegmentId },
+    /// Raise the sequence reservation to `through` (#843): sequences up to
+    /// it may be handed out. It must exceed the current reservation.
+    Reserve { through: u64 },
 }
 
 /// The WAL segment ledger. See the module documentation.
@@ -49,6 +52,8 @@ pub(crate) struct WalLedger {
     members: VecDeque<SegmentId>,
     /// The id the next rotation opens: always one past the open segment.
     next_segment_id: SegmentId,
+    /// Every sequence handed out is at or below this (#843).
+    seq_reserved_through: u64,
 }
 
 /// Why an edit cannot apply, or why a serialized ledger is not a reachable
@@ -82,6 +87,8 @@ pub(crate) enum LedgerError {
         log_start: SegmentId,
         next_segment_id: SegmentId,
     },
+    /// `Reserve` must raise the reservation.
+    ReservationNotRaised { through: u64, reserved_through: u64 },
     /// The edit would open the last representable id, leaving no next id.
     SegmentIdsExhausted,
     /// A serialized ledger is not a state any sequence of edits reaches.
@@ -123,6 +130,13 @@ impl fmt::Display for LedgerError {
                  at least the log start {log_start} and open at least the next segment \
                  id {next_segment_id}"
             ),
+            Self::ReservationNotRaised {
+                through,
+                reserved_through,
+            } => write!(
+                f,
+                "cannot reserve WAL sequences through {through}: the reservation already reaches {reserved_through}"
+            ),
             Self::SegmentIdsExhausted => f.write_str("WAL segment ids are exhausted"),
             Self::UnreachableState(reason) => {
                 write!(f, "the WAL ledger state is unreachable: {reason}")
@@ -145,6 +159,7 @@ impl WalLedger {
             holder,
             members: VecDeque::from([open]),
             next_segment_id: following(open)?,
+            seq_reserved_through: 0,
         })
     }
 
@@ -154,7 +169,19 @@ impl WalLedger {
             LedgerEdit::Rotate { seal, open } => self.rotate(*seal, *open),
             LedgerEdit::AdvanceLogStart { to } => self.advance_log_start(*to),
             LedgerEdit::SetAside { from, open } => self.set_aside(*from, *open),
+            LedgerEdit::Reserve { through } => self.reserve(*through),
         }
+    }
+
+    fn reserve(&mut self, through: u64) -> Result<(), LedgerError> {
+        if through <= self.seq_reserved_through {
+            return Err(LedgerError::ReservationNotRaised {
+                through,
+                reserved_through: self.seq_reserved_through,
+            });
+        }
+        self.seq_reserved_through = through;
+        Ok(())
     }
 
     // Each edit validates everything before its first mutation, so a
@@ -249,6 +276,11 @@ impl WalLedger {
             .take(self.members.len().saturating_sub(1))
     }
 
+    /// Every sequence handed out is at or below this.
+    pub(crate) fn seq_reserved_through(&self) -> u64 {
+        self.seq_reserved_through
+    }
+
     /// Whether segment `id` is history recovery replays.
     pub(crate) fn is_member(&self, id: SegmentId) -> bool {
         self.members.binary_search(&id).is_ok()
@@ -267,6 +299,7 @@ struct LedgerImage {
     holder: String,
     members: Vec<SegmentId>,
     next_segment_id: SegmentId,
+    seq_reserved_through: u64,
 }
 
 impl From<WalLedger> for LedgerImage {
@@ -275,6 +308,7 @@ impl From<WalLedger> for LedgerImage {
             holder: ledger.holder,
             members: ledger.members.into(),
             next_segment_id: ledger.next_segment_id,
+            seq_reserved_through: ledger.seq_reserved_through,
         }
     }
 }
@@ -287,6 +321,7 @@ impl TryFrom<LedgerImage> for WalLedger {
             holder,
             members,
             next_segment_id,
+            seq_reserved_through,
         } = image;
         let Some(&open) = members.last() else {
             return Err(LedgerError::UnreachableState(
@@ -310,6 +345,7 @@ impl TryFrom<LedgerImage> for WalLedger {
             holder,
             members: members.into(),
             next_segment_id,
+            seq_reserved_through,
         })
     }
 }

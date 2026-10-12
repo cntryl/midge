@@ -1469,6 +1469,45 @@ fn should_mutate_wal_authority_only_through_ledger_transitions() {
     );
 }
 
+/// Production files that may assign the runtime sequence, each with why.
+/// Everything else hands out sequences through
+/// `RuntimeState::allocate_sequences`, under the WAL ledger's durable
+/// reservation (#843).
+const SEQUENCE_OWNERS: &[(&str, &str)] = &[(
+    "src/runtime/state.rs",
+    "the allocator, its give-back, the recovery raises and the epoch start",
+)];
+
+/// Every sequence is handed out through the reservation: no production code
+/// outside its owner assigns or bumps the runtime sequence (#843).
+#[test]
+fn should_allocate_sequences_only_through_the_reservation() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let mutations = lines_calling(
+        &files,
+        &[
+            "state.sequence =",
+            "state.sequence +=",
+            "runtime.sequence =",
+            "state.sequence.checked_add(",
+            "state.sequence.saturating_add(",
+        ],
+    );
+
+    // Assert
+    let unexpected: Vec<_> = mutations
+        .iter()
+        .filter(|(file, _)| !SEQUENCE_OWNERS.iter().any(|(owner, _)| owner == file))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "sequences are handed out outside the reservation; use RuntimeState::allocate_sequences: {unexpected:#?}"
+    );
+}
+
 /// Code the #808 redesign deleted. Each entry names the issue that removed
 /// it; nothing in the crate, its tests, benches, examples or fuzz targets may
 /// bring it back. Entries are whole identifiers or path segments.
