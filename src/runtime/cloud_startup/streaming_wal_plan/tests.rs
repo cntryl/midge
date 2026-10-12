@@ -2083,8 +2083,8 @@ fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<
         crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
     )?;
 
-    // Assert: segment 1 is neither replayed nor owed again, and startup
-    // retires its local copy.
+    // Assert: segment 1 is neither replayed nor owed again. Durable ledger
+    // retirement leaves its physical cleanup to GC or the next orphan sweep.
     assert!(recovered.plan.local_segments.is_empty());
     assert_eq!(
         recovered
@@ -2096,6 +2096,10 @@ fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<
         vec![2]
     );
     assert_eq!(history.ledger().log_start(), 2);
+    assert!(fixture.segment(1).exists());
+    drop(history);
+    let reopened = fixture.history()?;
+    assert_eq!(reopened.ledger().log_start(), 2);
     assert!(!fixture.segment(1).exists());
     Ok(())
 }

@@ -505,7 +505,7 @@ fn publish_two_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8>
     publish_records(path, || {
         // A transaction is single-family (#843): the default family's write
         // stands alone and the second family's commits as its own batch.
-        let mut first = record(2);
+        let mut first = record(1);
         first.key = bytes::Bytes::from_static(b"atomic");
         let mut operation = record(3);
         operation.txn_id = Some(1);
@@ -587,7 +587,7 @@ fn should_recover_every_family_after_only_first_family_checkpoint_is_published()
     );
     expire_child_lease(dir.path());
     let mut recovered = Engine::open(opts).expect("recover unfinished family");
-    for (family, sequence) in [(0, 2), (second_id, 3)] {
+    for (family, sequence) in [(0, 1), (second_id, 3)] {
         let tx = recovered
             .begin_tx(family, TransactionMode::ReadOnly)
             .expect("read transaction");

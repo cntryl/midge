@@ -69,7 +69,7 @@ fn should_wait_for_owned_retirement_before_starting_manual_cloud_flush() -> Midg
     el.schedule_cloud_maintenance();
     reached
         .recv_timeout(TEST_WAIT)
-        .expect("actual owned preflight WAL range");
+        .expect("actual owned retirement WAL identity request");
     let journal_before = journal_len(&el)?;
     let cursor_before = el.state.sst_names.cursor.clone();
 

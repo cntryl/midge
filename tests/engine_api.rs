@@ -5106,10 +5106,25 @@ mod consistent_cut_backup {
             .objects
             .iter()
             .any(|object| object.path.starts_with("cloud_store/sst/")));
+        let lease_object = "cloud_store/midge_primary_lease.json";
         assert!(inventory
             .objects
             .iter()
-            .all(|object| !object.path.contains("lease")));
+            .any(|object| object.path == lease_object));
+        let lease_document = std::fs::read_to_string(artifact.join("objects").join(lease_object))
+            .expect("backup retains the shared metadata pointer");
+        assert!(
+            lease_document
+                .lines()
+                .any(|line| line == "expires: 1970-01-01T00:00:00Z"),
+            "backup must not transfer the source writer lease: {lease_document}"
+        );
+        assert!(
+            lease_document
+                .lines()
+                .any(|line| line.starts_with("metadata: {")),
+            "backup must retain the committed shared metadata pointer: {lease_document}"
+        );
         drop(engine);
 
         // Act

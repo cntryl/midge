@@ -1416,7 +1416,10 @@ fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_p
             let result = Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), policy);
 
             // Assert
-            assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+            assert!(
+                matches!(result, Err(MidgeError::Corruption(_))),
+                "committed metadata damage must fail closed: {result:?}"
+            );
             assert!(
                 !temp_dir.path().join("manifest.snapshot.json").exists(),
                 "a rejected generation must not install metadata locally"

@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "5cffb04435f13dc193da73fc9cab11e8a22dbc6f",
+  "source_revision": "1c1e226a4b86ccd089497659e95880e95aa81316",
   "source_revision_status": "References and SHA256 postimages bind the current #819 frontier cutover working tree based on this commit. Removed SST coverage/proof references are replaced by family frontier, whole-unit replay and shared-generation retirement controls. This inventory is source/reference evidence; test execution and qualification remain separate.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
@@ -1707,45 +1707,45 @@
       "tests": [
         {
           "path": "src/engine/tests/flush_retry.rs",
-          "line": 422,
+          "line": 474,
           "symbol": "should_complete_one_cloud_flush_when_abandoned_barrier_callers_retry",
           "claim": "Actual accepted held cloud flush outlives caller waits; retries converge on one built/uploaded SST with exact rows and successful strict reopen.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 432,
+              "line": 484,
               "marker": "assert!(matches!(second, Err(MidgeError::Timeout(_))), \"{second:?}\");"
             },
             {
-              "line": 433,
+              "line": 485,
               "marker": "assert!(fixture.engine.is_primary_lease_healthy());"
             },
             {
-              "line": 434,
+              "line": 486,
               "marker": "assert_eq!(fixture.gate.publications().len(), 1);"
             },
             {
-              "line": 435,
+              "line": 487,
               "marker": "assert!(fixture.manifest()?.files.is_empty());"
             },
             {
-              "line": 436,
+              "line": 488,
               "marker": "assert_acknowledged_rows(&fixture.engine, &cf)?;"
             },
             {
-              "line": 442,
+              "line": 494,
               "marker": "assert_one_publication(&fixture)?;"
             },
             {
-              "line": 443,
+              "line": 488,
               "marker": "assert_acknowledged_rows(&fixture.engine, &cf)?;"
             },
             {
-              "line": 444,
+              "line": 485,
               "marker": "assert!(fixture.engine.is_primary_lease_healthy());"
             },
             {
-              "line": 448,
+              "line": 500,
               "marker": "assert_acknowledged_rows(&reopened, &reopened_cf)?;"
             }
           ]
@@ -3693,13 +3693,13 @@
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 2175,
+          "line": 2179,
           "symbol": "should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry",
           "claim": "A cataloged object whose header links another segment than its entry names fails strict recovery.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2205,
+              "line": 2209,
               "marker": "assert!("
             }
           ]
@@ -3885,7 +3885,7 @@
         },
         {
           "path": "src/lease/cloud.rs",
-          "line": 422,
+          "line": 423,
           "symbol": "ProviderLeaderStore::publish_committed_metadata",
           "kind": "function",
           "marker": "fn publish_committed_metadata("
@@ -3991,21 +3991,21 @@
       "tests": [
         {
           "path": "src/engine/tests.rs",
-          "line": 1737,
+          "line": 1740,
           "symbol": "should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest",
           "claim": "Genuine different-size SST has positive unequal-size prerequisite; actual inventory validation fails and no local cache SST is installed.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1748,
+              "line": 1751,
               "marker": "assert_ne!("
             },
             {
-              "line": 1784,
+              "line": 1783,
               "marker": "assert!("
             },
             {
-              "line": 1784,
+              "line": 1783,
               "marker": "assert!("
             }
           ]
@@ -4611,7 +4611,7 @@
         },
         {
           "path": "src/engine/backup.rs",
-          "line": 390,
+          "line": 420,
           "symbol": "materialize_backup",
           "kind": "function",
           "marker": "fn materialize_backup("
@@ -4752,14 +4752,14 @@
         },
         {
           "path": "src/engine/backup.rs",
-          "line": 457,
+          "line": 487,
           "symbol": "validate_backup",
           "kind": "function",
           "marker": "fn validate_backup(artifact: &Path) -> MidgeResult<BackupManifest> {"
         },
         {
           "path": "src/engine/backup.rs",
-          "line": 533,
+          "line": 563,
           "symbol": "copy_verified_objects",
           "kind": "function",
           "marker": "fn copy_verified_objects("
@@ -4806,11 +4806,11 @@
               "marker": "assert!(inventory"
             },
             {
-              "line": 4969,
+              "line": 4984,
               "marker": "assert!(restored.is_primary_lease_healthy());"
             },
             {
-              "line": 4976,
+              "line": 4991,
               "marker": "assert_eq!("
             }
           ]
@@ -4838,7 +4838,7 @@
         },
         {
           "path": "src/engine/backup.rs",
-          "line": 533,
+          "line": 563,
           "symbol": "copy_verified_objects",
           "kind": "function",
           "marker": "fn copy_verified_objects("
@@ -4922,11 +4922,11 @@
               "marker": "assert!(inventory"
             },
             {
-              "line": 4969,
+              "line": 4984,
               "marker": "assert!(restored.is_primary_lease_healthy());"
             },
             {
-              "line": 4976,
+              "line": 4991,
               "marker": "assert_eq!("
             }
           ]

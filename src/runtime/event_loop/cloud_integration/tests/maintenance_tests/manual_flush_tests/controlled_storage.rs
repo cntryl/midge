@@ -76,7 +76,7 @@ impl StorageBackend for ControlledStorage {
             if let Some(gate) = gate {
                 assert!(std::thread::current()
                     .name()
-                    .is_some_and(|name| name.starts_with("midge-wal-prune-preflight-")));
+                    .is_some_and(|name| name.starts_with("midge-wal-retirement-")));
                 let _ = gate.reached.send(());
                 let _ = gate.release.recv();
             }

@@ -643,7 +643,9 @@ mod tests {
             Arc::new(CloudStorage::with_mock()),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
+        storage.enable_ephemeral_sst_cache(1024);
         storage.admit_local_wal_bytes(bytes).unwrap();
+        assert_eq!(storage.budget_snapshot().usage.wal_bytes, bytes);
         let fault = device.inject(Fault {
             op: FaultOp::RemoveFile,
             path: format!("wal/{}", crate::wal::segment_file_name(1)),

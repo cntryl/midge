@@ -603,7 +603,11 @@ mod tests {
                 created_at: 1,
             })
             .expect("orphan append whose writer then failed");
-        let flushed = sst_meta(2);
+        let flushed = crate::runtime::FileMeta {
+            smallest_seq: Some(2),
+            largest_seq: Some(2),
+            ..sst_meta(2)
+        };
 
         // Act
         state
@@ -621,5 +625,17 @@ mod tests {
             "orphan journal edit was truncated away"
         );
         assert!(reloaded.files.iter().any(|file| file.name == flushed.name));
+        assert_eq!(
+            reloaded.flush_frontiers().get(0).expect("default frontier"),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 2,
+            }
+        );
+        assert_eq!(
+            reloaded.flush_frontiers().get(7).expect("orphan frontier"),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 0,
+            }
+        );
     }
 }

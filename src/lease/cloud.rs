@@ -30,7 +30,8 @@ const AUTHORITY_SENTINEL_KEY: &str = "metadata/authority-initialized.v1";
 const AUTHORITY_SENTINEL_PENDING_BODY: &[u8] = b"midge cloud metadata authority v2 pending\n";
 const AUTHORITY_SENTINEL_BODY: &[u8] = b"midge cloud metadata authority v2 initialized\n";
 const METADATA_GENERATIONS_PREFIX: &str = "metadata/generations/";
-const MAX_LEASE_DOCUMENT_BYTES: usize = 4096;
+pub(crate) const MAX_LEASE_DOCUMENT_BYTES: usize = 4096;
+const BACKUP_EXPIRED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
 
 /// Cloud storage lease configuration.
 #[derive(Debug, Clone)]
@@ -1171,6 +1172,27 @@ fn format_lease_document(doc: &LeaseDocument) -> String {
             )
         }
     }
+}
+
+/// Preserve the committed metadata pointer in a backup while ensuring the
+/// restored database does not inherit the source database's active lease.
+pub(crate) fn expired_backup_lease_document(content: &[u8]) -> Result<Vec<u8>, LeaseError> {
+    if content.len() > MAX_LEASE_DOCUMENT_BYTES {
+        return Err(LeaseError::Indeterminate(
+            "cloud lease document is too large to include in a backup".to_string(),
+        ));
+    }
+    let content = std::str::from_utf8(content).map_err(|_| {
+        LeaseError::Indeterminate("cloud lease document is not valid UTF-8".to_string())
+    })?;
+    let mut document = parse_lease_document(content).ok_or_else(|| {
+        LeaseError::Indeterminate(
+            "cloud lease document is malformed; backup cannot preserve its metadata pointer"
+                .to_string(),
+        )
+    })?;
+    document.expires_at = BACKUP_EXPIRED_TIMESTAMP.to_string();
+    Ok(format_lease_document(&document).into_bytes())
 }
 
 /// Parse a lease document from the simple key-value text format.

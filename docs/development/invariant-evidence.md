@@ -221,7 +221,7 @@ Production: [src/runtime/handle.rs:313](../../src/runtime/handle.rs#L313) `send_
 
 Exact evidence and assertion markers:
 
-- [src/engine/tests/flush_retry.rs:422](../../src/engine/tests/flush_retry.rs#L422) `should_complete_one_cloud_flush_when_abandoned_barrier_callers_retry`: Actual accepted held cloud flush outlives caller waits; retries converge on one built/uploaded SST with exact rows and successful strict reopen. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 432, 433, 434, 435, 436, 442, 443, 444, 448.
+- [src/engine/tests/flush_retry.rs:474](../../src/engine/tests/flush_retry.rs#L474) `should_complete_one_cloud_flush_when_abandoned_barrier_callers_retry`: Actual accepted held cloud flush outlives caller waits; retries converge on one built/uploaded SST with exact rows and successful strict reopen. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 484, 485, 486, 487, 488, 494, 488, 485, 500.
 - [src/runtime/tests/compaction_deadline_tests.rs:37](../../src/runtime/tests/compaction_deadline_tests.rs#L37) `should_preserve_manual_caller_budget_when_queued_compaction_outlives_response_wait`: real RuntimeHandle/router with no event loop; original override remains captured after bounded caller timeout and late completion updates tombstone accounting. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 65, 69, 70, 71, 75, 76, 77, 78, 79, 80.
 
 Preconditions: Flush test exercises accepted public Engine work with conditional filesystem cloud. The delivered router control isolates actual RuntimeHandle/route ownership and explicitly has no event loop or durability pipeline.
@@ -446,7 +446,7 @@ Exact evidence and assertion markers:
 - [src/engine/tests.rs:934](../../src/engine/tests.rs#L934) `should_reject_epoch_scoped_simulated_cloud_wal_without_catalog`: Actual orphan epoch-scoped valid WAL bytes are rejected without the publication catalog. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 956.
 - [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:538](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L538) `should_validate_catalog_authority_before_exposing_replay_sources`: Strict rejects checksum-invalid catalog history; salvage flags degraded recovery, exposes only the first validated segment and no open segment, keeps the open segment aside and rebases at segment 4 or later. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 546, 552, 553, 562, 563, 571, 572, 573.
 - [tests/cloud_provider_engine_qualification/authority_publication.rs:58](../../tests/cloud_provider_engine_qualification/authority_publication.rs#L58) `should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup`: Held native immutable WAL PUT succeeds, remains an uncatalogued orphan, and cannot alter the successor catalog. Two absent-cache fresh-process recoveries exclude its complete transaction. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.. Assertion/call markers at lines 408.
-- [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:2175](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L2175) `should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry`: A cataloged object whose header links another segment than its entry names fails strict recovery. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2205.
+- [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:2179](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L2179) `should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry`: A cataloged object whose header links another segment than its entry names fails strict recovery. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2209.
 - [src/wal/cloud_catalog.rs:890](../../src/wal/cloud_catalog.rs#L890) `should_reject_catalog_whose_first_entry_does_not_link_the_anchor`: A decoded catalog whose first entry does not link its anchor is invalid. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 900.
 
 Preconditions: Actual filesystem CloudSimulated objects and real catalog bytes through the recovery planner; explicit checksum and chain-link faults.
@@ -472,7 +472,7 @@ Uncovered boundary: Injected event delivery is not an actual native upload cance
 
 ## CLOUD-3
 
-Production: [src/runtime/cloud_startup/cloud_recovery/metadata.rs:30](../../src/runtime/cloud_startup/cloud_recovery/metadata.rs#L30) `read_committed_cloud_metadata_within`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:302](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L302) `mirror_cloud_metadata_within`; [src/runtime/hybrid_persistence/metadata_snapshot.rs:404](../../src/runtime/hybrid_persistence/metadata_snapshot.rs#L404) `mirror_control_metadata_within`; [src/lease/cloud.rs:422](../../src/lease/cloud.rs#L422) `ProviderLeaderStore::publish_committed_metadata`.
+Production: [src/runtime/cloud_startup/cloud_recovery/metadata.rs:30](../../src/runtime/cloud_startup/cloud_recovery/metadata.rs#L30) `read_committed_cloud_metadata_within`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:302](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L302) `mirror_cloud_metadata_within`; [src/runtime/hybrid_persistence/metadata_snapshot.rs:404](../../src/runtime/hybrid_persistence/metadata_snapshot.rs#L404) `mirror_control_metadata_within`; [src/lease/cloud.rs:423](../../src/lease/cloud.rs#L423) `ProviderLeaderStore::publish_committed_metadata`.
 
 Exact evidence and assertion markers:
 
@@ -491,7 +491,7 @@ Production: [src/runtime/cloud_startup/cloud_recovery/mod.rs:423](../../src/runt
 
 Exact evidence and assertion markers:
 
-- [src/engine/tests.rs:1737](../../src/engine/tests.rs#L1737) `should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest`: Genuine different-size SST has positive unequal-size prerequisite; actual inventory validation fails and no local cache SST is installed. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1748, 1784, 1784.
+- [src/engine/tests.rs:1740](../../src/engine/tests.rs#L1740) `should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest`: Genuine different-size SST has positive unequal-size prerequisite; actual inventory validation fails and no local cache SST is installed. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1751, 1783, 1783.
 - [tests/storage_layer.rs:1650](../../tests/storage_layer.rs#L1650) `should_reject_manifest_bounds_when_valid_sst_summary_disagrees`: Valid persisted SST bytes with conflicting authoritative bounds return Corruption. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1655, 1669, 1712.
 
 Preconditions: Actual real SST objects/metadata in filesystem/mock-cloud fixtures, not a forged length-only unit result.
@@ -574,7 +574,7 @@ Uncovered boundary: Stable scan proves logical read retention during one drop sc
 
 ## BACKUP-1
 
-Production: [src/engine/backup.rs:77](../../src/engine/backup.rs#L77) `Engine::backup_to`; [src/engine/backup.rs:262](../../src/engine/backup.rs#L262) `pin_durable_files`; [src/engine/backup.rs:390](../../src/engine/backup.rs#L390) `materialize_backup`.
+Production: [src/engine/backup.rs:77](../../src/engine/backup.rs#L77) `Engine::backup_to`; [src/engine/backup.rs:262](../../src/engine/backup.rs#L262) `pin_durable_files`; [src/engine/backup.rs:420](../../src/engine/backup.rs#L420) `materialize_backup`.
 
 Exact evidence and assertion markers:
 
@@ -600,12 +600,12 @@ Uncovered boundary: Tests cover selected alias and late-target cases. Platform-n
 
 ## BACKUP-3
 
-Production: [src/engine/backup.rs:186](../../src/engine/backup.rs#L186) `Engine::restore_backup`; [src/engine/backup.rs:457](../../src/engine/backup.rs#L457) `validate_backup`; [src/engine/backup.rs:533](../../src/engine/backup.rs#L533) `copy_verified_objects`; [src/engine/verification.rs:265](../../src/engine/verification.rs#L265) `verify_storage_path`.
+Production: [src/engine/backup.rs:186](../../src/engine/backup.rs#L186) `Engine::restore_backup`; [src/engine/backup.rs:487](../../src/engine/backup.rs#L487) `validate_backup`; [src/engine/backup.rs:563](../../src/engine/backup.rs#L563) `copy_verified_objects`; [src/engine/verification.rs:265](../../src/engine/verification.rs#L265) `verify_storage_path`.
 
 Exact evidence and assertion markers:
 
 - [tests/engine_api.rs:4829](../../tests/engine_api.rs#L4829) `should_leave_restore_target_absent_given_corrupt_backup_object`: Corrupts actual backup FORMAT object, restore returns Corruption and target stays absent. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 4851, 4852.
-- [tests/engine_api.rs:4921](../../tests/engine_api.rs#L4921) `should_restore_split_cloud_simulation_layout_given_valid_backup`: Backup inventory excludes lease files, real CloudSimulated restore opens healthy and exact accepted value survives. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 4948, 4948, 4969, 4976.
+- [tests/engine_api.rs:4921](../../tests/engine_api.rs#L4921) `should_restore_split_cloud_simulation_layout_given_valid_backup`: Backup inventory excludes lease files, real CloudSimulated restore opens healthy and exact accepted value survives. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 4948, 4948, 4984, 4991.
 
 Preconditions: Actual local corrupt artifact and actual matching CloudSimulated split layout, strict staging verification and fresh Engine open.
 
@@ -613,7 +613,7 @@ Uncovered boundary: Healthy fresh acquisition plus excluded lease objects does n
 
 ## BACKUP-4
 
-Production: [src/engine/backup.rs:186](../../src/engine/backup.rs#L186) `Engine::restore_backup`; [src/engine/backup/paths.rs:114](../../src/engine/backup/paths.rs#L114) `publish`; [src/engine/backup.rs:533](../../src/engine/backup.rs#L533) `copy_verified_objects`.
+Production: [src/engine/backup.rs:186](../../src/engine/backup.rs#L186) `Engine::restore_backup`; [src/engine/backup/paths.rs:114](../../src/engine/backup/paths.rs#L114) `publish`; [src/engine/backup.rs:563](../../src/engine/backup.rs#L563) `copy_verified_objects`.
 
 Exact evidence and assertion markers:
 
@@ -630,7 +630,7 @@ Production: [src/engine/backup.rs:77](../../src/engine/backup.rs#L77) `Engine::b
 
 Exact evidence and assertion markers:
 
-- [tests/engine_api.rs:4921](../../tests/engine_api.rs#L4921) `should_restore_split_cloud_simulation_layout_given_valid_backup`: Actual supported CloudSimulated split-layout restore succeeds with exact value and healthy new owner. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 4948, 4948, 4969, 4976.
+- [tests/engine_api.rs:4921](../../tests/engine_api.rs#L4921) `should_restore_split_cloud_simulation_layout_given_valid_backup`: Actual supported CloudSimulated split-layout restore succeeds with exact value and healthy new owner. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 4948, 4948, 4984, 4991.
 - [tests/engine_api.rs:4829](../../tests/engine_api.rs#L4829) `should_leave_restore_target_absent_given_corrupt_backup_object`: Supported local artifact is validated and corrupt input refused. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 4851, 4852.
 
 Preconditions: Local and matching filesystem CloudSimulated layouts are the allowed source/target kinds.
