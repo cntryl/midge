@@ -715,8 +715,11 @@ fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
         .fence_cloud_wal_catalog(2)
         .expect_err("losing initial catalog CAS must fail");
 
-    // Assert
-    assert!(matches!(error, crate::common::MidgeError::Busy(_)));
+    // Assert: the winner's later epoch owns the catalog.
+    assert!(
+        matches!(error, crate::common::MidgeError::Fenced(_)),
+        "{error:?}"
+    );
     assert_eq!(
         storage
             .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
@@ -831,7 +834,12 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
         )
     });
     pausing_cloud.wait_for_catalog_compare_exchange();
-    storage
+    // The successor is another process over the same bucket.
+    let successor = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
+        Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new())),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    successor
         .fence_cloud_wal_catalog(3)
         .expect("takeover must advance catalog authority");
 

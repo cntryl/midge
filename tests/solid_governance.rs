@@ -1965,7 +1965,6 @@ fn should_keep_cloud_wal_tracker_state_private() {
 /// Every catalog mutation is one read-modify-CAS (#858): only
 /// `mutate_wal_catalog_within` commits a catalog.
 #[test]
-#[ignore = "#844: catalog mutations share one read-modify-CAS path"]
 fn should_mutate_wal_catalog_through_one_path() {
     // Arrange
     let files = source_scan::production_files();

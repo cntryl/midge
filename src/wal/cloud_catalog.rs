@@ -96,6 +96,42 @@ impl PublishedWalSegment {
     }
 }
 
+/// Why a catalog mutation is refused (#858). A refusal changes nothing,
+/// and no retry fixes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogRefusal {
+    /// Another writer epoch owns the catalog.
+    EpochMismatch { catalog: u64, writer: u64 },
+    /// Only the catalog's oldest segments may retire, in order.
+    NotOldestPrefix {
+        segment_id: u64,
+        oldest: Option<u64>,
+    },
+    /// The catalog publishes something else for this segment than the
+    /// caller saw.
+    Changed { segment_id: u64 },
+}
+
+impl std::fmt::Display for CatalogRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EpochMismatch { catalog, writer } => write!(
+                f,
+                "cloud WAL catalog mutation requires fencing epoch {catalog}, writer epoch {writer} rejected"
+            ),
+            Self::NotOldestPrefix { segment_id, oldest } => write!(
+                f,
+                "cloud WAL segment {segment_id} cannot retire before the catalog's oldest segment {}",
+                oldest.map_or_else(|| "(none)".to_string(), |oldest| oldest.to_string())
+            ),
+            Self::Changed { segment_id } => write!(
+                f,
+                "cloud WAL catalog segment {segment_id} changed before the mutation"
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct WalPublicationCatalog {
     pub(crate) format_version: u32,
@@ -139,12 +175,22 @@ impl WalPublicationCatalog {
             .map_err(|error| format!("serialize cloud WAL publication catalog: {error}"))
     }
 
-    pub(crate) fn fence_to(&mut self, writer_epoch: u64) -> Result<bool, String> {
+    /// The epoch that owns the catalog.
+    pub(crate) fn fencing_epoch(&self) -> u64 {
+        self.fencing_epoch
+    }
+
+    /// Hand the catalog to `writer_epoch`. Returns whether it changed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an epoch below the catalog's.
+    pub(crate) fn fence_to(&mut self, writer_epoch: u64) -> Result<bool, CatalogRefusal> {
         if writer_epoch < self.fencing_epoch {
-            return Err(format!(
-                "cloud WAL catalog is fenced at epoch {}, stale writer epoch {writer_epoch} rejected",
-                self.fencing_epoch
-            ));
+            return Err(CatalogRefusal::EpochMismatch {
+                catalog: self.fencing_epoch,
+                writer: writer_epoch,
+            });
         }
         if writer_epoch == self.fencing_epoch {
             return Ok(false);
@@ -182,23 +228,92 @@ impl WalPublicationCatalog {
         Ok(changed)
     }
 
-    pub(crate) fn retire(
+    /// Retire the catalog's oldest segments, which must be `expected`, as
+    /// the caller saw them; expected segments the catalog no longer
+    /// publishes are skipped. Returns the ids retired.
+    ///
+    /// # Errors
+    ///
+    /// Refuses another writer epoch, a segment that is not among the
+    /// catalog's oldest, in order, and a segment that changed. A refusal
+    /// changes nothing.
+    pub(crate) fn retire_prefix(
         &mut self,
         fencing_epoch: u64,
-        expected: &PublishedWalSegment,
-    ) -> Result<bool, String> {
+        expected: &[PublishedWalSegment],
+    ) -> Result<Vec<u64>, CatalogRefusal> {
         self.require_epoch(fencing_epoch)?;
-        match self.segments.get(&expected.segment_id) {
-            Some(actual) if actual == expected => {
-                self.segments.remove(&expected.segment_id);
-                Ok(true)
+        let pending = self.oldest_prefix(expected.iter().map(|entry| entry.segment_id))?;
+        for entry in expected
+            .iter()
+            .filter(|entry| pending.contains(&entry.segment_id))
+        {
+            if self.segments.get(&entry.segment_id) != Some(entry) {
+                return Err(CatalogRefusal::Changed {
+                    segment_id: entry.segment_id,
+                });
             }
-            Some(_) => Err(format!(
-                "cloud WAL catalog segment {} changed before retirement",
-                expected.segment_id
-            )),
-            None => Ok(false),
         }
+        for segment_id in &pending {
+            self.segments.remove(segment_id);
+        }
+        Ok(pending)
+    }
+
+    /// The segments of `candidates` the catalog still publishes, when they
+    /// are its oldest, in order: what [`Self::retire_prefix`] would retire.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a candidate that is not among the catalog's oldest, in order.
+    pub(crate) fn oldest_prefix(
+        &self,
+        candidates: impl IntoIterator<Item = u64>,
+    ) -> Result<Vec<u64>, CatalogRefusal> {
+        let pending: Vec<u64> = candidates
+            .into_iter()
+            .filter(|segment_id| self.segments.contains_key(segment_id))
+            .collect();
+        for (oldest, segment_id) in self.segments.keys().zip(&pending) {
+            if oldest != segment_id {
+                return Err(CatalogRefusal::NotOldestPrefix {
+                    segment_id: *segment_id,
+                    oldest: Some(*oldest),
+                });
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Salvage: stop publishing `segments`, the cataloged segments a salvage
+    /// open did not replay, as the caller saw them. Segments already gone
+    /// are skipped. Returns whether the catalog changed.
+    ///
+    /// # Errors
+    ///
+    /// Refuses another writer epoch, and a segment that changed.
+    pub(crate) fn set_aside(
+        &mut self,
+        fencing_epoch: u64,
+        segments: &[PublishedWalSegment],
+    ) -> Result<bool, CatalogRefusal> {
+        self.require_epoch(fencing_epoch)?;
+        for segment in segments {
+            if self
+                .segments
+                .get(&segment.segment_id)
+                .is_some_and(|actual| actual != segment)
+            {
+                return Err(CatalogRefusal::Changed {
+                    segment_id: segment.segment_id,
+                });
+            }
+        }
+        let before = self.segments.len();
+        for segment in segments {
+            self.segments.remove(&segment.segment_id);
+        }
+        Ok(self.segments.len() != before)
     }
 
     /// Raises the sequence floor; it never falls.
@@ -206,7 +321,7 @@ impl WalPublicationCatalog {
         &mut self,
         fencing_epoch: u64,
         floor: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CatalogRefusal> {
         self.require_epoch(fencing_epoch)?;
         if floor <= self.sequence_floor {
             return Ok(false);
@@ -215,14 +330,14 @@ impl WalPublicationCatalog {
         Ok(true)
     }
 
-    fn require_epoch(&self, writer_epoch: u64) -> Result<(), String> {
+    fn require_epoch(&self, writer_epoch: u64) -> Result<(), CatalogRefusal> {
         if writer_epoch == self.fencing_epoch {
             return Ok(());
         }
-        Err(format!(
-            "cloud WAL catalog mutation requires fencing epoch {}, writer epoch {writer_epoch} rejected",
-            self.fencing_epoch
-        ))
+        Err(CatalogRefusal::EpochMismatch {
+            catalog: self.fencing_epoch,
+            writer: writer_epoch,
+        })
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -360,11 +475,50 @@ mod tests {
         stale.content_crc32c = 99;
 
         // Act
-        let result = catalog.retire(8, &stale);
+        let result = catalog.retire_prefix(8, &[stale]);
 
         // Assert
-        assert!(result.unwrap_err().contains("changed before retirement"));
+        assert_eq!(result, Err(CatalogRefusal::Changed { segment_id: 1 }));
         assert_eq!(catalog.segments.get(&1), Some(&expected));
+    }
+
+    #[test]
+    fn should_refuse_retirement_of_a_segment_behind_an_older_one() {
+        // Arrange
+        let mut catalog = WalPublicationCatalog::empty(8).unwrap();
+        catalog
+            .append_run(8, &[segment(1, 7), segment(2, 7)])
+            .unwrap();
+
+        // Act
+        let result = catalog.retire_prefix(8, &[segment(2, 7)]);
+
+        // Assert
+        assert_eq!(
+            result,
+            Err(CatalogRefusal::NotOldestPrefix {
+                segment_id: 2,
+                oldest: Some(1)
+            })
+        );
+        assert_eq!(catalog.segments.len(), 2);
+    }
+
+    #[test]
+    fn should_skip_segments_the_catalog_already_retired_when_retiring_a_prefix() {
+        // Arrange
+        let mut catalog = WalPublicationCatalog::empty(8).unwrap();
+        catalog
+            .append_run(8, &[segment(1, 7), segment(2, 7)])
+            .unwrap();
+        catalog.retire_prefix(8, &[segment(1, 7)]).unwrap();
+
+        // Act
+        let retired = catalog.retire_prefix(8, &[segment(1, 7), segment(2, 7)]);
+
+        // Assert
+        assert_eq!(retired, Ok(vec![2]));
+        assert!(catalog.segments.is_empty());
     }
 
     #[test]
@@ -380,7 +534,13 @@ mod tests {
         // Assert
         assert!(raised);
         assert!(!lowered);
-        assert!(stale.unwrap_err().contains("fencing epoch"));
+        assert_eq!(
+            stale,
+            Err(CatalogRefusal::EpochMismatch {
+                catalog: 7,
+                writer: 6
+            })
+        );
         assert_eq!(catalog.sequence_floor, 9);
     }
 

@@ -879,8 +879,8 @@ fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeR
         .append_run(epoch, std::slice::from_ref(&entry))
         .map_err(MidgeError::from)?;
     catalog
-        .retire(epoch, &entry)
-        .map_err(MidgeError::Internal)?;
+        .retire_prefix(epoch, std::slice::from_ref(&entry))
+        .map_err(crate::runtime::hybrid_persistence::refusal_error)?;
 
     // Act
     let result = fixture.bootstrap_with_catalog(&catalog);

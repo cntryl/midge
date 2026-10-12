@@ -749,3 +749,27 @@ fn should_release_decode_admission_when_catalog_is_corrupt() {
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
     assert_eq!(budget.used(), 0);
 }
+
+#[test]
+fn should_map_a_catalog_rule_refusal_to_a_non_retriable_error() {
+    // Arrange
+    let fenced = CatalogRefusal::EpochMismatch {
+        catalog: 9,
+        writer: 8,
+    };
+    let contradicted = CatalogRefusal::NotOldestPrefix {
+        segment_id: 2,
+        oldest: Some(1),
+    };
+
+    // Act
+    let fenced = refusal_error(fenced);
+    let contradicted = refusal_error(contradicted);
+
+    // Assert: neither is an error a retry could clear.
+    assert!(matches!(fenced, MidgeError::Fenced(_)), "{fenced:?}");
+    assert!(
+        matches!(contradicted, MidgeError::Corruption(_)),
+        "{contradicted:?}"
+    );
+}
