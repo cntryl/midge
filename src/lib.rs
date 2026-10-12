@@ -222,10 +222,19 @@ pub mod __internal {
     }
     pub mod wal {
         pub use crate::wal::{
-            parse_segment_id, segment_file_name, segment_object_key, WalOpKind, WalRecord,
+            parse_segment_file_name, parse_segment_object_key, segment_file_name,
+            segment_object_key, WalOpKind, WalRecord,
         };
         pub mod encoding {
             pub use crate::wal::encoding::{decode, decode_view, encode, encode_into};
+        }
+        /// WAL segment format v2 (#843), for integration fixtures.
+        pub mod segment {
+            pub use crate::wal::format::link::ChainLink;
+            pub use crate::wal::format::segment::{
+                footer_link, header_epoch, is_footer_payload, records, SegmentBuilder,
+                SegmentHeader, HEADER_LEN,
+            };
         }
         pub mod frame {
             pub use crate::wal::frame::{

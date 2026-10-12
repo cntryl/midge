@@ -4090,7 +4090,6 @@ mod chaos_real {
             Bytes::copy_from_slice(key),
             Some(Bytes::copy_from_slice(value)),
             9_000_000,
-            0,
         );
         let payload = wal::encoding::encode(&record).expect("encode wal record");
         let len = u32::try_from(payload.len()).expect("payload len fits into u32");
@@ -7319,9 +7318,11 @@ mod cloud_crash_recovery {
         let fenced = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
             metrics.health == EngineHealth::Degraded
         });
+        // The ledger, the open segment's only authority (#851), recorded the
+        // rotation; only the writer for segment 2 is missing.
         assert_eq!(
-            fenced.wal_current_segment_id, 1,
-            "rotation must not advance the segment without a replacement writer"
+            fenced.wal_current_segment_id, 2,
+            "the ledger recorded the rotation before the writer was lost"
         );
         assert!(
             db_path
@@ -11643,7 +11644,7 @@ mod storage_verification_hardening {
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn write_empty_storage_fixture(db_path: &Path) {
-        std::fs::write(db_path.join("FORMAT"), "midge-format-version=5\n")
+        std::fs::write(db_path.join("FORMAT"), "midge-format-version=6\n")
             .expect("write format marker");
         std::fs::write(
             db_path.join("manifest.json"),
@@ -12776,12 +12777,14 @@ mod transaction_spill_hardening {
         files
     }
 
+    /// Every record frame of the segment file `path` with its payload
+    /// length, after the segment header; a footer frame is skipped.
     fn read_wal_frames(path: &Path) -> Vec<(WalRecord, usize)> {
-        use cntryl_midge::__internal::wal::{encoding, frame};
+        use cntryl_midge::__internal::wal::{encoding, frame, segment};
 
         let bytes = fs::read(path).expect("read active WAL");
         let mut frames = Vec::new();
-        let mut offset = 0usize;
+        let mut offset = segment::HEADER_LEN;
         while offset < bytes.len() {
             let header_end = offset + frame::WAL_FRAME_HEADER_LEN;
             let (payload_len, expected_crc) =
@@ -12791,11 +12794,14 @@ mod transaction_spill_hardening {
             let payload_end = payload_start + payload_len;
             let payload = &bytes[payload_start..payload_end];
             frame::verify_frame_crc(payload, expected_crc).expect("verify WAL frame CRC");
+            offset = payload_end;
+            if segment::is_footer_payload(payload) {
+                continue;
+            }
             frames.push((
                 encoding::decode(payload).expect("decode WAL record"),
                 payload_len,
             ));
-            offset = payload_end;
         }
         frames
     }

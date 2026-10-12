@@ -8,11 +8,10 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     let temp = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    let mut actor = WalActor::new(
-        temp.path().join("unused-wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -70,10 +69,12 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     Ok(())
 }
 
+/// Filesystem whose next write through a persistent handle (a WAL
+/// writer's) lands half its bytes and fails.
 #[derive(Default)]
-struct PartialAppendFs {
+pub(super) struct PartialAppendFs {
     inner: MockFs,
-    fail_next: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) fail_next: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct PartialAppendFile {
@@ -208,11 +209,10 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024);
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    let mut actor = WalActor::new(
-        temp.path().join("unused-wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -302,11 +302,10 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
         setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
         let fs = Arc::new(PartialAppendFs::default());
         let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-        let mut actor = WalActor::new(
-            temp.path().join("wal"),
+        let mut actor = WalActor::open(
+            &state,
             DurabilityPolicy::CloudAsync,
             BatchConfig::default(),
-            true,
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
@@ -344,9 +343,11 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
                 .len,
             physical_before
         );
+        // The header is written when the segment is created, outside WAL
+        // admission.
         assert_eq!(
             setup.hybrid_storage.budget_snapshot().total_committed_bytes,
-            physical_before,
+            physical_before - crate::wal::format::HEADER_LEN as u64,
             "durably rolled-back WAL bytes must return their admission (spilled={spilled})"
         );
         assert!(state
@@ -381,6 +382,25 @@ impl WalWriter for UncertainAppendWriter {
     fn sync(&self) -> MidgeResult<()> {
         Ok(())
     }
+
+    fn tail(&self) -> crate::wal::format::SegmentTail {
+        crate::wal::traits::unsealable::tail()
+    }
+
+    fn seal_facts(
+        &self,
+        _timeout: std::time::Duration,
+    ) -> crate::common::MidgeResult<crate::wal::format::SealedFacts> {
+        crate::wal::traits::unsealable::seal()
+    }
+
+    fn write_footer(
+        &self,
+        _facts: &crate::wal::format::SealedFacts,
+        _timeout: std::time::Duration,
+    ) -> crate::common::MidgeResult<()> {
+        crate::wal::traits::unsealable::write_footer()
+    }
 }
 
 #[test]
@@ -391,11 +411,10 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
         let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
         setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
         let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-        let mut actor = WalActor::new(
-            temp.path().join("unused-wal"),
+        let mut actor = WalActor::open(
+            &state,
             DurabilityPolicy::CloudAsync,
             BatchConfig::default(),
-            true,
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
@@ -437,11 +456,10 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
     let temp = tempfile::tempdir()?;
     let fs = Arc::new(PartialAppendFs::default());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        temp.path().join("unused-wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -489,11 +507,10 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024);
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    let mut actor = WalActor::new(
-        temp.path().join("unused-wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -522,7 +539,6 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
         crate::wal::WalOpKind::TxnBegin,
         Bytes::from_static(b"txn"),
         None,
-        u64::MAX,
         u64::MAX,
     );
     let begin_bound = crate::wal::encoding::record_frame_size_bound(&begin)? as u64;

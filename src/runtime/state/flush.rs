@@ -38,7 +38,7 @@ impl RuntimeState {
             accounting: super::FlushPublicationAccounting::new(origin),
             writer_epoch: self.writer_epoch,
             first_wal_segment: Some(cf_state.active_memtable_started_in_segment)
-                .filter(|segment| *segment > 0 && *segment <= self.wal.current_segment_id),
+                .filter(|segment| *segment > 0 && *segment <= self.wal.open_segment()),
             memtable,
             sst_name: None,
             sst_seq: None,
@@ -383,7 +383,7 @@ impl RuntimeState {
                 0
             } else {
                 self.wal
-                    .current_segment_id
+                    .open_segment()
                     .saturating_sub(cf_state.active_memtable_started_in_segment)
             }
         })
@@ -401,7 +401,7 @@ impl RuntimeState {
     /// segment below it is covered by published SSTs. `None` when memtable
     /// provenance is incomplete, so callers must then retain everything.
     pub(crate) fn wal_recovery_floor_segment(&self) -> Option<u64> {
-        let mut floor = self.wal.current_segment_id;
+        let mut floor = self.wal.open_segment();
         if floor == 0 {
             return None;
         }
@@ -416,14 +416,14 @@ impl RuntimeState {
                     return None;
                 }
                 let first = flush.first_wal_segment?;
-                if first == 0 || first > self.wal.current_segment_id {
+                if first == 0 || first > self.wal.open_segment() {
                     return None;
                 }
                 floor = floor.min(first);
             }
             if cf.memtable.size_bytes() > 0 {
                 let started = cf.active_memtable_started_in_segment;
-                if started == 0 || started > self.wal.current_segment_id {
+                if started == 0 || started > self.wal.open_segment() {
                     return None;
                 }
                 floor = floor.min(started);
@@ -492,7 +492,7 @@ impl RuntimeState {
                     |state, cf| {
                         state
                             .wal
-                            .current_segment_id
+                            .open_segment()
                             .saturating_sub(cf.active_memtable_started_in_segment)
                     },
                 ),

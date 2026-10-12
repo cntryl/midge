@@ -26,7 +26,7 @@ mod backend;
 use backend::{FixtureObservations, ObservedBackend};
 
 const READ_WINDOW: usize = 64 * 1024;
-const WRITER_EPOCH: u64 = 7;
+const SEGMENT_EPOCH: u64 = 7;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(5);
 // Thirty-two completed coverage checks must outlast the paired 3s idle budget.
 const COVERAGE_PAUSE: Duration = Duration::from_millis(125);
@@ -145,6 +145,7 @@ pub fn prepare_recovery_progress_fixture(
             drop(crate::runtime::wal_history::WalHistory::open(
                 crate::io::subdirectory(local_root, crate::wal::WAL_DIR),
                 first_open,
+                SEGMENT_EPOCH,
             )?);
             observations.set_expected_records(wal.records.len())?;
             let coverage = if mode == RecoveryProgressFixtureMode::CachedCoverage {
@@ -240,7 +241,7 @@ fn wal_fixture(
     .ok_or_else(|| MidgeError::Internal("the prepared cache has no WAL ledger".into()))?;
     let recovered = StreamingCloudWalRecovery::build(
         &local_root,
-        &ledger,
+        Some(&ledger),
         remote,
         &wal.catalog,
         RecoveryPolicy::Strict,
@@ -250,7 +251,6 @@ fn wal_fixture(
     )?;
     if recovered.plan.remote_segments.len() != 1
         || !recovered.plan.local_segments.is_empty()
-        || recovered.plan.active_wal.is_some()
         || recovered.plan.opened_in_salvage_mode
     {
         return Err(MidgeError::Internal(
@@ -279,10 +279,7 @@ fn wal_fixture(
         .saturating_add(u64::from(
             stats.max_sequence != Some(observed.expected_records),
         ))
-        .saturating_add(u64::from(stats.max_epoch_seen != WRITER_EPOCH))
-        .saturating_add(u64::from(
-            stats.had_corruption || stats.stale_records_skipped != 0,
-        ))
+        .saturating_add(u64::from(stats.had_corruption))
         .saturating_add(u64::from(local.join("cloud_recovery").exists()));
     observations.set_phase("complete")?;
     Ok(RecoveryProgressFixtureResult {
@@ -290,7 +287,14 @@ fn wal_fixture(
         verified_records,
         mismatches,
         max_sequence: stats.max_sequence.unwrap_or(0),
-        max_epoch: stats.max_epoch_seen,
+        // Replay checked the segment header against the catalog's epoch.
+        max_epoch: wal
+            .catalog
+            .segments
+            .values()
+            .map(|segment| segment.writer_epoch)
+            .max()
+            .unwrap_or_default(),
         completed_range_reads: observed.completed_range_reads,
         completed_range_bytes: observed.completed_range_bytes,
         maximum_range_bytes: observed.maximum_range_bytes,
@@ -439,7 +443,6 @@ fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<Fixtu
             Bytes::from(format!("key-{sequence:08}")),
             Some(Bytes::from(value)),
             sequence,
-            WRITER_EPOCH,
         );
         let payload = crate::wal::encoding::encode(&record)?;
         if cached && payload.len() < READ_WINDOW {
@@ -450,10 +453,18 @@ fn seed_wal(root: &Path, mode: RecoveryProgressFixtureMode) -> MidgeResult<Fixtu
         crate::wal::frame::append_frame(&mut bytes, &payload)?;
         records.push(record);
     }
+    // One sealed segment written by `SEGMENT_EPOCH`, as a writer publishes it.
+    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        SEGMENT_EPOCH,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .bytes(&bytes)
+    .seal();
     let publication = PublishedWalSegment::from_validated_bytes(
         1,
         u64::try_from(records.len()).unwrap_or(u64::MAX),
-        WRITER_EPOCH,
+        SEGMENT_EPOCH,
         &bytes,
     );
     let remote_path = root.join("cloud").join(&publication.object_key);
@@ -614,8 +625,9 @@ fn verify_rows(
     (verified, mismatches)
 }
 
-/// Bytes and files staged in `wal/`: everything but the ledger and empty
-/// files, such as a new ledger's open segment.
+/// Bytes and files staged in `wal/`: everything but the ledger and segments
+/// holding no record (at most a header), such as a new ledger's open
+/// segment.
 fn local_wal_state(local: &Path) -> MidgeResult<(u64, u64)> {
     let mut bytes = 0_u64;
     let mut files = 0_u64;
@@ -625,7 +637,7 @@ fn local_wal_state(local: &Path) -> MidgeResult<(u64, u64)> {
             continue;
         }
         let metadata = entry.metadata()?;
-        if metadata.is_file() && metadata.len() > 0 {
+        if metadata.is_file() && metadata.len() > crate::wal::format::HEADER_LEN as u64 {
             files += 1;
             bytes = bytes.saturating_add(metadata.len());
         }

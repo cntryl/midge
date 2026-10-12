@@ -142,23 +142,12 @@ pub struct WalRecord {
     /// Optional transaction ID for transactional operations.
     #[serde(default)]
     pub txn_id: Option<u64>,
-
-    /// Writer fencing epoch (monotonic fencing token).
-    /// Stamped by the writer and encoded into WAL so storage/replay
-    /// can enforce fencing semantics.  Required on every record.
-    pub writer_epoch: u64,
 }
 
 impl WalRecord {
     /// Create a new WAL record for the default column family.
     #[cfg(any(test, feature = "internal-testing"))]
-    pub fn new(
-        op: WalOpKind,
-        key: Bytes,
-        value: Option<Bytes>,
-        seq: u64,
-        writer_epoch: u64,
-    ) -> Self {
+    pub fn new(op: WalOpKind, key: Bytes, value: Option<Bytes>, seq: u64) -> Self {
         Self {
             cf_id: 0,
             op,
@@ -168,7 +157,6 @@ impl WalRecord {
             expiration: None,
             range_end: None,
             txn_id: None,
-            writer_epoch,
         }
     }
 
@@ -179,7 +167,6 @@ impl WalRecord {
         key: Bytes,
         value: Option<Bytes>,
         seq: u64,
-        writer_epoch: u64,
     ) -> Self {
         Self {
             cf_id,
@@ -190,7 +177,6 @@ impl WalRecord {
             expiration: None,
             range_end: None,
             txn_id: None,
-            writer_epoch,
         }
     }
 
@@ -202,9 +188,8 @@ impl WalRecord {
         value: Option<Bytes>,
         seq: u64,
         ttl_seconds: u64,
-        writer_epoch: u64,
     ) -> Self {
-        let mut record = Self::new_cf(cf_id, op, key, value, seq, writer_epoch);
+        let mut record = Self::new_cf(cf_id, op, key, value, seq);
         record.expiration = crate::common::time::expiration_from_ttl(
             Some(ttl_seconds),
             crate::common::time::unix_time_millis(),
@@ -237,7 +222,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
         expired_record.expiration = Some(1); // 1 ms after epoch
 
@@ -255,7 +239,6 @@ mod tests {
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
-            1,
             1,
         );
         future_record.expiration = Some(u64::MAX);
@@ -275,7 +258,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
 
         // Act
@@ -291,13 +273,12 @@ mod tests {
         // assertion is pinned to the *formula's* per-byte accounting rather
         // than a hardcoded overhead constant that would go stale the moment
         // the internal frame layout changes.
-        let baseline = WalRecord::new(WalOpKind::Put, Bytes::new(), Some(Bytes::new()), 42, 1);
+        let baseline = WalRecord::new(WalOpKind::Put, Bytes::new(), Some(Bytes::new()), 42);
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"mykey"),
             Some(Bytes::from_static(b"myvalue")),
             42,
-            1,
         );
 
         // Act
@@ -319,15 +300,12 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::new()),
             1,
-            1,
         );
-        let without_value =
-            WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1, 1);
+        let without_value = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1);
         let longer_key = WalRecord::new(
             WalOpKind::Delete,
             Bytes::from_static(b"key-longer"),
             None,
-            1,
             1,
         );
 
@@ -356,8 +334,7 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
-            3600, // 1 hour
-            1,
+            3600,
         );
 
         // Act

@@ -162,11 +162,10 @@ impl EventLoop {
         let sealed_generation = self.durability.current_key();
         let next_generation = self.next_wal_generation(sealed_generation)?;
         self.wal_transition.ensure_ready()?;
-        if self.wal_actor.is_cloud_async() && sealed_generation != self.state.wal.current_segment_id
-        {
+        if self.wal_actor.is_cloud_async() && sealed_generation != self.state.wal.open_segment() {
             let error = crate::common::MidgeError::Internal(format!(
                 "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
-                self.state.wal.current_segment_id
+                self.state.wal.open_segment()
             ));
             self.fence_wal_transition(&error, None);
             return Err(error);
@@ -525,6 +524,25 @@ mod tests {
 
         fn current_pos(&self) -> u64 {
             0
+        }
+
+        fn tail(&self) -> crate::wal::format::SegmentTail {
+            crate::wal::traits::unsealable::tail()
+        }
+
+        fn seal_facts(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> crate::common::MidgeResult<crate::wal::format::SealedFacts> {
+            crate::wal::traits::unsealable::seal()
+        }
+
+        fn write_footer(
+            &self,
+            _facts: &crate::wal::format::SealedFacts,
+            _timeout: std::time::Duration,
+        ) -> crate::common::MidgeResult<()> {
+            crate::wal::traits::unsealable::write_footer()
         }
     }
 
@@ -1027,7 +1045,8 @@ mod tests {
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .expect("create cloud event loop");
-        event_loop.state.wal.current_segment_id += 1;
+        crate::runtime::wal_history::fixture::rotate(&mut event_loop.state.wal.history)
+            .expect("rotate the ledger behind the coordinator");
 
         // Act
         let drift = event_loop

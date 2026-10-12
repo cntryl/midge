@@ -137,7 +137,6 @@ impl TransactionApplyOp {
     pub(super) fn batch_record(
         &self,
         txn_id: u64,
-        writer_epoch: u64,
     ) -> crate::wal::encoding::TxnBatchEncodeRecord<'_> {
         let fields = self.record_fields();
         crate::wal::encoding::TxnBatchEncodeRecord {
@@ -149,11 +148,10 @@ impl TransactionApplyOp {
             expiration: fields.expiration,
             range_end: fields.range_end.map(bytes::Bytes::as_ref),
             txn_id: Some(txn_id),
-            writer_epoch,
         }
     }
 
-    pub(super) fn wal_record(&self, txn_id: u64, writer_epoch: u64) -> crate::wal::WalRecord {
+    pub(super) fn wal_record(&self, txn_id: u64) -> crate::wal::WalRecord {
         let fields = self.record_fields();
         let mut record = crate::wal::WalRecord::new_cf(
             fields.cf_id,
@@ -161,7 +159,6 @@ impl TransactionApplyOp {
             fields.key.clone(),
             fields.value.cloned(),
             fields.sequence,
-            writer_epoch,
         );
         record.expiration = fields.expiration;
         record.range_end = fields.range_end.cloned();
@@ -208,8 +205,8 @@ mod tests {
         for (ordinal, op) in ops.into_iter().enumerate() {
             // Act
             let prepared = TransactionApplyOp::from_source(op, 41 + ordinal as u64, 1_000);
-            let batch = prepared.batch_record(7, 3);
-            let spill = prepared.wal_record(7, 3);
+            let batch = prepared.batch_record(7);
+            let spill = prepared.wal_record(7);
 
             // Assert
             assert_eq!(batch.cf_id, spill.cf_id);
@@ -220,7 +217,6 @@ mod tests {
             assert_eq!(batch.expiration, spill.expiration);
             assert_eq!(batch.range_end, spill.range_end.as_deref());
             assert_eq!(batch.txn_id, spill.txn_id);
-            assert_eq!(batch.writer_epoch, spill.writer_epoch);
         }
     }
 }

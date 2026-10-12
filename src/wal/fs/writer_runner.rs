@@ -1,4 +1,5 @@
 use crate::io::{Durability, Fs, FsPath, FsResult};
+use crate::wal::format::SegmentDigest;
 use crate::wal::traits::WalAppendError;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -117,6 +118,7 @@ pub struct WriterConfig {
     pub current_pos: Arc<std::sync::atomic::AtomicU64>,
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) counters: crate::telemetry::CounterSink,
+    pub(crate) digest: Arc<Mutex<SegmentDigest>>,
 }
 
 pub struct WriterRunner {
@@ -226,7 +228,7 @@ impl WriterRunner {
     ) -> Result<u64, WriteFailure> {
         let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
         let write_start = Instant::now();
-        let start_pos = self.append_once(file_opt, big_bytes.clone())?;
+        let start_pos = self.append_once(file_opt, &big_bytes)?;
         let write_elapsed = write_start.elapsed();
 
         self.config.counters.record(|m| {
@@ -256,7 +258,7 @@ impl WriterRunner {
     fn append_once<'a>(
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
-        big_bytes: bytes::Bytes,
+        big_bytes: &bytes::Bytes,
     ) -> Result<u64, WriteFailure> {
         let start_pos = self
             .config
@@ -284,10 +286,18 @@ impl WriterRunner {
                             ))
                         })
                 } else {
-                    file.write_at(start_pos, big_bytes)
+                    file.write_at(start_pos, big_bytes.clone())
                 };
             return match write_result {
-                Ok(()) => Ok(start_pos),
+                Ok(()) => {
+                    // The digest holds every byte written, in order: a
+                    // write rolled back or never made is not in it.
+                    let mut digest = self.config.digest.lock();
+                    if digest.data_len() == start_pos {
+                        digest.update(big_bytes);
+                    }
+                    Ok(start_pos)
+                }
                 Err(write_error) => {
                     tracing::error!(error = ?write_error, start_pos, "wal writer write_at failed");
                     self.check_write_authority().map_err(|error| WriteFailure {
@@ -587,7 +597,7 @@ mod tests {
             }));
             // Act
             let failure = runner
-                .append_once(&mut file, Bytes::from_static(b"partial frame"))
+                .append_once(&mut file, &Bytes::from_static(b"partial frame"))
                 .unwrap_err();
             // Assert
             assert!(matches!(
@@ -623,7 +633,7 @@ mod tests {
 
             // Act
             let failure = runner
-                .append_once(&mut file, Bytes::from_static(b"partial frame"))
+                .append_once(&mut file, &Bytes::from_static(b"partial frame"))
                 .expect_err("injected partial append failure");
 
             // Assert
@@ -739,6 +749,7 @@ mod tests {
             current_pos: Arc::new(AtomicU64::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
             counters: crate::telemetry::CounterSink::default(),
+            digest: Arc::new(Mutex::new(SegmentDigest::of(&[]))),
         })
     }
 
@@ -774,7 +785,7 @@ mod tests {
         let mut file = Some(runner.open_file_handle().unwrap());
         validity.expire_for_test();
         // Act
-        let result = runner.append_once(&mut file, bytes::Bytes::from_static(b"queued"));
+        let result = runner.append_once(&mut file, &bytes::Bytes::from_static(b"queued"));
         // Assert
         assert!(matches!(
             result,

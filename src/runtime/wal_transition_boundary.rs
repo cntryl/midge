@@ -7,8 +7,10 @@ pub(crate) enum WalTransitionBoundary {
     BeforeFsync,
     AfterFsync,
     AfterAppendBeforeAccounting,
+    AfterSealDigest,
     BeforeSegmentCreate,
     AfterSegmentCreate,
+    AfterFooter,
     AfterLedgerRotate,
     BeforeCoordinatorCommit,
     AfterCoordinatorCommit,
@@ -36,9 +38,11 @@ impl WalTransitionBoundary {
     /// Boundaries exercised by the local rotation matrices (actor and
     /// event-loop level).
     #[cfg(all(test, feature = "failpoints"))]
-    pub(crate) const LOCAL_ROTATION_BOUNDARIES: [Self; 3] = [
+    pub(crate) const LOCAL_ROTATION_BOUNDARIES: [Self; 5] = [
+        Self::AfterSealDigest,
         Self::BeforeSegmentCreate,
         Self::AfterSegmentCreate,
+        Self::AfterFooter,
         Self::AfterLedgerRotate,
     ];
 
@@ -49,9 +53,11 @@ impl WalTransitionBoundary {
     /// Boundaries exercised by the `CloudAsync` seal matrix
     /// (`event_loop::cloud_integration::tests`).
     #[cfg(all(test, feature = "failpoints"))]
-    pub(crate) const CLOUD_SEAL_BOUNDARIES: [Self; 9] = [
+    pub(crate) const CLOUD_SEAL_BOUNDARIES: [Self; 11] = [
+        Self::AfterSealDigest,
         Self::BeforeSegmentCreate,
         Self::AfterSegmentCreate,
+        Self::AfterFooter,
         Self::AfterLedgerRotate,
         Self::BeforeCoordinatorCommit,
         Self::AfterCoordinatorCommit,
@@ -71,12 +77,14 @@ impl WalTransitionBoundary {
     ];
 
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::BeforeFsync,
         Self::AfterFsync,
         Self::AfterAppendBeforeAccounting,
+        Self::AfterSealDigest,
         Self::BeforeSegmentCreate,
         Self::AfterSegmentCreate,
+        Self::AfterFooter,
         Self::AfterLedgerRotate,
         Self::BeforeCoordinatorCommit,
         Self::AfterCoordinatorCommit,
@@ -95,8 +103,10 @@ impl WalTransitionBoundary {
             Self::AfterAppendBeforeAccounting => {
                 "midge::wal_transition::after_append_before_accounting"
             }
+            Self::AfterSealDigest => "midge::wal_transition::after_seal_digest",
             Self::BeforeSegmentCreate => "midge::wal_transition::before_segment_create",
             Self::AfterSegmentCreate => "midge::wal_transition::after_segment_create",
+            Self::AfterFooter => "midge::wal_transition::after_footer",
             Self::AfterLedgerRotate => "midge::wal_transition::after_ledger_rotate",
             Self::BeforeCoordinatorCommit => "midge::wal_transition::before_coordinator_commit",
             Self::AfterCoordinatorCommit => "midge::wal_transition::after_coordinator_commit",
@@ -126,7 +136,7 @@ mod tests {
     #[test]
     fn should_enumerate_every_declared_wal_transition_boundary() {
         // Arrange
-        let expected = 14;
+        let expected = 16;
 
         // Act
         let boundaries = WalTransitionBoundary::ALL;

@@ -16,7 +16,6 @@ fn disjoint_segments(records_per_segment: u64) -> (CloudPersistence, Manifest) {
                 Bytes::copy_from_slice(&key),
                 Some(Bytes::from_static(b"value")),
                 sequence,
-                1,
             );
             let payload = crate::wal::encoding::encode(&record).expect("WAL record");
             crate::wal::frame::append_frame(&mut wal, &payload).expect("WAL frame");

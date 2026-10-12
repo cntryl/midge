@@ -197,7 +197,6 @@ fn fixture(
             Bytes::from_static(b"k"),
             Some(Bytes::copy_from_slice(&value)),
             sequence,
-            1,
         );
         let payload = crate::wal::encoding::encode(&record).expect("encode");
         crate::wal::frame::append_frame(&mut wal, &payload).expect("frame");
@@ -298,7 +297,7 @@ fn should_restart_crc_progress_when_wal_provider_identity_changes() {
     let progress = CloudWalPruneProgress::default();
     backend.allowance.store(3, Ordering::SeqCst);
     assert!(attempt(&storage, &manifest, &progress, 80).is_err());
-    let key = crate::wal::cloud_segment::object_key(1, 1);
+    let key = crate::wal::segment_object_key(1, 1);
     let bytes = read_cloud_object(&storage, &key);
     write_cloud_object(&storage, &key, bytes);
     backend.reads.lock().clear();
@@ -336,7 +335,7 @@ fn should_restart_semantic_progress_when_sst_provider_identity_changes() {
     assert!(result.is_err());
     assert_eq!(
         backend.reads.lock().first(),
-        Some(&(crate::wal::cloud_segment::object_key(1, 1), 0))
+        Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments
@@ -360,7 +359,7 @@ fn should_revalidate_from_start_when_process_local_proof_state_is_lost() {
     assert!(result.is_err());
     assert_eq!(
         backend.reads.lock().first(),
-        Some(&(crate::wal::cloud_segment::object_key(1, 1), 0))
+        Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments
@@ -582,36 +581,43 @@ fn should_reject_queued_range_when_submission_exhausts_attempt_deadline() {
 }
 
 #[test]
-fn should_resume_cross_family_transaction_proof_without_retiring_partial_coverage() {
+fn should_resume_two_family_transaction_proof_without_retiring_partial_coverage() {
     for quantum in [None, Some(Duration::ZERO)] {
-        // Arrange
+        // Arrange: a transaction is single-family (#843), so one segment
+        // holds a large batch for each family: family 0's at 2..=20 and
+        // family 1's at 22..=41.
         let (_directory, backend, storage, _) = fixture(0);
-        let mut records = Vec::new();
-        for sequence in 2..=41 {
-            let mut record = crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
-                Bytes::from_static(b"k"),
-                Some(Bytes::from_static(b"v")),
-                sequence,
-                1,
-            );
-            record.cf_id = u32::try_from(sequence % 2).expect("family");
-            record.txn_id = Some(1);
-            records.push(record);
-        }
-        let payload =
-            crate::wal::encoding::encode_txn_batch_payload(1, 1, 42, 1, &records).expect("batch");
-        let mut record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::TxnBatch,
-            Bytes::new(),
-            Some(payload),
-            42,
-            1,
-        );
-        record.txn_id = Some(1);
-        let payload = crate::wal::encoding::encode(&record).expect("encode");
         let mut wal = Vec::new();
-        crate::wal::frame::append_frame(&mut wal, &payload).expect("frame");
+        for (txn_id, family, operations, commit) in [(1, 0, 2..=20, 21), (2, 1, 22..=41, 42)] {
+            let begin = operations.start() - 1;
+            let records: Vec<_> = operations
+                .map(|sequence| {
+                    let mut record = crate::wal::WalRecord::new_cf(
+                        family,
+                        crate::wal::WalOpKind::Put,
+                        Bytes::from_static(b"k"),
+                        Some(Bytes::from_static(b"v")),
+                        sequence,
+                    );
+                    record.txn_id = Some(txn_id);
+                    record
+                })
+                .collect();
+            let payload = crate::wal::encoding::encode_txn_batch_payload(
+                txn_id, begin, commit, family, &records,
+            )
+            .expect("batch");
+            let mut record = crate::wal::WalRecord::new_cf(
+                family,
+                crate::wal::WalOpKind::TxnBatch,
+                Bytes::new(),
+                Some(payload),
+                commit,
+            );
+            record.txn_id = Some(txn_id);
+            let payload = crate::wal::encoding::encode(&record).expect("encode");
+            crate::wal::frame::append_frame(&mut wal, &payload).expect("frame");
+        }
         write_authoritative_cloud_wal(&storage, 1, 42, wal);
         let mut manifest = Manifest::default();
         for (name, family, sequence) in [("first.sst", 0, 40), ("second.sst", 1, 41)] {
@@ -656,7 +662,7 @@ fn should_retain_catalog_authority_when_resumed_wal_identity_contains_corrupt_by
     let progress = CloudWalPruneProgress::default();
     backend.allowance.store(3, Ordering::SeqCst);
     assert!(attempt(&storage, &manifest, &progress, 80).is_err());
-    let key = crate::wal::cloud_segment::object_key(1, 1);
+    let key = crate::wal::segment_object_key(1, 1);
     let mut bytes = read_cloud_object(&storage, &key);
     *bytes.last_mut().expect("WAL payload") ^= 1;
     write_cloud_object(&storage, &key, bytes);
@@ -693,7 +699,7 @@ fn should_revalidate_exact_coverage_when_manifest_family_assignment_changes() {
     );
     assert_eq!(
         backend.reads.lock().first(),
-        Some(&(crate::wal::cloud_segment::object_key(1, 1), 0))
+        Some(&(crate::wal::segment_object_key(1, 1), 0))
     );
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments

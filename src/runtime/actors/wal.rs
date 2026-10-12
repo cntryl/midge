@@ -46,14 +46,10 @@
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
-#[cfg(test)]
-use crate::io::FsError;
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 use apply_op::TransactionApplyOp;
-#[cfg(test)]
-use std::path::PathBuf;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -67,9 +63,18 @@ static TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID: AtomicU64 =
 
 struct TxnSequencePlan {
     txn_id: u64,
+    /// The one column family the transaction writes; its WAL frames carry it.
+    cf_id: crate::types::ColumnFamilyId,
     begin_seq: u64,
     first_op_seq: u64,
     commit_seq: u64,
+}
+
+impl TxnSequencePlan {
+    /// Every sequence the transaction took.
+    fn range(&self) -> std::ops::RangeInclusive<u64> {
+        self.begin_seq..=self.commit_seq
+    }
 }
 
 struct TxnWalBatch {
@@ -231,8 +236,6 @@ pub struct WalActor {
     durability_policy: DurabilityPolicy,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
-    /// Highest sequence actually appended to the current WAL segment.
-    segment_max_sequence: u64,
     /// Batch configuration governing `max_delay_ms` and `max_bytes`
     batch_config: BatchConfig,
     /// Last wall-clock time we performed a WAL fsync
@@ -253,9 +256,6 @@ pub struct WalActor {
     leader_holder_id: String,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
-    /// The segment ledger (#842): which WAL files are history. Rotation and
-    /// retirement change it only through this actor. `None` in memory mode.
-    history: Option<crate::runtime::wal_history::WalHistory>,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -264,14 +264,6 @@ pub struct WalActor {
     // WAL append instrumentation
     append_calls: u64,
     append_total: Duration,
-}
-
-/// Where a WAL actor's records go.
-pub(crate) enum WalBacking {
-    /// Nowhere durable: memory mode.
-    Memory,
-    /// Segment files, named by their ledger.
-    Files(crate::runtime::wal_history::WalHistory),
 }
 
 mod apply_op;
@@ -602,55 +594,24 @@ impl WalActor {
         });
     }
 
-    fn record_segment_sequence(&mut self, sequence: u64) {
-        self.segment_max_sequence = self.segment_max_sequence.max(sequence);
-    }
-
-    /// Open the WAL actor over a host WAL directory.
-    #[cfg(test)]
-    pub fn new(
-        wal_dir: PathBuf,
-        durability_policy: DurabilityPolicy,
-        batch_config: BatchConfig,
-        memory_mode: bool,
-        writer_epoch: u64,
-        storage_io_timeout: Duration,
-    ) -> MidgeResult<Self> {
-        let backing = if memory_mode {
-            WalBacking::Memory
-        } else {
-            let fs: Arc<dyn Fs> =
-                Arc::new(crate::io::RealFs::new(wal_dir).map_err(FsError::into_midge)?);
-            WalBacking::Files(crate::runtime::wal_history::WalHistory::open(fs, 1)?)
-        };
-        Self::open(
-            backing,
-            durability_policy,
-            batch_config,
-            writer_epoch,
-            storage_io_timeout,
-        )
-    }
-
-    /// Open the WAL actor over `backing`; a file-backed WAL appends to its
-    /// ledger's open segment.
+    /// Open the WAL actor over `state`'s segment ledger: a file-backed WAL
+    /// appends to the ledger's open segment, a memory-mode one nowhere.
     pub(crate) fn open(
-        backing: WalBacking,
+        state: &RuntimeState,
         durability_policy: DurabilityPolicy,
         batch_config: BatchConfig,
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
         let counters = crate::telemetry::CounterSink::default();
-        let (io, history) = match backing {
-            WalBacking::Memory => (WalIoState::Memory, None),
-            WalBacking::Files(history) => {
-                let fs = history.wal();
+        let io = match state.wal.history.segment_files() {
+            None => WalIoState::Memory,
+            Some(fs) => {
                 let factory = FsWalFactoryIo::new(Arc::clone(&fs))
                     .with_io_timeout(storage_io_timeout)
                     .with_counters(counters.clone());
-                let writer = factory.open_segment(history.ledger().open_segment())?;
-                (WalIoState::Open { fs, writer }, Some(history))
+                let writer = factory.open_segment(state.wal.open_segment())?;
+                WalIoState::Open { fs, writer }
             }
         };
 
@@ -662,7 +623,6 @@ impl WalActor {
             pending_sync_count: 0,
             durability_policy,
             bytes_since_sync: 0,
-            segment_max_sequence: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
             append_calls: 0,
@@ -675,7 +635,6 @@ impl WalActor {
             leader_store: None,
             leader_holder_id: String::new(),
             max_replayable_txn_bytes: None,
-            history,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -857,26 +816,30 @@ impl WalActor {
         self.bytes_since_sync
     }
 
-    pub(crate) fn current_segment_max_sequence(&self) -> u64 {
-        self.segment_max_sequence
+    /// The records the open segment holds: what sealing it would cover.
+    /// Memory mode holds none.
+    pub(crate) fn open_tail(&self) -> crate::wal::format::SegmentTail {
+        self.writer()
+            .map(crate::wal::WalWriter::tail)
+            .unwrap_or_default()
     }
 
-    /// The segment ledger; `None` in memory mode.
-    pub(crate) fn ledger(&self) -> Option<&crate::wal::ledger::WalLedger> {
-        self.history
-            .as_ref()
-            .map(crate::runtime::wal_history::WalHistory::ledger)
+    /// The highest sequence the open segment holds, or zero when it holds
+    /// none: what a seal ticket names.
+    pub(crate) fn open_segment_max_sequence(&self) -> u64 {
+        self.open_tail().last_seq.unwrap_or(0)
     }
 
-    /// Retire every WAL segment below `to` through the ledger. Memory mode
-    /// keeps no segments and retires nothing.
+    /// Retire every WAL segment below `to` through `state`'s ledger. Memory
+    /// mode keeps no segment files, so only the ledger moves.
     ///
     /// # Errors
     ///
     /// Refuses while the actor is fenced: a fenced writer changes no
     /// history. Otherwise returns the ledger's error, having removed nothing.
     pub(crate) fn retire_wal_below(
-        &mut self,
+        &self,
+        state: &mut RuntimeState,
         to: crate::wal::ledger::SegmentId,
     ) -> MidgeResult<crate::runtime::wal_history::RetiredWal> {
         if self.is_fenced() {
@@ -884,18 +847,7 @@ impl WalActor {
                 .io_error()
                 .unwrap_or_else(|| MidgeError::RecoveryFailed("the WAL is fenced".to_string())));
         }
-        match self.history.as_mut() {
-            Some(history) => history.retire_below(to),
-            None => Ok(crate::runtime::wal_history::RetiredWal::default()),
-        }
-    }
-
-    /// The segment ledger itself, for tests that stage a history.
-    #[cfg(test)]
-    pub(crate) fn history_for_test(
-        &mut self,
-    ) -> Option<&mut crate::runtime::wal_history::WalHistory> {
-        self.history.as_mut()
+        state.wal.history.retire_below(to)
     }
 
     #[cfg(test)]
@@ -918,10 +870,10 @@ impl WalActor {
 
 impl Default for WalActor {
     fn default() -> Self {
-        // INTENTIONAL: Cannot create with default since we need a WAL directory.
-        // WalActor must be created via WalActor::new(wal_dir) to ensure proper initialization.
+        // INTENTIONAL: Cannot create with default since we need a WAL ledger.
+        // WalActor must be created via WalActor::open(state) to ensure proper initialization.
         // This prevents misuse while maintaining the Default trait for generic contexts.
-        panic!("WalActor::default() is not supported. Use WalActor::new(wal_dir) instead.")
+        panic!("WalActor::default() is not supported. Use WalActor::open(state) instead.")
     }
 }
 

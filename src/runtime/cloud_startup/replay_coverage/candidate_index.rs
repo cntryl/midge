@@ -164,7 +164,6 @@ mod tests {
             Bytes::copy_from_slice(key),
             Some(Bytes::from_static(b"value")),
             seq,
-            7,
         )
     }
 

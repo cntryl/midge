@@ -336,19 +336,10 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
         let fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(
             crate::io::RealFs::new(dir.path().join("wal")).map_err(FsError::into_midge)?,
         );
-        // The database's open segment: its ledger replays only members.
-        let writer = crate::wal::fs::FsWalWriterIo::new(&crate::wal::segment_file_name(1), fs)?;
-        crate::wal::WalWriter::append_record(
-            &writer,
-            &crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
-                bytes::Bytes::from_static(b"written-at-epoch-7"),
-                Some(bytes::Bytes::from_static(b"value")),
-                1_000,
-                wal_epoch,
-            ),
-        )?;
-        crate::wal::WalWriter::sync(&writer)?;
+        // A writer under lease epoch 7 opened the newest segment the ledger
+        // names; segment headers carry the epoch (#843).
+        let mut history = crate::runtime::wal_history::WalHistory::open(fs, 1, wal_epoch)?;
+        history.start_epoch(wal_epoch, 1)?;
     }
     remove_if_present(&dir.path().join(".midge_leader"));
 

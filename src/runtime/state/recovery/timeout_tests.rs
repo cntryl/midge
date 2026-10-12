@@ -406,7 +406,6 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         bytes::Bytes::from_static(b"acknowledged"),
         Some(bytes::Bytes::from_static(b"value")),
         7,
-        1,
     );
     let payload = crate::wal::encoding::encode(&record).unwrap();
     let mut before = Vec::new();
@@ -415,13 +414,15 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
     assert_eq!(target, crate::wal::segment_file_name(1));
     std::fs::write(wal_dir.join(target), &before).unwrap();
     crate::runtime::wal_history::fixture::record_at(directory.path(), &[], 1).unwrap();
+    // The recorded segment: the frame behind its header.
+    let before = std::fs::read(wal_dir.join(target)).unwrap();
     let (fs, evidence) = read_fs(
         &wal_dir,
         target,
         Duration::ZERO,
         ReadDelivery::IoBeforeQuarantine,
     );
-    let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1).unwrap();
+    let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1, 0).unwrap();
 
     // Act: exercise the actual replay and its production salvage boundary.
     let result = RuntimeState::replay_wal_storage_within(
@@ -432,7 +433,7 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         HashMap::new(),
         None,
         fs.as_ref(),
-        &mut history,
+        history,
     );
 
     // Assert: a secondary timeout retains its type and all source bytes.
@@ -499,7 +500,7 @@ fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
     let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap()));
 
     // Act: open the WAL history the way recovery does.
-    let result = crate::runtime::wal_history::WalHistory::open(wal, 1).map(|history| {
+    let result = crate::runtime::wal_history::WalHistory::open(wal, 1, 0).map(|history| {
         (
             history.ledger().open_segment(),
             history.ledger().next_segment_id(),

@@ -537,7 +537,12 @@ fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 4 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 50;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 50,
+    )
+    .expect("rotate the WAL ledger");
 
     grow_active_memtable(&mut state, 0, 5 * 1024);
 
@@ -571,7 +576,12 @@ fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 1024 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 1;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 1,
+    )
+    .expect("rotate the WAL ledger");
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -600,7 +610,12 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.limits.memtable_flush_threshold = 1024 * 1024;
     state.limits.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 10;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 10,
+    )
+    .expect("rotate the WAL ledger");
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -625,7 +640,12 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
 fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 20,
+    )
+    .expect("rotate the WAL ledger");
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -656,7 +676,7 @@ fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Assert
     assert_eq!(
         state.max_memtable_wal_segment_gap(),
-        state.wal.current_segment_id.saturating_sub(1)
+        state.wal.open_segment().saturating_sub(1)
     );
 }
 
@@ -821,19 +841,22 @@ fn should_account_for_recovered_wal_memtable_bytes_when_reopening() {
         bytes::Bytes::from_static(b"recovered-key"),
         Some(bytes::Bytes::from(vec![0xA5; 4096])),
         1,
-        1,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
     let mut frame = Vec::new();
     crate::wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
-    std::fs::write(
-        temp_dir
-            .path()
-            .join("wal")
-            .join(crate::wal::segment_file_name(1)),
-        frame,
-    )
-    .expect("write retained WAL");
+    // The record follows the open segment's header.
+    let mut segment = std::fs::OpenOptions::new()
+        .append(true)
+        .open(
+            temp_dir
+                .path()
+                .join("wal")
+                .join(crate::wal::segment_file_name(1)),
+        )
+        .expect("open the retained WAL");
+    std::io::Write::write_all(&mut segment, &frame).expect("write retained WAL");
+    segment.sync_all().expect("sync retained WAL");
 
     // Act
     let reopened = RuntimeState::try_new(
@@ -881,10 +904,10 @@ fn should_initialize_wal_state_with_defaults() {
     // (no setup)
 
     // Act
-    let wal = WalState::default();
+    let wal = WalState::new(crate::runtime::wal_history::WalHistory::in_memory(0));
 
     // Assert
-    assert_eq!(wal.current_segment_id, 1);
+    assert_eq!(wal.open_segment(), 1);
     assert_eq!(wal.frontiers.last_synced(), 0);
     assert_eq!(wal.pending_writes, 0);
     assert_eq!(wal.frontiers.local_durable(), 0);
@@ -2092,7 +2115,9 @@ fn should_handle_multiple_column_families() {
 fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
+        .expect("rotate the WAL ledger");
     let secondary = state.create_cf("floor-secondary".into()).unwrap();
     for (cf_id, segment) in [(0, 5), (secondary, 7)] {
         let cf = state.get_cf_mut(cf_id).unwrap();
@@ -2133,7 +2158,9 @@ fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
 fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
+        .expect("rotate the WAL ledger");
     state
         .get_cf_mut(0)
         .unwrap()
@@ -2151,7 +2178,9 @@ fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
 fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = 20;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
+        .expect("rotate the WAL ledger");
     state.next_flush_id = u64::MAX;
     let cf = state.get_cf_mut(0).unwrap();
     cf.active_memtable_started_in_segment = 3;
@@ -2432,7 +2461,12 @@ fn should_not_select_wal_bytes_flush_candidate_when_only_segments_advance() {
     // far behind in segments but not in bytes must not be flushed. This is
     // what keeps local eventual flushes from feeding each other (#552).
     let mut state = state_with_unflushed_default_family(100);
-    state.wal.current_segment_id = state.limits.eventual_flush_segment_gap + 100;
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(
+        &mut state.wal.history,
+        state.limits.eventual_flush_segment_gap + 100,
+    )
+    .expect("rotate the WAL ledger");
 
     // Act
     let by_bytes = state.next_flush_candidate(EventualFlush::WalBytes);
@@ -3468,4 +3502,123 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
         Vec::<u8>::new()
     );
     scenario.teardown();
+}
+
+// =========== Sequence reservation tests (#843) ===========
+
+/// A file-backed state over a simulated device, so a test can fault the
+/// LEDGER and read back what it persisted.
+fn state_on_device(
+    device: &crate::simulation::crash_fs::CrashDevice,
+) -> crate::common::MidgeResult<RuntimeState> {
+    RuntimeState::recover(
+        std::path::Path::new("/device"),
+        false,
+        Arc::new(device.fs()),
+        crate::config::RecoveryPolicy::Strict,
+        crate::runtime::state::RecoveryWal::Replay { writer_epoch: 1 },
+        None,
+    )
+}
+
+/// The reservation LEDGER holds on `device`.
+fn persisted_reservation(device: &crate::simulation::crash_fs::CrashDevice) -> u64 {
+    let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+    crate::runtime::wal_history::WalHistory::read(&wal)
+        .expect("read the WAL ledger")
+        .expect("the WAL ledger exists")
+        .seq_reserved_through()
+}
+
+/// Append one put through the WAL actor, as a commit does.
+fn commit_put(state: &mut RuntimeState, key: &'static [u8]) -> crate::common::MidgeResult<u64> {
+    let mut actor = crate::runtime::actors::WalActor::open(
+        state,
+        crate::wal::DurabilityPolicy::Strict,
+        crate::wal::policy::BatchConfig::default(),
+        0,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let prepared = actor.prepare_transaction_append(
+        state,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 1,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(key),
+                value: bytes::Bytes::from_static(b"value"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    let results = actor.append_prepared_transactions(state, vec![prepared])?;
+    Ok(results[0].last_sequence)
+}
+
+#[test]
+fn should_persist_reservation_before_allocating_past_it() {
+    // Arrange
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let mut state = state_on_device(&device).expect("recover");
+
+    // Act
+    let last = commit_put(&mut state, b"reserved").expect("commit");
+
+    // Assert
+    assert!(
+        persisted_reservation(&device) >= last,
+        "sequence {last} was handed out past the persisted reservation {}",
+        persisted_reservation(&device)
+    );
+}
+
+#[test]
+fn should_return_error_without_wal_bytes_when_reservation_cannot_be_persisted() {
+    // Arrange: the first LEDGER sync after recovery fails.
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let mut state = state_on_device(&device).expect("recover");
+    let sequence_before = state.sequence;
+    let segment = format!(
+        "{}/{}",
+        crate::wal::WAL_DIR,
+        crate::wal::segment_file_name(state.wal.open_segment())
+    );
+    let segment_before = device.files()[&segment].clone();
+    let fault = device.inject(crate::simulation::crash_fs::Fault {
+        op: crate::simulation::crash_fs::FaultOp::Sync,
+        path: format!("{}/LEDGER", crate::wal::WAL_DIR),
+        nth: 1,
+        effect: crate::simulation::crash_fs::FaultEffect::Before,
+        error: crate::simulation::crash_fs::FaultError::Io,
+    });
+
+    // Act
+    let result = commit_put(&mut state, b"unreserved");
+
+    // Assert
+    assert!(device.fired(fault), "the reservation must reach the LEDGER");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(state.sequence, sequence_before);
+    assert_eq!(device.files()[&segment], segment_before);
+}
+
+#[test]
+fn should_allocate_compaction_generation_within_reservation() {
+    // Arrange
+    let device = crate::simulation::crash_fs::CrashDevice::new();
+    let mut state = state_on_device(&device).expect("recover");
+
+    // Act
+    let generation = state
+        .next_compaction_output_generation()
+        .expect("allocate a generation");
+
+    // Assert
+    assert!(generation <= persisted_reservation(&device));
+    assert_eq!(state.sequence, generation);
 }

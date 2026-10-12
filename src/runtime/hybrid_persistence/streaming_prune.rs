@@ -279,13 +279,13 @@ fn validate_segment_progress(
         },
         &mut || work.checkpoint(),
     )?;
-    if prefix.max_sequence != entry.max_sequence || prefix.writer_epoch != entry.writer_epoch {
-        return Err(MidgeError::Corruption(format!(
-            "cloud WAL segment {} contents differ from catalog sequence or epoch",
+    let identity = prefix.identity().ok_or_else(|| {
+        MidgeError::Corruption(format!(
+            "cloud WAL segment {} has no header",
             entry.segment_id
-        )));
-    }
-    Ok(())
+        ))
+    })?;
+    entry.check(&identity).map_err(MidgeError::Corruption)
 }
 
 impl Coverage<'_> {

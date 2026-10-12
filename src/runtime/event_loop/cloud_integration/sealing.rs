@@ -23,33 +23,14 @@ impl EventLoop {
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
         let deadline = self.event_loop_cloud_deadline();
-        self.seal_current_cloud_segment_inner(false, &deadline)
+        self.seal_current_cloud_segment_within(&deadline)
     }
 
     pub(in crate::runtime::event_loop) fn seal_current_cloud_segment_within(
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(false, deadline)
-    }
-
-    /// Seal the WAL segment recovered at startup.
-    ///
-    /// Configured startup shares one deadline, including authority validation
-    /// and upload admission. Unconfigured opens retain their unbounded budget.
-    pub(in crate::runtime::event_loop) fn seal_recovered_cloud_active_segment(
-        &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(true, deadline)
-    }
-
-    fn seal_current_cloud_segment_inner(
-        &mut self,
-        recovered_active: bool,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        let result = self.try_seal_current_cloud_segment(recovered_active, deadline);
+        let result = self.try_seal_current_cloud_segment(deadline);
         if result.is_err() && self.durability.cloud_seal_retry_needed() {
             self.durability.defer_cloud_seal_retry();
         }
@@ -58,10 +39,9 @@ impl EventLoop {
 
     fn try_seal_current_cloud_segment(
         &mut self,
-        recovered_active: bool,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        let Some(plan) = self.prepare_cloud_seal(recovered_active, deadline)? else {
+        let Some(plan) = self.prepare_cloud_seal(deadline)? else {
             return Ok(None);
         };
         let CloudSealPlan {
@@ -74,13 +54,9 @@ impl EventLoop {
             self.wal_transition
                 .begin_seal(segment_id, next_segment_id, expected_max_sequence)?;
         let seal_start = Instant::now();
-        let flushed = if recovered_active {
+        let flushed =
             self.wal_actor
-                .flush_recovered_cloud_wal_within(&mut self.state, deadline, &ticket)
-        } else {
-            self.wal_actor
-                .flush_for_cloud_upload_within(&mut self.state, deadline, &ticket)
-        };
+                .flush_for_cloud_upload_within(&mut self.state, deadline, &ticket);
         let max_sequence = match flushed {
             Ok(max_sequence) => max_sequence,
             Err(error) => {
@@ -136,12 +112,14 @@ impl EventLoop {
 
     fn prepare_cloud_seal(
         &mut self,
-        recovered_active: bool,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<CloudSealPlan>> {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
         }
+        // A fenced protocol refuses before reading the ledger, which may
+        // already have recorded the rotation that fenced it.
+        self.wal_transition.ensure_ready()?;
         let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
             return Err(crate::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
@@ -150,7 +128,7 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.state.wal.pending_writes == 0 {
             return Ok(None);
         }
-        if !recovered_active && !self.cloud_coordinator.cloud_wal.upload_backlog.is_empty() {
+        if !self.cloud_coordinator.cloud_wal.upload_backlog.is_empty() {
             return Err(crate::common::MidgeError::WriteStall(
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
@@ -158,13 +136,9 @@ impl EventLoop {
         self.durability.mark_cloud_seal_retry_needed();
         self.validate_runtime_writer_lease_within(deadline)?;
 
-        let segment_id = self.state.wal.current_segment_id;
-        let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
-            crate::common::MidgeError::ResourceLimit(
-                "WAL segment identity space exhausted".to_string(),
-            )
-        })?;
-        let expected_max_sequence = self.wal_actor.current_segment_max_sequence();
+        let segment_id = self.state.wal.open_segment();
+        let next_segment_id = self.state.wal.history.ledger().next_segment_id();
+        let expected_max_sequence = self.wal_actor.open_segment_max_sequence();
         if self.durability.current_key() != segment_id {
             let error = crate::common::MidgeError::Internal(format!(
                 "durability generation drift: expected current key {segment_id}"
@@ -179,9 +153,7 @@ impl EventLoop {
             .fs
             .metadata(&crate::wal::segment_key(segment_id))
             .map_or(0, |metadata| metadata.len);
-        if !recovered_active {
-            storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
-        }
+        storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         Ok(Some(CloudSealPlan {
             segment_id,
             next_segment_id,
@@ -316,7 +288,7 @@ impl EventLoop {
         Ok(())
     }
 
-    fn try_drain_cloud_wal_upload_backlog_within(
+    pub(in crate::runtime::event_loop) fn try_drain_cloud_wal_upload_backlog_within(
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {

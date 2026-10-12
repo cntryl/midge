@@ -279,7 +279,10 @@ pub fn trial(
     let committed = facts["committed_wal_frontier"]
         .as_u64()
         .ok_or("committed frontier")?;
-    if metrics.wal_cloud_durable_seq != committed
+    // The cloud frontier covers every committed record; past them it may
+    // extend over sequences an earlier process reserved but no record took
+    // (#843).
+    if metrics.wal_cloud_durable_seq < committed
         || metrics.current_sequence < committed
         || committed > manifest.durability_frontier
         || metrics.salvage_mode_opens != 0

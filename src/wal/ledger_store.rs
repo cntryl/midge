@@ -36,7 +36,7 @@ pub(crate) const LEDGER_FILE: &str = "LEDGER";
 /// Where a new LEDGER image is staged before it is renamed over LEDGER.
 const LEDGER_TEMP_FILE: &str = "LEDGER.tmp";
 const MAGIC: [u8; 8] = *b"MDGLEDGR";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = MAGIC.len() + 4;
 /// The `len` and `crc32c` words before each payload.
 const FRAME_HEADER_LEN: usize = 8;
@@ -253,11 +253,12 @@ impl From<LedgerError> for MidgeError {
         match error {
             LedgerError::SegmentIdsExhausted => Self::ResourceLimit(format!("WAL ledger: {error}")),
             LedgerError::UnreachableState(_) => Self::Corruption(format!("WAL ledger: {error}")),
-            LedgerError::EmptyHolder
-            | LedgerError::NotOpenSegment { .. }
+            LedgerError::NotOpenSegment { .. }
             | LedgerError::NotNextSegment { .. }
             | LedgerError::BadLogStart { .. }
-            | LedgerError::BadSetAside { .. } => {
+            | LedgerError::BadSetAside { .. }
+            | LedgerError::BrokenChain(_)
+            | LedgerError::ReservationNotRaised { .. } => {
                 Self::Internal(format!("invalid WAL ledger edit: {error}"))
             }
         }

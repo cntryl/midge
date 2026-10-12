@@ -15,19 +15,41 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 5 is current. Version 5 names the WAL's history with
-a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records which
-`wal/{id:020}.wal` files are history, their order, the next segment id and the
-retirement point. Segments carry their final name from creation; there is no
-active `wal.log` and no rename on rotation, and recovery never lists `wal/` to
-decide what to replay.
+Database `FORMAT` version 6 is current. Version 5 named the WAL's history
+with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
+which `wal/{id:020}.wal` files are history, their order, the next segment id and
+the retirement point. Segments carry their final name from creation; there is
+no active `wal.log` and no rename on rotation, and recovery never lists `wal/`
+to decide what to replay.
 
-Version 5 is an intentional pre-1.0 break with no in-place upgrade: current
-binaries reject database FORMAT versions 1 through 4 with `CompatibilityError`,
+Version 6 (#843) links the segments themselves and moves the writer epoch out
+of the records:
+
+- **Segment format v2.** Every segment starts with a 128-byte header (magic
+  `MWSEGHDR`, version 2, segment id, writer epoch, holder, first sequence, the
+  link of the segment before it, and a CRC32C). A sealed segment ends with a
+  footer frame naming its own link: its id, last sequence and an xxh3-128
+  digest of every byte before the footer, with its record count and
+  per-family maximum sequences. Nothing may follow the footer. Recovery
+  admits a segment only when its header names the segment the ledger (or,
+  for cloud objects, the catalog) expects, its link matches the segment
+  before it and its epoch does not go backwards. A cloud object must be a
+  sealed v2 segment whose header id and epoch match its catalog entry.
+- **Record format v2.** A WAL record no longer carries a writer epoch; the
+  segment header does. Transaction frames carry their transaction's column
+  family, and every operation in a transaction batch must belong to it.
+- **LEDGER v2.** Members record their header facts and, once sealed, their
+  footer facts; the ledger keeps the link of the last retired segment as its
+  anchor and a durable sequence reservation, so a sequence the engine handed
+  out is never handed out again after a crash.
+
+Version 6 is an intentional pre-1.0 break with no in-place upgrade: current
+binaries reject database FORMAT versions 1 through 5 with `CompatibilityError`,
 and leave the marker untouched. Cloud databases are rejected the same way,
-because their hydrated metadata carries the marker. FORMAT 5 requires SST V4;
-current binaries also reject SST versions 1 through 3 and unknown future
-versions. There is no legacy decoder or best-effort fallback in the V4 reader.
+because their hydrated metadata carries the marker; the record v1 segments of
+an older cloud prefix do not decode. FORMAT 6 requires SST V4; current
+binaries also reject SST versions 1 through 3 and unknown future versions.
+There is no legacy decoder or best-effort fallback in the V4 reader.
 
 SST V4 has the following integrity and compatibility boundaries:
 
@@ -141,6 +163,6 @@ new database, an older binary must not open it.
 ## Fixture Coverage
 
 Repository gates reject the checked-in populated FORMAT 3/SST V4 fixture, a
-prior FORMAT 2 fixture and a synthetic future FORMAT 6 fixture with
+prior FORMAT 2 fixture and a synthetic future FORMAT 7 fixture with
 `CompatibilityError`, without rewriting their markers. Format changes must
 update these fixtures and their CI assertions together.

@@ -2452,7 +2452,7 @@ mod local_wal_retention {
             .expect("read wal dir")
             .filter_map(Result::ok)
             .filter(|entry| {
-                cntryl_midge::__internal::wal::parse_segment_id(
+                cntryl_midge::__internal::wal::parse_segment_file_name(
                     &entry.file_name().to_string_lossy(),
                 )
                 .is_some()
@@ -2798,21 +2798,11 @@ mod local_wal_retention {
         assert_eq!(value, None);
     }
 
+    /// The writer epoch in the header of the segment file `file` (#843).
     #[cfg(feature = "internal-testing")]
-    fn wal_record_epochs(file: &Path) -> Vec<u64> {
-        use cntryl_midge::__internal::wal::{encoding, frame};
+    fn segment_epoch(file: &Path) -> u64 {
         let bytes = std::fs::read(file).expect("read WAL file");
-        let mut epochs = Vec::new();
-        let mut offset = 0usize;
-        while offset < bytes.len() {
-            let header_end = offset + frame::WAL_FRAME_HEADER_LEN;
-            let (payload_len, _) =
-                frame::decode_frame_header(&bytes[offset..header_end]).expect("frame header");
-            let payload = &bytes[header_end..header_end + payload_len];
-            epochs.push(encoding::decode(payload).expect("decode").writer_epoch);
-            offset = header_end + payload_len;
-        }
-        epochs
+        cntryl_midge::__internal::wal::segment::header_epoch(&bytes).expect("segment header")
     }
 
     /// LT-C: segment ids come from the WAL ledger (#842), so a full prune
@@ -2852,7 +2842,7 @@ mod local_wal_retention {
         );
         let epochs: Vec<_> = after_run2
             .iter()
-            .map(|id| (id, wal_record_epochs(&segment_path(temp.path(), *id))))
+            .map(|id| (id, segment_epoch(&segment_path(temp.path(), *id))))
             .collect();
 
         // Assert
@@ -2864,6 +2854,90 @@ mod local_wal_retention {
         assert!(
             after_run2.iter().all(|id| *id > 2),
             "run 2 reused a segment id from run 1: {after_run2:?}"
+        );
+    }
+}
+
+#[cfg(feature = "internal-testing")]
+mod sequence_reservation {
+    //! Sequences are reserved in the WAL ledger before they are handed out
+    //! (#843), so a sequence a commit returned is never given out again, even
+    //! when a power loss drops the commit's unsynced record.
+
+    use cntryl_midge::__internal::io::Fs;
+    use cntryl_midge::__internal::simulation::{CrashDevice, SimulatedClock};
+    use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// The lease a crashed process leaves behind; a restart advances its
+    /// lease clock past it.
+    const LEASE_TTL: Duration = Duration::from_secs(1);
+
+    fn options(named: &Path, device: &CrashDevice, clock: &SimulatedClock) -> OpenOptions {
+        let root: Arc<dyn Fs> = Arc::new(device.fs());
+        OpenOptions::local(named)
+            .background_compaction(false)
+            .lease_ttl(LEASE_TTL)
+            .lease_clock_skew_tolerance(Duration::ZERO)
+            .lease_clock_for_testing(Arc::new(clock.clone()))
+            .filesystem_for_testing(root)
+            .build()
+            .expect("open options")
+    }
+
+    /// Commit `key` and return the sequence the engine reached.
+    fn commit(engine: &Engine, key: &[u8], write: WriteOptions) -> u64 {
+        let default = engine.get_column_family("default").expect("default");
+        let mut tx = engine
+            .begin_tx(default.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+        tx.commit(write).expect("commit");
+        engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics")
+            .current_sequence
+    }
+
+    fn get(engine: &Engine, key: &[u8]) -> Option<Vec<u8>> {
+        let default = engine.get_column_family("default").expect("default");
+        engine
+            .begin_tx(default.id(), TransactionMode::ReadOnly)
+            .expect("read")
+            .get(key)
+            .expect("get")
+            .map(|value| value.to_vec())
+    }
+
+    #[test]
+    fn should_not_reuse_sequences_of_a_lost_unsynced_tail_after_power_loss() {
+        // Arrange: a synced commit, then a buffered one whose sequence the
+        // engine reported; the process dies and the power loss keeps nothing
+        // unsynced.
+        let named = tempfile::TempDir::new().expect("named directory");
+        let device = CrashDevice::new();
+        let clock = SimulatedClock::new();
+        let engine = Engine::open(options(named.path(), &device, &clock)).expect("open");
+        commit(&engine, b"synced", WriteOptions::sync());
+        let lost = commit(&engine, b"buffered", WriteOptions::buffered());
+        device.process_crash();
+        drop(engine);
+        clock.advance(LEASE_TTL * 2);
+        device.power_loss_with(|_| 0);
+
+        // Act
+        let reopened = Engine::open(options(named.path(), &device, &clock)).expect("reopen");
+        let after = commit(&reopened, b"after", WriteOptions::sync());
+
+        // Assert
+        assert_eq!(get(&reopened, b"buffered"), None, "the tail must be lost");
+        assert_eq!(get(&reopened, b"synced"), Some(b"value".to_vec()));
+        assert!(
+            after > lost,
+            "sequence {after} reuses the lost tail's sequence {lost}"
         );
     }
 }

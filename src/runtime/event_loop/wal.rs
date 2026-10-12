@@ -401,6 +401,22 @@ impl WalCoordinator {
             }
         }
 
+        // No record holds a sequence below the open segment's first that
+        // no segment holds, such as one an earlier process reserved (#843):
+        // the cloud holds it once every segment before the open one is
+        // durable, which the newest inflight segment's acknowledgement
+        // proves.
+        let open_first_seq = event_loop
+            .state
+            .wal
+            .history
+            .ledger()
+            .open_member()
+            .open
+            .first_seq;
+        if inflight_segment.is_none() && sequence < open_first_seq {
+            inflight_segment = event_loop.durability.newest_inflight_segment();
+        }
         if !wait_for_ack || event_loop.state.wal.frontiers.cloud_durable() >= sequence {
             event_loop.drain_auto_flush_memtables();
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });

@@ -1393,7 +1393,7 @@ const WAL_SCOPE_REMOVALS: &[(&str, &str)] = &[
 const WAL_SCOPE_CUTS: &[(&str, &str)] = &[
     (
         "src/runtime/wal_history.rs",
-        "salvage: a copy of the cut segment, then the cut once the ledger records it",
+        "salvage: a copy of the cut segment, then the cut and its footer before the ledger records it",
     ),
     (
         "src/runtime/state/recovery.rs",
@@ -1466,6 +1466,45 @@ fn should_mutate_wal_authority_only_through_ledger_transitions() {
     assert!(
         journal_writers.is_empty(),
         "only WalHistory opens the ledger journal: {journal_writers:?}"
+    );
+}
+
+/// Production files that may assign the runtime sequence, each with why.
+/// Everything else hands out sequences through
+/// `RuntimeState::allocate_sequences`, under the WAL ledger's durable
+/// reservation (#843).
+const SEQUENCE_OWNERS: &[(&str, &str)] = &[(
+    "src/runtime/state.rs",
+    "the allocator, its give-back, the recovery raises and the epoch start",
+)];
+
+/// Every sequence is handed out through the reservation: no production code
+/// outside its owner assigns or bumps the runtime sequence (#843).
+#[test]
+fn should_allocate_sequences_only_through_the_reservation() {
+    // Arrange
+    let files = source_scan::production_files();
+
+    // Act
+    let mutations = lines_calling(
+        &files,
+        &[
+            "state.sequence =",
+            "state.sequence +=",
+            "runtime.sequence =",
+            "state.sequence.checked_add(",
+            "state.sequence.saturating_add(",
+        ],
+    );
+
+    // Assert
+    let unexpected: Vec<_> = mutations
+        .iter()
+        .filter(|(file, _)| !SEQUENCE_OWNERS.iter().any(|(owner, _)| owner == file))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "sequences are handed out outside the reservation; use RuntimeState::allocate_sequences: {unexpected:#?}"
     );
 }
 
@@ -1545,6 +1584,38 @@ const DELETED_BY_WAL_REDESIGN: &[(&str, &str)] = &[
     ("cloud_segment_object_key", "#842"),
     ("cloud_segment_file_name", "#842"),
     ("faults_fired", "#842"),
+    ("parse_segment_id", "#843"),
+    ("current_segment_id", "#843"),
+    ("WalBacking", "#843"),
+    ("take_wal_backing", "#843"),
+    ("adopt_wal_history", "#843"),
+    ("EpochPolicy", "#843"),
+    ("WriterEpochFrontiers", "#843"),
+    ("max_writer_epoch", "#843"),
+    ("max_epoch_seen", "#843"),
+    ("stale_records_skipped", "#843"),
+    ("discover_frontiers", "#843"),
+    ("duplicate_before", "#843"),
+    ("DUPLICATE_RESCANS", "#843"),
+    ("WRITER_EPOCH", "#843"),
+    ("has_current_record_prefix", "#843"),
+    ("segment_max_sequence", "#843"),
+    ("record_segment_sequence", "#843"),
+    ("current_segment_max_sequence", "#843"),
+    ("inspect_local_bytes", "#843"),
+    ("inspect_local_sealed_wal_file", "#843"),
+    ("RecoveredCloudActiveWal", "#843"),
+    ("recovered_cloud_active_wal", "#843"),
+    ("restore_recovered_cloud_active_wal", "#843"),
+    ("seal_recovered_cloud_active_segment", "#843"),
+    ("flush_recovered_cloud_wal_within", "#843"),
+    ("commit_set_aside", "#843"),
+    ("commit_set_aside_within", "#843"),
+    ("EmptyHolder", "#843"),
+    ("loses_required_value", "#843"),
+    ("Expectation::Chain", "#843"),
+    ("OpenTail", "#843"),
+    ("cloud_segment::object_key", "#843"),
 ];
 
 /// Whether `source` holds `token` as a whole identifier, not as part of a

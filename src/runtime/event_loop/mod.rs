@@ -104,7 +104,35 @@ use crate::runtime::actors::flush::FlushWorkerResult;
 struct RecoveredCloudWalConfig {
     remote_segments: BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
     local_segments: BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
-    active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
+    /// Recovery sealed the tail at open: start the uploads it owes then,
+    /// as far as the upload queue admits (#843).
+    upload_at_open: bool,
+}
+
+impl RecoveredCloudWalConfig {
+    /// The obligations `config` recovered, and in `CloudAsync` the tail
+    /// recovery sealed at open: owed to the cloud like any sealed local
+    /// segment, and uploaded from the open on.
+    fn with_sealed_tail(
+        config: &super::RuntimeConfig,
+        sealed_tail: Option<crate::runtime::wal_history::SealedSegment>,
+    ) -> Self {
+        let mut recovered = Self::from(config);
+        if config.wal_durability_policy != crate::wal::DurabilityPolicy::CloudAsync {
+            return recovered;
+        }
+        if let Some(sealed) = sealed_tail {
+            recovered.upload_at_open = true;
+            recovered.local_segments.insert(
+                sealed.id,
+                crate::runtime::RecoveredCloudWalSegment {
+                    max_sequence: sealed.facts.link.last_seq,
+                    writer_epoch: sealed.epoch,
+                },
+            );
+        }
+        recovered
+    }
 }
 
 impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
@@ -132,7 +160,7 @@ impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
                 &config.recovered_local_wal_segments,
                 &config.recovered_local_wal_segment_epochs,
             ),
-            active_wal: config.recovered_cloud_active_wal,
+            upload_at_open: false,
         }
     }
 }
@@ -239,13 +267,16 @@ impl EventLoop {
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
+        // Before anything reads the ledger or admits work (#843): the
+        // recovered tail is sealed durably, and sequences an earlier process
+        // reserved are never handed out again.
+        let sealed_tail = state.begin_wal_epoch(config.writer_epoch)?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
             flush_worker_mode.worker_msg_tx(),
         );
-        let (memory_mode, initial_segment_id) =
-            (state.is_memory_mode(), state.wal.current_segment_id);
-        let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
+        let (memory_mode, initial_segment_id) = (state.is_memory_mode(), state.wal.open_segment());
+        let recovered_cloud_wal = RecoveredCloudWalConfig::with_sealed_tail(&config, sealed_tail);
         Self::apply_runtime_state_config(&mut state, &config);
 
         let resources = resources::assemble_sst_resources(&state, memory_mode, &config);
@@ -266,7 +297,7 @@ impl EventLoop {
             config.flush_memory_limit,
         )?;
         let mut wal_actor = WalActor::open(
-            state.take_wal_backing(memory_mode)?,
+            &state,
             config.wal_durability_policy,
             config.wal_batch_config,
             config.writer_epoch,
@@ -355,15 +386,17 @@ impl EventLoop {
             self.set_hybrid_storage(storage);
         }
         if self.wal_actor.is_cloud_async() {
-            let boundary = if recovered_cloud_wal.active_wal.is_some() {
-                0
-            } else {
-                self.state.sequence
-            };
             self.wal_transition
-                .initialize_gc_pins(self.state.wal.current_segment_id, boundary);
+                .initialize_gc_pins(self.state.wal.open_segment(), self.state.sequence);
         }
-        self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)
+        self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)?;
+        if self.cloud_coordinator.hybrid_storage.is_some() {
+            // Nothing owed may already cover every record below the open
+            // segment.
+            let durable = self.state.wal.frontiers.cloud_durable();
+            self.state.wal.advance_cloud_through(durable);
+        }
+        Ok(())
     }
 
     /// The compaction publisher shares the flush worker's inline mode so
@@ -445,8 +478,7 @@ impl EventLoop {
         check_startup_scope(startup_scope, "recovered cloud WAL initialization")?;
         let remote_segments = &config.remote_segments;
         let local_segments = &config.local_segments;
-        let active_wal = config.active_wal;
-        if remote_segments.is_empty() && local_segments.is_empty() && active_wal.is_none() {
+        if remote_segments.is_empty() && local_segments.is_empty() {
             return Ok(());
         }
         if !self.wal_actor.is_cloud_async() {
@@ -491,10 +523,7 @@ impl EventLoop {
             .map_err(|refusal| crate::common::MidgeError::RecoveryFailed(refusal.to_string()))?;
         check_startup_scope(startup_scope, "recovered cloud WAL acknowledgement")?;
         if let Some(durable) = initially_durable.last() {
-            self.state
-                .wal
-                .frontiers
-                .advance_cloud_to(durable.max_sequence);
+            self.state.wal.advance_cloud_through(durable.max_sequence);
         }
         for crate::wal::publish::OwedSegment { segment_id, .. } in initially_durable {
             check_startup_scope(startup_scope, "recovered durable cloud WAL")?;
@@ -510,23 +539,14 @@ impl EventLoop {
                 .upload_backlog
                 .insert(segment_id, segment.max_sequence);
         }
-
-        if let Some(active_wal) = active_wal {
-            check_startup_scope(startup_scope, "recovered active cloud WAL")?;
-            self.wal_actor
-                .restore_recovered_cloud_active_wal(&mut self.state, active_wal)?;
+        if config.upload_at_open {
+            // The open fails rather than serve without the writer authority
+            // these uploads need; the sealed tail stays owed to the cloud.
             let deadline = startup_scope.map_or_else(
-                crate::common::OperationDeadline::unbounded,
+                || crate::common::OperationDeadline::from_budget(self.runtime_response_timeout),
                 crate::common::DeadlineScope::deadline,
             );
-            if self
-                .seal_recovered_cloud_active_segment(&deadline)?
-                .is_none()
-            {
-                return Err(crate::common::MidgeError::RecoveryFailed(
-                    "recovered active cloud WAL was not sealed for resumed upload".to_string(),
-                ));
-            }
+            self.try_drain_cloud_wal_upload_backlog_within(&deadline)?;
         }
 
         check_startup_scope(startup_scope, "recovered cloud WAL completion")?;

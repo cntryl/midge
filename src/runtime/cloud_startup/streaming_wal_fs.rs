@@ -74,8 +74,7 @@ impl StreamingWalFs {
 }
 
 fn canonical_wal_name(name: &str) -> bool {
-    crate::wal::parse_segment_id(name)
-        .is_some_and(|segment_id| crate::wal::segment_file_name(segment_id) == name)
+    crate::wal::parse_segment_file_name(name).is_some()
 }
 
 fn replay_directory(path: &FsPath) -> bool {

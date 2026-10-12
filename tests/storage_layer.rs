@@ -1546,7 +1546,7 @@ mod compatibility_fixtures {
     /// its format. Its empty pre-ledger `wal.log` goes with the old marker.
     fn copy_populated_fixture_as_current_format() -> tempfile::TempDir {
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
-        fs::write(temp.path().join("FORMAT"), "midge-format-version=5\n")
+        fs::write(temp.path().join("FORMAT"), "midge-format-version=6\n")
             .expect("mark fixture copy as the current format");
         fs::remove_file(temp.path().join("wal").join("wal.log"))
             .expect("drop the pre-ledger active WAL");
@@ -1761,9 +1761,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v6_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v7_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v6");
+        let temp = copy_fixture_dir("future_v7");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())

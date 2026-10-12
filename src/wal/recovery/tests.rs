@@ -30,8 +30,8 @@ fn encode_frame(record: &WalRecord) -> Vec<u8> {
 fn should_fail_replay_closed_given_duplicate_key_sequence() {
     // Arrange
     let mut memtables = HashMap::new();
-    let first = put_record(b"duplicate", 7, 1);
-    let mut conflicting = put_record(b"duplicate", 7, 1);
+    let first = put_record(b"duplicate", 7);
+    let mut conflicting = put_record(b"duplicate", 7);
     conflicting.value = Some(Bytes::from_static(b"conflicting"));
     apply_record(&first, &mut memtables).expect("apply first record");
 
@@ -52,7 +52,7 @@ fn should_reject_delete_range_record_missing_range_end() {
     // Arrange: RANGE_END is required for DeleteRange (lsm-spec format/wal.md
     // §5.1) — a record missing it must be rejected, not silently skipped.
     let mut memtables = HashMap::new();
-    let record = WalRecord::new(WalOpKind::DeleteRange, Bytes::from_static(b"a"), None, 1, 1);
+    let record = WalRecord::new(WalOpKind::DeleteRange, Bytes::from_static(b"a"), None, 1);
     assert_eq!(record.range_end, None);
 
     // Act
@@ -65,20 +65,19 @@ fn should_reject_delete_range_record_missing_range_end() {
     );
 }
 
-fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord {
+fn put_record(key: &'static [u8], sequence: u64) -> WalRecord {
     WalRecord::new(
         WalOpKind::Put,
         Bytes::from_static(key),
         Some(Bytes::from_static(b"value")),
         sequence,
-        writer_epoch,
     )
 }
 
 fn wal_with_corrupted_length_before_valid_suffix() -> Vec<u8> {
-    let prefix = encode_frame(&put_record(b"prefix", 1, 1));
-    let hidden = encode_frame(&put_record(b"hidden", 2, 1));
-    let suffix = encode_frame(&put_record(b"suffix", 3, 1));
+    let prefix = encode_frame(&put_record(b"prefix", 1));
+    let hidden = encode_frame(&put_record(b"hidden", 2));
+    let suffix = encode_frame(&put_record(b"suffix", 3));
     let hidden_offset = prefix.len();
     let mut wal_bytes = [prefix, hidden, suffix].concat();
     let corrupt_len = u32::try_from(wal_bytes.len()).unwrap();
@@ -105,7 +104,7 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
         .expect("create WAL directory");
     let segment = FsPath::new(format!("wal/{}", crate::wal::segment_file_name(1)));
     let bytes = (1..=128)
-        .map(|sequence| encode_frame(&put_record(b"key", sequence, 1)))
+        .map(|sequence| encode_frame(&put_record(b"key", sequence)))
         .collect::<Vec<_>>()
         .concat();
     let mut file = storage
@@ -122,6 +121,11 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
     file.append(bytes::Bytes::from(bytes))
         .expect("write WAL fixture");
     drop(file);
+    let segments = crate::wal::recovery::fixture::wrap_chain(
+        &storage,
+        &crate::wal::recovery::fixture::segments(&wal_dir, &[1], None),
+        0,
+    );
     let open_fault = |nth| crate::simulation::crash_fs::Fault {
         op: crate::simulation::crash_fs::FaultOp::Open,
         path: segment.0.clone(),
@@ -130,24 +134,27 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
         error: crate::simulation::crash_fs::FaultError::Io,
     };
 
-    // Act: the second open fails; then a third open would have failed.
-    let second = device.inject(open_fault(2));
-    let failed = replay_fixture(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[1], None),
-        &mut HashMap::new(),
-    );
-    device.disarm_faults();
-    let third = device.inject(open_fault(3));
-    let replayed = replay_fixture(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[1], None),
-        &mut HashMap::new(),
-    );
+    let replay = |memtables: &mut HashMap<_, _>| {
+        replay_wal_with_manifest_filter_within(
+            &storage,
+            &segments,
+            memtables,
+            ReplayPolicy::Strict,
+            &|_| Ok(true),
+            None,
+        )
+    };
 
-    // Assert: epoch discovery and record replay each open the WAL once.
-    assert!(device.fired(second) && failed.is_err());
-    assert!(!device.fired(third), "replay opened the WAL a third time");
+    // Act: the first open fails; then a second open would have failed.
+    let first = device.inject(open_fault(1));
+    let failed = replay(&mut HashMap::new());
+    device.disarm_faults();
+    let second = device.inject(open_fault(2));
+    let replayed = replay(&mut HashMap::new());
+
+    // Assert: one pass reads the WAL, opening it once (#843).
+    assert!(device.fired(first) && failed.is_err());
+    assert!(!device.fired(second), "replay opened the WAL a second time");
     assert_eq!(replayed.expect("replay").record_count, 128);
 }
 
@@ -155,8 +162,10 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
 fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() {
     // Arrange
     let replay_file = ReplayFile {
+        id: 1,
         path: FsPath::new(crate::wal::segment_file_name(1)),
         kind: ReplayFileKind::FinalActive,
+        expect: super::Expectation::Epoch(0),
     };
     let failure = ReplayFailure::Error(MidgeError::Corruption(
         "Incomplete WAL record text alone is not a typed tail".to_string(),
@@ -211,7 +220,6 @@ fn should_recover_put_record_key_value_when_replaying_wal() {
             Bytes::from_static(b"test_key"),
             Some(Bytes::from_static(b"test_value")),
             1,
-            1,
         );
         writer.append_record(&record).unwrap();
         writer.sync().unwrap();
@@ -253,7 +261,6 @@ fn should_increment_record_count_when_replaying_put() {
             Bytes::from_static(b"test_key"),
             Some(Bytes::from_static(b"test_value")),
             1,
-            1,
         );
         writer.append_record(&record).unwrap();
         writer.sync().unwrap();
@@ -292,7 +299,6 @@ fn should_track_max_sequence_from_put_record() {
             WalOpKind::Put,
             Bytes::from_static(b"test_key"),
             Some(Bytes::from_static(b"test_value")),
-            1,
             1,
         );
         writer.append_record(&record).unwrap();
@@ -333,17 +339,11 @@ fn should_recover_delete_operation_when_replaying_wal() {
             Bytes::from_static(b"test_key"),
             Some(Bytes::from_static(b"test_value")),
             1,
-            1,
         );
         writer.append_record(&put_record).unwrap();
 
-        let delete_record = WalRecord::new(
-            WalOpKind::Delete,
-            Bytes::from_static(b"test_key"),
-            None,
-            2,
-            1,
-        );
+        let delete_record =
+            WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
         writer.append_record(&delete_record).unwrap();
         writer.sync().unwrap();
     }
@@ -384,17 +384,11 @@ fn should_count_put_records() {
             Bytes::from_static(b"test_key"),
             Some(Bytes::from_static(b"test_value")),
             1,
-            1,
         );
         writer.append_record(&put_record).unwrap();
 
-        let delete_record = WalRecord::new(
-            WalOpKind::Delete,
-            Bytes::from_static(b"test_key"),
-            None,
-            2,
-            1,
-        );
+        let delete_record =
+            WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
         writer.append_record(&delete_record).unwrap();
         writer.sync().unwrap();
     }
@@ -435,7 +429,6 @@ fn should_separate_records_by_column_family_when_recovering() {
             Bytes::from_static(b"key0"),
             Some(Bytes::from_static(b"value0")),
             1,
-            1,
         );
         writer.append_record(&record_cf0).unwrap();
 
@@ -445,7 +438,6 @@ fn should_separate_records_by_column_family_when_recovering() {
             Bytes::from_static(b"key1"),
             Some(Bytes::from_static(b"value1")),
             2,
-            1,
         );
         writer.append_record(&record_cf1).unwrap();
         writer.sync().unwrap();
@@ -487,7 +479,6 @@ fn should_recover_both_column_families_with_correct_data() {
             Bytes::from_static(b"key0"),
             Some(Bytes::from_static(b"value0")),
             1,
-            1,
         );
         writer.append_record(&record_cf0).unwrap();
 
@@ -497,7 +488,6 @@ fn should_recover_both_column_families_with_correct_data() {
             Bytes::from_static(b"key1"),
             Some(Bytes::from_static(b"value1")),
             2,
-            1,
         );
         writer.append_record(&record_cf1).unwrap();
         writer.sync().unwrap();
@@ -540,7 +530,6 @@ fn should_count_records_across_multiple_column_families() {
             Bytes::from_static(b"key0"),
             Some(Bytes::from_static(b"value0")),
             1,
-            1,
         );
         writer.append_record(&record_cf0).unwrap();
 
@@ -550,7 +539,6 @@ fn should_count_records_across_multiple_column_families() {
             Bytes::from_static(b"key1"),
             Some(Bytes::from_static(b"value1")),
             2,
-            1,
         );
         writer.append_record(&record_cf1).unwrap();
         writer.sync().unwrap();
@@ -602,16 +590,16 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
             Bytes::from_static(b"key1"),
             Some(Bytes::from_static(b"value1")),
             5,
-            1,
         );
         writer.append_record(&record1).unwrap();
 
+        // Sequences strictly increase within a segment (#843); gaps are
+        // allowed.
         let record2 = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key2"),
             Some(Bytes::from_static(b"value2")),
-            10,
-            1,
+            7,
         );
         writer.append_record(&record2).unwrap();
 
@@ -619,8 +607,7 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
             WalOpKind::Put,
             Bytes::from_static(b"key3"),
             Some(Bytes::from_static(b"value3")),
-            7,
-            1,
+            10,
         );
         writer.append_record(&record3).unwrap();
         writer.sync().unwrap();
@@ -698,7 +685,6 @@ fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
             Bytes::from_static(b"expired_key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
         // Set expiration to the past (1 millisecond after epoch)
         expired_record.expiration = Some(1);
@@ -709,7 +695,6 @@ fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
             Bytes::from_static(b"future_key"),
             Some(Bytes::from_static(b"value")),
             2,
-            1,
         );
         // Set expiration to far future
         future_record.expiration = Some(u64::MAX);
@@ -768,7 +753,6 @@ fn should_track_bytes_accounting_correctly() {
             Bytes::from_static(b"key123"),         // 6 bytes
             Some(Bytes::from_static(b"value456")), // 8 bytes
             1,
-            1,
         );
         writer.append_record(&record).unwrap();
         writer.sync().unwrap();
@@ -812,7 +796,6 @@ fn should_handle_delete_range_operations() {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
         writer.append_record(&put_record).unwrap();
 
@@ -822,7 +805,6 @@ fn should_handle_delete_range_operations() {
             Bytes::from_static(b"start"),
             None,
             2,
-            1,
         );
         delete_range_record.range_end = Some(Bytes::from_static(b"end"));
         writer.append_record(&delete_range_record).unwrap();
@@ -860,13 +842,8 @@ fn should_handle_transaction_markers() {
         )
         .unwrap();
 
-        let begin_record = WalRecord::new(
-            WalOpKind::TxnBegin,
-            Bytes::from_static(b"txn_key"),
-            None,
-            1,
-            1,
-        );
+        let begin_record =
+            WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn_key"), None, 1);
         writer.append_record(&begin_record).unwrap();
 
         let put_record = WalRecord::new(
@@ -874,7 +851,6 @@ fn should_handle_transaction_markers() {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             2,
-            1,
         );
         writer.append_record(&put_record).unwrap();
 
@@ -883,7 +859,6 @@ fn should_handle_transaction_markers() {
             Bytes::from_static(b"txn_key"),
             None,
             3,
-            1,
         );
         writer.append_record(&commit_record).unwrap();
 
@@ -932,19 +907,17 @@ fn should_apply_txn_batch_atomically_during_recovery() {
             Bytes::from_static(b"batch-key"),
             Some(Bytes::from_static(b"batch-value")),
             2,
-            7,
         );
         put_record.txn_id = Some(11);
 
         let payload =
-            crate::wal::encoding::encode_txn_batch_payload(11, 1, 3, 7, &[put_record]).unwrap();
+            crate::wal::encoding::encode_txn_batch_payload(11, 1, 3, 0, &[put_record]).unwrap();
         let mut batch_record = WalRecord::new_cf(
             0,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload),
             3,
-            7,
         );
         batch_record.txn_id = Some(11);
 
@@ -986,12 +959,12 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
             fs as Arc<dyn crate::io::Fs>,
         )
         .unwrap();
-        let mut covered = put_record(b"covered", 2, 7);
+        let mut covered = put_record(b"covered", 2);
         covered.txn_id = Some(11);
-        let mut uncovered = put_record(b"uncovered", 3, 7);
+        let mut uncovered = put_record(b"uncovered", 3);
         uncovered.txn_id = Some(11);
         let payload =
-            crate::wal::encoding::encode_txn_batch_payload(11, 1, 4, 7, &[covered, uncovered])
+            crate::wal::encoding::encode_txn_batch_payload(11, 1, 4, 0, &[covered, uncovered])
                 .unwrap();
         let mut batch = WalRecord::new_cf(
             0,
@@ -999,7 +972,6 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
             Bytes::from_static(b"txn"),
             Some(payload),
             4,
-            7,
         );
         batch.txn_id = Some(11);
         writer.append_record(&batch).unwrap();
@@ -1009,7 +981,11 @@ fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
 
     // Act
     let mut memtables = HashMap::new();
-    let segments = crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1));
+    let segments = crate::wal::recovery::fixture::wrap_chain(
+        &storage,
+        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
+        0,
+    );
     let stats = replay_wal_with_manifest_filter_within(
         &storage,
         &segments,
@@ -1049,7 +1025,7 @@ fn should_recover_only_committed_transaction_given_split_wal_records_when_commit
         .unwrap();
 
         let mut begin_record =
-            WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 1);
+            WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1);
         begin_record.txn_id = Some(42);
         writer.append_record(&begin_record).unwrap();
 
@@ -1058,7 +1034,6 @@ fn should_recover_only_committed_transaction_given_split_wal_records_when_commit
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             2,
-            1,
         );
         put_record.txn_id = Some(42);
         writer.append_record(&put_record).unwrap();
@@ -1085,64 +1060,50 @@ fn should_recover_only_committed_transaction_given_split_wal_records_when_commit
 
 #[test]
 fn should_isolate_reused_transaction_id_by_writer_epoch() {
-    // Arrange: epoch 11 crashes after writing an uncommitted operation.
-    // Epoch 12 then reuses transaction id 1 and commits different data.
+    // Arrange: epoch 11 crashes after writing an uncommitted operation in
+    // segment 1. Epoch 12 then reuses transaction id 1 in segment 2 and
+    // commits different data. Transaction ids restart in every process; the
+    // segment headers' epochs keep the two apart.
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
     std::fs::create_dir(&wal_subdir).unwrap();
     let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-    {
-        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
-        let writer = FsWalWriterIo::new(
-            &crate::wal::segment_file_name(1),
-            fs as Arc<dyn crate::io::Fs>,
-        )
-        .unwrap();
-        let mut old_begin =
-            WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 11);
-        old_begin.txn_id = Some(1);
-        writer.append_record(&old_begin).unwrap();
-        let mut orphaned = WalRecord::new(
+    let marker = |op, seq| {
+        let mut record = WalRecord::new(op, Bytes::from_static(b"txn"), None, seq);
+        record.txn_id = Some(1);
+        record
+    };
+    let member = |key: &'static [u8], value: &'static [u8], seq| {
+        let mut record = WalRecord::new(
             WalOpKind::Put,
-            Bytes::from_static(b"orphaned"),
-            Some(Bytes::from_static(b"must-stay-hidden")),
-            2,
-            11,
+            Bytes::from_static(key),
+            Some(Bytes::from_static(value)),
+            seq,
         );
-        orphaned.txn_id = Some(1);
-        writer.append_record(&orphaned).unwrap();
-
-        let mut new_begin =
-            WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 3, 12);
-        new_begin.txn_id = Some(1);
-        writer.append_record(&new_begin).unwrap();
-        let mut committed = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"committed"),
-            Some(Bytes::from_static(b"visible")),
-            4,
-            12,
-        );
-        committed.txn_id = Some(1);
-        writer.append_record(&committed).unwrap();
-        let mut new_commit = WalRecord::new(
-            WalOpKind::TxnCommit,
-            Bytes::from_static(b"txn"),
-            None,
-            5,
-            12,
-        );
-        new_commit.txn_id = Some(1);
-        writer.append_record(&new_commit).unwrap();
-        writer.sync().unwrap();
-    }
+        record.txn_id = Some(1);
+        record
+    };
+    let (first, link) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        11,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&marker(WalOpKind::TxnBegin, 1))
+    .record(&member(b"orphaned", b"must-stay-hidden", 2))
+    .seal();
+    let second = crate::wal::format::segment::SegmentBuilder::new(2, 12, link)
+        .record(&marker(WalOpKind::TxnBegin, 3))
+        .record(&member(b"committed", b"visible", 4))
+        .record(&marker(WalOpKind::TxnCommit, 5))
+        .open();
+    std::fs::write(wal_subdir.join(crate::wal::segment_file_name(1)), first).unwrap();
+    std::fs::write(wal_subdir.join(crate::wal::segment_file_name(2)), second).unwrap();
 
     // Act
     let mut memtables = HashMap::new();
     replay_fixture(
         &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
+        &crate::wal::recovery::fixture::segments(&FsPath::new("wal"), &[1], Some(2)),
         &mut memtables,
     )
     .unwrap();
@@ -1173,7 +1134,7 @@ fn should_replay_committed_split_transaction_from_spool() {
             fs as Arc<dyn crate::io::Fs>,
         )
         .unwrap();
-        let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1, 1);
+        let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1);
         begin.txn_id = Some(txn_id);
         writer.append_record(&begin).unwrap();
         for index in 0..operation_count {
@@ -1182,7 +1143,6 @@ fn should_replay_committed_split_transaction_from_spool() {
                 Bytes::from(format!("spooled-{index:03}")),
                 Some(Bytes::from(vec![b'x'; 4 * 1024])),
                 index + 2,
-                1,
             );
             put.txn_id = Some(txn_id);
             writer.append_record(&put).unwrap();
@@ -1192,7 +1152,6 @@ fn should_replay_committed_split_transaction_from_spool() {
             Bytes::from_static(b"txn"),
             None,
             operation_count + 2,
-            1,
         );
         commit.txn_id = Some(txn_id);
         writer.append_record(&commit).unwrap();
@@ -1243,7 +1202,6 @@ fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
             Bytes::from_static(b"prefix"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
         writer.append_record(&prefix).unwrap();
 
@@ -1253,18 +1211,16 @@ fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
             Bytes::from_static(b"truncated"),
             Some(Bytes::from_static(b"should-not-appear")),
             3,
-            1,
         );
         batched_put.txn_id = Some(90);
         let payload =
-            crate::wal::encoding::encode_txn_batch_payload(90, 2, 4, 1, &[batched_put]).unwrap();
+            crate::wal::encoding::encode_txn_batch_payload(90, 2, 4, 0, &[batched_put]).unwrap();
         let mut batch_record = WalRecord::new_cf(
             0,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload),
             4,
-            1,
         );
         batch_record.txn_id = Some(90);
         writer.append_record(&batch_record).unwrap();
@@ -1309,7 +1265,6 @@ fn should_reject_corrupt_final_active_wal_frame_given_complete_frame_header_when
         Bytes::from_static(b"crc_key"),
         Some(Bytes::from_static(b"crc_value")),
         1,
-        9,
     );
     let payload = crate::wal::encoding::encode(&record).unwrap();
     let mut frame = Vec::new();
@@ -1357,7 +1312,6 @@ fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() 
             Bytes::from_static(b"good"),
             Some(Bytes::from_static(b"value")),
             1,
-            2,
         );
         writer.append_record(&record).unwrap();
         writer.sync().unwrap();
@@ -1367,7 +1321,6 @@ fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() 
         WalOpKind::Put,
         Bytes::from_static(b"bad"),
         Some(Bytes::from_static(b"value")),
-        2,
         2,
     );
     let payload = crate::wal::encoding::encode(&bad_record).unwrap();
@@ -1416,7 +1369,6 @@ fn should_salvage_valid_prefix_on_truncated_tail_frame() {
             Bytes::from_static(b"good"),
             Some(Bytes::from_static(b"value")),
             1,
-            3,
         );
         writer.append_record(&record).unwrap();
         writer.sync().unwrap();
@@ -1427,7 +1379,6 @@ fn should_salvage_valid_prefix_on_truncated_tail_frame() {
         Bytes::from_static(b"tail"),
         Some(Bytes::from_static(b"value")),
         2,
-        3,
     );
     let payload = crate::wal::encoding::encode(&tail_record).unwrap();
     let mut frame = Vec::new();
@@ -1463,17 +1414,25 @@ fn should_fail_strict_recovery_given_corruption_in_a_sealed_wal_segment() {
     let wal_dir = FsPath::new("wal");
     let first_segment = wal_subdir.join(crate::wal::segment_file_name(1));
 
-    append_raw_bytes(&first_segment, &encode_frame(&put_record(b"prefix", 1, 1)));
-    let mut torn_frame = encode_frame(&put_record(b"torn", 2, 1));
+    // Sealed segment 1 lost its footer to a torn final frame.
+    let mut torn_frame = encode_frame(&put_record(b"torn", 2));
     torn_frame.truncate(torn_frame.len() - 3);
-    append_raw_bytes(&first_segment, &torn_frame);
+    let torn_segment = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        0,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&put_record(b"prefix", 1))
+    .bytes(&torn_frame)
+    .open();
+    append_raw_bytes(&first_segment, &torn_segment);
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(2)),
-        &encode_frame(&put_record(b"later-sealed", 3, 2)),
+        &encode_frame(&put_record(b"later-sealed", 3)),
     );
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(3)),
-        &encode_frame(&put_record(b"active", 4, 2)),
+        &encode_frame(&put_record(b"active", 4)),
     );
     let mut memtables = HashMap::new();
 
@@ -1489,7 +1448,7 @@ fn should_fail_strict_recovery_given_corruption_in_a_sealed_wal_segment() {
     // Assert
     match error {
         MidgeError::Corruption(message) => {
-            assert!(message.contains("Incomplete WAL record"));
+            assert!(message.contains("Incomplete WAL record"), "{message}");
             assert!(message.contains(&crate::wal::segment_file_name(1)));
         }
         other => panic!("expected corruption error, got {other:?}"),
@@ -1507,17 +1466,25 @@ fn should_salvage_verified_prefix_given_corruption_in_a_sealed_wal_segment_when_
     let wal_dir = FsPath::new("wal");
     let first_segment = wal_subdir.join(crate::wal::segment_file_name(1));
 
-    append_raw_bytes(&first_segment, &encode_frame(&put_record(b"prefix", 1, 1)));
-    let mut torn_frame = encode_frame(&put_record(b"torn", 2, 1));
+    // Sealed segment 1 lost its footer to a torn final frame.
+    let mut torn_frame = encode_frame(&put_record(b"torn", 2));
     torn_frame.truncate(torn_frame.len() - 3);
-    append_raw_bytes(&first_segment, &torn_frame);
+    let torn_segment = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        0,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&put_record(b"prefix", 1))
+    .bytes(&torn_frame)
+    .open();
+    append_raw_bytes(&first_segment, &torn_segment);
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(2)),
-        &encode_frame(&put_record(b"later-sealed", 3, 2)),
+        &encode_frame(&put_record(b"later-sealed", 3)),
     );
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(3)),
-        &encode_frame(&put_record(b"active", 4, 2)),
+        &encode_frame(&put_record(b"active", 4)),
     );
     let mut memtables = HashMap::new();
 
@@ -1533,7 +1500,6 @@ fn should_salvage_verified_prefix_given_corruption_in_a_sealed_wal_segment_when_
     // Assert
     assert!(stats.had_corruption);
     assert_eq!(stats.record_count, 1);
-    assert_eq!(stats.max_epoch_seen, 1);
     assert_eq!(
         memtables[&0].get(b"prefix").unwrap(),
         Some(b"value".to_vec())
@@ -1554,11 +1520,11 @@ fn should_ignore_only_incomplete_final_active_wal_tail_given_truncated_frame_whe
 
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(1)),
-        &encode_frame(&put_record(b"sealed", 1, 1)),
+        &encode_frame(&put_record(b"sealed", 1)),
     );
     let active_path = wal_subdir.join(crate::wal::segment_file_name(2));
-    append_raw_bytes(&active_path, &encode_frame(&put_record(b"active", 2, 1)));
-    let mut torn_frame = encode_frame(&put_record(b"torn", 3, 1));
+    append_raw_bytes(&active_path, &encode_frame(&put_record(b"active", 2)));
+    let mut torn_frame = encode_frame(&put_record(b"torn", 3));
     torn_frame.truncate(torn_frame.len() - 3);
     append_raw_bytes(&active_path, &torn_frame);
     let mut memtables = HashMap::new();
@@ -1595,31 +1561,32 @@ fn should_report_verified_prefix_without_modifying_file_when_tolerating_active_w
     let storage = RealFs::new(dir.path()).unwrap();
     let wal_dir = FsPath::new("wal");
     let active_path = wal_subdir.join(crate::wal::segment_file_name(1));
-    let first = encode_frame(&put_record(b"first", 1, 1));
-    let second = encode_frame(&put_record(b"second", 2, 1));
+    let first = encode_frame(&put_record(b"first", 1));
+    let second = encode_frame(&put_record(b"second", 2));
     append_raw_bytes(&active_path, &first);
     append_raw_bytes(&active_path, &second);
-    let mut torn_frame = encode_frame(&put_record(b"torn", 3, 1));
+    let mut torn_frame = encode_frame(&put_record(b"torn", 3));
     torn_frame.truncate(torn_frame.len() - 3);
     append_raw_bytes(&active_path, &torn_frame);
+    let segments = crate::wal::recovery::fixture::wrap_chain(
+        &storage,
+        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
+        0,
+    );
     let original_len = std::fs::metadata(&active_path).unwrap().len();
     let mut memtables = HashMap::new();
 
     // Act
-    let stats = replay_fixture_with_policy(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
-        &mut memtables,
-        ReplayPolicy::Strict,
-    )
-    .unwrap();
+    let stats =
+        replay_fixture_with_policy(&storage, &segments, &mut memtables, ReplayPolicy::Strict)
+            .unwrap();
 
     // Assert
     assert_eq!(
         stats.tolerated_active_tail,
         Some(ToleratedActiveTail {
             path: FsPath::new(format!("wal/{}", crate::wal::segment_file_name(1))),
-            valid_bytes: (first.len() + second.len()) as u64,
+            valid_bytes: (crate::wal::format::HEADER_LEN + first.len() + second.len()) as u64,
         })
     );
     assert_eq!(
@@ -1639,7 +1606,7 @@ fn should_not_report_tolerated_tail_when_active_wal_is_complete() {
     let wal_dir = FsPath::new("wal");
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(1)),
-        &encode_frame(&put_record(b"complete", 1, 1)),
+        &encode_frame(&put_record(b"complete", 1)),
     );
     let mut memtables = HashMap::new();
 
@@ -1727,7 +1694,7 @@ fn should_tolerate_zero_filled_final_active_wal_tail_given_strict_recovery() {
     let storage = RealFs::new(dir.path()).unwrap();
     let wal_dir = FsPath::new("wal");
     let wal_path = wal_subdir.join(crate::wal::segment_file_name(1));
-    append_raw_bytes(&wal_path, &encode_frame(&put_record(b"prefix", 1, 1)));
+    append_raw_bytes(&wal_path, &encode_frame(&put_record(b"prefix", 1)));
     append_raw_bytes(&wal_path, &[0_u8; crate::wal::frame::WAL_FRAME_HEADER_LEN]);
     let mut memtables = HashMap::new();
 
@@ -1750,236 +1717,6 @@ fn should_tolerate_zero_filled_final_active_wal_tail_given_strict_recovery() {
 }
 
 #[test]
-fn should_skip_stale_writer_epoch_records_given_interleaved_epochs_when_replaying_multiple_segments(
-) {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let wal_subdir = dir.path().join("wal");
-    std::fs::create_dir(&wal_subdir).unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-
-    {
-        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
-        let writer = FsWalWriterIo::new(
-            &crate::wal::segment_file_name(1),
-            fs as Arc<dyn crate::io::Fs>,
-        )
-        .unwrap();
-
-        let fresh = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"fresh"),
-            Some(Bytes::from_static(b"v2")),
-            1,
-            2,
-        );
-        writer.append_record(&fresh).unwrap();
-
-        let stale = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"stale"),
-            Some(Bytes::from_static(b"v1")),
-            2,
-            1,
-        );
-        writer.append_record(&stale).unwrap();
-        writer.sync().unwrap();
-    }
-
-    let mut memtables = HashMap::new();
-
-    // Act
-    let stats = replay_fixture(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
-        &mut memtables,
-    )
-    .unwrap();
-
-    // Assert
-    assert_eq!(stats.max_epoch_seen, 2);
-    assert_eq!(stats.stale_records_skipped, 1);
-    assert_eq!(memtables[&0].get(b"fresh").unwrap(), Some(b"v2".to_vec()));
-    assert_eq!(memtables[&0].get(b"stale").unwrap(), None);
-}
-
-#[test]
-fn should_skip_stale_writer_epoch_records_seen_before_fresh_epoch() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let wal_subdir = dir.path().join("wal");
-    std::fs::create_dir(&wal_subdir).unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-
-    {
-        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
-        let writer = FsWalWriterIo::new(
-            &crate::wal::segment_file_name(1),
-            fs as Arc<dyn crate::io::Fs>,
-        )
-        .unwrap();
-
-        let stale = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"stale-first"),
-            Some(Bytes::from_static(b"v1")),
-            3,
-            1,
-        );
-        writer.append_record(&stale).unwrap();
-
-        let fresh = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"fresh-second"),
-            Some(Bytes::from_static(b"v2")),
-            2,
-            2,
-        );
-        writer.append_record(&fresh).unwrap();
-        writer.sync().unwrap();
-    }
-
-    let mut memtables = HashMap::new();
-
-    // Act
-    let stats = replay_fixture(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
-        &mut memtables,
-    )
-    .unwrap();
-
-    // Assert
-    assert_eq!(stats.max_epoch_seen, 2);
-    assert_eq!(stats.stale_records_skipped, 1);
-    assert_eq!(
-        memtables[&0].get(b"fresh-second").unwrap(),
-        Some(b"v2".to_vec())
-    );
-    assert_eq!(memtables[&0].get(b"stale-first").unwrap(), None);
-}
-
-#[test]
-fn should_skip_lower_epoch_record_when_seen_after_fresh_epoch_with_lower_sequence() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let wal_subdir = dir.path().join("wal");
-    std::fs::create_dir(&wal_subdir).unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-
-    {
-        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
-        let writer = FsWalWriterIo::new(
-            &crate::wal::segment_file_name(1),
-            fs as Arc<dyn crate::io::Fs>,
-        )
-        .unwrap();
-
-        let valid_old_epoch = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"valid-old-epoch"),
-            Some(Bytes::from_static(b"v1")),
-            1,
-            1,
-        );
-        writer.append_record(&valid_old_epoch).unwrap();
-
-        let fresh_epoch = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"fresh-epoch"),
-            Some(Bytes::from_static(b"v2")),
-            10,
-            2,
-        );
-        writer.append_record(&fresh_epoch).unwrap();
-
-        let stale_lower_sequence = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"zombie-low-seq"),
-            Some(Bytes::from_static(b"stale")),
-            2,
-            1,
-        );
-        writer.append_record(&stale_lower_sequence).unwrap();
-        writer.sync().unwrap();
-    }
-
-    let mut memtables = HashMap::new();
-
-    // Act
-    let stats = replay_fixture(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[], Some(1)),
-        &mut memtables,
-    )
-    .unwrap();
-
-    // Assert
-    assert_eq!(stats.max_epoch_seen, 2);
-    assert_eq!(stats.record_count, 2);
-    assert_eq!(stats.stale_records_skipped, 1);
-    assert_eq!(
-        memtables[&0].get(b"valid-old-epoch").unwrap(),
-        Some(b"v1".to_vec())
-    );
-    assert_eq!(
-        memtables[&0].get(b"fresh-epoch").unwrap(),
-        Some(b"v2".to_vec())
-    );
-    assert_eq!(memtables[&0].get(b"zombie-low-seq").unwrap(), None);
-}
-
-#[test]
-fn should_preserve_fencing_ordinal_when_duplicate_frame_is_skipped_across_wal_files() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let wal_subdir = dir.path().join("wal");
-    std::fs::create_dir(&wal_subdir).unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-    let duplicate = put_record(b"rotation-duplicate", 1, 1);
-    append_raw_bytes(
-        &wal_subdir.join(crate::wal::segment_file_name(1)),
-        &encode_frame(&duplicate),
-    );
-    let active_path = wal_subdir.join(crate::wal::segment_file_name(2));
-    append_raw_bytes(&active_path, &encode_frame(&duplicate));
-    append_raw_bytes(
-        &active_path,
-        &encode_frame(&put_record(b"fresh-epoch", 10, 2)),
-    );
-    append_raw_bytes(
-        &active_path,
-        &encode_frame(&put_record(b"stale-low-sequence", 2, 1)),
-    );
-    let mut memtables = HashMap::new();
-
-    // Act
-    let stats = replay_fixture(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&wal_dir, &[1], Some(2)),
-        &mut memtables,
-    )
-    .unwrap();
-
-    // Assert
-    assert_eq!(stats.max_epoch_seen, 2);
-    assert_eq!(stats.stale_records_skipped, 1);
-    assert_eq!(
-        memtables[&0].get(b"rotation-duplicate").unwrap(),
-        Some(b"value".to_vec())
-    );
-    assert_eq!(
-        memtables[&0].get(b"fresh-epoch").unwrap(),
-        Some(b"value".to_vec())
-    );
-    assert_eq!(memtables[&0].get(b"stale-low-sequence").unwrap(), None);
-}
-
-#[test]
 fn should_replay_distinct_records_that_share_a_key_across_wal_files() {
     // Arrange: same key and value in two files at different sequences is two
     // real writes, not a cross-file duplicate.
@@ -1990,11 +1727,11 @@ fn should_replay_distinct_records_that_share_a_key_across_wal_files() {
     let wal_dir = FsPath::new("wal");
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(1)),
-        &encode_frame(&put_record(b"shared-key", 1, 1)),
+        &encode_frame(&put_record(b"shared-key", 1)),
     );
     append_raw_bytes(
         &wal_subdir.join(crate::wal::segment_file_name(2)),
-        &encode_frame(&put_record(b"shared-key", 2, 1)),
+        &encode_frame(&put_record(b"shared-key", 2)),
     );
     let mut memtables = HashMap::new();
 
@@ -2019,7 +1756,6 @@ fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_rec
         Bytes::from_static(b"ttl-key"),
         Some(Bytes::from_static(b"ttl-value")),
         7,
-        1,
     );
     record.expiration = Some(20_000);
     let mut memtables = HashMap::new();
@@ -2043,14 +1779,10 @@ fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_rec
 }
 
 /// What one walker concluded about a local WAL file: whether it accepts the
-/// file and, if so, its verified sequence, byte, and epoch frontiers.
+/// file and, if so, its verified sequence and byte frontiers.
 #[derive(Debug, PartialEq, Eq)]
 enum WalkerVerdict {
-    Accepted {
-        newest_epoch: u64,
-        max_sequence: u64,
-        valid_bytes: u64,
-    },
+    Accepted { max_sequence: u64, valid_bytes: u64 },
     Rejected,
 }
 
@@ -2068,10 +1800,11 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     .expect("write WAL fixture");
     let storage = RealFs::new(dir.path()).expect("open fs");
 
-    let segments = crate::wal::recovery::fixture::segments(&FsPath::new("wal"), &[], Some(1));
+    // Damaged bytes stay as they are: no wrapping, only the builder's epoch.
+    let segments =
+        crate::wal::recovery::fixture::segments_in_epoch(&FsPath::new("wal"), &[], Some(1), 1);
     let replay = match validate_wal_with_policy(&storage, &segments, ReplayPolicy::Strict, None) {
         Ok(stats) => WalkerVerdict::Accepted {
-            newest_epoch: stats.max_epoch_seen,
             max_sequence: stats.max_sequence.unwrap_or(0),
             valid_bytes: stats
                 .tolerated_active_tail
@@ -2101,15 +1834,13 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     };
     let inspector = match super::streaming::inspect_wal_file(file.as_ref(), &path, limits) {
         Ok(prefix) => WalkerVerdict::Accepted {
-            newest_epoch: prefix.writer_epoch,
-            max_sequence: prefix.max_sequence,
+            max_sequence: prefix.max_sequence(),
             valid_bytes: prefix.valid_bytes as u64,
         },
         // Cloud recovery truncates a torn tail to the verified prefix, as
         // local replay tolerates it.
         Err(failure) if failure.is_incomplete_tail() => WalkerVerdict::Accepted {
-            newest_epoch: failure.verified_prefix().writer_epoch,
-            max_sequence: failure.verified_prefix().max_sequence,
+            max_sequence: failure.verified_prefix().max_sequence(),
             valid_bytes: failure.verified_prefix().valid_bytes as u64,
         },
         Err(_) => WalkerVerdict::Rejected,
@@ -2117,45 +1848,28 @@ fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
     (replay, inspector)
 }
 
-fn wal_with_epochs(epochs: &[u64]) -> Vec<u8> {
-    epochs
-        .iter()
-        .zip(1..)
-        .map(|(epoch, sequence)| encode_frame(&put_record(b"key", sequence, *epoch)))
-        .collect::<Vec<_>>()
-        .concat()
-}
-
-#[test]
-fn should_classify_identically_across_walkers_when_fenced_writer_interleaves() {
-    // Arrange: a paused, fenced writer (epoch 5) appended into its
-    // successor's file between epoch-6 records.
-    let bytes = wal_with_epochs(&[6, 6, 5, 6, 6]);
-
-    // Act
-    let (replay, inspector) = classify_with_both_walkers(&bytes);
-
-    // Assert
-    assert_eq!(
-        replay,
-        WalkerVerdict::Accepted {
-            newest_epoch: 6,
-            max_sequence: 5,
-            valid_bytes: bytes.len() as u64,
-        }
+/// An open segment holding `count` puts at sequences `1..=count`.
+fn open_segment_with(count: u64) -> Vec<u8> {
+    let mut builder = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        1,
+        crate::wal::format::ChainLink::GENESIS,
     );
-    assert_eq!(inspector, replay);
+    for sequence in 1..=count {
+        builder = builder.record(&put_record(b"key", sequence));
+    }
+    builder.open()
 }
 
 proptest::proptest! {
     #[test]
     fn should_classify_identically_across_walkers_when_given_fuzzed_wal_bytes(
-        epochs in proptest::collection::vec(0_u64..=4, 1..8),
+        count in 1_u64..8,
         damage in proptest::option::of((proptest::prelude::any::<proptest::sample::Index>(), 1_u8..=255)),
         cut in proptest::option::of(proptest::prelude::any::<proptest::sample::Index>()),
     ) {
         // Arrange
-        let mut bytes = wal_with_epochs(&epochs);
+        let mut bytes = open_segment_with(count);
         if let Some((index, mask)) = damage {
             let at = index.index(bytes.len());
             bytes[at] ^= mask;
@@ -2167,167 +1881,39 @@ proptest::proptest! {
         // Act
         let (replay, inspector) = classify_with_both_walkers(&bytes);
 
-        // Assert: inspection includes stale fenced records in its sequence
-        // bound, while replay excludes them from the applied frontier.
-        match (replay, inspector) {
-            (
-                WalkerVerdict::Accepted {
-                    newest_epoch: replay_epoch,
-                    max_sequence: replay_sequence,
-                    valid_bytes: replay_bytes,
-                },
-                WalkerVerdict::Accepted {
-                    newest_epoch: inspected_epoch,
-                    max_sequence: inspected_sequence,
-                    valid_bytes: inspected_bytes,
-                },
-            ) => {
-                proptest::prop_assert_eq!(inspected_epoch, replay_epoch, "bytes: {:?}", bytes);
-                proptest::prop_assert_eq!(inspected_bytes, replay_bytes, "bytes: {:?}", bytes);
-                proptest::prop_assert!(inspected_sequence >= replay_sequence, "bytes: {:?}", bytes);
-                if epochs.windows(2).all(|pair| pair[0] <= pair[1]) {
-                    proptest::prop_assert_eq!(inspected_sequence, replay_sequence, "bytes: {:?}", bytes);
-                }
-            }
-            (WalkerVerdict::Rejected, WalkerVerdict::Rejected) => {}
-            (replay, inspector) => {
-                proptest::prop_assert_eq!(inspector, replay, "bytes: {:?}", bytes);
-            }
-        }
-    }
-}
-
-/// One WAL fixture file: its name and `(key, sequence)` puts.
-type WalFixtureFile<'a> = (&'a str, &'a [(&'static [u8], u64)]);
-
-/// Write `files` into `wal/`.
-fn write_wal_files(directory: &TempDir, files: &[WalFixtureFile<'_>]) {
-    let wal_dir = directory.path().join("wal");
-    std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
-    for (name, records) in files {
-        let bytes: Vec<u8> = records
-            .iter()
-            .flat_map(|(key, sequence)| encode_frame(&put_record(key, *sequence, 1)))
-            .collect();
-        std::fs::write(wal_dir.join(name), bytes).expect("write WAL file");
+        // Assert
+        proptest::prop_assert_eq!(inspector, replay, "bytes: {:?}", bytes);
     }
 }
 
 #[test]
-fn should_keep_dedup_index_empty_when_local_wal_is_strictly_increasing() {
-    // Arrange: three files with strictly increasing sequences. Replay used to
-    // keep one dedup entry per record, about 40 bytes each (#524).
-    let directory = TempDir::new().expect("create WAL recovery directory");
-    let first: Vec<(&'static [u8], u64)> = (1..=50).map(|seq| (b"a" as &[u8], seq)).collect();
-    let second: Vec<(&'static [u8], u64)> = (51..=100).map(|seq| (b"b" as &[u8], seq)).collect();
-    let active: Vec<(&'static [u8], u64)> = (101..=150).map(|seq| (b"c" as &[u8], seq)).collect();
-    write_wal_files(
-        &directory,
-        &[
-            (&crate::wal::segment_file_name(1), &first),
-            (&crate::wal::segment_file_name(2), &second),
-            (&crate::wal::segment_file_name(3), &active),
-        ],
-    );
-    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
-    let mut memtables = HashMap::new();
-    streaming::reset_duplicate_rescans();
-
-    // Act
-    let stats = replay_fixture_with_policy(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&FsPath::new("wal"), &[1, 2], Some(3)),
-        &mut memtables,
-        ReplayPolicy::Strict,
-    )
-    .expect("replay strictly increasing WAL");
-
-    // Assert
-    assert_eq!(stats.record_count, 150);
-    assert_eq!(stats.max_sequence, Some(150));
-    assert_eq!(streaming::duplicate_rescans(), 0);
-}
-
-#[test]
-fn should_rescan_only_overlapping_records_when_segments_repeat_after_rotation() {
-    // Arrange: the active file repeats the sealed segment's last record, as
-    // a rotation overlap does. This is the control for the probe above.
-    let directory = TempDir::new().expect("create WAL recovery directory");
-    write_wal_files(
-        &directory,
-        &[
-            (&crate::wal::segment_file_name(1), &[(b"a", 1), (b"a", 2)]),
-            (&crate::wal::segment_file_name(2), &[(b"a", 2), (b"a", 3)]),
-        ],
-    );
-    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
-    let mut memtables = HashMap::new();
-    streaming::reset_duplicate_rescans();
-
-    // Act
-    let stats = replay_fixture_with_policy(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&FsPath::new("wal"), &[1], Some(2)),
-        &mut memtables,
-        ReplayPolicy::Strict,
-    )
-    .expect("replay overlapping WAL");
-
-    // Assert: the repeated record is skipped, not applied twice.
-    assert_eq!(stats.record_count, 3);
-    assert_eq!(streaming::duplicate_rescans(), 1);
-}
-
-#[test]
-fn should_not_rescan_fresh_records_when_a_stale_record_carries_a_higher_sequence() {
-    // Arrange: a fenced writer (epoch 1) appends a high sequence after its
-    // successor (epoch 2) started. Every later fresh record sits below that
-    // stale sequence; counting it would rescan the WAL once per record.
-    let directory = TempDir::new().expect("create WAL recovery directory");
-    let wal_dir = directory.path().join("wal");
-    std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
-    let mut bytes = encode_frame(&put_record(b"fresh", 1, 2));
-    bytes.extend(encode_frame(&put_record(b"stale", 100_000, 1)));
-    for sequence in 2..=200 {
-        bytes.extend(encode_frame(&put_record(b"fresh", sequence, 2)));
-    }
-    std::fs::write(wal_dir.join(crate::wal::segment_file_name(1)), bytes).expect("write WAL");
-    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
-    let mut memtables = HashMap::new();
-    streaming::reset_duplicate_rescans();
-
-    // Act
-    let stats = replay_fixture_with_policy(
-        &storage,
-        &crate::wal::recovery::fixture::segments(&FsPath::new("wal"), &[], Some(1)),
-        &mut memtables,
-        ReplayPolicy::Strict,
-    )
-    .expect("replay WAL with a stale high sequence");
-
-    // Assert
-    assert_eq!(stats.stale_records_skipped, 1);
-    assert_eq!(stats.record_count, 200);
-    assert_eq!(streaming::duplicate_rescans(), 0);
-}
-
-#[test]
-#[ignore = "#808 stage 2: allocation and linked history"]
 fn should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_epoch() {
     // Arrange: the LR-F3 layout. Segments 5 and 6 hold epoch-1 acknowledged
     // writes. After the next-segment id regressed to 1 at an epoch-2 open,
     // rotation sealed the active log (epoch-1 tail, then epoch-2 records)
-    // as segment 1, which now replays first.
+    // as segment 1, which now replays first. Each segment's header names
+    // its writer's epoch and links the segment before it in replay order.
     let dir = TempDir::new().unwrap();
     let wal_dir = dir.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
     let seg = |id: u64| wal_dir.join(crate::wal::segment_file_name(id));
-    let mut one = encode_frame(&put_record(b"e1-tail", 3, 1));
-    one.extend(encode_frame(&put_record(b"e2-new", 4, 2)));
-    std::fs::write(seg(1), one).unwrap();
-    std::fs::write(seg(5), encode_frame(&put_record(b"e1-acked-a", 1, 1))).unwrap();
-    std::fs::write(seg(6), encode_frame(&put_record(b"e1-acked-b", 2, 1))).unwrap();
-    std::fs::write(seg(7), b"").unwrap();
+    let builder = crate::wal::format::segment::SegmentBuilder::new;
+    let (one, link) = builder(1, 2, crate::wal::format::ChainLink::GENESIS)
+        .record(&put_record(b"e1-tail", 3))
+        .record(&put_record(b"e2-new", 4))
+        .seal();
+    let (five, link) = builder(5, 1, link)
+        .first_seq(1)
+        .record(&put_record(b"e1-acked-a", 1))
+        .seal();
+    let (six, link) = builder(6, 1, link)
+        .first_seq(2)
+        .record(&put_record(b"e1-acked-b", 2))
+        .seal();
+    let seven = builder(7, 2, link).open();
+    for (id, bytes) in [(1, one), (5, five), (6, six), (7, seven)] {
+        std::fs::write(seg(id), bytes).unwrap();
+    }
     let storage = RealFs::new(dir.path()).unwrap();
     let mut memtables = HashMap::new();
 
@@ -2348,10 +1934,9 @@ fn should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_
                 (
                     table.get(b"e1-acked-a").unwrap().is_some(),
                     table.get(b"e1-acked-b").unwrap().is_some(),
-                    stats.stale_records_skipped,
                     stats.had_corruption,
                 ),
-                (true, true, 0, false),
+                (true, true, false),
                 "acknowledged epoch-1 writes were skipped as stale"
             );
         }
@@ -2366,9 +1951,11 @@ fn replay_fixture_with_policy(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
+    // Bare bodies a test wrote become a chain of v2 segments first.
+    let segments = crate::wal::recovery::fixture::wrap_chain(storage, segments, 0);
     replay_wal_with_manifest_filter_within(
         storage,
-        segments,
+        &segments,
         memtables,
         policy,
         &|_| Ok(true),
@@ -2383,3 +1970,5 @@ fn replay_fixture(
 ) -> MidgeResult<RecoveryStats> {
     replay_fixture_with_policy(storage, segments, memtables, ReplayPolicy::Strict)
 }
+
+mod ledger_chain;

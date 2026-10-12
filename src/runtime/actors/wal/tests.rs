@@ -17,13 +17,13 @@ use std::sync::{Mutex, OnceLock};
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn seal_ticket_for_test(actor: &WalActor, state: &RuntimeState) -> WalSealTicket {
-    let segment_id = state.wal.current_segment_id;
+    let segment_id = state.wal.open_segment();
     WalSealTicket::for_test(
         segment_id,
         segment_id
             .checked_add(1)
             .expect("test segment has successor"),
-        actor.current_segment_max_sequence(),
+        actor.open_segment_max_sequence(),
     )
 }
 
@@ -35,11 +35,10 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
     let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(1))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1);
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -63,7 +62,7 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
                 .join(crate::wal::segment_file_name(1))
         )?
         .len(),
-        0
+        crate::wal::format::HEADER_LEN as u64
     );
     assert_eq!(
         setup.hybrid_storage.budget_snapshot().total_committed_bytes,
@@ -79,11 +78,10 @@ fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() ->
     let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -113,11 +111,13 @@ fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() ->
             .join(crate::wal::segment_file_name(1)),
     )?
     .len();
-    // Assert
-    assert!(physical > 0 && physical < 4096);
+    // Assert: the segment header is written when the segment is created,
+    // outside WAL admission; appends are charged what they wrote.
+    let appended = physical - crate::wal::format::HEADER_LEN as u64;
+    assert!(appended > 0 && appended < 4096);
     assert_eq!(
         setup.hybrid_storage.budget_snapshot().total_committed_bytes,
-        physical
+        appended
     );
     Ok(())
 }
@@ -227,11 +227,10 @@ fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted()
     // Arrange
     let mut state = RuntimeState::new("/tmp/test_midge_sequence_exhaustion".into(), true);
     state.sequence = u64::MAX - 1;
-    let mut actor = WalActor::new(
-        state.host_wal_dir().clone(),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -322,11 +321,17 @@ fn prepare_put_transaction(
 }
 
 /// A file-backed WAL actor over `fs`, appending to segment `open` of the
-/// ledger there, which starts at `open` when `fs` holds none.
-fn actor_over(fs: Arc<dyn Fs>, open: u64, policy: DurabilityPolicy) -> MidgeResult<WalActor> {
-    let history = crate::runtime::wal_history::WalHistory::open(fs, open)?;
+/// ledger there, which starts at `open` when `fs` holds none. `state`
+/// continues that ledger.
+fn actor_over(
+    state: &mut RuntimeState,
+    fs: Arc<dyn Fs>,
+    open: u64,
+    policy: DurabilityPolicy,
+) -> MidgeResult<WalActor> {
+    state.wal.history = crate::runtime::wal_history::WalHistory::open(fs, open, 0)?;
     WalActor::open(
-        crate::runtime::actors::wal::WalBacking::Files(history),
+        state,
         policy,
         BatchConfig::default(),
         1,
@@ -349,7 +354,7 @@ impl SegmentCreateFailingFs {
     }
 
     fn should_fail_open(&self, path: &FsPath, opts: FsOpenOptions) -> bool {
-        opts.create_new && *path == self.segment
+        (opts.create || opts.create_new) && *path == self.segment
     }
 }
 
@@ -425,8 +430,9 @@ impl SegmentWriterOpenFailingFs {
         }
     }
 
+    /// Creating the segment succeeds; opening it again for the writer fails.
     fn should_fail_open(&self, path: &FsPath, opts: FsOpenOptions) -> bool {
-        !opts.create_new && *path == self.segment
+        !opts.create && !opts.create_new && *path == self.segment
     }
 }
 
@@ -569,6 +575,28 @@ impl crate::wal::WalWriter for FsyncFailingWriter {
     fn current_pos(&self) -> u64 {
         self.inner.current_pos()
     }
+
+    fn tail(&self) -> crate::wal::format::SegmentTail {
+        self.inner.tail()
+    }
+
+    fn seal_facts(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MidgeResult<crate::wal::format::SealedFacts> {
+        self.inner.seal_facts(timeout)
+    }
+
+    /// Sealing syncs the footer, which fails like every other sync.
+    fn write_footer(
+        &self,
+        _facts: &crate::wal::format::SealedFacts,
+        _timeout: std::time::Duration,
+    ) -> MidgeResult<()> {
+        Err(MidgeError::Io(std::io::Error::other(
+            "injected fsync failure",
+        )))
+    }
 }
 
 #[test]
@@ -581,6 +609,7 @@ fn should_restore_open_actor_when_cloud_rotation_preflight_read_fails() -> Midge
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
     let mut wal_actor = actor_over(
+        &mut state,
         Arc::clone(&preflight) as Arc<dyn Fs>,
         1,
         DurabilityPolicy::CloudAsync,
@@ -596,7 +625,7 @@ fn should_restore_open_actor_when_cloud_rotation_preflight_read_fails() -> Midge
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
     wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
-    let segment_id = state.wal.current_segment_id;
+    let segment_id = state.wal.open_segment();
     preflight
         .fail_once
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -611,10 +640,10 @@ fn should_restore_open_actor_when_cloud_rotation_preflight_read_fails() -> Midge
     assert!(wal_actor.is_open());
     assert!(!wal_actor.is_fenced());
     assert!(!state.persistence_anomaly_detected());
-    assert_eq!(state.wal.current_segment_id, segment_id);
+    assert_eq!(state.wal.open_segment(), segment_id);
     wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
     wal_actor.rotate(&mut state, &ticket)?;
-    assert_eq!(state.wal.current_segment_id, segment_id + 1);
+    assert_eq!(state.wal.open_segment(), segment_id + 1);
     Ok(())
 }
 
@@ -625,8 +654,12 @@ fn should_fence_rotation_when_open_segment_is_missing_with_pending_records() -> 
     let mock = MockFs::new();
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    state.wal.current_segment_id = 4;
-    let mut wal_actor = actor_over(Arc::new(mock.clone()), 4, DurabilityPolicy::Batched)?;
+    let mut wal_actor = actor_over(
+        &mut state,
+        Arc::new(mock.clone()),
+        4,
+        DurabilityPolicy::Batched,
+    )?;
     let prepared = prepare_put_transaction(
         &mut wal_actor,
         &mut state,
@@ -650,7 +683,7 @@ fn should_fence_rotation_when_open_segment_is_missing_with_pending_records() -> 
     assert!(matches!(error, MidgeError::RecoveryFailed(_)), "{error:?}");
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
-    assert_eq!(state.wal.current_segment_id, 4);
+    assert_eq!(state.wal.open_segment(), 4);
     assert_eq!(state.wal.frontiers.local_durable(), 0);
     assert!(matches!(
         begin_sync_for_test(&mut wal_actor, &mut state),
@@ -665,15 +698,14 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
     let temp = tempfile::tempdir()?;
     let wal_dir = temp.path().join("wal");
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut wal_actor = WalActor::new(
-        wal_dir.clone(),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let segment_id = state.wal.current_segment_id;
+    let segment_id = state.wal.open_segment();
     let mismatched_ticket = WalSealTicket::for_test(segment_id, segment_id + 1, 99);
 
     // Act
@@ -684,13 +716,8 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
     // Assert
     assert!(matches!(error, MidgeError::Internal(message) if message.contains("disagrees")));
     assert!(wal_actor.is_fenced());
-    assert_eq!(state.wal.current_segment_id, segment_id);
-    assert_eq!(
-        wal_actor
-            .ledger()
-            .map(crate::wal::ledger::WalLedger::open_segment),
-        Some(segment_id)
-    );
+    assert_eq!(state.wal.open_segment(), segment_id);
+    assert_eq!(Some(state.wal.open_segment()), Some(segment_id));
     assert!(wal_dir
         .join(crate::wal::segment_file_name(segment_id))
         .exists());
@@ -705,11 +732,10 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     // Arrange
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut wal_actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -772,11 +798,10 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
     let mut state = RuntimeState::new(PathBuf::from("/tmp/test"), true);
     state.sequence = 100; // ensure WAL sequence is distinct from memtable's internal counter
 
-    let mut wal_actor = WalActor::new(
-        PathBuf::from("/tmp/test"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -817,17 +842,14 @@ fn should_not_force_sync_immediately() -> MidgeResult<()> {
         max_delay_ms: 10_000,
         max_bytes: 1024 * 1024,
     };
-    let mut wal_actor = WalActor::new(
-        wal_dir.clone(),
+    let mut state = RuntimeState::new(wal_dir, false);
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         batch_cfg,
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-
-    // Prepare a runtime state
-    let mut state = RuntimeState::new(wal_dir, false);
 
     // Act: append a small batch (deferred in Batched mode)
     let ops = vec![
@@ -884,13 +906,11 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
     // Arrange
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
-    let wal_dir = db_path.join("wal");
     let mut state = RuntimeState::new(db_path, false);
-    let mut wal_actor = WalActor::new(
-        wal_dir,
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1003,11 +1023,10 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1059,11 +1078,10 @@ fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() ->
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1116,11 +1134,10 @@ fn should_reject_whole_group_before_wal_append_given_cf_missing_after_prepare() 
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1145,65 +1162,53 @@ fn should_reject_whole_group_before_wal_append_given_cf_missing_after_prepare() 
 
 #[test]
 fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> MidgeResult<()> {
-    // Arrange
+    // Arrange: a transaction is single-family (#843), so the later
+    // operation fails preflight on its own key: the memtable already holds
+    // that key at every sequence the transaction could have taken.
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    state.column_families.insert(
-        1,
-        crate::runtime::state::ColumnFamilyState::new(1, "second".to_string()),
-    );
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
+    let put = |key: &'static [u8]| crate::runtime::TransactionOp::Put {
+        cf_id: 0,
+        key: Bytes::from_static(key),
+        value: Bytes::from_static(b"value"),
+        ttl_seconds: None,
+        insert_only: false,
+    };
     let prepared = wal_actor.prepare_transaction_append(
         &mut state,
         TransactionAppendParams {
             request_id: 123,
             assertions: Vec::new(),
-            ops: vec![
-                crate::runtime::TransactionOp::Put {
-                    cf_id: 0,
-                    key: Bytes::from_static(b"first-valid"),
-                    value: Bytes::from_static(b"value"),
-                    ttl_seconds: None,
-                    insert_only: false,
-                },
-                crate::runtime::TransactionOp::Put {
-                    cf_id: 1,
-                    key: Bytes::from_static(b"later-invalid"),
-                    value: Bytes::from_static(b"value"),
-                    ttl_seconds: None,
-                    insert_only: false,
-                },
-            ],
+            ops: vec![put(b"first-valid"), put(b"later-invalid")],
             durability_policy: Some(DurabilityPolicy::Batched),
             start_sequence: None,
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         },
     )?;
-    state.column_families.remove(&1);
+    let memtable = state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .clone();
+    for sequence in 1..=state.sequence {
+        memtable.put_with_seq(b"later-invalid".to_vec(), b"held".to_vec(), sequence, None)?;
+    }
 
     // Act
     let result = wal_actor.append_prepared_transactions(&mut state, vec![prepared]);
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
     assert_eq!(wal_actor.append_calls(), 0);
-    assert_eq!(
-        state
-            .get_cf(0)
-            .expect("first column family remains")
-            .memtable
-            .iter_all()
-            .len(),
-        0
-    );
+    assert_eq!(memtable.get(b"first-valid")?, None);
     Ok(())
 }
 
@@ -1240,11 +1245,10 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1300,13 +1304,11 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
     let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let db_path = temp.path().to_path_buf();
-    let wal_dir = db_path.join("wal");
     let mut state = RuntimeState::new(db_path, false);
-    let mut wal_actor = WalActor::new(
-        wal_dir,
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1397,14 +1399,43 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
 }
 
 #[test]
+fn should_rotate_through_ledger_in_memory_mode() -> MidgeResult<()> {
+    // Arrange: memory mode keeps no WAL files, but its ledger still names
+    // the open segment (#851).
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut wal_actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
+
+    // Act
+    let receipt = wal_actor.rotate(&mut state, &ticket)?;
+
+    // Assert
+    assert!(state.wal.history.segment_files().is_none());
+    assert_eq!((receipt.sealed_segment(), receipt.next_segment()), (1, 2));
+    assert_eq!(state.wal.open_segment(), 2);
+    assert_eq!(
+        state.wal.history.ledger().members().collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    Ok(())
+}
+
+#[test]
 fn should_not_report_sync_deadline_without_pending_data() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
-    let wal_actor = WalActor::new(
-        temp.path().to_path_buf(),
+    let state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1423,14 +1454,13 @@ fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeRe
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig {
             max_delay_ms: 0,
             max_bytes: 1,
         },
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1462,38 +1492,20 @@ fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeRe
 fn should_only_coalesce_supported_local_transaction_appends() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
-    let batched_actor = WalActor::new(
-        temp.path().join("batched"),
-        DurabilityPolicy::Batched,
-        BatchConfig::default(),
-        false,
-        1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-    )?;
-    let strict_actor = WalActor::new(
-        temp.path().join("strict"),
-        DurabilityPolicy::Strict,
-        BatchConfig::default(),
-        false,
-        1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-    )?;
-    let cloud_actor = WalActor::new(
-        temp.path().join("cloud"),
-        DurabilityPolicy::CloudAsync,
-        BatchConfig::default(),
-        false,
-        1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-    )?;
-    let memory_actor = WalActor::new(
-        temp.path().join("memory"),
-        DurabilityPolicy::Batched,
-        BatchConfig::default(),
-        true,
-        1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-    )?;
+    let actor = |directory: &str, policy, memory_mode| {
+        let state = RuntimeState::new(temp.path().join(directory), memory_mode);
+        WalActor::open(
+            &state,
+            policy,
+            BatchConfig::default(),
+            1,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        )
+    };
+    let batched_actor = actor("batched", DurabilityPolicy::Batched, false)?;
+    let strict_actor = actor("strict", DurabilityPolicy::Strict, false)?;
+    let cloud_actor = actor("cloud", DurabilityPolicy::CloudAsync, false)?;
+    let memory_actor = actor("memory", DurabilityPolicy::Batched, true)?;
 
     // Act
     // Assert
@@ -1520,11 +1532,10 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
     let db_path = temp.path().to_path_buf();
     let wal_dir = db_path.join("wal");
     let mut state = RuntimeState::new(db_path, false);
-    let mut wal_actor = WalActor::new(
-        wal_dir.clone(),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -1553,19 +1564,35 @@ fn should_fail_rotate_without_advancing_segment_when_next_segment_creation_fails
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(SegmentCreateFailingFs::new(8));
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    state.wal.current_segment_id = 7;
-    let mut wal_actor = actor_over(fs, 7, DurabilityPolicy::Strict)?;
-    wal_actor.segment_max_sequence = 42;
+    let mut wal_actor = actor_over(&mut state, Arc::clone(&fs), 7, DurabilityPolicy::Strict)?;
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"key",
+        b"value",
+        DurabilityPolicy::Strict,
+    )?;
+    wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    let max_sequence = wal_actor.open_segment_max_sequence();
+    let segment = FsPath::new(crate::wal::segment_file_name(7));
+    let before = crate::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
     let result = wal_actor.rotate(&mut state, &ticket);
 
-    // Assert
+    // Assert: the digest is taken but no footer is written before the
+    // successor exists, so segment 7 stays open and writable.
     assert!(result.is_err());
     assert!(wal_actor.is_open());
-    assert_eq!(state.wal.current_segment_id, 7);
-    assert_eq!(wal_actor.segment_max_sequence, 42);
+    assert_eq!(state.wal.open_segment(), 7);
+    assert!(max_sequence > 0);
+    assert_eq!(wal_actor.open_segment_max_sequence(), max_sequence);
+    assert_eq!(
+        crate::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?,
+        before
+    );
     assert!(wal_actor.writer().is_some());
 
     Ok(())
@@ -1583,15 +1610,14 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
         let db_path = temp.path().to_path_buf();
         let wal_dir = db_path.join("wal");
         let mut state = RuntimeState::new(db_path, false);
-        let mut wal_actor = WalActor::new(
-            wal_dir.clone(),
+        let mut wal_actor = WalActor::open(
+            &state,
             DurabilityPolicy::Strict,
             BatchConfig::default(),
-            false,
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
-        let segment_id = state.wal.current_segment_id;
+        let segment_id = state.wal.open_segment();
         let ticket = seal_ticket_for_test(&wal_actor, &state);
         fail::cfg(boundary.failpoint_name(), "return").expect("configure WAL rotation boundary");
 
@@ -1603,17 +1629,20 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
 
         // Assert
         assert!(matches!(error, MidgeError::Internal(_)));
-        assert_eq!(state.wal.current_segment_id, segment_id);
         assert!(wal_dir
             .join(crate::wal::segment_file_name(segment_id))
             .exists());
-        let ledger_open = wal_actor
-            .ledger()
-            .map(crate::wal::ledger::WalLedger::open_segment);
-        if boundary == WalTransitionBoundary::AfterLedgerRotate {
+        let ledger_open = Some(state.wal.open_segment());
+        // The footer is the first irreversible step: from it on the actor
+        // fences, and only the ledger's rotation moves the open segment.
+        if matches!(
+            boundary,
+            WalTransitionBoundary::AfterFooter | WalTransitionBoundary::AfterLedgerRotate
+        ) {
             assert!(wal_actor.is_fenced());
             assert!(state.persistence_anomaly_detected());
-            assert_eq!(ledger_open, Some(segment_id + 1));
+            let rotated = boundary == WalTransitionBoundary::AfterLedgerRotate;
+            assert_eq!(ledger_open, Some(segment_id + u64::from(rotated)));
             assert!(matches!(
                 wal_actor.rotate(&mut state, &ticket),
                 Err(MidgeError::RecoveryFailed(_))
@@ -1629,7 +1658,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
                 boundary == WalTransitionBoundary::AfterSegmentCreate
             );
             wal_actor.rotate(&mut state, &ticket)?;
-            assert_eq!(state.wal.current_segment_id, segment_id + 1);
+            assert_eq!(state.wal.open_segment(), segment_id + 1);
         }
     }
 
@@ -1647,11 +1676,10 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
     for spilled in [false, true] {
         let temp = tempfile::tempdir()?;
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        let mut actor = WalActor::new(
-            temp.path().join("wal"),
+        let mut actor = WalActor::open(
+            &state,
             DurabilityPolicy::CloudAsync,
             BatchConfig::default(),
-            false,
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
@@ -1745,17 +1773,22 @@ fn should_fence_rotation_before_overwriting_a_next_segment_that_holds_data() -> 
     let db_path = temp.path().to_path_buf();
     let wal_dir = db_path.join("wal");
     let mut state = RuntimeState::new(db_path, false);
-    let mut wal_actor = WalActor::new(
-        wal_dir.clone(),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let segment_id = state.wal.current_segment_id;
+    let segment_id = state.wal.open_segment();
     let next_path = wal_dir.join(crate::wal::segment_file_name(segment_id + 1));
-    std::fs::write(&next_path, b"existing-segment-data")?;
+    // Longer than a segment header, so it may hold records.
+    let existing = [
+        vec![0xa5; crate::wal::format::HEADER_LEN],
+        b"existing-segment-data".to_vec(),
+    ]
+    .concat();
+    std::fs::write(&next_path, &existing)?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
@@ -1771,14 +1804,9 @@ fn should_fence_rotation_before_overwriting_a_next_segment_that_holds_data() -> 
         ),
         "{error:?}"
     );
-    assert_eq!(std::fs::read(next_path)?, b"existing-segment-data");
-    assert_eq!(state.wal.current_segment_id, segment_id);
-    assert_eq!(
-        wal_actor
-            .ledger()
-            .map(crate::wal::ledger::WalLedger::open_segment),
-        Some(segment_id)
-    );
+    assert_eq!(std::fs::read(next_path)?, existing);
+    assert_eq!(state.wal.open_segment(), segment_id);
+    assert_eq!(Some(state.wal.open_segment()), Some(segment_id));
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     Ok(())
@@ -1791,8 +1819,12 @@ fn should_keep_rotation_retryable_when_next_segment_directory_sync_fails() -> Mi
     let mock = MockFs::new();
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    state.wal.current_segment_id = 7;
-    let mut wal_actor = actor_over(Arc::new(mock.clone()), 7, DurabilityPolicy::Strict)?;
+    let mut wal_actor = actor_over(
+        &mut state,
+        Arc::new(mock.clone()),
+        7,
+        DurabilityPolicy::Strict,
+    )?;
     mock.set_sync_dir_failure(true);
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
@@ -1800,9 +1832,7 @@ fn should_keep_rotation_retryable_when_next_segment_directory_sync_fails() -> Mi
     let error = wal_actor
         .rotate(&mut state, &ticket)
         .expect_err("directory sync failure must interrupt rotation");
-    let ledger_open = wal_actor
-        .ledger()
-        .map(crate::wal::ledger::WalLedger::open_segment);
+    let ledger_open = Some(state.wal.open_segment());
     mock.set_sync_dir_failure(false);
     let retried = wal_actor.rotate(&mut state, &ticket);
 
@@ -1811,7 +1841,7 @@ fn should_keep_rotation_retryable_when_next_segment_directory_sync_fails() -> Mi
     assert_eq!(ledger_open, Some(7));
     assert!(!state.persistence_anomaly_detected());
     assert!(retried.is_ok(), "{retried:?}");
-    assert_eq!(state.wal.current_segment_id, 8);
+    assert_eq!(state.wal.open_segment(), 8);
     Ok(())
 }
 
@@ -1823,8 +1853,7 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(SegmentWriterOpenFailingFs::new(8));
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    state.wal.current_segment_id = 7;
-    let mut wal_actor = actor_over(Arc::clone(&fs), 7, DurabilityPolicy::CloudAsync)?;
+    let mut wal_actor = actor_over(&mut state, Arc::clone(&fs), 7, DurabilityPolicy::CloudAsync)?;
     let prepared = prepare_put_transaction(
         &mut wal_actor,
         &mut state,
@@ -1889,7 +1918,8 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
     assert!(matches!(second_rotate_error, MidgeError::RecoveryFailed(_)));
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.sequence, sequence_before_rejected);
-    assert_eq!(state.wal.current_segment_id, 7);
+    // The ledger recorded the rotation before the next writer failed.
+    assert_eq!(state.wal.open_segment(), 8);
     assert_eq!(state.wal.frontiers.local_durable(), durable_before);
     assert_eq!(state.wal.pending_writes, pending_before);
     assert_eq!(
@@ -1906,9 +1936,7 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
         .exists(&FsPath::new(crate::wal::segment_file_name(7)))
         .map_err(FsError::into_midge)?);
     assert_eq!(
-        wal_actor
-            .ledger()
-            .map(crate::wal::ledger::WalLedger::open_segment),
+        Some(state.wal.open_segment()),
         Some(8),
         "the ledger already sealed segment 7"
     );
@@ -2040,7 +2068,7 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     });
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    let mut wal_actor = actor_over(fs, 1, DurabilityPolicy::CloudAsync)?;
+    let mut wal_actor = actor_over(&mut state, fs, 1, DurabilityPolicy::CloudAsync)?;
     let prepared = prepare_put_transaction(
         &mut wal_actor,
         &mut state,
@@ -2073,11 +2101,10 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
     let temp = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
-    let mut actor = WalActor::new(
-        temp.path().join("unused-wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2139,11 +2166,10 @@ fn should_reject_resident_transaction_when_batch_payload_exceeds_wal_decode_limi
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
-    let mut wal_actor = WalActor::new(
-        db_path.join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2197,11 +2223,10 @@ fn should_build_one_read_snapshot_per_cf_when_validating_insert_only_conflict_ch
     // Arrange: every op used to rebuild a full read snapshot (manifest clone,
     // read view, uncached SST opens) on the event-loop thread.
     let mut state = RuntimeState::new("/tmp/test_midge_validation_snapshots".into(), true);
-    let mut wal_actor = WalActor::new(
-        "/tmp/test_midge_validation_snapshots".into(),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2340,11 +2365,10 @@ fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
             });
         keys.extend(file_keys.into_iter().take(keys_per_file));
     }
-    let mut actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2415,11 +2439,10 @@ fn should_fence_as_local_failure_when_wal_state_changes_under_a_sync_receipt() -
     // invariant failure, not lost authority (#537).
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut wal_actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut wal_actor = WalActor::open(
+        &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2453,11 +2476,10 @@ fn should_not_regress_local_durable_seq_when_older_sync_receipt_completes_after_
 ) -> MidgeResult<()> {
     // Arrange: the local frontier has already reached 20.
     let mut state = RuntimeState::new("/tmp/test_midge_frontier_regression".into(), true);
-    let mut actor = WalActor::new(
-        state.host_wal_dir().clone(),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
-        true,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2486,11 +2508,10 @@ fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeRe
     ] {
         let temp = tempfile::tempdir()?;
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        let mut actor = WalActor::new(
-            temp.path().join("wal"),
+        let mut actor = WalActor::open(
+            &state,
             policy,
             BatchConfig::default(),
-            false,
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
@@ -2514,7 +2535,7 @@ fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeRe
                     .join(crate::wal::segment_file_name(1))
             )?
             .len(),
-            0
+            crate::wal::format::HEADER_LEN as u64
         );
     }
     Ok(())
@@ -2530,11 +2551,10 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
         for spilled in [false, true] {
             let temp = tempfile::tempdir()?;
             let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-            let mut actor = WalActor::new(
-                temp.path().join("wal"),
+            let mut actor = WalActor::open(
+                &state,
                 policy,
                 BatchConfig::default(),
-                false,
                 1,
                 crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             )?;
@@ -2592,7 +2612,7 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                         .join(crate::wal::segment_file_name(1))
                 )?
                 .len(),
-                0
+                crate::wal::format::HEADER_LEN as u64
             );
         }
     }
@@ -2605,11 +2625,10 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2624,7 +2643,6 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
         crate::wal::WalOpKind::Put,
         Bytes::from_static(b"key"),
         Some(Bytes::from_static(b"value")),
-        1,
         1,
     );
     // Act
@@ -2645,7 +2663,7 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
                 .join(crate::wal::segment_file_name(2))
         )?
         .len(),
-        0
+        crate::wal::format::HEADER_LEN as u64
     );
     Ok(())
 }
@@ -2659,11 +2677,10 @@ fn should_preserve_open_segment_when_validity_expires_before_next_segment_create
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::Strict,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2702,11 +2719,10 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
     // Arrange
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        temp.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -2734,5 +2750,138 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
         .join("wal")
         .join(crate::wal::segment_file_name(2))
         .exists());
+    Ok(())
+}
+
+#[test]
+fn should_fence_when_footer_write_fails() -> MidgeResult<()> {
+    // Arrange: segment 7 holds a record; the footer write lands half its
+    // bytes and fails, after the next segment was created.
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let fs = Arc::new(admission::PartialAppendFs::default());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut wal_actor = actor_over(
+        &mut state,
+        Arc::clone(&fs) as Arc<dyn Fs>,
+        7,
+        DurabilityPolicy::Strict,
+    )?;
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"key",
+        b"value",
+        DurabilityPolicy::Strict,
+    )?;
+    wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
+    fs.fail_next
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Act
+    let result = wal_actor.rotate(&mut state, &ticket);
+
+    // Assert: a torn footer cannot be taken back, so the actor fences and
+    // the ledger keeps segment 7 open for restart recovery to seal.
+    assert!(result.is_err());
+    assert!(wal_actor.is_fenced());
+    assert!(state.persistence_anomaly_detected());
+    assert_eq!(state.wal.open_segment(), 7);
+    assert!(matches!(
+        wal_actor.rotate(&mut state, &ticket),
+        Err(MidgeError::RecoveryFailed(_))
+    ));
+    Ok(())
+}
+
+/// A file-backed actor over a fresh database with a second family.
+fn actor_with_second_family(
+    temp: &tempfile::TempDir,
+) -> MidgeResult<(RuntimeState, WalActor, u32)> {
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let family = state.create_cf("second".into())?;
+    let actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    Ok((state, actor, family))
+}
+
+fn put_in(cf_id: u32, key: &'static [u8]) -> crate::runtime::TransactionOp {
+    crate::runtime::TransactionOp::Put {
+        cf_id,
+        key: Bytes::from_static(key),
+        value: Bytes::from_static(b"value"),
+        ttl_seconds: None,
+        insert_only: false,
+    }
+}
+
+fn transaction(ops: Vec<crate::runtime::TransactionOp>) -> TransactionAppendParams {
+    TransactionAppendParams {
+        request_id: 1,
+        assertions: Vec::new(),
+        ops,
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+    }
+}
+
+#[test]
+fn should_stamp_transaction_batch_with_its_family() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let (mut state, mut actor, family) = actor_with_second_family(&temp)?;
+    let prepared = actor.prepare_transaction_append(
+        &mut state,
+        transaction(vec![put_in(family, b"a"), put_in(family, b"b")]),
+    )?;
+
+    // Act
+    actor.append_prepared_transactions(&mut state, vec![prepared])?;
+
+    // Assert: the batch frame and every operation in it name the family.
+    let segment = state
+        .host_wal_dir()
+        .join(crate::wal::segment_file_name(state.wal.open_segment()));
+    let records = crate::wal::format::segment::records(&std::fs::read(segment)?)?;
+    let [batch] = records.as_slice() else {
+        panic!("one transaction frame: {records:?}");
+    };
+    assert_eq!(batch.op, crate::wal::WalOpKind::TxnBatch);
+    assert_eq!(batch.cf_id, family);
+    let payload = batch.value.as_ref().expect("batch payload");
+    let decoded = crate::wal::encoding::decode_txn_batch_payload(batch, payload)?;
+    assert_eq!(decoded.records.len(), 2);
+    assert!(decoded.records.iter().all(|record| record.cf_id == family));
+    Ok(())
+}
+
+#[test]
+fn should_reject_transaction_spanning_families_before_allocating() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let (mut state, mut actor, family) = actor_with_second_family(&temp)?;
+    let sequence_before = state.sequence;
+    let segment = state
+        .host_wal_dir()
+        .join(crate::wal::segment_file_name(state.wal.open_segment()));
+    let bytes_before = std::fs::read(&segment)?;
+
+    // Act
+    let result = actor.prepare_transaction_append(
+        &mut state,
+        transaction(vec![put_in(0, b"a"), put_in(family, b"b")]),
+    );
+
+    // Assert: no sequence was handed out and no frame written.
+    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    assert_eq!(state.sequence, sequence_before);
+    assert_eq!(std::fs::read(&segment)?, bytes_before);
     Ok(())
 }

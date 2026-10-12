@@ -66,7 +66,7 @@ impl EventLoop {
             // plan collect proof needed by an older authoritative generation.
             let cutoff = self
                 .wal_transition
-                .tombstone_gc_cutoff(self.state.wal.current_segment_id);
+                .tombstone_gc_cutoff(self.state.wal.open_segment());
             plan.snapshot_horizon = Some(plan.snapshot_horizon.map_or(cutoff, |h| h.min(cutoff)));
             if cutoff == 0 {
                 plan.point_tombstone_gc_eligible = false;

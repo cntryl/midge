@@ -120,6 +120,8 @@ impl WalActor {
             }
         }
 
+        let cf_id =
+            Self::transaction_family(ops.iter().map(crate::runtime::transaction_spill::op_cf_id))?;
         Self::validate_transaction_preconditions(
             state,
             self.read_resources.clone(),
@@ -128,7 +130,7 @@ impl WalActor {
             start_sequence,
             conflict_policy,
         )?;
-        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len())?;
+        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len(), cf_id)?;
         let (apply_ops, wal_batch) = match self.build_transaction_wal_batch(
             state,
             ops,
@@ -139,14 +141,14 @@ impl WalActor {
             Err(error) => {
                 // Nothing was written; give the sequences back so the
                 // durable frontier never skips over an unwritten range.
-                state.sequence = sequence_plan.begin_seq - 1;
+                state.release_sequences(&sequence_plan.range());
                 return Err(error);
             }
         };
 
         crate::failpoints::fail_point!("midge::wal::after_transaction_preparation");
         if let Err(error) = self.ensure_lease_validity() {
-            state.sequence = sequence_plan.begin_seq - 1;
+            state.release_sequences(&sequence_plan.range());
             return Err(error);
         }
         Ok(PreparedTransactionAppend {
@@ -342,33 +344,58 @@ impl WalActor {
         Ok(())
     }
 
+    /// The one column family a transaction's operations write. A transaction
+    /// is per family (#843): its WAL frames carry that family, and replay
+    /// rejects an operation from another one.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` when the operations span families.
+    pub(super) fn transaction_family(
+        mut families: impl Iterator<Item = crate::types::ColumnFamilyId>,
+    ) -> MidgeResult<crate::types::ColumnFamilyId> {
+        let first = families.next().unwrap_or_default();
+        match families.find(|cf_id| *cf_id != first) {
+            Some(other) => Err(MidgeError::InvalidArgument(format!(
+                "a transaction writes one column family; it holds operations for {first} and {other}"
+            ))),
+            None => Ok(first),
+        }
+    }
+
     pub(super) fn allocate_transaction_sequences(
         state: &mut RuntimeState,
         ops_count: usize,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<TxnSequencePlan> {
         debug_assert!(
             ops_count > 0,
             "append_transaction requires at least one operation"
         );
-        let ops_count_u64 = u64::try_from(ops_count).map_err(|_| {
-            MidgeError::ResourceLimit("transaction operation count exceeds sequence space".into())
-        })?;
-        let begin_seq = state.sequence.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let first_op_seq = begin_seq.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let commit_seq = first_op_seq.checked_add(ops_count_u64).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let txn_id = state.next_txn_id()?;
-        state.sequence = commit_seq;
+        // The begin marker, one sequence per operation, the commit marker.
+        let count = u64::try_from(ops_count)
+            .ok()
+            .and_then(|ops| ops.checked_add(2))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit(
+                    "transaction operation count exceeds sequence space".into(),
+                )
+            })?;
+        let range = state.allocate_sequences(count)?;
+        let txn_id = match state.next_txn_id() {
+            Ok(txn_id) => txn_id,
+            Err(error) => {
+                state.release_sequences(&range);
+                return Err(error);
+            }
+        };
+        let begin_seq = *range.start();
         Ok(TxnSequencePlan {
             txn_id,
+            cf_id,
             begin_seq,
-            first_op_seq,
-            commit_seq,
+            first_op_seq: begin_seq + 1,
+            commit_seq: *range.end(),
         })
     }
 
@@ -412,14 +439,14 @@ impl WalActor {
         }
         let nested_records = apply_ops
             .iter()
-            .map(|op| op.batch_record(sequence_plan.txn_id, self.current_epoch))
+            .map(|op| op.batch_record(sequence_plan.txn_id))
             .collect::<Vec<_>>();
 
         let payload = crate::wal::encoding::encode_txn_batch_payload_records(
             sequence_plan.txn_id,
             sequence_plan.begin_seq,
             sequence_plan.commit_seq,
-            self.current_epoch,
+            sequence_plan.cf_id,
             &nested_records,
         )
         .map_err(|error| {
@@ -440,12 +467,11 @@ impl WalActor {
         let decoded_bound =
             crate::wal::encoding::txn_batch_decoded_bound(payload.len(), nested_records.len());
         let mut batch_record = WalRecord::new_cf(
-            0,
+            sequence_plan.cf_id,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload),
             sequence_plan.commit_seq,
-            self.current_epoch,
         );
         batch_record.txn_id = Some(sequence_plan.txn_id);
         // Replay rejects the batch if either its frame or its decoded
@@ -512,9 +538,6 @@ impl WalActor {
             }
             self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());
-            if let Some(max_sequence) = records.iter().map(|record| record.seq).max() {
-                self.record_segment_sequence(max_sequence);
-            }
             if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
                 self.fence_transition(state, error.to_string());
                 return Err(error);

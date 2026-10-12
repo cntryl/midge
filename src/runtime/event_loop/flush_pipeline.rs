@@ -78,7 +78,7 @@ impl EventLoop {
             )));
         }
 
-        let current_segment_id = self.state.wal.current_segment_id;
+        let open_segment = self.state.wal.open_segment();
 
         let appended_bytes = self.state.wal.appended_bytes;
         let sequence = self.state.sequence;
@@ -105,7 +105,7 @@ impl EventLoop {
             .get_cf_mut(cf_id)
             .expect("tracked flush family exists");
         cf.memtable = Arc::new(crate::memtable::SkipListMemtable::new());
-        cf.active_memtable_started_in_segment = current_segment_id;
+        cf.active_memtable_started_in_segment = open_segment;
         cf.active_memtable_started_at_wal_bytes = appended_bytes;
         crate::failpoints::fail_point!("midge::flush_worker::after_freeze");
         self.publish_snapshot();
@@ -1680,10 +1680,7 @@ mod tests {
         };
         assert_eq!((exists(1), exists(2), exists(3)), (true, true, true));
         assert_eq!(
-            event_loop
-                .wal_actor
-                .ledger()
-                .map(crate::wal::ledger::WalLedger::log_start),
+            Some(event_loop.state.wal.history.ledger().log_start()),
             Some(1)
         );
         Ok(())
@@ -2178,7 +2175,7 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
-        let current = event_loop.state.wal.current_segment_id;
+        let current = event_loop.state.wal.open_segment();
         let active = event_loop
             .state
             .host_wal_dir()
@@ -2200,7 +2197,7 @@ mod tests {
 
         // Assert
         assert_eq!(
-            event_loop.state.wal.current_segment_id,
+            event_loop.state.wal.open_segment(),
             current + 1,
             "the open segment was {active_len_before} bytes on disk before prune"
         );
@@ -2318,13 +2315,13 @@ mod tests {
             crate::runtime::RuntimeConfig::default(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        let current = event_loop.state.wal.current_segment_id;
+        let current = event_loop.state.wal.open_segment();
 
         // Act
         event_loop.prune_local_wal_segments_covered_by_manifest();
 
         // Assert
-        assert_eq!(event_loop.state.wal.current_segment_id, current);
+        assert_eq!(event_loop.state.wal.open_segment(), current);
         Ok(())
     }
 
@@ -2340,7 +2337,6 @@ mod tests {
             crate::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
-            1,
             1,
         );
         let mut frame = Vec::new();
@@ -2394,7 +2390,6 @@ mod tests {
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             5,
-            1,
         );
         let mut frame = Vec::new();
         crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
@@ -2464,7 +2459,6 @@ mod tests {
                 bytes::Bytes::from(format!("key-{segment_id}")),
                 Some(bytes::Bytes::from_static(b"value")),
                 segment_id,
-                1,
             );
             let mut frame = Vec::new();
             crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
@@ -2594,10 +2588,7 @@ mod tests {
         // pass starts at the following one and every segment is read once.
         assert_eq!(reads_per_pass, vec![1, 1, 1, 0]);
         assert_eq!(
-            event_loop
-                .wal_actor
-                .ledger()
-                .map(crate::wal::ledger::WalLedger::log_start),
+            Some(event_loop.state.wal.history.ledger().log_start()),
             Some(4)
         );
         for segment_id in 1..=3 {
@@ -2894,7 +2885,7 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
-        let segment_before = event_loop.state.wal.current_segment_id;
+        let segment_before = event_loop.state.wal.open_segment();
         let durable_before = event_loop.state.wal.frontiers.local_durable();
         let sealed_path = event_loop
             .state
@@ -2910,7 +2901,7 @@ mod tests {
         scenario.teardown();
 
         // Assert
-        assert_eq!(event_loop.state.wal.current_segment_id, segment_before);
+        assert_eq!(event_loop.state.wal.open_segment(), segment_before);
         assert_eq!(
             event_loop.state.wal.frontiers.local_durable(),
             durable_before
@@ -2931,7 +2922,7 @@ mod tests {
     fn should_reject_publication_completion_after_lease_loss() -> crate::common::MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
-        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let state = crate::runtime::state::RuntimeState::new_in_epoch(directory.path(), false, 7);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
         let healthy = Arc::new(AtomicBool::new(true));
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -3003,7 +2994,7 @@ mod tests {
 
         // Assert
         assert!(event_loop.state.manifest.files.is_empty());
-        assert_eq!(event_loop.state.wal.current_segment_id, 1);
+        assert_eq!(event_loop.state.wal.open_segment(), 1);
         assert_eq!(
             hybrid.budget_snapshot().total_committed_bytes,
             128,

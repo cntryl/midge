@@ -51,9 +51,9 @@ pub use read_snapshot::ReadSnapshot;
 pub use crate::types::ConflictPolicy;
 pub use state::RuntimeState;
 
+pub(crate) use config::RecoveredCloudWalSegment;
 pub use config::RuntimeConfig;
 pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy};
-pub(crate) use config::{RecoveredCloudActiveWal, RecoveredCloudWalSegment};
 pub use handle::RuntimeHandle;
 pub(crate) use lifecycle::{RuntimeLifecycle, RuntimeLifecycleState, RuntimeTransactionGuard};
 pub(crate) use metadata_publication::MetadataPublicationLock;

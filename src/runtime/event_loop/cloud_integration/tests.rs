@@ -30,7 +30,7 @@ mod maintenance_tests;
 fn install_prune_gc_pins_for_test(el: &mut EventLoop, segment: u64, max_sequence: u64) {
     el.wal_transition = crate::runtime::wal_transition::WalTransitionProtocol::new();
     el.wal_transition
-        .initialize_gc_pins(el.state.wal.current_segment_id, max_sequence);
+        .initialize_gc_pins(el.state.wal.open_segment(), max_sequence);
     el.wal_transition
         .register_recovered(segment, max_sequence, true);
 }
@@ -48,7 +48,7 @@ fn queue_generation_for_maintenance_test(
     sequence: u64,
 ) -> crate::common::MidgeResult<()> {
     el.state.sequence = sequence;
-    let segment = el.state.wal.current_segment_id;
+    let segment = el.state.wal.open_segment();
     let cf = el.state.get_cf_mut(0).unwrap();
     cf.active_memtable_started_in_segment = segment;
     cf.memtable.put_with_seq(
@@ -425,7 +425,7 @@ fn should_fail_all_generation_waiters_given_exhausted_cloud_upload_attempts(
     )?;
     let direct_request = 43;
     let pending_request = 44;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     let direct_response = event_loop.router.register(direct_request, "TestRequest");
     let pending_response = event_loop.router.register(pending_request, "TestRequest");
     event_loop.durability.queue_waiter_for_key(
@@ -477,7 +477,7 @@ fn should_preserve_timeout_variant_given_exhausted_cloud_upload_timeouts(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 46;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     let response = event_loop.router.register(request_id, "TestRequest");
     event_loop
         .durability
@@ -1490,18 +1490,24 @@ fn copy_local_segment_to_remote_wal_for_test(el: &EventLoop, segment_id: u64) {
     });
 }
 
-fn publish_remote_wal_bytes_for_test(
-    el: &EventLoop,
-    segment_id: u64,
-    max_sequence: u64,
-    bytes: &[u8],
-) {
+/// Seal `body`, bare frames, as segment `segment_id` the way a writer does
+/// and publish the sealed file as its authoritative remote copy: the ledger
+/// rotates to `segment_id`, the body follows its header, and the seal leaves
+/// `segment_id` sealed at the log start with `segment_id + 1` open.
+fn seal_and_publish_for_test(el: &mut EventLoop, segment_id: u64, max_sequence: u64, body: &[u8]) {
+    crate::runtime::wal_history::fixture::rotate_to(&mut el.state.wal.history, segment_id)
+        .expect("rotate the WAL ledger to the candidate segment");
     let local_path = el
         .state
         .host_wal_dir()
         .join(crate::wal::segment_file_name(segment_id));
-    write_test_file(local_path.clone(), bytes);
-    write_test_file(remote_wal_path_for_test(el, segment_id), bytes);
+    let mut sealed = std::fs::read(&local_path).expect("read the open candidate segment");
+    sealed.extend_from_slice(body);
+    write_test_file(local_path.clone(), &sealed);
+    crate::runtime::wal_history::fixture::seal_through(&mut el.state.wal.history, segment_id)
+        .expect("seal the WAL ledger through the candidate segment");
+    let sealed = std::fs::read(&local_path).expect("read the sealed candidate segment");
+    write_test_file(remote_wal_path_for_test(el, segment_id), &sealed);
     if let Some(storage) = el.cloud_coordinator.hybrid_storage.as_ref() {
         cloud_persistence(storage)
             .publish_remote_wal_segment(
@@ -1515,36 +1521,14 @@ fn publish_remote_wal_bytes_for_test(
     }
 }
 
-/// Bring `el`'s segment ledger to where a writer that sealed `segment_id`
-/// left it: `segment_id` sealed at the log start, `segment_id + 1` open.
-fn seal_ledger_through_for_test(el: &mut EventLoop, segment_id: u64) {
-    crate::runtime::wal_history::fixture::seal_through(
-        el.wal_actor
-            .history_for_test()
-            .expect("a file-backed WAL has a segment ledger"),
-        segment_id,
-    )
-    .expect("seal the WAL ledger through the candidate segment");
-}
-
 fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence: u64) {
-    seal_ledger_through_for_test(el, segment_id);
-    el.state.wal.current_segment_id = segment_id + 1;
-    el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
-    el.cloud_coordinator
-        .cloud_wal
-        .acknowledge_for_test(segment_id, max_sequence);
     let record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
         Bytes::from_static(b"prune-candidate"),
         Some(Bytes::from_static(b"value")),
         max_sequence,
-        el.state.writer_epoch,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
-    let mut bytes = Vec::new();
-    crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
-    publish_remote_wal_bytes_for_test(el, segment_id, max_sequence, &bytes);
+    seed_cloud_prune_candidate_with_records(el, segment_id, max_sequence, vec![record]);
 }
 
 fn seed_cloud_prune_candidate_with_records(
@@ -1553,20 +1537,16 @@ fn seed_cloud_prune_candidate_with_records(
     max_sequence: u64,
     records: Vec<crate::wal::WalRecord>,
 ) {
-    seal_ledger_through_for_test(el, segment_id);
-    el.state.wal.current_segment_id = segment_id + 1;
     el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
         .acknowledge_for_test(segment_id, max_sequence);
-
     let mut bytes = Vec::new();
-    for mut record in records {
-        record.writer_epoch = el.state.writer_epoch;
+    for record in records {
         let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
         crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
     }
-    publish_remote_wal_bytes_for_test(el, segment_id, max_sequence, &bytes);
+    seal_and_publish_for_test(el, segment_id, max_sequence, &bytes);
 }
 
 fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
@@ -1684,6 +1664,48 @@ fn valid_range_tombstone_sst_bytes_for_test(start: &[u8], end: &[u8], seq: u64) 
     writer
         .finish_bytes()
         .expect("finish range tombstone test SST bytes")
+}
+
+/// Add an SST holding every version of `prune-candidate` in `sequences`.
+fn add_valid_versions_manifest_sst_for_test(
+    el: &mut EventLoop,
+    sst_name: &str,
+    sequences: std::ops::RangeInclusive<u64>,
+) {
+    use crate::sst::SstFactory;
+
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create().expect("create test SST writer");
+    for sequence in sequences.clone().rev() {
+        writer
+            .add_with_meta(
+                b"prune-candidate",
+                Some(b"value"),
+                sequence,
+                EntryType::Put,
+                None,
+            )
+            .expect("add test SST version");
+    }
+    let bytes = writer.finish_bytes().expect("finish test SST bytes");
+    el.state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: sst_name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"prune-candidate".to_vec()),
+            largest_key: Some(b"prune-candidate".to_vec()),
+            smallest_seq: Some(*sequences.start()),
+            largest_seq: Some(*sequences.end()),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
+    write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
 }
 
 fn add_valid_manifest_sst_for_test(
@@ -3063,7 +3085,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     );
     assert_eq!(
         el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+            .tombstone_gc_cutoff(el.state.wal.open_segment()),
         0,
         "uncertain commit retains the pin until confirmed readback"
     );
@@ -3086,7 +3108,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     // Assert
     assert_eq!(
         el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+            .tombstone_gc_cutoff(el.state.wal.open_segment()),
         max_sequence
     );
     assert!(
@@ -4329,7 +4351,6 @@ fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_
                 Bytes::from_static(b"default-only-in-wal"),
                 Some(Bytes::from_static(b"default-value")),
                 5,
-                0,
             ),
             crate::wal::WalRecord::new_cf(
                 1,
@@ -4337,7 +4358,6 @@ fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_
                 Bytes::from_static(b"other-covered"),
                 Some(Bytes::from_static(b"other-value")),
                 max_sequence,
-                0,
             ),
         ],
     );
@@ -4552,7 +4572,6 @@ fn should_prune_remote_wal_when_insert_is_canonically_persisted_as_put(
         Bytes::from_static(b"prune-candidate"),
         Some(Bytes::from_static(b"value")),
         sequence,
-        0,
     );
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![insert]);
     el.state.wal.frontiers.set_cloud_durable_for_test(sequence);
@@ -4590,7 +4609,6 @@ fn should_prune_remote_wal_when_point_delete_is_exactly_covered_by_manifest_sst(
         Bytes::copy_from_slice(key),
         None,
         max_sequence,
-        0,
     );
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete]);
     el.state
@@ -4636,7 +4654,6 @@ fn should_not_prune_remote_wal_when_point_delete_has_same_sequence_value(
         Bytes::copy_from_slice(key),
         None,
         max_sequence,
-        0,
     );
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete]);
     el.state
@@ -4678,7 +4695,6 @@ fn should_not_prune_remote_wal_when_expired_value_masquerades_as_same_sequence_p
         Bytes::copy_from_slice(key),
         None,
         sequence,
-        0,
     );
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![delete]);
     el.state.wal.frontiers.set_cloud_durable_for_test(sequence);
@@ -4725,7 +4741,6 @@ fn should_prune_remote_wal_when_expired_value_is_exactly_covered_by_manifest_sst
         Bytes::copy_from_slice(key),
         Some(Bytes::copy_from_slice(value)),
         sequence,
-        0,
     );
     put.expiration = Some(expired_at);
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![put]);
@@ -4846,7 +4861,6 @@ fn should_retain_remote_wal_when_delete_range_record_has_only_manifest_bounds(
         Bytes::from_static(b"k10"),
         None,
         max_sequence,
-        0,
     );
     delete_range.range_end = Some(Bytes::from_static(b"k20"));
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete_range]);
@@ -4893,7 +4907,6 @@ fn should_not_prune_remote_wal_when_delete_range_record_exceeds_manifest_range(
         Bytes::from_static(b"k10"),
         None,
         max_sequence,
-        0,
     );
     delete_range.range_end = Some(Bytes::from_static(b"k20"));
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete_range]);
@@ -4942,7 +4955,6 @@ fn should_prune_remote_wal_when_only_transaction_marker_exceeds_data_coverage(
                 Bytes::from_static(b"txn"),
                 None,
                 8,
-                0,
             ),
             crate::wal::WalRecord::new_cf(
                 0,
@@ -4950,7 +4962,6 @@ fn should_prune_remote_wal_when_only_transaction_marker_exceeds_data_coverage(
                 Bytes::from_static(b"txn-data"),
                 Some(Bytes::from_static(b"value")),
                 9,
-                0,
             ),
             crate::wal::WalRecord::new_cf(
                 0,
@@ -4958,7 +4969,6 @@ fn should_prune_remote_wal_when_only_transaction_marker_exceeds_data_coverage(
                 Bytes::from_static(b"txn"),
                 None,
                 max_sequence,
-                0,
             ),
         ],
     );
@@ -5051,11 +5061,9 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
             Bytes::from_static(b"uncovered-earlier-segment"),
             Some(Bytes::from_static(b"value")),
             blocked_segment,
-            0,
         )],
     );
     seed_cloud_prune_candidate(&mut el, covered_segment, covered_segment);
-    el.state.wal.current_segment_id = covered_segment + 1;
     el.state
         .wal
         .frontiers
@@ -5358,7 +5366,7 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
     // Assert
     assert_eq!(
         el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.current_segment_id),
+            .tombstone_gc_cutoff(el.state.wal.open_segment()),
         max_sequence
     );
     assert_eq!(failing_cloud.delete_attempts(), 1);
@@ -5400,13 +5408,11 @@ fn should_retain_later_batch_members_when_oldest_wal_is_uncovered() -> crate::co
             Bytes::from_static(b"uncovered-earlier-segment"),
             Some(Bytes::from_static(b"value")),
             1,
-            0,
         )],
     );
     for segment_id in 2..=9 {
         seed_cloud_prune_candidate(&mut el, segment_id, segment_id);
     }
-    el.state.wal.current_segment_id = 10;
     el.state.wal.frontiers.set_cloud_durable_for_test(9);
     add_valid_manifest_sst_for_test(&mut el, "later-batch-covered.sst", 9);
 
@@ -5440,18 +5446,16 @@ fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
         key.clone(),
         Some(Bytes::from_static(b"older-value")),
         1,
-        0,
     );
     let mut uncovered_range_delete = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::DeleteRange,
         Bytes::from_static(b"uncovered-range-start"),
         None,
         2,
-        0,
     );
     uncovered_range_delete.range_end = Some(Bytes::from_static(b"uncovered-range-end"));
     seed_cloud_prune_candidate_with_records(&mut el, 1, 2, vec![put, uncovered_range_delete]);
-    let delete = crate::wal::WalRecord::new(crate::wal::WalOpKind::Delete, key.clone(), None, 3, 0);
+    let delete = crate::wal::WalRecord::new(crate::wal::WalOpKind::Delete, key.clone(), None, 3);
     seed_cloud_prune_candidate_with_records(&mut el, 2, 3, vec![delete]);
     el.state.wal.frontiers.set_cloud_durable_for_test(3);
     add_valid_point_tombstone_manifest_sst_for_test(
@@ -5668,7 +5672,6 @@ fn should_reject_cloud_ack_given_remote_wal_from_different_writer_epoch(
         Bytes::from_static(b"stale-writer"),
         Some(Bytes::from_static(b"value")),
         max_sequence,
-        99,
     );
     let payload = crate::wal::encoding::encode(&stale_record).expect("encode stale WAL record");
     let mut stale_bytes = Vec::new();
@@ -6179,6 +6182,7 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
 
 #[cfg(feature = "failpoints")]
 #[test]
+#[allow(clippy::too_many_lines)]
 fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -6216,7 +6220,7 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         "buffered transaction should defer cloud durability"
     );
 
-    let failed_segment = el.state.wal.current_segment_id;
+    let failed_segment = el.state.wal.open_segment();
     fail::cfg(
         "midge::cloud::inject_fail_after_wal_flush_before_rotate",
         "return",
@@ -6236,7 +6240,8 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         other => panic!("unexpected seal failure: {other:?}"),
     }
     assert_eq!(
-        el.state.wal.current_segment_id, failed_segment,
+        el.state.wal.open_segment(),
+        failed_segment,
         "failed seal must not advance the current WAL segment"
     );
     assert!(
@@ -6265,7 +6270,7 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         "retry should preserve the original max sequence for the segment"
     );
     assert_eq!(
-        el.state.wal.current_segment_id,
+        el.state.wal.open_segment(),
         failed_segment + 1,
         "successful retry should advance to the next WAL segment"
     );
@@ -6351,7 +6356,7 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
             ttl_seconds: None,
         },
     )?;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     fail::cfg(
         "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
         "return",
@@ -6418,7 +6423,7 @@ fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let max_sequence = append_cloud_async_put(&mut event_loop)?;
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
     let request_ids = [90_301_u64, 90_302];
     let responses = request_ids.map(|request_id| {
         let response = event_loop.router.register(request_id, "CloudDurability");
@@ -6444,7 +6449,7 @@ fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
         crate::common::MidgeError::Internal(message)
             if message.contains("durability generation drift")
     ));
-    assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
     assert_eq!(event_loop.state.wal.pending_writes, 0);
     assert_eq!(event_loop.wal_actor.bytes_since_sync(), 0);
     assert_eq!(
@@ -6511,10 +6516,13 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let outcome = |boundary: WalTransitionBoundary| match boundary {
-        WalTransitionBoundary::BeforeSegmentCreate | WalTransitionBoundary::AfterSegmentCreate => {
-            Outcome::Reversible
+        WalTransitionBoundary::AfterSealDigest
+        | WalTransitionBoundary::BeforeSegmentCreate
+        | WalTransitionBoundary::AfterSegmentCreate => Outcome::Reversible,
+        // The footer is the first irreversible step (#843).
+        WalTransitionBoundary::AfterFooter | WalTransitionBoundary::AfterLedgerRotate => {
+            Outcome::FencedBeforeReceipt
         }
-        WalTransitionBoundary::AfterLedgerRotate => Outcome::FencedBeforeReceipt,
         WalTransitionBoundary::BeforeCoordinatorCommit
         | WalTransitionBoundary::AfterCoordinatorCommit
         | WalTransitionBoundary::BeforeSegmentRegistration
@@ -6530,7 +6538,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         let max_sequence = append_cloud_async_put(&mut event_loop)?;
-        let segment_id = event_loop.state.wal.current_segment_id;
+        let segment_id = event_loop.state.wal.open_segment();
         let pending_before = event_loop.state.wal.pending_writes;
         let sealed_path = event_loop
             .state
@@ -6584,7 +6592,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
         );
         match expected {
             Outcome::Reversible => {
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id);
                 assert_eq!(event_loop.durability.current_key(), segment_id);
                 assert_eq!(event_loop.state.wal.pending_writes, pending_before);
                 assert!(sealed_path.exists(), "{boundary:?}: the open segment stays");
@@ -6594,10 +6602,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     "{boundary:?}: only an unrecorded empty next segment may remain"
                 );
                 assert_eq!(
-                    event_loop
-                        .wal_actor
-                        .ledger()
-                        .map(crate::wal::ledger::WalLedger::open_segment),
+                    Some(event_loop.state.wal.history.ledger().open_segment()),
                     Some(segment_id),
                     "{boundary:?}"
                 );
@@ -6612,7 +6617,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                     .seal_current_cloud_segment()
                     .expect("reversible failure must be retryable");
                 assert_eq!(retried, Some((segment_id, max_sequence)));
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
                 assert_eq!(
                     event_loop
                         .durability
@@ -6623,7 +6628,15 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 assert!(response.try_recv().is_err());
             }
             Outcome::FencedBeforeReceipt => {
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+                // Once the ledger recorded the rotation its open segment
+                // moved; a footer alone leaves it. Only restart recovery,
+                // which accepts the footer as the seal, may write again.
+                let rotated = boundary == WalTransitionBoundary::AfterLedgerRotate;
+                assert_eq!(
+                    event_loop.state.wal.open_segment(),
+                    segment_id + u64::from(rotated),
+                    "{boundary:?}"
+                );
                 assert_eq!(event_loop.durability.current_key(), segment_id);
                 assert!(
                     sealed_path.exists(),
@@ -6658,7 +6671,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 ));
             }
             Outcome::FencedAfterReceipt => {
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
                 assert_eq!(event_loop.durability.current_key(), segment_id + 1);
                 assert_eq!(event_loop.state.wal.pending_writes, 0);
                 assert_eq!(event_loop.state.wal.frontiers.local_durable(), max_sequence);
@@ -6992,14 +7005,14 @@ fn should_not_enqueue_cloud_wal_segment_given_lease_unhealthy_when_sealing(
         },
     )?;
     event_loop.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(false)));
-    let segment_id = event_loop.state.wal.current_segment_id;
+    let segment_id = event_loop.state.wal.open_segment();
 
     // Act
     let result = event_loop.seal_current_cloud_segment();
 
     // Assert
     assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
-    assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id);
     assert_eq!(
         event_loop
             .cloud_coordinator
@@ -7935,7 +7948,7 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
-    let active_segment = el.state.wal.current_segment_id;
+    let active_segment = el.state.wal.open_segment();
     let request_id = 91_102;
     let response_rx = router.register(request_id, "SealWalForCloud");
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
@@ -7961,7 +7974,8 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         })
     ));
     assert_eq!(
-        el.state.wal.current_segment_id, active_segment,
+        el.state.wal.open_segment(),
+        active_segment,
         "deadline refusal before flush must leave the active WAL segment intact"
     );
     assert_eq!(
@@ -8395,7 +8409,7 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     append_cloud_async_put(&mut el)?;
-    let active_segment = el.state.wal.current_segment_id;
+    let active_segment = el.state.wal.open_segment();
     el.fencing.leader_store = Some(Arc::new(DelayedLeaderStore::new(
         Duration::from_secs(1),
         "writer-1",
@@ -8425,7 +8439,8 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
         }) if response_id == request_id
     ));
     assert_eq!(
-        el.state.wal.current_segment_id, active_segment,
+        el.state.wal.open_segment(),
+        active_segment,
         "timed-out final seal must retain the active WAL for recovery"
     );
     assert!(
@@ -9863,6 +9878,177 @@ fn should_publish_whole_run_after_memory_deferral_when_shared_memory_returns(
     assert!(matches!(
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Ok { request_id: actual }) if actual == request_id
+    ));
+    Ok(())
+}
+
+#[test]
+fn should_not_owe_a_zero_record_segment_after_restart() -> crate::common::MidgeResult<()> {
+    // Arrange: a CloudAsync cache whose open segment 1 holds no record and
+    // was opened by epoch 0; the restarted writer holds epoch 1.
+    let directory = tempfile::tempdir()?;
+    let db_path = directory.path().to_path_buf();
+    let state = RuntimeState::new(db_path.clone(), false);
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+                .expect("create cloud backend"),
+        ),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        hybrid_storage: Some(hybrid_storage),
+        writer_epoch: 1,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+
+    // Act
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+
+    // Assert: the empty segment is replaced, not sealed, so nothing is owed.
+    let ledger = event_loop.state.wal.history.ledger();
+    assert_eq!(ledger.open_segment(), 2);
+    assert_eq!(ledger.sealed().count(), 0);
+    assert!(event_loop
+        .cloud_coordinator
+        .cloud_wal
+        .upload_backlog
+        .is_empty());
+    assert!(!db_path
+        .join("wal")
+        .join(crate::wal::segment_file_name(1))
+        .exists());
+    Ok(())
+}
+
+#[test]
+fn should_extend_cloud_frontier_over_reserved_sequences_without_records(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: an earlier process reserved sequences through 1000 and the
+    // cloud holds every record it wrote, through sequence 3; nothing is owed.
+    let directory = tempfile::tempdir()?;
+    let db_path = directory.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    state.wal.history.reserve(1000)?;
+    state.raise_sequence_to(3);
+    state.wal.frontiers.reset_cloud_for_recovery(3);
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+                .expect("create cloud backend"),
+        ),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        hybrid_storage: Some(hybrid_storage),
+        writer_epoch: 1,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+
+    // Act
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+
+    // Assert: sequences 4..=1000 hold no record, so the cloud holds every
+    // record below the new open segment.
+    assert_eq!(event_loop.state.sequence, 1000);
+    assert_eq!(
+        event_loop
+            .state
+            .wal
+            .history
+            .ledger()
+            .open_member()
+            .open
+            .first_seq,
+        1001
+    );
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1000);
+    Ok(())
+}
+
+#[test]
+fn should_wait_for_recovered_tail_when_cloud_durability_targets_a_reserved_sequence(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a restart recovers a tail holding sequence 1 after an earlier
+    // process reserved through 1000. Opening seals the tail and starts its
+    // upload, which has not been acknowledged yet.
+    let directory = tempfile::tempdir()?;
+    let db_path = directory.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"recovered"),
+        Some(Bytes::from_static(b"value")),
+        1,
+    );
+    let mut body = Vec::new();
+    crate::wal::frame::append_frame(&mut body, &crate::wal::encoding::encode(&record)?)?;
+    let segment = state.host_wal_dir().join(crate::wal::segment_file_name(1));
+    let mut bytes = std::fs::read(&segment)?;
+    bytes.extend(body);
+    std::fs::write(&segment, bytes)?;
+    state.raise_sequence_to(1);
+    state.wal.frontiers.advance_local_to(1);
+    state.wal.history.reserve(1000)?;
+    state.wal.frontiers.reset_cloud_for_recovery(0);
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        Arc::new(
+            crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+                .expect("create cloud backend"),
+        ),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        hybrid_storage: Some(hybrid_storage),
+        writer_epoch: 1,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+    assert_eq!(event_loop.state.sequence, 1000);
+    let request_id = 90_901;
+    let response = event_loop.router.register(request_id, "CloudDurability");
+
+    // Act: an assertion-only cloud_strict commit returns the sequence it
+    // read at, the reservation's end, and asks the cloud to hold it.
+    WalCoordinator::seal_for_cloud(&mut event_loop, request_id, 1000, true);
+
+    // Assert: it waits for the tail rather than failing, and the tail's
+    // acknowledgement completes it.
+    if let Ok(early) = response.try_recv() {
+        panic!("the request must wait for the recovered tail, not answer {early:?}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while event_loop.state.wal.frontiers.cloud_durable() < 1000 && Instant::now() < deadline {
+        event_loop.tick_hybrid_storage();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Ok { request_id: id }) if id == request_id
     ));
     Ok(())
 }

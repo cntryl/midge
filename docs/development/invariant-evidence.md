@@ -262,7 +262,7 @@ Uncovered boundary: Salvage is degraded recovery, not normal complete-history su
 
 ## WAL-5
 
-Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:694](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L694) `enforce_epoch_order`; [src/runtime/cloud_startup/streaming_wal_plan.rs:795](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L795) `stop_at_first_hole`; [src/wal/recovery.rs:553](../../src/wal/recovery.rs#L553) `max_writer_epoch`.
+Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:694](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L694) `enforce_epoch_order`; [src/runtime/cloud_startup/streaming_wal_plan.rs:795](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L795) `stop_at_first_hole`.
 
 Exact evidence and assertion markers:
 

@@ -760,7 +760,7 @@ fn should_capture_most_restrictive_gc_cutoff_when_compaction_launches() -> Midge
     let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    let generation = el.state.wal.current_segment_id;
+    let generation = el.state.wal.open_segment();
     el.wal_transition.initialize_gc_pins(generation, 20);
     let plan =
         crate::compaction::CompactionPlan::new(0, 0, 1).with_tombstone_gc_eligibility(true, true);

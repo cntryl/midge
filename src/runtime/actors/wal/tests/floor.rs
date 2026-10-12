@@ -9,25 +9,27 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         crate::storage::simulated::host_simulated_cloud(directory.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-    state.wal.current_segment_id = 7;
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 7)?;
     let secondary = state.create_cf("spilled-floor".into())?;
-    let mut actor = WalActor::new(
-        directory.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.set_storage_budget(setup.hybrid_storage.clone());
-    let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
-        Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0)),
-        &crate::io::real::test_root(directory.path()),
-        false,
-        1,
-    )
-    .with_storage_budget(Some(setup.hybrid_storage.clone()));
-    for cf_id in [0, secondary] {
+    // A transaction is single-family (#843): one spilled transaction per
+    // family, both in segment 7.
+    let mut sources = Vec::new();
+    for (txn_id, cf_id) in (1..).zip([0, secondary]) {
+        let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
+            Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0)),
+            &crate::io::real::test_root(directory.path()),
+            false,
+            txn_id,
+        )
+        .with_storage_budget(Some(setup.hybrid_storage.clone()));
         writes.push(crate::runtime::TransactionOp::Put {
             cf_id,
             key: Bytes::from_static(b"key"),
@@ -35,8 +37,8 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
             ttl_seconds: None,
             insert_only: false,
         })?;
+        sources.push(writes.take_source());
     }
-    let source = writes.take_source();
     assert!(
         setup
             .hybrid_storage
@@ -48,28 +50,32 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     let wal_path = directory
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(1));
+        .join(crate::wal::segment_file_name(7));
     assert_eq!(
         std::fs::metadata(&wal_path)?.len(),
-        0,
+        crate::wal::format::HEADER_LEN as u64,
         "an open caller transaction has not emitted WAL frames"
     );
 
     // Act
-    actor.append_spilled_transaction(
-        &mut state,
-        &source,
-        SpilledTransactionAppendParams {
-            request_id: 1,
-            assertions: Vec::new(),
-            durability_policy: Some(DurabilityPolicy::CloudAsync),
-            start_sequence: 0,
-            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
-        },
-    )?;
-    let observed =
-        crate::wal::cloud_segment::inspect_bytes("active", &std::fs::read(wal_path)?).unwrap();
-    state.wal.current_segment_id = 9;
+    for (request_id, source) in (1..).zip(&sources) {
+        actor.append_spilled_transaction(
+            &mut state,
+            source,
+            SpilledTransactionAppendParams {
+                request_id,
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::CloudAsync),
+                start_sequence: 0,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            },
+        )?;
+    }
+    let observed = crate::wal::format::segment::records(&std::fs::read(wal_path)?)?
+        .into_iter()
+        .filter(|record| record.op == crate::wal::WalOpKind::Put)
+        .count();
+    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 9)?;
     let sequence = state.sequence;
     let mut frozen = Vec::new();
     for cf_id in [0, secondary] {
@@ -91,7 +97,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         .unwrap();
 
     // Assert
-    assert_eq!(observed.data_records.len(), 2);
+    assert_eq!(observed, 2);
     assert_eq!(before_publication, Some(7));
     assert_eq!(after_first_family, Some(7));
     assert_eq!(state.wal_recovery_floor_segment(), Some(9));
@@ -104,11 +110,10 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-    let mut actor = WalActor::new(
-        directory.path().join("wal"),
+    let mut actor = WalActor::open(
+        &state,
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
-        false,
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
@@ -123,10 +128,15 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
     actor.append_prepared_transactions(&mut state, vec![prepared])?;
     drop(actor);
     drop(state);
+    // Move segment 1's records to segment 7: the fixture gives them
+    // segment 7's header.
     let wal_directory = directory.path().join("wal");
-    std::fs::rename(
-        wal_directory.join(crate::wal::segment_file_name(1)),
+    let first = wal_directory.join(crate::wal::segment_file_name(1));
+    let records = std::fs::read(&first)?[crate::wal::format::HEADER_LEN..].to_vec();
+    std::fs::remove_file(&first)?;
+    std::fs::write(
         wal_directory.join(crate::wal::segment_file_name(7)),
+        records,
     )?;
     let wal: Arc<dyn crate::io::Fs> =
         Arc::new(crate::io::RealFs::new(&wal_directory).map_err(crate::io::FsError::into_midge)?);
@@ -138,8 +148,9 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
         false,
         crate::config::RecoveryPolicy::Strict,
     )?;
-    assert_eq!(recovered.wal.current_segment_id, 8);
-    recovered.wal.current_segment_id = 50;
+    assert_eq!(recovered.wal.open_segment(), 8);
+    recovered.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    crate::runtime::wal_history::fixture::rotate_to(&mut recovered.wal.history, 50)?;
     let table = recovered.get_cf(0).unwrap().memtable.clone();
     let generation = recovered
         .track_new_immutable_flush(0, table, recovered.sequence)

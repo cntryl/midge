@@ -1975,13 +1975,6 @@
           "symbol": "stop_at_first_hole",
           "kind": "function",
           "marker": "fn stop_at_first_hole("
-        },
-        {
-          "path": "src/wal/recovery.rs",
-          "line": 553,
-          "symbol": "max_writer_epoch",
-          "kind": "function",
-          "marker": "pub(crate) fn max_writer_epoch("
         }
       ],
       "tests": [
@@ -2332,16 +2325,6 @@
             {
               "line": 317,
               "marker": "assert_eq!(stats.max_sequence, Some(final_sequence(&fixture.records)));",
-              "helper": "assert_frontier"
-            },
-            {
-              "line": 318,
-              "marker": "assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);",
-              "helper": "assert_frontier"
-            },
-            {
-              "line": 319,
-              "marker": "assert_eq!(stats.stale_records_skipped, 0);",
               "helper": "assert_frontier"
             },
             {
@@ -4944,16 +4927,6 @@
               "helper": "assert_frontier"
             },
             {
-              "line": 318,
-              "marker": "assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);",
-              "helper": "assert_frontier"
-            },
-            {
-              "line": 319,
-              "marker": "assert_eq!(stats.stale_records_skipped, 0);",
-              "helper": "assert_frontier"
-            },
-            {
               "line": 320,
               "marker": "assert!(!stats.had_corruption);",
               "helper": "assert_frontier"
@@ -6729,16 +6702,6 @@
             {
               "line": 317,
               "marker": "assert_eq!(stats.max_sequence, Some(final_sequence(&fixture.records)));",
-              "helper": "assert_frontier"
-            },
-            {
-              "line": 318,
-              "marker": "assert_eq!(stats.max_epoch_seen, WRITER_EPOCH);",
-              "helper": "assert_frontier"
-            },
-            {
-              "line": 319,
-              "marker": "assert_eq!(stats.stale_records_skipped, 0);",
               "helper": "assert_frontier"
             },
             {

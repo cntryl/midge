@@ -167,8 +167,7 @@
       "target": "lib",
       "source": "src/wal/recovery/tests.rs",
       "test": "should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_epoch",
-      "baseline": "red",
-      "failure_marker": "acknowledged epoch-1 writes were skipped as stale"
+      "baseline": "green"
     },
     {
       "id": "torn-unsynced-tail",
@@ -185,8 +184,7 @@
       "target": "wal_campaigns",
       "source": "tests/wal_campaigns.rs",
       "test": "should_keep_recovered_tail_when_power_is_lost_after_a_process_crash",
-      "baseline": "red",
-      "failure_marker": "recovered WAL tail was served, then lost after power loss"
+      "baseline": "green"
     },
     {
       "id": "lost-buffered-delete",

@@ -40,7 +40,7 @@ use cntryl_midge::__internal::simulation::{Fault, FaultEffect, FaultError, Fault
 use config::{Config, Mode, StoreFaults, RENEWING_LEASE_TTL_MILLIS};
 use harness::{Campaign, FindingKind, Stop, LEASE_LOCK};
 use images::{assert_clean, assert_reproduced, load_image};
-use known::{loses_required_value, resurrects};
+use known::resurrects;
 use search::campaign;
 use std::path::Path;
 use workload::{control_seeds, Durability, Op, Profile, DEFAULT, DETECTION_SEEDS, KEYS};
@@ -154,23 +154,20 @@ fn should_not_reuse_segment_names_when_flushes_retire_every_sealed_segment() {
     assert_clean("segment-retirement-control", finding);
 }
 
+/// Formerly the detection of `recovered-tail-not-durable`: recovery replayed
+/// a buffered WAL tail from the page cache and served it without making it
+/// durable, so a later power loss lost it. The event loop now seals the
+/// recovered tail durably before it serves anything (#843).
 #[test]
-fn should_reproduce_recovered_tail_loss_when_campaigning() {
+fn should_find_no_violation_when_buffered_tails_meet_power_loss() {
     // Arrange
-    let workloads = DETECTION_SEEDS;
+    let workloads = control_seeds(32);
 
     // Act
     let finding = campaign(Profile::BufferedCrashes, workloads, 12, Config::default());
 
-    // Assert: a value recovery served after a process crash was lost.
-    assert_reproduced("recovered-tail-not-durable", finding, |finding| {
-        loses_required_value(&finding.kind)
-            && finding.workload.contains(&Op::ProcessCrash)
-            && finding
-                .workload
-                .iter()
-                .any(|op| matches!(op, Op::PowerLoss { .. }))
-    });
+    // Assert
+    assert_clean("buffered-crashes-control", finding);
 }
 
 /// #811: a completed lease release unlinks its acquisition lock without a
@@ -226,12 +223,12 @@ fn should_replay_saved_image_when_one_is_named() {
     assert!(replayed.is_ok(), "the image reproduces {replayed:#?}");
 }
 
-/// Registered RED case `recovered-tail-not-durable`, found by the
-/// buffered-crash campaign: recovery replays a buffered WAL tail from the page
-/// cache and serves it, but never makes it durable, so a later power loss
-/// loses data the engine already returned.
+/// Registered case `recovered-tail-not-durable`, found by the buffered-crash
+/// campaign: recovery replayed a buffered WAL tail from the page cache and
+/// served it, but never made it durable, so a later power loss lost data the
+/// engine had already returned. Recovery now seals the tail with a footer and
+/// fsyncs it before serving (#843).
 #[test]
-#[ignore = "#808 stage 2: recovered-tail-not-durable"]
 fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
     // Arrange: a buffered put, then the process dies and a restarted process
     // recovers and serves the replayed tail.

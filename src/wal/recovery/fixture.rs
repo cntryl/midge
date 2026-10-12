@@ -1,14 +1,28 @@
 //! Replay lists for WAL test fixtures: the segments a fixture wrote under its
 //! WAL directory, named by id the way the segment ledger names them, sealed
 //! ids in order and then the open one. Tests state their own lists so they
-//! do not depend on how the runtime decides membership.
+//! do not depend on how the runtime decides membership. A list expects of
+//! each file the writer epoch its own header names, which [`wrap_chain`]
+//! settles; replay then checks that the segments chain.
 
-use super::ReplaySegments;
+use super::{Expectation, ReplaySegments};
 use crate::io::FsPath;
 
 /// Replay `sealed` in order, then `open` as the final active segment, all
-/// under `wal_dir`.
+/// under `wal_dir`, after any anchor. Pass the list through [`wrap_chain`]
+/// before replaying it.
 pub(crate) fn segments(wal_dir: &FsPath, sealed: &[u64], open: Option<u64>) -> ReplaySegments {
+    segments_in_epoch(wal_dir, sealed, open, 0)
+}
+
+/// [`segments`] expecting every file to be written by `epoch`, for segment
+/// files a test built whole.
+pub(crate) fn segments_in_epoch(
+    wal_dir: &FsPath,
+    sealed: &[u64],
+    open: Option<u64>,
+    epoch: u64,
+) -> ReplaySegments {
     let path = |id: u64| {
         let name = crate::wal::segment_file_name(id);
         let base = wal_dir.0.trim_end_matches('/');
@@ -18,5 +32,80 @@ pub(crate) fn segments(wal_dir: &FsPath, sealed: &[u64], open: Option<u64>) -> R
             format!("{base}/{name}")
         })
     };
-    ReplaySegments::new(sealed.iter().copied().map(path), open.map(path))
+    let mut segments = ReplaySegments::new(None);
+    for id in sealed {
+        segments.push_sealed(*id, path(*id), Expectation::Epoch(epoch));
+    }
+    if let Some(id) = open {
+        segments.push_open(id, path(id), Expectation::Epoch(epoch));
+    }
+    segments
+}
+
+/// Make every file `segments` names that a test wrote as a bare body of
+/// frames into a v2 segment, chained in replay order: the header, linked to
+/// the file before, then the body, then, for a sealed file, a footer whose
+/// facts come from whatever frames decode (`SegmentBuilder::seal`), so a
+/// deliberately corrupt body still seals. Files that already start with a
+/// header are left as they are. Every wrapped segment is written by `epoch`.
+/// Returns `segments` expecting of each file the epoch its header names.
+///
+/// # Panics
+///
+/// Panics if a file cannot be read or written.
+pub(crate) fn wrap_chain(
+    storage: &dyn crate::io::Fs,
+    segments: &ReplaySegments,
+    epoch: u64,
+) -> ReplaySegments {
+    use crate::wal::format::segment::{footer_link, lenient_footer, SegmentHeader};
+    let mut settled = segments.clone();
+    let mut prev = segments
+        .anchor
+        .unwrap_or(crate::wal::format::ChainLink::GENESIS);
+    for file in &mut settled.files {
+        let Ok(bytes) = crate::io::read_all(storage, &file.path) else {
+            continue;
+        };
+        if let Ok(header) = SegmentHeader::decode(&bytes) {
+            file.expect = Expectation::Epoch(header.epoch);
+            if let Ok(Some(link)) = footer_link(&bytes) {
+                prev = link;
+            }
+            continue;
+        }
+        file.expect = Expectation::Epoch(epoch);
+        let header = SegmentHeader {
+            id: file.id,
+            epoch,
+            holder: crate::wal::format::segment::FIXTURE_HOLDER,
+            first_seq: prev.last_seq.saturating_add(1),
+            prev,
+        };
+        let mut wrapped = header.encode().to_vec();
+        wrapped.extend_from_slice(&bytes);
+        if file.kind == super::ReplayFileKind::Sealed {
+            let footer = lenient_footer(&wrapped).expect("a written header decodes");
+            prev = footer.sealed_facts().link;
+            wrapped.extend(footer.encode_frame().expect("encode fixture footer"));
+        }
+        let mut handle = storage
+            .open(
+                &file.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: false,
+                    create_new: false,
+                    truncate: true,
+                },
+            )
+            .expect("open fixture segment");
+        handle
+            .write_at(0, bytes::Bytes::from(wrapped))
+            .expect("write fixture segment");
+        handle
+            .sync(crate::io::Durability::Durable)
+            .expect("sync fixture segment");
+    }
+    settled
 }

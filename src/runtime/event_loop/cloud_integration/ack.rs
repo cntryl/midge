@@ -234,10 +234,7 @@ impl EventLoop {
             return;
         }
 
-        self.state
-            .wal
-            .frontiers
-            .advance_cloud_to(durable.max_sequence);
+        self.state.wal.advance_cloud_through(durable.max_sequence);
         tracing::debug!(
             segment_id = durable.segment_id,
             cloud_durable_seq = self.state.wal.frontiers.cloud_durable(),
@@ -475,10 +472,8 @@ impl EventLoop {
         };
         let local_path = crate::wal::segment_key(segment_id);
         // Only a ledger member's file is history worth uploading again.
-        let member = self
-            .wal_actor
-            .ledger()
-            .is_some_and(|ledger| ledger.is_member(segment_id));
+        let history = &self.state.wal.history;
+        let member = history.segment_files().is_some() && history.ledger().is_member(segment_id);
         if member && matches!(self.state.fs.exists(&local_path), Ok(true)) {
             self.cloud_coordinator
                 .cloud_wal
