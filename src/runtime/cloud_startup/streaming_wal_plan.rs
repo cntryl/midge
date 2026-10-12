@@ -60,16 +60,30 @@ pub(crate) struct StreamingCloudWalRecovery {
     pub(crate) next_remote_id: SegmentId,
 }
 
-/// Whether another writer published past this cache's history (#843).
+/// Whether another writer published past this cache's history (#843),
+/// which took over: this cache's unpublished tail is not history.
+///
 /// This ledger publishes only segments it sealed, and every one it sealed is
 /// at or below the segment its open member links: its newest sealed member,
 /// or the anchor it continued from. A catalog segment above that came from
-/// another writer, which took over; this cache's unpublished tail is not
-/// history. An idle restart that reopened an empty segment under a later id
-/// still links the same segment, so it cannot hide the takeover.
-fn was_taken_over(ledger: &WalLedger, catalog_head: Option<SegmentId>) -> bool {
+/// another writer. An idle restart that reopened an empty segment under a
+/// later id still links the same segment, so it cannot hide the takeover.
+/// A cataloged segment whose id this ledger sealed but whose header names
+/// another holder is that writer's too: this ledger's own was never
+/// published. `holders` are the cataloged segments' header holders.
+fn was_taken_over(
+    ledger: &WalLedger,
+    catalog_head: Option<SegmentId>,
+    holders: &BTreeMap<SegmentId, [u8; 16]>,
+) -> bool {
     let own_tail = ledger.open_member().open.prev.id;
+    let holder = ledger.holder().bytes();
     catalog_head.is_some_and(|head| head > own_tail)
+        || ledger.sealed().any(|id| {
+            holders
+                .get(&id)
+                .is_some_and(|published| *published != holder)
+        })
 }
 
 /// Rejoin past the catalog: every local member is kept aside, replay reads
@@ -128,12 +142,9 @@ impl StreamingCloudWalRecovery {
         let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
         let catalog_head = catalog.segments.keys().copied().max();
         let next_remote_id = next_segment_id(catalog_head)?;
-        let failed_back = ledger.is_some_and(|ledger| was_taken_over(ledger, catalog_head));
         let mut replay_fs = StreamingWalFs::new(read_window)?;
-        let mut plan = CloudWalRecoveryPlan::new(catalog.sequence_floor, failed_back);
-        if let (true, Some(ledger)) = (failed_back, ledger) {
-            warn_failed_back(ledger, next_remote_id);
-        }
+        let mut plan = CloudWalRecoveryPlan::new(catalog.sequence_floor, false);
+        let mut catalog_holders = BTreeMap::new();
         let mut catalog_links = BTreeMap::new();
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
@@ -149,14 +160,15 @@ impl StreamingCloudWalRecovery {
                 limits,
                 scope,
             );
-            let Some((source, link)) =
+            let Some(published) =
                 recover_or_salvage(result, policy, &mut plan.opened_in_salvage_mode)?
             else {
                 skipped.insert(*segment_id);
                 continue;
             };
-            catalog_links.insert(*segment_id, link);
-            sources.insert(*segment_id, source);
+            catalog_holders.insert(*segment_id, published.holder);
+            catalog_links.insert(*segment_id, published.link);
+            sources.insert(*segment_id, published.source);
             plan.remote_segments.insert(
                 *segment_id,
                 crate::runtime::RecoveredCloudWalSegment {
@@ -164,6 +176,12 @@ impl StreamingCloudWalRecovery {
                     writer_epoch: publication.writer_epoch,
                 },
             );
+        }
+        let failed_back =
+            ledger.is_some_and(|ledger| was_taken_over(ledger, catalog_head, &catalog_holders));
+        plan.failed_back = failed_back;
+        if let (true, Some(ledger)) = (failed_back, ledger) {
+            warn_failed_back(ledger, next_remote_id);
         }
         let mut active_source = None;
         if let Some(ledger) = ledger.filter(|_| !failed_back) {
@@ -411,6 +429,14 @@ fn recover_or_salvage<T>(
     }
 }
 
+/// A cataloged segment, validated: where replay reads it, the link its
+/// footer names and the holder its header names.
+struct PublishedSource {
+    source: ReplaySource,
+    link: Option<ChainLink>,
+    holder: [u8; 16],
+}
+
 fn remote_source(
     local: Arc<dyn Fs>,
     remote: Arc<dyn StorageBackend>,
@@ -419,7 +445,7 @@ fn remote_source(
     read_window: usize,
     limits: StreamingReplayLimits,
     scope: &DeadlineScope,
-) -> MidgeResult<(ReplaySource, Option<ChainLink>)> {
+) -> MidgeResult<PublishedSource> {
     scope.check("cloud WAL HEAD submission")?;
     let deadline = if scope.deadline().is_bounded() {
         scope.deadline()
@@ -497,25 +523,25 @@ fn remote_source(
         .open(&FsPath::new(canonical), READ_ONLY)
         .map_err(FsError::into_midge)?;
     let prefix = inspect_sealed_wal_file(file.as_ref(), &path, limits)?;
-    let header_id = prefix.scan.as_ref().map(|scan| scan.header().id);
+    let header = prefix.scan.as_ref().map(|scan| *scan.header());
     if prefix.max_sequence != publication.max_sequence
         || prefix.writer_epoch != publication.writer_epoch
-        || header_id != Some(publication.segment_id)
+        || header.map(|header| header.id) != Some(publication.segment_id)
     {
         return Err(MidgeError::Corruption(format!(
             "cloud WAL {} sequence, epoch or segment differs from its catalog proof",
             publication.object_key
         )));
     }
-    let link = sealed_link(&prefix);
-    Ok((
-        ReplaySource {
+    Ok(PublishedSource {
+        link: sealed_link(&prefix),
+        holder: header.map_or([0; 16], |header| header.holder),
+        source: ReplaySource {
             fs,
             path,
             expect: Expectation::Epoch(publication.writer_epoch),
         },
-        link,
-    ))
+    })
 }
 
 fn select_local_segment(

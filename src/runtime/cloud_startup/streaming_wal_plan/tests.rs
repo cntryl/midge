@@ -1659,6 +1659,42 @@ fn should_link_reopened_cache_to_catalog_head_when_a_successor_takes_its_next_id
 }
 
 #[test]
+fn should_rebase_cache_when_a_successor_published_its_unpublished_segment_id() -> MidgeResult<()> {
+    // Arrange: this cache published segment 1, sealed segment 2 without
+    // publishing it, and left an empty open segment 3. A successor then
+    // published its own segment 2, linked to 1.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &framed_wal(2, b"unpublished"))?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    let mut header =
+        crate::wal::format::segment::SegmentBuilder::new(2, 9, published_link(&fixture, 1)?)
+            .header();
+    header.holder = [0x42; 16];
+    let (successor, head) = crate::wal::format::segment::SegmentBuilder::from_header(header)
+        .bytes(&framed_wal(2, b"successor"))
+        .seal();
+    fixture.publish(2, 2, 9, &successor)?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+    let history = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
+    )?;
+
+    // Assert: the catalog's segment 2 is the successor's, so this cache's
+    // segment 2 was never published; it rejoins after the successor.
+    assert!(recovered.plan.failed_back);
+    assert_eq!(history.ledger().open_member().open.prev, head);
+    Ok(())
+}
+
+#[test]
 fn should_link_fresh_cache_first_segment_to_catalog_head() -> MidgeResult<()> {
     // Arrange: a new cache over a catalog holding segments 1 and 2.
     let mut fixture = Fixture::new()?;
