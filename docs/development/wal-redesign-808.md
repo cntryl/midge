@@ -53,15 +53,37 @@ Decisions that refine the #808 target design:
   the retries go on. Uploads verified but not yet published count against the
   upload queue's limits, so writes stall behind a segment that keeps failing.
   The queue is WAL-only.
-- Rotation does not pre-open the next segment, because the next header links
-  the previous segment's final digest.
+- Segments are linked (#843). A header names the segment's id, writer epoch,
+  first sequence and the link of the segment before it; a footer seals the
+  segment with its own link: id, last sequence and an xxh3-128 digest of the
+  bytes before the footer. Recovery admits only the chain the ledger (or the
+  catalog) names, so the writer epoch is a segment fact and records no longer
+  carry it.
+- Rotation takes the digest from the writer's running hash first, then
+  creates the next segment linked to it, then writes and syncs the footer,
+  then records `Rotate`. A failed create leaves the segment open and
+  writable; a crash after the footer leaves a footered segment the ledger
+  still calls open, which recovery accepts as sealed.
+- Recovery seals the tail it replayed before the event loop serves anything:
+  a footer and fsync when it holds records, `Reopen` with a new segment when
+  it holds none, so no sealed segment is empty. Then a `Reserve` edit makes
+  the next block of sequences durable before any is handed out, and the
+  sequence continues past every earlier reservation, so a commit whose
+  unsynced record a power loss dropped never has its sequence reused.
 - Genesis records the holder identity and the first open segment. A fresh
-  cloud cache starts one past the catalog's last segment. A ledger whose open
-  segment is below that was succeeded by another writer, which alone
-  publishes there; its local WAL is set aside and history continues past
-  the catalog.
-- Salvage drops a suffix of the ledger with `SetAside{from, open}`, after
-  copying the dropped files into `wal/salvaged-<millis>/`. Nothing is renamed.
+  cloud cache starts one past the catalog's last segment, linked to the
+  catalog head. A ledger whose open segment is below that was succeeded by
+  another writer, which alone publishes there; `Rebase` keeps its local WAL
+  aside and continues past the catalog, linked to the catalog head.
+- Salvage drops a suffix of the ledger with `SetAside{from, cut, open}`, after
+  copying the dropped files into `wal/salvaged-<millis>/`, truncating the cut
+  segment to its replayed prefix and sealing that with a footer. The new open
+  segment links the cut. Nothing is renamed.
+- Until #844 chains the catalog, the catalog's first entry has no anchor to
+  check; every later cloud segment must carry the epoch its entry names and
+  link the one before.
+- A transaction is single-family: its frames carry the family, and a batch
+  spanning families is refused before any sequence is allocated.
 - Files the ledger does not name are orphans. The writable open sweeps them,
   and fails closed on one holding data above every id the ledger handed out.
 - An idle column family pins every later local segment until a flush covers
@@ -103,6 +125,12 @@ history once the successor's catalog entries retire, so it needs ownership
 belongs to a writer another one succeeded: it sets its local WAL aside,
 replays only the catalog, and continues past it, since an unpublished tail is
 not history once another writer has taken over.
+
+Linked segments (#843) turn `inverted-epoch-history` and
+`recovered-tail-not-durable` GREEN. Replay follows the ledger's chain, so a
+segment written by an older epoch is never skipped as stale behind a newer
+one, and recovery seals and syncs the tail it served. The buffered-crash
+campaign detection became a control.
 
 Three fixtures lost their scenario under the ledger and were re-targeted to
 reproduce the same defects:

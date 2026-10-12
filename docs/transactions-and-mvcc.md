@@ -265,7 +265,7 @@ Compaction reads `state.oldest_active_snapshot_sequence()` and applies that hori
 
 ### WAL replay and MVCC state
 
-WAL records carry four fields relevant to MVCC: `seq`, `txn_id`, `writer_epoch`, and `op_kind` (which includes `TxnBatch` for committed transactions).
+WAL records carry three fields relevant to MVCC: `seq`, `txn_id`, and `op_kind` (which includes `TxnBatch` for committed transactions). A transaction frame carries its transaction's column family, and every op in its batch belongs to that family. The writer epoch is a fact of the segment, in its header, not of each record (#843).
 
 Recovery (`src/wal/recovery.rs`) reconstructs state as follows:
 
@@ -287,9 +287,9 @@ The WAL actor includes fail-point annotations at:
 
 Atomicity is preserved by the WAL's single-frame `TxnBatch` encoding combined with recovery's all-or-nothing application. The sequence number range for a transaction is allocated atomically by the single-threaded event loop; no partial allocation is possible.
 
-The `writer_epoch` field on each WAL record prevents zombie writes from stale leaders: recovery skips records from any epoch lower than the maximum epoch seen in the log.
+Each WAL segment's header names the writer epoch that created it and links the segment before it. Recovery replays only the chain of segments the WAL ledger (or the cloud publication catalog) names, and refuses a segment whose epoch goes backwards or whose link does not match its predecessor, so a stale leader's segment cannot enter the replayed history.
 
-After recovery, `RuntimeState.sequence` is set to the maximum sequence number found in the WAL. There is no separate MVCC metadata file; the sequence number embedded in every WAL record and SST entry is the only version state.
+After recovery, `RuntimeState.sequence` is set to the maximum sequence number found in the WAL, and the event loop then continues past the sequence reservation the WAL ledger recorded, so a sequence handed out before a crash is never handed out again. There is no separate MVCC metadata file; the sequence number embedded in every WAL record and SST entry is the only version state.
 
 ---
 

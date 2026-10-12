@@ -9,6 +9,31 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking on-disk format: database FORMAT 6 (#843).** WAL segments are
+  linked: each starts with a header naming its writer epoch, first sequence
+  and the segment before it, and each sealed segment ends with a footer whose
+  digest the next header names. WAL records no longer carry a writer epoch,
+  and transaction frames carry their column family. The WAL ledger records
+  every member's header and footer facts and a durable sequence reservation.
+  Binaries reject FORMAT 1 through 5 with `CompatibilityError`; there is no
+  in-place upgrade. Export the logical contents with the old binary and
+  import them into a new database.
+
+### Fixed
+
+- Recovery seals and syncs the WAL tail it replayed before serving any read,
+  so a power loss after a process crash no longer loses values recovery
+  already returned (#843).
+- A sequence number returned for a commit whose unsynced WAL record a power
+  loss dropped is never handed out again (#843).
+- Replay follows the WAL ledger's linked chain, so segments an older writer
+  epoch wrote are no longer skipped as stale behind a regressed segment id
+  (#843).
+- A transaction that spans column families is refused before any sequence
+  is allocated (#843).
+
 ## [0.3.3] - 2026-10-07
 
 ### Fixed
