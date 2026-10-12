@@ -137,6 +137,15 @@ pub fn prepare_recovery_progress_fixture(
         }
         _ => {
             let wal = seed_wal(root, mode)?;
+            // The cache's ledger exists before recovery starts, as it does for
+            // a real cache, so the measured recovery never writes locally.
+            let local_root: Arc<dyn Fs> =
+                Arc::new(crate::io::RealFs::new(&local).map_err(FsError::into_midge)?);
+            let first_open = wal.catalog.segments.keys().max().map_or(1, |last| last + 1);
+            drop(crate::runtime::wal_history::WalHistory::open(
+                crate::io::subdirectory(local_root, crate::wal::WAL_DIR),
+                first_open,
+            )?);
             observations.set_expected_records(wal.records.len())?;
             let coverage = if mode == RecoveryProgressFixtureMode::CachedCoverage {
                 Some(Box::new(cached_coverage(root, &wal.records, &remote)?))
@@ -224,14 +233,14 @@ fn wal_fixture(
     observations.set_phase("planner")?;
     let local_root: Arc<dyn Fs> =
         Arc::new(crate::io::RealFs::new(local).map_err(FsError::into_midge)?);
-    let first_open = wal.catalog.segments.keys().max().map_or(1, |last| last + 1);
-    let history = crate::runtime::wal_history::WalHistory::open(
-        crate::io::subdirectory(Arc::clone(&local_root), crate::wal::WAL_DIR),
-        first_open,
-    )?;
+    let ledger = crate::runtime::wal_history::WalHistory::read(&crate::io::subdirectory(
+        Arc::clone(&local_root),
+        crate::wal::WAL_DIR,
+    ))?
+    .ok_or_else(|| MidgeError::Internal("the prepared cache has no WAL ledger".into()))?;
     let recovered = StreamingCloudWalRecovery::build(
         &local_root,
-        history.ledger(),
+        &ledger,
         remote,
         &wal.catalog,
         RecoveryPolicy::Strict,
