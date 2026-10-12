@@ -1723,6 +1723,50 @@ fn should_rebase_cache_when_a_successor_published_its_unpublished_segment_id() -
 }
 
 #[test]
+fn should_set_aside_cache_tail_when_the_catalog_set_aside_a_successor_segment_at_its_id(
+) -> MidgeResult<()> {
+    // Arrange: as above, but a salvage later set the successor's segment 2
+    // aside, so the catalog's head is segment 1 again while its next id has
+    // passed 2: this cache's segment 2 is still not history.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &framed_wal(2, b"unpublished"))?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    let head = published_link(&fixture, 1)?;
+    let mut header = crate::wal::format::segment::SegmentBuilder::new(2, 9, head).header();
+    header.holder = [0x42; 16];
+    let (successor, _) = crate::wal::format::segment::SegmentBuilder::from_header(header)
+        .bytes(&framed_wal(2, b"successor"))
+        .seal();
+    fixture.publish(2, 2, 9, &successor)?;
+    fixture.edit_catalog(|catalog| {
+        let set_aside = catalog.entries()[1..].to_vec();
+        catalog
+            .set_aside_suffix(catalog.fencing_epoch(), Some(2), &set_aside, 2)
+            .expect("set the successor's segment aside");
+    });
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+
+    // Assert: this cache's segment 2 is neither replayed nor owed, and the
+    // cache continues after the catalog at an id it never handed out.
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(recovered.segments.open_segment().is_none());
+    assert_eq!(
+        recovered.plan.history,
+        HistoryAction::Rebase {
+            anchor: head,
+            open_at_least: 3
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn should_link_fresh_cache_first_segment_to_catalog_head() -> MidgeResult<()> {
     // Arrange: a new cache over a catalog holding segments 1 and 2.
     let mut fixture = Fixture::new()?;

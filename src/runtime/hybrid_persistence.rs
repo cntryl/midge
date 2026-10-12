@@ -736,10 +736,12 @@ impl CloudPersistence {
             return Ok(ordered_candidates
                 .into_iter()
                 .map(|(segment_id, _)| {
-                    if catalog.entry(segment_id).is_some() {
-                        (segment_id, Err(MidgeError::Busy(refusal.to_string())))
-                    } else {
+                    // Only a segment at or below the anchor retired; one the
+                    // catalog no longer lists above it was set aside.
+                    if segment_id <= catalog.anchor().id {
                         (segment_id, Ok(()))
+                    } else {
+                        (segment_id, Err(MidgeError::Busy(refusal.to_string())))
                     }
                 })
                 .collect());

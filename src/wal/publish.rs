@@ -320,7 +320,10 @@ pub(crate) fn additions(
                 head: head.id,
             });
         }
-        if entry.prev() != head || epoch.is_some_and(|epoch| entry.epoch() < epoch) {
+        if entry.prev() != head
+            || entry.max_sequence() <= head.last_seq
+            || epoch.is_some_and(|epoch| entry.epoch() < epoch)
+        {
             return Err(Refusal::Unchained { segment_id, head });
         }
         head = entry.link();

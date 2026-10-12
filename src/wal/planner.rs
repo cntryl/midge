@@ -15,10 +15,10 @@
 //! - **Fresh:** no ledger. The catalog replays; a new history starts linked
 //!   to its head, at its next id.
 //! - **Joined:** the ledger's chain holds `h_C`, and the catalog never
-//!   handed out the ledger's open id. Members at or below the catalog's
-//!   anchor are retired history; members up to `h_C` replay from the
-//!   catalog (salvage falls back to the local copy); later members are this
-//!   cache's tail.
+//!   handed out the id of the ledger's first member after it. Members at or
+//!   below the catalog's anchor are retired history; members up to `h_C`
+//!   replay from the catalog (salvage falls back to the local copy); later
+//!   members are this cache's tail.
 //! - **Behind:** `h_C` precedes the ledger's anchor and is not in its
 //!   chain: the catalog lost history this cache retired. When the catalog's
 //!   floor covers the ledger's anchor, the catalog set that history aside
@@ -62,7 +62,14 @@ pub(crate) fn lineage(catalog: &WalPublicationCatalog, ledger: Option<&WalLedger
             .member_facts()
             .filter_map(|member| member.sealed.as_ref())
             .any(|sealed| sealed.link == head);
-    if in_chain && catalog.next_segment_id() <= ledger.open_segment() {
+    // The ledger's first member after the head continues the catalog only
+    // when the catalog never handed out its id: a writer may have published
+    // that id and salvage set it aside since.
+    let continues = ledger
+        .members()
+        .find(|id| *id > head.id)
+        .unwrap_or_else(|| ledger.open_segment());
+    if in_chain && catalog.next_segment_id() <= continues {
         Lineage::Joined
     } else if !in_chain && head.id < anchor.id {
         Lineage::Behind {

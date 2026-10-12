@@ -106,8 +106,9 @@ Decisions that refine the #808 target design:
   - **Fresh:** no ledger. The catalog replays and a new history starts after
     its head.
   - **Joined:** the ledger's chain holds the catalog head, and the catalog
-    never handed out the ledger's open id. The catalog replays, then the
-    cache's tail.
+    never handed out the id of the ledger's first member after that head: a
+    successor may have published that id and salvage set it aside since.
+    The catalog replays, then the cache's tail.
   - **Behind:** the catalog head precedes the ledger's anchor and is not in
     its chain: the catalog lost history this cache retired. When the
     catalog's floor covers the ledger's anchor, the catalog set that history
@@ -137,10 +138,12 @@ Decisions that refine the #808 target design:
   raises the floor over everything set aside; then the ledger carries out
   the history action. The failpoint
   `midge::recovery::after_salvage_floor_before_quarantine` sits between
-  them. A crash there leaves either the same hole, which the next salvage open
-  completes, or, when the catalog dropped history the cache had already
-  retired, a catalog Behind the ledger whose floor covers the gap, which the
-  next open rebases onto, strictly.
+  them. A crash there leaves either the same hole in the cache's own tail,
+  which the next salvage open completes, or a catalog the ledger no longer
+  joins: Behind it, with a floor covering the gap, when the catalog dropped
+  history the cache had already retired, or past it when the catalog dropped
+  segments the cache still holds. The next open rebases onto that catalog,
+  strictly, and the floor already covers what was set aside.
 - The #844 discussion proposed treating a cataloged id in
   `[log_start, open)` that is not a ledger member as set-aside history. That
   rule is not implemented literally: after an idle-restart `Reopen`, it would
