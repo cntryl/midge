@@ -624,6 +624,11 @@ fn write_footer(wal: &dyn Fs, path: &FsPath, scan: &SegmentScan) -> MidgeResult<
     let facts = scan.facts();
     let frame = Footer::new(&facts, scan.first_seq()).encode_frame()?;
     let mut file = wal.open(path, read_write()).map_err(FsError::into_midge)?;
+    // The records the footer seals reach the device first: otherwise a
+    // power loss could keep the footer while an earlier record page
+    // reverts, and the segment would no longer replay.
+    file.sync(Durability::Durable)
+        .map_err(FsError::into_midge)?;
     file.write_at(scan.data_len(), bytes::Bytes::from(frame))
         .map_err(FsError::into_midge)?;
     file.sync(Durability::Durable)

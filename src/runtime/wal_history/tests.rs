@@ -473,6 +473,79 @@ fn should_seal_recovered_tail_durably_when_starting_an_epoch() {
     }
 }
 
+/// `len` bytes WAL compression cannot shrink.
+fn incompressible(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect()
+}
+
+#[test]
+fn should_keep_recovered_tail_when_power_is_lost_after_its_footer_append() {
+    for seed in 0..POWER_LOSS_SEEDS {
+        // Arrange: segment 4 ends in a record that spans pages and was never
+        // synced; the epoch start appends the footer, then power is lost
+        // before anything more reaches the device.
+        let device = CrashDevice::new();
+        let mut history = four_segments(&device);
+        let wal = wal(&device);
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"segment-4-large"),
+            Some(bytes::Bytes::from(incompressible(3 * 4096))),
+            43,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode record");
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+        let mut file = wal
+            .open(
+                &FsPath::new(name(4)),
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .expect("open segment 4");
+        let offset = file.len().expect("length");
+        file.write_at(offset, bytes::Bytes::from(frame))
+            .expect("buffered write");
+        drop(file);
+        let footer_write = device.inject(Fault {
+            op: FaultOp::Write,
+            path: key(4),
+            nth: 1,
+            effect: FaultEffect::After,
+            error: FaultError::Io,
+        });
+
+        // Act
+        let interrupted = history.start_epoch(1, 100);
+        device.disarm_faults();
+        device.power_loss(seed);
+        let reopened = open(&device);
+
+        // Assert: whatever the device kept, the segment replays strictly,
+        // and the record the epoch start read is never lost behind a kept
+        // footer.
+        assert!(interrupted.is_err(), "seed {seed}");
+        assert!(device.fired(footer_write), "seed {seed}");
+        let sequences = replayed_sequences(&device, &reopened);
+        assert!(
+            sequences.starts_with(&[11, 12, 21, 22, 31, 32, 41, 42]),
+            "seed {seed}: {sequences:?}"
+        );
+    }
+}
+
 #[test]
 fn should_not_seal_empty_open_segment_when_reopening() {
     // Arrange: the open segment holds no record, written by epoch 0.
