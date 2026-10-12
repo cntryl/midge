@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn should_derive_object_key_and_max_sequence_from_the_entry_link() {
+    fn should_derive_entry_identity_from_its_link() {
         // Arrange
         let bytes = sealed(ChainLink::GENESIS, 4..=4, 7).remove(0);
 
@@ -855,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_anchor_and_next_segment_id_when_every_entry_retires() {
+    fn should_keep_the_chain_when_every_entry_retires() {
         // Arrange
         let (mut catalog, entries) = published(8, 2);
 

@@ -1946,8 +1946,7 @@ fn should_stop_salvage_at_local_member_whose_file_is_missing() -> MidgeResult<()
 }
 
 #[test]
-fn should_continue_ids_and_chain_past_retired_catalog_history_when_fresh_cache_takes_over(
-) -> MidgeResult<()> {
+fn should_continue_past_retired_catalog_history_when_fresh_cache_takes_over() -> MidgeResult<()> {
     // Arrange: a writer published segments 1 and 2, then retired both once
     // SSTs covered them; a new cache takes over.
     let mut fixture = Fixture::new()?;

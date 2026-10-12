@@ -1741,7 +1741,7 @@ const WAL_CORE_FORBIDDEN: &[&str] = &[
 
 /// The WAL core decides; adapters do the I/O (#844).
 #[test]
-fn should_keep_wal_core_free_of_io_and_runtime_dependencies() {
+fn should_keep_wal_core_free_of_io_or_runtime_dependencies() {
     // Arrange
     let files = source_scan::production_files();
 
@@ -2005,7 +2005,7 @@ fn should_mutate_wal_catalog_through_one_path() {
         .production
         .split("fn mutate_wal_catalog_within")
         .nth(1)
-        .and_then(|rest| rest.split("\n}\n").next());
+        .and_then(|rest| rest.split("\nfn ").next());
     let calls_outside_mutate = catalog
         .production
         .matches("commit_catalog_")

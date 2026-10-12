@@ -749,20 +749,7 @@ fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
 }
 
 #[test]
-fn should_release_decode_admission_when_catalog_is_corrupt() {
-    // Arrange
-    let budget = ResourceBudget::new(1024 * 1024);
-
-    // Act
-    let result = AdmittedCatalog::decode(b"{broken", &budget);
-
-    // Assert
-    assert!(matches!(result, Err(MidgeError::Corruption(_))));
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn should_map_a_catalog_rule_refusal_to_a_non_retriable_error() {
+fn should_map_to_a_non_retriable_error_when_a_catalog_rule_refuses() {
     // Arrange
     let fenced = CatalogRefusal::EpochMismatch {
         catalog: 9,
@@ -778,9 +765,19 @@ fn should_map_a_catalog_rule_refusal_to_a_non_retriable_error() {
     let contradicted = refusal_error(contradicted);
 
     // Assert: neither is an error a retry could clear.
-    assert!(matches!(fenced, MidgeError::Fenced(_)), "{fenced:?}");
-    assert!(
-        matches!(contradicted, MidgeError::Corruption(_)),
-        "{contradicted:?}"
-    );
+    assert!(matches!(fenced, MidgeError::Fenced(_)));
+    assert!(matches!(contradicted, MidgeError::Corruption(_)));
+}
+
+#[test]
+fn should_release_decode_admission_when_catalog_is_corrupt() {
+    // Arrange
+    let budget = ResourceBudget::new(1024 * 1024);
+
+    // Act
+    let result = AdmittedCatalog::decode(b"{broken", &budget);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    assert_eq!(budget.used(), 0);
 }
