@@ -1815,14 +1815,14 @@
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 530,
+          "line": 531,
           "symbol": "Planner::admit_open",
           "kind": "function",
           "marker": "fn admit_open("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 459,
+          "line": 462,
           "symbol": "apply_open_cut",
           "kind": "function",
           "marker": "fn apply_open_cut(local: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {"
@@ -1893,21 +1893,21 @@
         },
         {
           "path": "src/wal/planner/tests.rs",
-          "line": 579,
+          "line": 521,
           "symbol": "should_cut_a_torn_open_member_without_keeping_a_copy",
           "claim": "An open member holding one record and then a torn frame is cut back to its 160 verified bytes without a retained copy and replays; strict recovery is not flagged as salvage.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 608,
+              "line": 543,
               "marker": "assert_eq!("
             },
             {
-              "line": 616,
+              "line": 551,
               "marker": "assert_eq!(ids(&plan), vec![(1, Source::Local)]);"
             },
             {
-              "line": 617,
+              "line": 552,
               "marker": "assert!(!plan.opened_in_salvage_mode);"
             }
           ]
@@ -1921,14 +1921,14 @@
       "production": [
         {
           "path": "src/wal/planner.rs",
-          "line": 354,
+          "line": 355,
           "symbol": "plan",
           "kind": "function",
           "marker": "pub(crate) fn plan("
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 591,
+          "line": 592,
           "symbol": "Planner::finish",
           "kind": "function",
           "marker": "fn finish("
@@ -2021,21 +2021,21 @@
         },
         {
           "path": "src/wal/planner/tests.rs",
-          "line": 623,
+          "line": 558,
           "symbol": "should_replay_only_the_chain_prefix_before_the_first_hole",
           "claim": "Seeded property over published and unpublished segments with damaged objects or members: strict planning fails exactly when a hole precedes the open segment, salvage replays exactly the segments before the first hole, and salvage is flagged exactly when a hole exists.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 646,
+              "line": 581,
               "marker": "proptest::prop_assert_eq!(strict.is_err(), hole.is_some());"
             },
             {
-              "line": 649,
+              "line": 584,
               "marker": "proptest::prop_assert_eq!(replayed, expected);"
             },
             {
-              "line": 650,
+              "line": 585,
               "marker": "proptest::prop_assert_eq!(salvage.opened_in_salvage_mode, hole.is_some());"
             }
           ]
@@ -2085,7 +2085,7 @@
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 591,
+          "line": 592,
           "symbol": "Planner::finish",
           "kind": "function",
           "marker": "fn finish("
@@ -2108,25 +2108,25 @@
       "tests": [
         {
           "path": "src/wal/planner/tests.rs",
-          "line": 416,
+          "line": 395,
           "symbol": "should_stop_at_the_first_segment_whose_header_breaks_the_chain",
           "claim": "A cache segment written by epoch 7 after the catalog's epoch-8 segment breaks the chain: strict planning refuses it naming the lower epoch; salvage replays only segment 1, rebases onto it and lifts the catalog floor over the set-aside segment.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 443,
+              "line": 410,
               "marker": "assert!("
             },
             {
-              "line": 447,
+              "line": 414,
               "marker": "assert_eq!(ids(&salvage), vec![(1, Source::Remote)]);"
             },
             {
-              "line": 448,
+              "line": 415,
               "marker": "assert_eq!("
             },
             {
-              "line": 455,
+              "line": 422,
               "marker": "assert!(salvage.catalog_floor >= tail[0].link().last_seq);"
             }
           ]
@@ -2171,29 +2171,29 @@
         },
         {
           "path": "src/wal/planner/tests.rs",
-          "line": 339,
+          "line": 337,
           "symbol": "should_rebase_strictly_when_the_catalog_set_this_history_aside",
           "claim": "A catalog that set segments 2 and 3 aside with floor 5 is Behind this ledger and covers it: strict planning replays segment 1, rebases onto it, keeps new writes above sequence 5 and needs no further catalog change.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 363,
+              "line": 354,
               "marker": "assert_eq!(lineage, Lineage::Behind { covered: true });"
             },
             {
-              "line": 364,
+              "line": 355,
               "marker": "assert_eq!(ids(&plan), vec![(1, Source::Remote)]);"
             },
             {
-              "line": 365,
+              "line": 356,
               "marker": "assert_eq!("
             },
             {
-              "line": 372,
+              "line": 363,
               "marker": "assert!(plan.max_unreplayed_sequence >= 5);"
             },
             {
-              "line": 373,
+              "line": 364,
               "marker": "assert!(!plan.changes_catalog(&catalog));"
             }
           ]
@@ -2349,17 +2349,17 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 225,
+          "line": 240,
           "symbol": "should_require_full_range_coverage_for_wal_tombstones",
           "claim": "Constructed authoritative [a,m] coverage covers [c,k) but rejects [c,z).",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 254,
+              "line": 269,
               "marker": "assert!(covered_result);"
             },
             {
-              "line": 255,
+              "line": 270,
               "marker": "assert!(!uncovered_result);"
             }
           ]
@@ -2955,33 +2955,33 @@
         },
         {
           "path": "src/runtime/state/tests.rs",
-          "line": 1509,
+          "line": 1511,
           "symbol": "should_replay_every_compaction_publication_crash_point_to_complete_authority",
           "claim": "Recovered manifest resolves the constructed crash-phase matrix to complete authority.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1564,
+              "line": 1566,
               "marker": "assert_eq!(mirrored_names.len(), mirrored_output_count);"
             },
             {
-              "line": 1565,
+              "line": 1567,
               "marker": "assert!(mirrored_names.is_subset(&new_authority));"
             },
             {
-              "line": 1591,
+              "line": 1593,
               "marker": "assert_eq!("
-            },
-            {
-              "line": 1595,
-              "marker": "assert!(recovered_authority == old_authority || recovered_authority == new_authority);"
             },
             {
               "line": 1597,
+              "marker": "assert!(recovered_authority == old_authority || recovered_authority == new_authority);"
+            },
+            {
+              "line": 1599,
               "marker": "assert_eq!("
             },
             {
-              "line": 1603,
+              "line": 1605,
               "marker": "assert_eq!("
             }
           ]
@@ -3531,62 +3531,62 @@
       "tests": [
         {
           "path": "src/metadata/persistence.rs",
-          "line": 1139,
+          "line": 1140,
           "symbol": "should_preserve_concurrent_journal_edit_when_checkpoint_uses_stale_manifest",
           "claim": "Actual concurrent journal append survives stale snapshot checkpoint; loaded file and edit frontier remain included.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1168,
+              "line": 1169,
               "marker": "assert!("
             },
             {
-              "line": 1175,
+              "line": 1176,
               "marker": "assert_eq!(loaded.edit_checkpoint_id, 1);"
             }
           ]
         },
         {
           "path": "src/metadata/persistence.rs",
-          "line": 1228,
+          "line": 1229,
           "symbol": "should_replay_only_post_checkpoint_edits_given_crash_after_snapshot_rename",
           "claim": "Real post-rename failpoint leaves journal; next edit replays once, snapshot edit ID 1/loaded 2, exact two files and one post-checkpoint edit.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 1253,
+              "line": 1254,
               "marker": "assert!(checkpoint_error.contains(\"snapshot rename\"));"
             },
             {
-              "line": 1254,
+              "line": 1255,
               "marker": "assert!("
             },
             {
-              "line": 1287,
+              "line": 1288,
               "marker": "assert_eq!(snapshot_checkpoint, 1);"
             },
             {
-              "line": 1288,
+              "line": 1289,
               "marker": "assert_eq!("
-            },
-            {
-              "line": 1292,
-              "marker": "assert_eq!(loaded.files.len(), 2);"
             },
             {
               "line": 1293,
-              "marker": "assert_eq!(replayed.len(), 1);"
+              "marker": "assert_eq!(loaded.files.len(), 2);"
             },
             {
               "line": 1294,
+              "marker": "assert_eq!(replayed.len(), 1);"
+            },
+            {
+              "line": 1295,
               "marker": "assert!(matches!("
             },
             {
-              "line": 1299,
+              "line": 1300,
               "marker": "assert_eq!("
             },
             {
-              "line": 1308,
+              "line": 1309,
               "marker": "assert_eq!("
             }
           ]
@@ -3745,13 +3745,13 @@
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
-          "line": 2168,
+          "line": 2171,
           "symbol": "should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry",
           "claim": "A cataloged object whose header links another segment than its entry names fails strict recovery.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2195,
+              "line": 2198,
               "marker": "assert!("
             }
           ]
@@ -3808,17 +3808,17 @@
       "tests": [
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2912,
+          "line": 3066,
           "symbol": "should_readback_remote_wal_before_upload_worker_emits_ack",
           "claim": "Actual upload worker emits ACK for segment 9/sequence 13 only with recorded GET download of exact epoch/segment key.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2946,
+              "line": 3100,
               "marker": "assert!("
             },
             {
-              "line": 2956,
+              "line": 3110,
               "marker": "assert!("
             }
           ]
@@ -4113,14 +4113,14 @@
         },
         {
           "path": "src/wal/planner.rs",
-          "line": 491,
+          "line": 492,
           "symbol": "Planner::admit_tail",
           "kind": "function",
           "marker": "fn admit_tail("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 477,
+          "line": 480,
           "symbol": "assemble_planned_sources",
           "kind": "function",
           "marker": "fn assemble_planned_sources("
@@ -4222,50 +4222,50 @@
         },
         {
           "path": "src/wal/planner/tests.rs",
-          "line": 271,
+          "line": 258,
           "symbol": "should_replay_the_tail_after_the_catalog_head_from_the_cache",
           "claim": "The catalog holds segment 1; the cache sealed unpublished segment 2 and opened 3. Replay reads 1 from the catalog and 2 and 3 from the cache, 2 stays owed to the catalog, and 3 replays last, unsealed.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 292,
+              "line": 276,
               "marker": "assert_eq!("
             },
             {
-              "line": 296,
+              "line": 276,
               "marker": "assert_eq!("
             },
             {
-              "line": 300,
+              "line": 280,
               "marker": "assert!(!plan.replay[2].sealed);"
             }
           ]
         },
         {
           "path": "src/wal/planner/tests.rs",
-          "line": 459,
+          "line": 426,
           "symbol": "should_fall_back_to_the_cached_copy_when_a_shared_object_is_damaged",
           "claim": "A damaged shared object 2 fails strict planning; salvage replays the cache's identical copy instead, flags degraded recovery, sets no catalog entry aside and owes segment 2 again.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 491,
+              "line": 446,
               "marker": "assert!(matches!(strict, Err(PlanError::Unreplayable(_))));"
             },
             {
-              "line": 492,
+              "line": 447,
               "marker": "assert_eq!(ids(&salvage), vec![(1, Source::Remote), (2, Source::Local)]);"
             },
             {
-              "line": 493,
+              "line": 448,
               "marker": "assert!(salvage.opened_in_salvage_mode);"
             },
             {
-              "line": 494,
+              "line": 449,
               "marker": "assert_eq!(salvage.retire_catalog_from, None);"
             },
             {
-              "line": 495,
+              "line": 450,
               "marker": "assert_eq!("
             }
           ]
@@ -4309,17 +4309,17 @@
       "tests": [
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 2446,
+          "line": 2483,
           "symbol": "should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs",
           "claim": "Actual cloud object proof is captured, same bytes are republished with a new ETag; guarded delete errors and object still exists.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 2465,
+              "line": 2502,
               "marker": "assert!("
             },
             {
-              "line": 2469,
+              "line": 2506,
               "marker": "assert_cloud_object_exists(&storage, &key);"
             }
           ]
@@ -4770,7 +4770,7 @@
         },
         {
           "path": "src/engine/verification.rs",
-          "line": 242,
+          "line": 265,
           "symbol": "verify_storage_path",
           "kind": "function",
           "marker": "pub(super) fn verify_storage_path("
@@ -5819,17 +5819,17 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/tests.rs",
-          "line": 3002,
+          "line": 3156,
           "symbol": "should_keep_retrying_failed_wal_upload_when_every_attempt_fails",
           "claim": "Actual queued valid local WAL with always-failing storage and an injected zero-delay retry policy reports failures 1 through 6 in order and stays queued.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 3024,
+              "line": 3178,
               "marker": "assert_eq!("
             },
             {
-              "line": 3035,
+              "line": 3189,
               "marker": "assert_eq!("
             }
           ]
@@ -6646,33 +6646,33 @@
       "tests": [
         {
           "path": "src/runtime/state/tests.rs",
-          "line": 733,
+          "line": 753,
           "symbol": "should_stall_next_write_after_active_generation_reserves_last_l0_slot",
           "claim": "Constructed published/queued capacity plus actual active put reaches hard ceiling and sets slot unavailable/hard stall.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 749,
+              "line": 769,
               "marker": "assert_eq!(state.l0_hard_ceiling(), 3);"
             },
             {
-              "line": 750,
+              "line": 770,
               "marker": "assert!(!state.l0_write_slot_unavailable(0));"
             },
             {
-              "line": 762,
+              "line": 782,
               "marker": "assert_eq!(usage, state.l0_hard_ceiling());"
             },
             {
-              "line": 763,
+              "line": 783,
               "marker": "assert!(state.l0_write_slot_unavailable(0));"
             },
             {
-              "line": 764,
+              "line": 784,
               "marker": "assert!(state.should_hard_stall_writes(0));"
             },
             {
-              "line": 765,
+              "line": 785,
               "marker": "assert!(state.has_any_hard_write_stall());"
             }
           ]
@@ -7439,7 +7439,7 @@
         },
         {
           "path": "src/wal/frame.rs",
-          "line": 524,
+          "line": 528,
           "symbol": "next_frame",
           "kind": "function",
           "marker": "pub(crate) fn next_frame<S: FrameBytes>("
@@ -7609,14 +7609,14 @@
       "production": [
         {
           "path": "src/engine/verification.rs",
-          "line": 58,
+          "line": 65,
           "symbol": "StorageVerifier::verify_path",
           "kind": "function",
           "marker": "pub fn verify_path("
         },
         {
           "path": "src/engine/verification.rs",
-          "line": 242,
+          "line": 265,
           "symbol": "verify_storage_path",
           "kind": "function",
           "marker": "pub(super) fn verify_storage_path("
@@ -8181,14 +8181,14 @@
       "production": [
         {
           "path": "src/metadata/accounted_fs.rs",
-          "line": 143,
+          "line": 151,
           "symbol": "write_at",
           "kind": "function",
           "marker": "fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {"
         },
         {
           "path": "src/metadata/accounted_fs.rs",
-          "line": 157,
+          "line": 165,
           "symbol": "append",
           "kind": "function",
           "marker": "fn append(&mut self, data: Bytes) -> FsResult<u64> {"

@@ -101,7 +101,9 @@ Decisions that refine the #808 target design:
   catalog whose entries all retired is still history.
 - Recovery planning is pure (`wal::planner`, #844). Startup only probes the
   segments (object HEAD, checksum and inspection), cuts the open member and
-  assembles the sources; the planner decides. `lineage` places a cache's
+  assembles the sources; the planner decides and derives lineage from the
+  catalog and ledger itself. Replay reads through `ReadFs`, whose `ReadFile`
+  handles expose only reads and length queries. `lineage` places a cache's
   ledger against the catalog:
   - **Fresh:** no ledger. The catalog replays and a new history starts after
     its head.
