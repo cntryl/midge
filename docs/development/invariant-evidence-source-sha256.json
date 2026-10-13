@@ -174,5 +174,5 @@
   "tests/transactions.rs": "83254f2abeac901845ab36fabd071a0f9835d5ce0bfc3c0ca23692bc31f73921",
   "tests/verification_cli.rs": "ead731c9606afb50830bb4831fdb1c86eb707cb38a8c8a0c34bc53adb5398678",
   "tests/wal_campaigns/config.rs": "22a14f029cf75832562f188e8c49cedd162052ff8c24f0a961ec8d95149f5712",
-  "tests/wal_campaigns/harness.rs": "5284bd17d503b9253b5bb430c3b6b68b00192e4714cfea6d6740c5faa428e62a"
+  "tests/wal_campaigns/harness.rs": "ffa35707b4d188ba36261665c3ae1f65345fb5e335fa3845628b34d882985711"
 }

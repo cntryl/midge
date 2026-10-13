@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "ffa338c67d289abe706cf43a33d4a7f93c61af82",
+  "source_revision": "bab5b3ccdee16af9502cba4e032a41b6a0e69947",
   "source_revision_status": "References and SHA256 postimages bind this invariant map to the tested implementation revision recorded in source_revision. Historical qualification records retain their original source and outcomes; they do not qualify a later revision. Test execution is recorded separately.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
