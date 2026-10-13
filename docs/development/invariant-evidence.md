@@ -3,13 +3,12 @@
 Every catalog ID maps to production symbols, exact assertions, fixture
 assumptions and untested boundaries. This is source/reference evidence;
 execution results remain separately scoped in qualification records and PRs.
-References and source postimages bind the current #819 frontier cutover working
-tree based on 5cffb04435f13dc193da73fc9cab11e8a22dbc6f. Historical campaigns in the JSON inventory
-retain their recorded source and outcome; they do not qualify this cutover.
-This reference refresh replaces removed SST coverage controls with canonical
-family frontier, whole-unit replay and shared-generation retirement controls.
-Constructed counters,
-seeded encoded WAL and genuine public ACK are labeled separately.
+References and source postimages bind the implementation revision recorded in
+the JSON inventory. Historical campaigns in the JSON inventory retain their
+recorded source and outcome; they do not qualify a later revision. This refresh
+updates only WAL-2/3/4/5 and CLOUD-3/5 for the WAL redesign contracts.
+Constructed counters, seeded encoded WAL and genuine public ACK are labeled
+separately.
 
 Common-mode integration fixtures use memory, local and filesystem-backed
 CloudSimulated. Native ignored Sqrzl qualification needs its explicit
@@ -17,8 +16,8 @@ features/environment and --ignored execution. None of these fixtures
 establish deployment IAM/quota/network policy or physical device bytes.
 
 The [JSON inventory](invariant-evidence.json) and [source hashes](invariant-evidence-source-sha256.json)
-are checked by `ruby tools/validate-invariant-catalog.rb`; reference checks
-do not establish semantic sufficiency or execute the linked tests.
+bind the references to one implementation revision. They do not establish
+semantic sufficiency or execute the linked tests.
 
 ## AUTH-1
 
@@ -218,20 +217,23 @@ Uncovered boundary: Mapping is not crash persistence proof for every mode. In-me
 
 ## WAL-2
 
-Production: [src/runtime/handle.rs:313](../../src/runtime/handle.rs#L313) `send_and_wait_with_timeout`; [src/runtime/router.rs:261](../../src/runtime/router.rs#L261) `ResponseRouter::abandon`; [src/runtime/event_loop/flush_pipeline.rs:138](../../src/runtime/event_loop/flush_pipeline.rs#L138) `schedule_next_flush_worker_with_shutdown`.
+Production: [src/runtime/actors/wal.rs:706](../../src/runtime/actors/wal.rs#L706) `admit_wal_records`; [src/runtime/actors/wal.rs:849](../../src/runtime/actors/wal.rs#L849) `fail_unapplied_transactions`; [src/runtime/actors/wal/transaction.rs:585](../../src/runtime/actors/wal/transaction.rs#L585) `append_prepared_transaction_batches`; [src/wal/recovery/streaming.rs:278](../../src/wal/recovery/streaming.rs#L278) `replay_wal_with_options`.
 
 Exact evidence and assertion markers:
 
 - [src/engine/tests/flush_retry.rs:474](../../src/engine/tests/flush_retry.rs#L474) `should_complete_one_cloud_flush_when_abandoned_barrier_callers_retry`: Actual accepted held cloud flush outlives caller waits; retries converge on one built/uploaded SST with exact rows and successful strict reopen. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 484, 485, 486, 487, 488, 494, 488, 485, 500.
 - [src/runtime/tests/compaction_deadline_tests.rs:37](../../src/runtime/tests/compaction_deadline_tests.rs#L37) `should_preserve_manual_caller_budget_when_queued_compaction_outlives_response_wait`: real RuntimeHandle/router with no event loop; original override remains captured after bounded caller timeout and late completion updates tombstone accounting. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 65, 69, 70, 71, 75, 76, 77, 78, 79, 80.
+- [src/runtime/actors/wal/tests/admission.rs:422](../../src/runtime/actors/wal/tests/admission.rs#L422) `should_retain_wal_admission_when_failed_append_has_no_rollback_proof`: An ambiguous append returns `OutcomeUnknown`, fences the writer, and retains its admission charge. Assertion markers at lines 444, 446, 449.
+- [src/runtime/actors/wal/tests/admission.rs:513](../../src/runtime/actors/wal/tests/admission.rs#L513) `should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget`: Whole-unit budget rejection leaves WAL bytes and reservation unchanged, keeps the writer open, and permits retry after capacity returns. Assertion markers at lines 600, 604, 606, 610, 614, 617.
+- [tests/fault_injection.rs:2899](../../tests/fault_injection.rs#L2899) `should_not_replay_commit_reported_as_retryable_when_wal_sync_fails`: Public strict commit crosses a real WAL append and injected fsync failure, then restarts; the write cannot be both reported retryable and recovered. Assertion markers at lines 2917, 2921, 2941.
 
-Preconditions: Flush test exercises accepted public Engine work with conditional filesystem cloud. The delivered router control isolates actual RuntimeHandle/route ownership and explicitly has no event loop or durability pipeline.
+Preconditions: Flush test exercises accepted public Engine work with conditional filesystem cloud. The outcome and admission tests run the real WAL actor; the sync-failure case drives public Engine commit and restart with the fsync failpoint.
 
-Uncovered boundary: Flush/router timeout ownership is representative of accepted work, not a dedicated generic non-idempotent commit replay test. Caller retry must not infer that an ambiguous write was unapplied. The shared checkpoint helper reconstructs only a typed pre-WAL WriteStall and preserves unknown Timeout or other terminal errors; its scripted policy controls do not fabricate a real pressure schedule.
+Uncovered boundary: Caller timeout is not cancellation, and an ambiguous write still requires idempotency or readback before retry. Provider-level request ambiguity remains bounded by each provider's conditional publication contract.
 
 ## WAL-3
 
-Production: [src/wal/planner.rs:307](../../src/wal/planner.rs#L307) `local`; [src/wal/planner.rs:531](../../src/wal/planner.rs#L531) `Planner::admit_open`; [src/runtime/cloud_startup/streaming_wal_plan.rs:477](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L477) `apply_open_cut`; [src/wal/recovery/streaming.rs:264](../../src/wal/recovery/streaming.rs#L264) `replay_wal_with_options`.
+Production: [src/wal/planner.rs:307](../../src/wal/planner.rs#L307) `local`; [src/wal/planner.rs:531](../../src/wal/planner.rs#L531) `Planner::admit_open`; [src/runtime/cloud_startup/streaming_wal_plan.rs:477](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L477) `apply_open_cut`; [src/wal/recovery/streaming.rs:257](../../src/wal/recovery/streaming.rs#L257) `replay_wal_with_checkpoint`; [src/wal/recovery/streaming.rs:278](../../src/wal/recovery/streaming.rs#L278) `replay_wal_with_options`.
 
 Exact evidence and assertion markers:
 
@@ -239,10 +241,12 @@ Exact evidence and assertion markers:
 - [src/wal/recovery/tests.rs:1022](../../src/wal/recovery/tests.rs#L1022) `should_recover_only_committed_transaction_given_split_wal_records_when_commit_marker_is_missing`: Synced transaction begin/put without marker decodes but materializes no recovered memtable. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 1066, 1067.
 - [src/wal/planner/tests.rs:170](../../src/wal/planner/tests.rs#L170) `should_plan_every_ledger_member_after_its_anchor`: A ledger with sealed members 1 and 2 and open member 3 plans replay from its anchor in that order, sealed first and the open member last, each checked against its ledger facts. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 179, 180, 187.
 - [src/wal/planner/tests.rs:533](../../src/wal/planner/tests.rs#L533) `should_cut_a_torn_open_member_without_keeping_a_copy`: An open member holding one record and then a torn frame is cut back to its 160 verified bytes without a retained copy and replays; strict recovery is not flagged as salvage. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 555, 563, 564.
+- [tests/storage_root_injection.rs:811](../../tests/storage_root_injection.rs#L811) `should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail`: Strict recovery opens each CrashFs power-loss image with the synced value intact and without refusing a torn unsynced tail. Assertion markers at lines 823, 829, 830.
+- [src/wal/recovery/streaming/tests.rs:744](../../src/wal/recovery/streaming/tests.rs#L744) `should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_follow`: A later epoch can checkpoint and recover all complete later records despite an abandoned earlier split transaction; the abandoned key stays absent. Assertion markers at lines 792, 793, 801, 802.
 
 Preconditions: Actual local filesystem WAL and public strict reopen; split record test directly drives real recovery. Planner tests use real sealed segment bytes, a real ledger and constructed probes.
 
-Uncovered boundary: These selected assertions prove the replay order, the retained prefix, the planned cut and transaction atomicity, not directly the truncation+fsync-before-next-append sequence. That ordering must also remain source-backed; individual frame/crash variants are bounded schedules.
+Uncovered boundary: These selected assertions cover bounded crash images and replay budgets; they do not prove every device failure schedule or provider-specific timing.
 
 ## WAL-4
 
@@ -253,15 +257,18 @@ Exact evidence and assertion markers:
 - [tests/durability.rs:822](../../tests/durability.rs#L822) `should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening`: Genuine corrupted first WAL frame fails strict recovery and salvage exposes no corrupted key. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 871, 884.
 - [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:673](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L673) `should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one`: Real catalog fixture corruption at segment 2 with no local copy yields the salvage flag, remote replay only [1], set-aside catalog entries [2,3] and open segment kept aside, max_unreplayed_sequence=4, a rebase at segment 4 or later, and one catalog change leaving entries [1] with seq_floor=4. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 687, 688, 697, 697, 714, 715, 716, 717, 718, 727, 735.
 - [src/wal/planner/tests.rs:570](../../src/wal/planner/tests.rs#L570) `should_replay_only_the_chain_prefix_before_the_first_hole`: Seeded property over published and unpublished segments with damaged objects or members: strict planning fails exactly when a hole precedes the open segment, salvage replays exactly the segments before the first hole, and salvage is flagged exactly when a hole exists. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 593, 596, 597.
-- [src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs:298](../../src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs#L298) `should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_catalog_commit`: A salvage child aborts at midge::recovery::after_salvage_floor_before_quarantine after its catalog commit; a strict reopen replays only remote segment 1, owes no local segment, replays no open segment, keeps new writes above sequence 5 and links its new open segment to the catalog head. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 324, 333, 334, 335, 336.
+- [src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs:300](../../src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs#L300) `should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_catalog_commit`: A salvage child aborts at midge::recovery::after_salvage_floor_before_quarantine after its catalog commit; a strict reopen replays only remote segment 1, owes no local segment, replays no open segment, keeps new writes above sequence 5 and links its new open segment to the catalog head. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 324, 333, 334, 335, 336.
+- [tests/wal_replay_io_failure.rs:73](../../tests/wal_replay_io_failure.rs#L73) `should_keep_acknowledged_writes_when_salvage_replay_hits_a_transient_io_error`: Real acknowledged WAL writes survive each injected transient read failure and the subsequent healthy reopen. Assertion markers at lines 112, 116, 121.
+- [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:2157](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L2157) `should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains`: Strict recovery skips a corrupt local copy already retired by cloud authority, replays later catalog history, and advances local `log_start`. Assertion markers at lines 2184, 2193, 2194, 2196.
+- [tests/fault_injection/wal_authority_regressions.rs:259](../../tests/fault_injection/wal_authority_regressions.rs#L259) `should_allow_strict_writes_when_salvage_substitutes_intact_local_segment`: Recovery substitutes verified local bytes for a damaged cloud object, then a strict write and a later reopen both succeed. Assertion markers at lines 279, 283, 292.
 
-Preconditions: Explicit RecoveryPolicy::Strict versus Salvage; real catalog/segment bytes and actual corrupted publication identity. The crash case aborts a real child process at the named failpoint. The property test uses real sealed segments with constructed damage probes.
+Preconditions: Explicit RecoveryPolicy::Strict versus Salvage; real catalog/segment bytes and actual corrupted publication identity. The crash case aborts a real child process at the named failpoint. Transient read faults use CrashFs and the public Engine; retired-prefix and substitute cases use cloud catalog fixtures.
 
-Uncovered boundary: Salvage is degraded recovery, not normal complete-history success. These schedules do not license skipping a hole or guarantee every damaged format is salvageable.
+Uncovered boundary: Salvage is degraded recovery, not normal complete-history success. The selected schedules do not qualify every timeout, I/O error, resource-limit, or provider implementation.
 
 ## WAL-5
 
-Production: [src/wal/format/link.rs:135](../../src/wal/format/link.rs#L135) `Chain::admit`; [src/wal/planner.rs:592](../../src/wal/planner.rs#L592) `Planner::finish`; [src/wal/cloud_catalog.rs:586](../../src/wal/cloud_catalog.rs#L586) `WalPublicationCatalog::set_aside_suffix`; [src/runtime/cloud_startup/mod.rs:92](../../src/runtime/cloud_startup/mod.rs#L92) `commit_recovery_plan_within`.
+Production: [src/lease/fs_leader_store.rs:414](../../src/lease/fs_leader_store.rs#L414) `FsLeaderStore::with_writer_epoch`; [src/runtime/wal_history.rs:53](../../src/runtime/wal_history.rs#L53) `with_writer_fence`; [src/runtime/wal_history.rs:375](../../src/runtime/wal_history.rs#L375) `WalHistory::under_writer_fence`; [src/wal/fs/writer_runner.rs:258](../../src/wal/fs/writer_runner.rs#L258) `WriterRunner::append_once`; [src/wal/cloud_catalog.rs:586](../../src/wal/cloud_catalog.rs#L586) `WalPublicationCatalog::set_aside_suffix`.
 
 Exact evidence and assertion markers:
 
@@ -269,10 +276,17 @@ Exact evidence and assertion markers:
 - [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:957](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L957) `should_reject_strict_recovery_when_later_segment_has_lower_writer_epoch`: Real catalog fixture: a local sealed segment by epoch 7 after published epoch-8 history fails strict recovery with the epoch-regression reason and stays in place. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 967, 972.
 - [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:977](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L977) `should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch`: An open segment by epoch 7 after published epoch-8 history fails strict recovery; the file stays in place and no salvage copy is made. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 987, 992, 993.
 - [src/wal/planner/tests.rs:345](../../src/wal/planner/tests.rs#L345) `should_rebase_strictly_when_the_catalog_set_this_history_aside`: A catalog that set segments 2 and 3 aside with floor 5 is Behind this ledger and covers it: strict planning replays segment 1, rebases onto it, keeps new writes above sequence 5 and needs no further catalog change. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 362, 363, 364, 371, 372.
+- [src/wal/ledger_store/tests.rs:300](../../src/wal/ledger_store/tests.rs#L300) `should_refuse_append_when_ledger_changes_without_changing_length`: A same-size unauthorized rewrite is detected before a cached writer can append over it. Assertion markers at lines 314, 315.
+- [src/runtime/wal_history/tests.rs:43](../../src/runtime/wal_history/tests.rs#L43) `should_fence_stale_history_before_successor_wal_effects`: A predecessor history cannot edit the ledger after a successor acquires; the exact ledger image and membership remain unchanged. Assertion markers at lines 68, 69.
+- [src/lease/fs_leader_store.rs:1080](../../src/lease/fs_leader_store.rs#L1080) `should_finish_an_admitted_writer_effect_before_successor_acquisition`: A second store cannot acquire through an admitted writer effect; it takes a greater epoch after the effect completes. Assertion markers at lines 1118, 1122, 1123.
+- [src/wal/fs/writer_io.rs:1086](../../src/wal/fs/writer_io.rs#L1086) `should_hold_filesystem_writer_fence_around_background_append`: The actual background `write_at` runs inside the epoch fence, which blocks successor acquisition until the append finishes. Assertion markers at lines 1146, 1150.
+- [src/lease/fs_leader_store.rs:1244](../../src/lease/fs_leader_store.rs#L1244) `should_allow_successor_after_power_loss_follows_completed_release`: After durable release and CrashFs power loss, a successor acquires a strictly greater epoch. Assertion markers at lines 1254, 1263, 1264.
+- [src/lease/fs_leader_store.rs:1311](../../src/lease/fs_leader_store.rs#L1311) `should_fail_closed_when_power_loss_interrupts_acquisition_lock`: CrashFs acquisition interruption leaves either an uncommitted blocking lock or a clean first epoch; it never publishes a false prior owner. Assertion markers at lines 1336, 1338, 1341.
+- [tests/wal_campaigns.rs:172](../../tests/wal_campaigns.rs#L172) `should_allow_successor_when_power_loss_follows_completed_lease_release`: The engine campaign control passes power loss immediately after a completed filesystem lease release. Assertion marker at line 193.
 
-Preconditions: Real sealed segment bytes and catalog entries with a deliberate epoch regression; planner tests use a real ledger and constructed probes, and the streaming fixtures read real local files. Salvage and strict paths are distinct.
+Preconditions: Real filesystem lease state, CrashFs power-loss states, a real background WAL writer, and actual LEDGER bytes. Epoch-regression planner tests use real sealed segment bytes and catalog entries; the stale-cache takeover case is qualified separately under CLOUD-5 with Sqrzl.
 
-Uncovered boundary: The selected planner assertions establish ordering and floor inputs, not every public post-recovery sequence allocator path or epoch overflow boundary.
+Uncovered boundary: Filesystem effect fencing is qualified on the shared filesystem store. Provider requests already submitted can have ambiguous outcomes; their immutable identities and conditional catalog publication remain the authority boundary. These tests do not exhaust every scheduler interleaving.
 
 ## WAL-6
 
@@ -473,7 +487,7 @@ Uncovered boundary: Injected event delivery is not an actual native upload cance
 
 ## CLOUD-3
 
-Production: [src/runtime/cloud_startup/cloud_recovery/metadata.rs:30](../../src/runtime/cloud_startup/cloud_recovery/metadata.rs#L30) `read_committed_cloud_metadata_within`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:302](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L302) `mirror_cloud_metadata_within`; [src/runtime/hybrid_persistence/metadata_snapshot.rs:404](../../src/runtime/hybrid_persistence/metadata_snapshot.rs#L404) `mirror_control_metadata_within`; [src/lease/cloud.rs:423](../../src/lease/cloud.rs#L423) `ProviderLeaderStore::publish_committed_metadata`.
+Production: [src/runtime/cloud_startup/cloud_recovery/metadata.rs:30](../../src/runtime/cloud_startup/cloud_recovery/metadata.rs#L30) `read_committed_cloud_metadata_within`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:302](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L302) `mirror_cloud_metadata_within`; [src/runtime/hybrid_persistence/metadata_snapshot.rs:404](../../src/runtime/hybrid_persistence/metadata_snapshot.rs#L404) `mirror_control_metadata_within`; [src/lease/cloud.rs:423](../../src/lease/cloud.rs#L423) `ProviderLeaderStore::publish_committed_metadata`; [src/metadata/format.rs:76](../../src/metadata/format.rs#L76) `validate_format_marker`; [src/wal/cloud_catalog.rs:327](../../src/wal/cloud_catalog.rs#L327) `WalPublicationCatalog::decode`.
 
 Exact evidence and assertion markers:
 
@@ -481,10 +495,12 @@ Exact evidence and assertion markers:
 - [src/lease/cloud/tests.rs:2393](../../src/lease/cloud/tests.rs#L2393) `should_reject_metadata_pointer_cas_that_lands_after_successor_acquires`: Held predecessor CAS loses to successor and exact committed winner pointer survives. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 2456, 2460.
 - [src/lease/cloud/tests/startup_deadline/scoped_metadata.rs:407](../../src/lease/cloud/tests/startup_deadline/scoped_metadata.rs#L407) `should_preserve_native_mirror_operation_budget_when_startup_scope_is_unbounded`: Real native acquired lease and FORMAT/snapshot mirror succeeds through default/unbounded scope, retaining finite ordinary aggregate budget and exact remote descriptor bytes. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 415.
 - [src/lease/cloud/tests/startup_deadline/scoped_metadata.rs:419](../../src/lease/cloud/tests/startup_deadline/scoped_metadata.rs#L419) `should_publish_native_mirror_when_bounded_startup_scope_has_remaining_budget`: Actual native mirror succeeds while every observed bounded operation deadline equals the original captured scope. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 427.
+- [src/metadata/format.rs:249](../../src/metadata/format.rs#L249) `should_reject_open_given_format_version_older_than_eight`: Older persisted database versions return `CompatibilityError`; no in-place migration is attempted. Assertion markers at lines 263, 264.
+- [src/wal/cloud_catalog.rs:959](../../src/wal/cloud_catalog.rs#L959) `should_report_another_format_version_as_incompatible`: A catalog with format version 1 is rejected as incompatible before it can be treated as current authority. Assertion marker at line 967.
 
-Preconditions: Source includes merged #713 default-None finite mirror fallback; native metadata fixture is an in-process actual S3 HTTP service with conditional responses, not an external production account.
+Preconditions: Source includes merged #713 default-None finite mirror fallback; native metadata fixture is an in-process actual S3 HTTP service with conditional responses, not an external production account. Format tests use real persisted markers and catalog bytes.
 
-Uncovered boundary: Native fixture checks one protocol and controlled sequences. It does not authorize unpointed generations or prove distributed multi-region consistency; ordinary None/Complete compatibility must remain separate from active aggregate scope.
+Uncovered boundary: Native fixture checks one protocol and controlled sequences. It does not authorize unpointed generations or prove distributed multi-region consistency. Unsupported formats are rejected; migration between persisted versions is not provided.
 
 ## CLOUD-4
 
@@ -503,7 +519,7 @@ Uncovered boundary: Selected assertions prove size and bounds validation. They d
 
 Composed native regression: [should_verify_acknowledged_state_in_fresh_recovery_process](../../tests/cloud_provider_engine_qualification/authority_publication.rs) — Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim. See [fixture protocol](authority-publication-fixture.md).
 
-Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:71](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L71) `StreamingCloudWalRecovery::build_within`; [src/runtime/cloud_startup/streaming_wal_plan.rs:204](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L204) `PublishedObject::probe`; [src/wal/planner.rs:54](../../src/wal/planner.rs#L54) `lineage`; [src/wal/planner.rs:492](../../src/wal/planner.rs#L492) `Planner::admit_tail`; [src/runtime/cloud_startup/streaming_wal_plan.rs:495](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L495) `assemble_planned_sources`; [src/wal/recovery/streaming.rs:264](../../src/wal/recovery/streaming.rs#L264) `replay_wal_with_options`.
+Production: [src/runtime/cloud_startup/streaming_wal_plan.rs:70](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L70) `StreamingCloudWalRecovery::build_within`; [src/runtime/cloud_startup/streaming_wal_plan.rs:200](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L200) `PublishedObject::probe`; [src/wal/planner.rs:54](../../src/wal/planner.rs#L54) `lineage`; [src/wal/planner.rs:492](../../src/wal/planner.rs#L492) `Planner::admit_tail`; [src/runtime/cloud_startup/streaming_wal_plan.rs:495](../../src/runtime/cloud_startup/streaming_wal_plan.rs#L495) `assemble_planned_sources`; [src/wal/recovery/streaming.rs:278](../../src/wal/recovery/streaming.rs#L278) `replay_wal_with_options`.
 
 Exact evidence and assertion markers:
 
@@ -512,10 +528,13 @@ Exact evidence and assertion markers:
 - [tests/cloud_provider_engine_qualification/authority_publication.rs:501](../../tests/cloud_provider_engine_qualification/authority_publication.rs#L501) `should_verify_acknowledged_state_in_fresh_recovery_process`: Two independent native recovery processes start with absent caches and require exact ordered scan and point values for acknowledged successor overwrites, deletion and atomic pairs after actual WAL/SST reclamation. Scope: Three bounded native S3 schedules against pinned local Sqrzl: before upstream PUT, after upstream HTTP 200, and lost successful response. Genuine lease expiry; shortened predecessor shutdown drain budget only. Successor is quiesced before predecessor release to isolate catalog mutation. No exhaustive simulation or live-provider qualification claim.. Assertion/call markers at lines 126, 131, 137.
 - [src/wal/planner/tests.rs:262](../../src/wal/planner/tests.rs#L262) `should_replay_the_tail_after_the_catalog_head_from_the_cache`: The catalog holds segment 1; the cache sealed unpublished segment 2 and opened 3. Replay reads 1 from the catalog and 2 and 3 from the cache, 2 stays owed to the catalog, and 3 replays last, unsealed. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 276, 276, 284.
 - [src/wal/planner/tests.rs:434](../../src/wal/planner/tests.rs#L434) `should_fall_back_to_the_cached_copy_when_a_shared_object_is_damaged`: A damaged shared object 2 fails strict planning; salvage replays the cache's identical copy instead, flags degraded recovery, sets no catalog entry aside and owes segment 2 again. Scope: source/assertion evidence; exact fixture modes and assumptions stated in preconditions. Assertion/call markers at lines 454, 455, 456, 457, 458.
+- [tests/fault_injection/wal_authority_regressions.rs:87](../../tests/fault_injection/wal_authority_regressions.rs#L87) `should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache`: A successor publishes strict commits and flushes them; when the predecessor reopens its old cache, the predecessor's unpublished tail is disqualified and cannot replace successor values. Scope: Sqrzl-backed provider qualification; assertions at lines 141, 148.
+- [tests/fault_injection.rs:7074](../../tests/fault_injection.rs#L7074) `should_recover_local_cloud_async_wal_when_child_aborts_before_upload`: An acknowledged `cloud_async()` record recovers from the surviving same-node WAL after a child abort before upload. Assertion marker at lines 7085, 7086.
+- [src/runtime/cloud_startup/streaming_wal_plan/tests.rs:2157](../../src/runtime/cloud_startup/streaming_wal_plan/tests.rs#L2157) `should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains`: A corrupt local prefix already retired by cloud authority does not block replay of the later published catalog entry. Assertion markers at lines 2184, 2193, 2194.
 
-Preconditions: Ignored native suite requires cloud-all, sqrzl-tests, failpoints and an explicitly qualified Sqrzl environment; exact campaign source/process receipts bind qualification. Planner tests use real sealed segment bytes, a real ledger and constructed probes.
+Preconditions: Ignored native suite requires cloud-all, sqrzl-tests, failpoints and an explicitly qualified Sqrzl environment; exact campaign source/process receipts bind qualification. The predecessor-cache test requires Sqrzl. The cloud_async test uses the actual engine with a child abort and surviving local cache. Planner tests use real sealed segment bytes, a real ledger and constructed probes.
 
-Uncovered boundary: No native campaign was executed during this preparation. Qualification at a historical source revision does not qualify a later source revision. Emulator protocol success does not establish IAM, quotas, real-cloud availability or optional 128 MiB release-cost evidence.
+Uncovered boundary: `cloud_async()` provides same-cache recovery for unpublished writes, not a durability promise across takeover or cache loss; shared catalog authority wins. Qualification at a historical source revision does not qualify a later source revision. Emulator protocol success does not establish IAM, quotas, real-cloud availability or optional 128 MiB release-cost evidence.
 
 ## CLOUD-6
 
@@ -932,7 +951,7 @@ Exact evidence and assertion markers:
 
 Preconditions: Actual held/delegated Fs cases prove wrapper lifecycle boundaries. Histogram values and the private u64::MAX seed are intentionally constructed; those controls prove arithmetic and sticky invalidation only, not actual checkpoint cost, device I/O, accumulated escaped filesystem mutations or hosted measurement.
 
-Uncovered boundary: The lightweight reference validator checks symbols/assertion markers, not the semantic adequacy of every failure schedule. Operation-ledger completeness and active_operations gauge do not mean all runtime/background work has finished.
+Uncovered boundary: Operation-ledger completeness and the `active_operations` gauge do not mean every runtime or background worker has finished. The selected assertions do not prove the semantic adequacy of every failure schedule.
 
 ## ACCT-6
 

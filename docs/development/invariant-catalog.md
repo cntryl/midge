@@ -6,24 +6,21 @@ extends the narrower [storage invariants](storage-invariants.md) page. It does
 not attempt to list every local helper precondition or Rust type invariant.
 
 The initial inventory was recorded during the #707/#708 work. This update
-refreshes its row-level references for the #819 per-family flush frontier
-cutover. Required canonical manifest rows, complete replay-unit selection,
-and committed shared metadata generations replace SST recovery coverage
-proofs. The source references and SHA256 postimages identify the working
-tree described by the accompanying inventory. Historical qualification
-objects retain their recorded source and outcomes; they do not qualify this
-cutover.
+refreshes only WAL-2/3/4/5 and CLOUD-3/5 for the WAL redesign contracts; other
+rows retain their existing references. Source references and SHA256 postimages
+identify the implementation revision recorded in the accompanying inventory.
+Historical qualification objects retain their recorded source and outcomes;
+they do not qualify a later revision.
 The retained nine-cell outcome, original readback digest and #730/#731
 helper/reader limits are mapped below. Full-hour acceptance is separate and
-uses the final merged catalog source; its run identities and artifact
-readbacks are tracked on [GitHub issue #711](https://github.com/cntryl/midge/issues/711).
-No fresh Rust test execution is claimed by this documentation preparation.
+uses the final catalog source; its run identities and artifact readbacks are
+tracked on [GitHub issue #711](https://github.com/cntryl/midge/issues/711).
 
 Each ID links to [exact source and assertion evidence](invariant-evidence.md).
 The accompanying [machine-readable inventory](invariant-evidence.json) names
 production symbols, test symbols, assertion markers, fixture preconditions
-and uncovered boundaries. The lightweight validator checks references and
-source postimage drift; it does not prove an invariant or run Rust tests.
+and uncovered boundaries. These references connect each contract to its
+implementation and evidence; they do not prove an invariant or run Rust tests.
 
 ## Catalog
 
@@ -68,10 +65,10 @@ and [`transactions-and-mvcc.md`](../transactions-and-mvcc.md).
 | ID | Invariant | Evidence |
 |---|---|---|
 | WAL-1 | The selected write option defines the acknowledgment boundary. On local storage, `sync()` waits for local fsync; in-memory storage has no crash-persistent medium. `buffered()` waits for append and visibility but may be lost before fsync; `best_effort()` skips WAL and requires later SST publication to survive restart; `cloud_async()` does not promise cloud durability at return; `cloud_strict()` returns only after cloud authority covers the sequence. | [Exact evidence](invariant-evidence.md#wal-1) |
-| WAL-2 | A commit timeout is not proof that a mutation did not happen. Once accepted, runtime work may finish after the caller stops waiting; callers must use idempotency or readback before retrying an ambiguous write. | [Exact evidence](invariant-evidence.md#wal-2) |
-| WAL-3 | Recovery processes sealed WAL segments in sequence order, then the active WAL. It never applies an incomplete frame or partial transaction. A valid truncated active tail may be retained as a prefix, but the file is truncated and synced to that prefix before append resumes. | [Exact evidence](invariant-evidence.md#wal-3) |
-| WAL-4 | Strict recovery fails closed on corrupt or ambiguous durable state. Salvage may retain only a validated prefix and must report degraded recovery; it must not silently skip a replay hole and apply later state as if history were contiguous. | [Exact evidence](invariant-evidence.md#wal-4) |
-| WAL-5 | Writer epochs and recovered sequence floors prevent a stale writer or set-aside WAL record from becoming current history or having its sequence reused. Epoch-regressed sources participate in the salvage-hole and floor plan before quarantine. | [Exact evidence](invariant-evidence.md#wal-5) |
+| WAL-2 | Admit the complete transaction and its replay resource envelope before the first WAL effect. After an append or fsync may have begun, an ambiguous failure returns `OutcomeUnknown`; a caller timeout does not prove the mutation was unapplied. | [Exact evidence](invariant-evidence.md#wal-2) |
+| WAL-3 | Recovery applies only complete transactions under one bounded replay rule across local and cloud paths. An abandoned split transaction cannot block checkpoint replay. A valid torn active tail is cut to its verified prefix and synced before append resumes. | [Exact evidence](invariant-evidence.md#wal-3) |
+| WAL-4 | Strict recovery fails closed on corrupt or ambiguous durable state. Salvage retains only the longest verified authorized prefix and stops at the first damaged or authoritatively missing point. It persists the sequence floor before truncation or set-aside; timeouts, I/O errors, resource limits and uncertain authority fail closed. | [Exact evidence](invariant-evidence.md#wal-4) |
+| WAL-5 | The active writer epoch fences every ledger edit and WAL storage effect. Stale caches and delayed workers cannot change history after takeover. Persisted formats are explicitly versioned; unsupported versions are rejected before mutation, with no migration path. | [Exact evidence](invariant-evidence.md#wal-5) |
 | WAL-6 | Local and cloud durability frontiers only advance. Recovery may reset a frontier only through its explicit recovery path, then re-prove the prefix from manifest or validated WAL authority. | [Exact evidence](invariant-evidence.md#wal-6) |
 | WAL-7 | WAL retirement requires each sealed segment family maximum to be covered by its durable family flush frontier. Flush publication pairs the frozen commit boundary with its SST; dropped families retain a permanent tombstone. Unknown family authority retains WAL. Replay selects whole validated transactions by commit sequence. | [Exact evidence](invariant-evidence.md#wal-7) |
 
@@ -112,9 +109,9 @@ publication crash matrix in
 |---|---|---|
 | CLOUD-1 | Cloud WAL segments are immutable, epoch-scoped objects. Object existence alone grants no replay or durability authority; startup replays only entries in a validated publication catalog. Late uploads from a fenced writer remain ignored orphans. | [Exact evidence](invariant-evidence.md#cloud-1) |
 | CLOUD-2 | `CloudAck` is emitted only after immutable upload and exact byte readback. The runtime validates the active lease and publishes the WAL catalog before advancing the cloud durability frontier or completing strict durability waiters. | [Exact evidence](invariant-evidence.md#cloud-2) |
-| CLOUD-3 | The committed cloud metadata generation is the authority for mirrored local control files. Mutable metadata copies and unreferenced uploads do not override the committed descriptor. Primary and recovery mirror repair must preserve conditional publication ordering. | [Exact evidence](invariant-evidence.md#cloud-3) |
+| CLOUD-3 | The committed cloud metadata generation is the authority for mirrored local control files. Mutable metadata copies and unreferenced uploads do not override the committed descriptor; catalog and metadata format versions are checked before mutation, with unsupported versions rejected and no migration path. | [Exact evidence](invariant-evidence.md#cloud-3) |
 | CLOUD-4 | Cloud startup inventories each manifest-authoritative SST by its exact object key and recorded size. SST readers validate content, identity and format when those paths consume it; metadata-only inventory does not eagerly verify every body or block. Definitive missing/size-mismatched objects fail closed or enter the explicitly supported salvage path; unrelated objects are not substituted. | [Exact evidence](invariant-evidence.md#cloud-4) |
-| CLOUD-5 | Cloud recovery combines intact local WAL with validated remote catalog history and preserves sequence/epoch holes. A `cloud_strict()` acknowledgment remains recoverable after local-cache loss from uploaded WAL or later published SST state. | [Exact evidence](invariant-evidence.md#cloud-5) |
+| CLOUD-5 | Cloud recovery combines intact local WAL with the validated published catalog chain and preserves sequence/epoch holes. A `cloud_strict()` acknowledgment survives cache loss from published WAL or SST state. `cloud_async()` unpublished WAL may recover from its surviving cache, but is not promised to a successor and cannot override the shared catalog. | [Exact evidence](invariant-evidence.md#cloud-5) |
 | CLOUD-6 | Cloud WAL retirement uses only a validated committed shared metadata generation whose family frontiers cover every sealed segment family maximum. The catalog records that generation before deletion; deletion is conditional on exact object identity and successor-safe retirement authority. Unknown or changed authority retains WAL. | [Exact evidence](invariant-evidence.md#cloud-6) |
 | CLOUD-7 | Provider failures, deadlines, and conditional-write conflicts remain typed outcomes. Provider adapters must preserve range, pagination, precondition, and timeout semantics rather than silently falling back to weaker operations. | [Exact evidence](invariant-evidence.md#cloud-7) |
 
@@ -241,12 +238,10 @@ states that these are bounded schedules rather than exhaustive concurrency
 proofs. Future invariant changes should continue to name the production entry
 point, exact test, assumed preconditions, and untested boundary.
 
-Every ID now names exact production/test references, assertion markers,
-fixture preconditions and uncovered scope in the accompanying evidence map.
-`ruby tools/validate-invariant-catalog.rb` checks unique IDs, complete mapping,
-missing/dangling evidence references, source/test symbols, assertion markers
-and captured source hashes. This catches reference drift; it does not infer
-semantic sufficiency from a passing assertion or replace actual test runs.
+Every ID names production/test references, assertion markers, fixture
+preconditions and uncovered scope in the accompanying evidence map. The map
+records the source revision and postimage hashes; it does not infer semantic
+sufficiency from a passing assertion or replace actual test runs.
 
 #715 instrumentation and readback controls establish their tested contracts.
 Historical 32911805 A/r1 smoke 37270512400 validates transport/construction
@@ -278,7 +273,7 @@ device bytes. Final fourteen hours follow the final merged #711 source.
 The delivery history and remaining qualification work are tracked separately:
 
 - [#711](https://github.com/cntryl/midge/issues/711): this row-level reference
-  inventory and validator; documentation adds no new runtime guarantee.
+  inventory; documentation adds no new runtime guarantee.
 - [#712](https://github.com/cntryl/midge/issues/712): delivered by #724 for
   current-version documentation and historical status wording.
 - [#713](https://github.com/cntryl/midge/issues/713): delivered aggregate

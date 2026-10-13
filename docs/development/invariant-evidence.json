@@ -1,7 +1,7 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "741b7c980a7a08aa8ac13b0d4ab3888c6c568009",
-  "source_revision_status": "References and SHA256 postimages bind the current #819 frontier cutover working tree based on this commit. Removed SST coverage/proof references are replaced by family frontier, whole-unit replay and shared-generation retirement controls. This inventory is source/reference evidence; test execution and qualification remain separate.",
+  "source_revision": "9922fddb5cd221b24d1e6b465810ee312495926f",
+  "source_revision_status": "References and SHA256 postimages bind this invariant map to the tested implementation revision recorded in source_revision. Historical qualification records retain their original source and outcomes; they do not qualify a later revision. Test execution is recorded separately.",
   "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
   "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
   "qualification": {
@@ -1704,25 +1704,32 @@
       "id": "WAL-2",
       "production": [
         {
-          "path": "src/runtime/handle.rs",
-          "line": 313,
-          "symbol": "send_and_wait_with_timeout",
+          "path": "src/runtime/actors/wal.rs",
+          "line": 706,
+          "symbol": "WalActor::admit_wal_records",
           "kind": "function",
-          "marker": "fn send_and_wait_with_timeout("
+          "marker": "fn admit_wal_records(&self, records: &[WalRecord]) -> MidgeResult<u64> {"
         },
         {
-          "path": "src/runtime/router.rs",
-          "line": 261,
-          "symbol": "ResponseRouter::abandon",
+          "path": "src/runtime/actors/wal.rs",
+          "line": 849,
+          "symbol": "WalActor::fail_unapplied_transactions",
           "kind": "function",
-          "marker": "pub fn abandon(&self, request_id: u64, timeout: Duration) -> bool {"
+          "marker": "fn fail_unapplied_transactions("
         },
         {
-          "path": "src/runtime/event_loop/flush_pipeline.rs",
-          "line": 138,
-          "symbol": "schedule_next_flush_worker_with_shutdown",
+          "path": "src/wal/recovery/streaming.rs",
+          "line": 278,
+          "symbol": "replay_wal_with_options",
           "kind": "function",
-          "marker": "fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {"
+          "marker": "pub(crate) fn replay_wal_with_options("
+        },
+        {
+          "path": "src/runtime/actors/wal/transaction.rs",
+          "line": 585,
+          "symbol": "append_prepared_transaction_batches",
+          "kind": "function",
+          "marker": "fn append_prepared_transaction_batches("
         }
       ],
       "tests": [
@@ -1819,41 +1826,89 @@
               "marker": "assert_eq!(late, 1);"
             }
           ]
+        },
+        {
+          "path": "src/runtime/actors/wal/tests/admission.rs",
+          "line": 422,
+          "symbol": "should_retain_wal_admission_when_failed_append_has_no_rollback_proof",
+          "claim": "An ambiguous append reports OutcomeUnknown, fences the writer, and retains its WAL admission charge.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 444,
+              "marker": "assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));"
+            },
+            {
+              "line": 446,
+              "marker": "actor.is_fenced(),"
+            },
+            {
+              "line": 449,
+              "marker": "assert!(setup.hybrid_storage.budget_snapshot().total_committed_bytes > 0,"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/actors/wal/tests/admission.rs",
+          "line": 513,
+          "symbol": "should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget",
+          "claim": "A whole-unit budget rejection writes no WAL bytes, releases no earlier reservation, keeps the actor open, and permits retry after capacity returns.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 604,
+              "marker": "assert!(!fenced_after_first, \"a budget rejection fenced the WAL\");"
+            },
+            {
+              "line": 617,
+              "marker": "assert!(actor.is_open());"
+            }
+          ]
+        },
+        {
+          "path": "tests/fault_injection.rs",
+          "line": 2899,
+          "symbol": "should_not_replay_commit_reported_as_retryable_when_wal_sync_fails",
+          "claim": "A public sync commit followed by injected fsync failure and restart cannot be both reported retryable and recovered.",
+          "scope": "failpoints feature; public Engine commit and strict restart",
+          "assertions": [
+            {
+              "line": 2917,
+              "marker": "commit.is_err(),"
+            },
+            {
+              "line": 2942,
+              "marker": "!(retryable && visible_after_restart.is_some()),"
+            }
+          ]
         }
       ],
-      "preconditions": "Flush test exercises accepted public Engine work with conditional filesystem cloud. The delivered router control isolates actual RuntimeHandle/route ownership and explicitly has no event loop or durability pipeline.",
-      "uncovered": "Flush/router timeout ownership is representative of accepted work, not a dedicated generic non-idempotent commit replay test. Caller retry must not infer that an ambiguous write was unapplied. The shared checkpoint helper reconstructs only a typed pre-WAL WriteStall and preserves unknown Timeout or other terminal errors; its scripted policy controls do not fabricate a real pressure schedule."
+      "preconditions": "Flush test exercises accepted public Engine work with conditional filesystem cloud. The outcome and admission tests run the real WAL actor; the sync-failure case drives public Engine commit and restart with the fsync failpoint.",
+      "uncovered": "Caller timeout is not cancellation, and an ambiguous write still requires idempotency or readback before retry. Provider-level request ambiguity remains bounded by each provider's conditional publication contract."
     },
     {
       "id": "WAL-3",
       "production": [
         {
-          "path": "src/wal/planner.rs",
-          "line": 307,
-          "symbol": "local",
+          "path": "src/wal/recovery/streaming.rs",
+          "line": 257,
+          "symbol": "replay_wal_with_checkpoint",
           "kind": "function",
-          "marker": "pub(crate) fn local(ledger: &WalLedger) -> RecoveryPlan {"
+          "marker": "pub(crate) fn replay_wal_with_checkpoint("
         },
         {
-          "path": "src/wal/planner.rs",
-          "line": 531,
-          "symbol": "Planner::admit_open",
+          "path": "src/wal/recovery/streaming.rs",
+          "line": 278,
+          "symbol": "replay_wal_with_options",
           "kind": "function",
-          "marker": "fn admit_open("
+          "marker": "pub(crate) fn replay_wal_with_options("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
           "line": 477,
           "symbol": "apply_open_cut",
           "kind": "function",
-          "marker": "fn apply_open_cut(local: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {"
-        },
-        {
-          "path": "src/wal/recovery/streaming.rs",
-          "line": 264,
-          "symbol": "replay_wal_with_options",
-          "kind": "function",
-          "marker": "pub(crate) fn replay_wal_with_options("
+          "marker": "fn apply_open_cut("
         }
       ],
       "tests": [
@@ -1932,10 +1987,52 @@
               "marker": "assert!(!plan.opened_in_salvage_mode);"
             }
           ]
+        },
+        {
+          "path": "tests/storage_root_injection.rs",
+          "line": 811,
+          "symbol": "should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail",
+          "claim": "Strict recovery accepts every CrashFs power-loss image with the synced value intact and never rejects a torn unsynced tail.",
+          "scope": "CrashFs power-loss images; strict public reopen",
+          "assertions": [
+            {
+              "line": 823,
+              "marker": "assert!("
+            },
+            {
+              "line": 829,
+              "marker": "assert_eq!(synced.as_deref(), Some(&b\"value\"[..]));"
+            },
+            {
+              "line": 830,
+              "marker": "assert!(buffered.is_none() || buffered == Some(tail.clone()));"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/recovery/streaming/tests.rs",
+          "line": 744,
+          "symbol": "should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_follow",
+          "claim": "A later epoch checkpoints complete records despite an abandoned split transaction; the abandoned transaction remains absent.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 792,
+              "marker": "assert!(result.is_ok(), \"replay failed: {result:?}\");"
+            },
+            {
+              "line": 793,
+              "marker": "assert!(checkpoints > 0);"
+            },
+            {
+              "line": 801,
+              "marker": "assert!(!recovered.contains(b\"abandoned\".as_slice()));"
+            }
+          ]
         }
       ],
-      "preconditions": "Actual local filesystem WAL and public strict reopen; split record test directly drives real recovery. Planner tests use real sealed segment bytes, a real ledger and constructed probes.",
-      "uncovered": "These selected assertions prove the replay order, the retained prefix, the planned cut and transaction atomicity, not directly the truncation+fsync-before-next-append sequence. That ordering must also remain source-backed; individual frame/crash variants are bounded schedules."
+      "preconditions": "Actual local filesystem WAL and public strict reopen; the torn-tail test enumerates CrashFs power-loss images. The split-transaction test drives the production streaming replay implementation with real encoded segment bytes and bounded checkpoint storage.",
+      "uncovered": "These selected assertions cover bounded crash images and replay budgets; they do not prove every device failure schedule or provider-specific timing."
     },
     {
       "id": "WAL-4",
@@ -1948,13 +2045,6 @@
           "marker": "pub(crate) fn plan("
         },
         {
-          "path": "src/wal/planner.rs",
-          "line": 592,
-          "symbol": "Planner::finish",
-          "kind": "function",
-          "marker": "fn finish("
-        },
-        {
           "path": "src/runtime/cloud_startup/mod.rs",
           "line": 92,
           "symbol": "commit_recovery_plan_within",
@@ -1962,11 +2052,18 @@
           "marker": "pub(crate) fn commit_recovery_plan_within("
         },
         {
-          "path": "src/wal/recovery.rs",
-          "line": 430,
-          "symbol": "replay_wal_with_frontiers_within",
+          "path": "src/runtime/wal_history.rs",
+          "line": 706,
+          "symbol": "WalHistory::set_aside",
           "kind": "function",
-          "marker": "pub(crate) fn replay_wal_with_frontiers_within("
+          "marker": "pub(crate) fn set_aside("
+        },
+        {
+          "path": "src/wal/recovery/streaming.rs",
+          "line": 278,
+          "symbol": "replay_wal_with_options",
+          "kind": "function",
+          "marker": "pub(crate) fn replay_wal_with_options("
         }
       ],
       "tests": [
@@ -2062,8 +2159,88 @@
           ]
         },
         {
+          "path": "tests/wal_replay_io_failure.rs",
+          "line": 73,
+          "symbol": "should_keep_acknowledged_writes_when_salvage_replay_hits_a_transient_io_error",
+          "claim": "Each transient WAL read fault leaves every acknowledged write recoverable on a later healthy open.",
+          "scope": "public Engine plus CrashFs; every WAL read fault is retried against a separate device copy",
+          "assertions": [
+            {
+              "line": 112,
+              "marker": "control_missing.is_empty(),"
+            },
+            {
+              "line": 121,
+              "marker": "assert!("
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
+          "line": 676,
+          "symbol": "should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one",
+          "claim": "Cloud salvage stops before the first missing authoritative segment, sets aside the suffix, and persists a sequence floor over it.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 690,
+              "marker": "assert!(recovered.plan.opened_in_salvage_mode);"
+            },
+            {
+              "line": 715,
+              "marker": "vec![2, 3]"
+            },
+            {
+              "line": 738,
+              "marker": "assert_eq!(catalog.seq_floor(), 4);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
+          "line": 2157,
+          "symbol": "should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains",
+          "claim": "A corrupt local copy of cloud-retired segment 1 does not pin or block strict recovery of cataloged segment 2.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 2191,
+              "marker": "vec![2]"
+            },
+            {
+              "line": 2193,
+              "marker": "assert!(recovered.plan.local_segments.is_empty());"
+            },
+            {
+              "line": 2194,
+              "marker": "assert!(history.ledger().log_start() >= 2);"
+            }
+          ]
+        },
+        {
+          "path": "tests/fault_injection/wal_authority_regressions.rs",
+          "line": 259,
+          "symbol": "should_allow_strict_writes_when_salvage_substitutes_intact_local_segment",
+          "claim": "Substitution from verified local segment bytes permits a strict write and later strict reopen while preserving the damaged remote identity.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 283,
+              "marker": "commit.is_ok(),"
+            },
+            {
+              "line": 287,
+              "marker": "shutdown.is_ok(),"
+            },
+            {
+              "line": 290,
+              "marker": "assert_eq!(std::fs::read(&remote).unwrap(), corrupt);"
+            }
+          ]
+        },
+        {
           "path": "src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs",
-          "line": 298,
+          "line": 300,
           "symbol": "should_open_strictly_without_set_aside_segments_when_salvage_stops_after_its_catalog_commit",
           "claim": "A salvage child aborts at midge::recovery::after_salvage_floor_before_quarantine after its catalog commit; a strict reopen replays only remote segment 1, owes no local segment, replays no open segment, keeps new writes above sequence 5 and links its new open segment to the catalog head.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
@@ -2091,39 +2268,39 @@
           ]
         }
       ],
-      "preconditions": "Explicit RecoveryPolicy::Strict versus Salvage; real catalog/segment bytes and actual corrupted publication identity. The crash case aborts a real child process at the named failpoint. The property test uses real sealed segments with constructed damage probes.",
-      "uncovered": "Salvage is degraded recovery, not normal complete-history success. These schedules do not license skipping a hole or guarantee every damaged format is salvageable."
+      "preconditions": "Explicit RecoveryPolicy::Strict versus Salvage; real catalog/segment bytes and actual corrupted publication identity. The crash case aborts a real child process at the named failpoint. Transient read faults use CrashFs and the public Engine; retired-prefix and substitute cases use cloud catalog fixtures.",
+      "uncovered": "Salvage is degraded recovery, not normal complete-history success. The selected schedules do not qualify every timeout, I/O error, resource-limit, or provider implementation."
     },
     {
       "id": "WAL-5",
       "production": [
         {
-          "path": "src/wal/format/link.rs",
-          "line": 135,
-          "symbol": "Chain::admit",
+          "path": "src/lease/fs_leader_store.rs",
+          "line": 414,
+          "symbol": "FsLeaderStore::with_writer_epoch",
           "kind": "function",
-          "marker": "pub(crate) fn admit(&mut self, header: &SegmentHeader, id: SegmentId) -> MidgeResult<()> {"
+          "marker": "fn with_writer_epoch("
         },
         {
-          "path": "src/wal/planner.rs",
-          "line": 592,
-          "symbol": "Planner::finish",
+          "path": "src/runtime/wal_history.rs",
+          "line": 53,
+          "symbol": "with_writer_fence",
           "kind": "function",
-          "marker": "fn finish("
+          "marker": "fn with_writer_fence<T>("
         },
         {
-          "path": "src/wal/cloud_catalog.rs",
-          "line": 586,
-          "symbol": "WalPublicationCatalog::set_aside_suffix",
+          "path": "src/runtime/wal_history.rs",
+          "line": 375,
+          "symbol": "WalHistory::under_writer_fence",
           "kind": "function",
-          "marker": "pub(crate) fn set_aside_suffix("
+          "marker": "fn under_writer_fence<T>("
         },
         {
-          "path": "src/runtime/cloud_startup/mod.rs",
-          "line": 92,
-          "symbol": "commit_recovery_plan_within",
+          "path": "src/wal/fs/writer_runner.rs",
+          "line": 258,
+          "symbol": "WriterRunner::append_once",
           "kind": "function",
-          "marker": "pub(crate) fn commit_recovery_plan_within("
+          "marker": "fn append_once<'a>("
         }
       ],
       "tests": [
@@ -2218,10 +2395,133 @@
               "marker": "assert!(!plan.changes_catalog(&catalog));"
             }
           ]
+        },
+        {
+          "path": "src/wal/ledger_store/tests.rs",
+          "line": 300,
+          "symbol": "should_refuse_append_when_ledger_changes_without_changing_length",
+          "claim": "An unauthorized same-length LEDGER rewrite is rejected before append and remains byte-for-byte unchanged.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 314,
+              "marker": "assert!(matches!(result, Err(MidgeError::Fenced(_))), \"{result:?}\");"
+            },
+            {
+              "line": 315,
+              "marker": "assert_eq!(ledger_bytes(&fs), successor_image);"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/wal_history/tests.rs",
+          "line": 43,
+          "symbol": "should_fence_stale_history_before_successor_wal_effects",
+          "claim": "A predecessor WalHistory cannot edit the ledger after successor acquisition; its image and membership are unchanged.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 67,
+              "marker": "assert!(matches!(result, Err(MidgeError::Fenced(_))), \"{result:?}\");"
+            },
+            {
+              "line": 69,
+              "marker": "crate::io::read_all(wal.as_ref(), &ledger_path).unwrap(),"
+            }
+          ]
+        },
+        {
+          "path": "src/lease/fs_leader_store.rs",
+          "line": 1080,
+          "symbol": "should_finish_an_admitted_writer_effect_before_successor_acquisition",
+          "claim": "A successor is refused while a real epoch-fenced writer effect is admitted and acquires a higher epoch after it completes.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 1118,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 1122,
+              "marker": "assert_eq!(successor.holder_id, \"successor\");"
+            },
+            {
+              "line": 1123,
+              "marker": "assert!(successor.epoch > predecessor.epoch);"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/fs/writer_io.rs",
+          "line": 1086,
+          "symbol": "should_hold_filesystem_writer_fence_around_background_append",
+          "claim": "The actual background write_at is held inside the filesystem epoch fence; takeover cannot pass it.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 1146,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 1150,
+              "marker": "assert!(successor.epoch > predecessor.epoch);"
+            }
+          ]
+        },
+        {
+          "path": "src/lease/fs_leader_store.rs",
+          "line": 1244,
+          "symbol": "should_allow_successor_after_power_loss_follows_completed_release",
+          "claim": "A CrashFs power loss after completed release permits a greater-epoch successor.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 1254,
+              "marker": "assert!(first_store.release_if_owner(\"first\", first.epoch).unwrap());"
+            },
+            {
+              "line": 1263,
+              "marker": "assert!(successor.epoch > first.epoch);"
+            }
+          ]
+        },
+        {
+          "path": "src/lease/fs_leader_store.rs",
+          "line": 1311,
+          "symbol": "should_fail_closed_when_power_loss_interrupts_acquisition_lock",
+          "claim": "Power loss during acquisition either preserves a blocking uncommitted lock or allows a clean first epoch; it does not publish a false owner.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 1336,
+              "marker": "match successor_store.acquire_leadership(\"successor\") {"
+            },
+            {
+              "line": 1338,
+              "marker": "assert_eq!(record.epoch, 1);"
+            },
+            {
+              "line": 1341,
+              "marker": "Err(LeaseError::AcquisitionFailed(_)) => {"
+            }
+          ]
+        },
+        {
+          "path": "tests/wal_campaigns.rs",
+          "line": 172,
+          "symbol": "should_allow_successor_when_power_loss_follows_completed_lease_release",
+          "claim": "The engine campaign control passes power loss immediately after a completed filesystem lease release.",
+          "scope": "nightly campaign selector; deterministic power-loss simulation",
+          "assertions": [
+            {
+              "line": 193,
+              "marker": "assert_clean(\"completed-lease-release\", found);"
+            }
+          ]
         }
       ],
-      "preconditions": "Real sealed segment bytes and catalog entries with a deliberate epoch regression; planner tests use a real ledger and constructed probes, and the streaming fixtures read real local files. Salvage and strict paths are distinct.",
-      "uncovered": "The selected planner assertions establish ordering and floor inputs, not every public post-recovery sequence allocator path or epoch overflow boundary."
+      "preconditions": "Real filesystem lease state, CrashFs power-loss states, a real background WAL writer, and actual LEDGER bytes. Epoch-regression planner tests use real sealed segment bytes and catalog entries; the stale-cache takeover case is qualified separately under CLOUD-5 with Sqrzl.",
+      "uncovered": "Filesystem effect fencing is qualified on the shared filesystem store. Provider requests already submitted can have ambiguous outcomes; their immutable identities and conditional catalog publication remain the authority boundary. These tests do not exhaust every scheduler interleaving."
     },
     {
       "id": "WAL-6",
@@ -3910,6 +4210,20 @@
           "symbol": "ProviderLeaderStore::publish_committed_metadata",
           "kind": "function",
           "marker": "fn publish_committed_metadata("
+        },
+        {
+          "path": "src/metadata/format.rs",
+          "line": 78,
+          "symbol": "validate_format_marker",
+          "kind": "function",
+          "marker": "pub fn validate_format_marker("
+        },
+        {
+          "path": "src/wal/cloud_catalog.rs",
+          "line": 324,
+          "symbol": "WalPublicationCatalog::decode",
+          "kind": "function",
+          "marker": "pub fn decode(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {"
         }
       ],
       "tests": [
@@ -3972,10 +4286,36 @@
               "marker": "assert_successful_native_mirror(&observed);"
             }
           ]
+        },
+        {
+          "path": "src/metadata/format.rs",
+          "line": 249,
+          "symbol": "should_reject_open_given_format_version_older_than_eight",
+          "claim": "Older on-disk database formats return CompatibilityError without in-place migration.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 264,
+              "marker": "matches!(result, Err(MidgeError::CompatibilityError(_))),"
+            }
+          ]
+        },
+        {
+          "path": "src/wal/cloud_catalog.rs",
+          "line": 959,
+          "symbol": "should_report_another_format_version_as_incompatible",
+          "claim": "A version 1 cloud WAL catalog is rejected as incompatible before becoming current authority.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 967,
+              "marker": "assert_eq!(result, Err(CatalogDecodeError::Incompatible(1)));"
+            }
+          ]
         }
       ],
-      "preconditions": "Source includes merged #713 default-None finite mirror fallback; native metadata fixture is an in-process actual S3 HTTP service with conditional responses, not an external production account.",
-      "uncovered": "Native fixture checks one protocol and controlled sequences. It does not authorize unpointed generations or prove distributed multi-region consistency; ordinary None/Complete compatibility must remain separate from active aggregate scope."
+      "preconditions": "Source includes merged #713 default-None finite mirror fallback; native metadata fixture is an in-process actual S3 HTTP service with conditional responses, not an external production account. Format tests use real persisted markers and catalog bytes.",
+      "uncovered": "Native fixture checks one protocol and controlled sequences. It does not authorize unpointed generations or prove distributed multi-region consistency. Unsupported formats are rejected; migration between persisted versions is not provided."
     },
     {
       "id": "CLOUD-4",
@@ -4061,24 +4401,24 @@
       "production": [
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 71,
+          "line": 70,
           "symbol": "StreamingCloudWalRecovery::build_within",
           "kind": "function",
           "marker": "pub(crate) fn build_within("
         },
         {
           "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 204,
+          "line": 200,
           "symbol": "PublishedObject::probe",
           "kind": "function",
-          "marker": "fn probe(&self, entry: &CatalogEntry) -> MidgeResult<(RemoteSource, Probe)> {"
+          "marker": "fn probe("
         },
         {
           "path": "src/wal/planner.rs",
           "line": 54,
           "symbol": "lineage",
           "kind": "function",
-          "marker": "pub(crate) fn lineage(catalog: &WalPublicationCatalog, ledger: Option<&WalLedger>) -> Lineage {"
+          "marker": "fn lineage("
         },
         {
           "path": "src/wal/planner.rs",
@@ -4088,15 +4428,8 @@
           "marker": "fn admit_tail("
         },
         {
-          "path": "src/runtime/cloud_startup/streaming_wal_plan.rs",
-          "line": 495,
-          "symbol": "assemble_planned_sources",
-          "kind": "function",
-          "marker": "fn assemble_planned_sources("
-        },
-        {
           "path": "src/wal/recovery/streaming.rs",
-          "line": 264,
+          "line": 278,
           "symbol": "replay_wal_with_options",
           "kind": "function",
           "marker": "pub(crate) fn replay_wal_with_options("
@@ -4238,10 +4571,57 @@
               "marker": "assert_eq!("
             }
           ]
+        },
+        {
+          "path": "tests/fault_injection/wal_authority_regressions.rs",
+          "line": 87,
+          "symbol": "should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache",
+          "claim": "A predecessor reopening its stale cache cannot override successor strict commits and flush authority.",
+          "scope": "Sqrzl-backed provider test; feature sqrzl-tests required",
+          "assertions": [
+            {
+              "line": 141,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 148,
+              "marker": "\"foreign predecessor cache overrode successor authority\""
+            }
+          ]
+        },
+        {
+          "path": "tests/fault_injection.rs",
+          "line": 7074,
+          "symbol": "should_recover_local_cloud_async_wal_when_child_aborts_before_upload",
+          "claim": "An acknowledged cloud_async record is recoverable from the same surviving cache after a child abort before upload.",
+          "scope": "failpoints feature; actual engine child abort and same-cache reopen",
+          "assertions": [
+            {
+              "line": 7086,
+              "marker": "assert_value_visible("
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
+          "line": 2157,
+          "symbol": "should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains",
+          "claim": "Corruption in a cloud-retired local prefix does not prevent recovery of later catalog history.",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "assertions": [
+            {
+              "line": 2191,
+              "marker": "vec![2]"
+            },
+            {
+              "line": 2194,
+              "marker": "assert!(history.ledger().log_start() >= 2);"
+            }
+          ]
         }
       ],
-      "preconditions": "Ignored native suite requires cloud-all, sqrzl-tests, failpoints and an explicitly qualified Sqrzl environment; exact campaign source/process receipts bind qualification. Planner tests use real sealed segment bytes, a real ledger and constructed probes.",
-      "uncovered": "No native campaign was executed during this preparation. Qualification at a historical source revision does not qualify a later source revision. Emulator protocol success does not establish IAM, quotas, real-cloud availability or optional 128 MiB release-cost evidence."
+      "preconditions": "Ignored native suite requires cloud-all, sqrzl-tests, failpoints and an explicitly qualified Sqrzl environment; exact campaign source/process receipts bind qualification. The predecessor-cache test requires Sqrzl. The cloud_async test uses the actual engine with a child abort and surviving local cache. Planner tests use real sealed segment bytes, a real ledger and constructed probes.",
+      "uncovered": "cloud_async() provides same-cache recovery for unpublished writes, not a durability promise across takeover or cache loss; shared catalog authority wins. Qualification at a historical source revision does not qualify a later source revision. Emulator protocol success does not establish IAM, quotas, real-cloud availability or optional 128 MiB release-cost evidence."
     },
     {
       "id": "CLOUD-6",
@@ -8640,7 +9020,7 @@
         }
       ],
       "preconditions": "Actual held/delegated Fs cases prove wrapper lifecycle boundaries. Histogram values and the private u64::MAX seed are intentionally constructed; those controls prove arithmetic and sticky invalidation only, not actual checkpoint cost, device I/O, accumulated escaped filesystem mutations or hosted measurement.",
-      "uncovered": "The lightweight reference validator checks symbols/assertion markers, not the semantic adequacy of every failure schedule. Operation-ledger completeness and active_operations gauge do not mean all runtime/background work has finished."
+      "uncovered": "Operation-ledger completeness and the active_operations gauge do not mean every runtime or background worker has finished. The selected assertions do not prove the semantic adequacy of every failure schedule."
     },
     {
       "id": "ACCT-6",
@@ -9584,7 +9964,7 @@
         }
       ],
       "preconditions": "All 33 linked reader controls intentionally construct JSON evidence/counters and sometimes real temporary-file reads; they do not execute hosted A/B/C, waiter bodies, device I/O or full-hour qualification. The two #730 zero-rejection cases and #731 exact-expiry parser case are constructed reachability contracts. Shared commit controls at RES-3 and nine capture controls here separate scripted rejection/gauge plus actual local ACK/reopen from pure constructed clocks/errors. Before/end capture uses actual timed runtime query then same-owner snapshot; it requires only zero Persistent metadata activity, not global compute/GC/publication idleness. The actual workload separately requires strict ACK, flush, compaction, exact verification, reopen and both owned shutdowns.",
-      "uncovered": "Initial campaign 37268459342 at c8983928 remains invalid after the three A repeats terminated on genuine L0 WriteStall; six other rows cannot qualify it. Historical smoke 37270512400 validates A/r1 transport/construction only at 32911805: 256 commits, 230 measured, 100 compactions, zero stalls/waits and retained too_few_samples diagnostics. Historical nine-run 37270845568 at 32911805 remains invalid: A/r1 and A/r2 verified all data but selected active CompactionBeforeGc metadata endpoints, despite later settled owners; seven other valid rows cannot repair it. Measured c8f0de80 smoke 37273556125 is transport/construction-valid; all nine fresh attempts of 37274074026 are valid, totaling 1,376,256 real strict ACK rows, exact point/ordered scans before and after reopen and two owned shutdowns per attempt. B/C each miss the snapshot-payload target in three repeats (13.023–13.534% / 80.261–80.262%); A has one time miss and does not qualify. A/r1 end and B/r1/B/r3 warmup captured real active candidates then selected idle, without weakening the gate. This satisfies only the conditional policy-investigation predicate. Cadence remains unchanged, pre-state costs are unknown/excluded, and no physical-device, native confidence or final fourteen-hour qualification follows. Adjacent samples are not global barriers and JSON cannot prove executed body/clock. Final fourteen hours use the final merged #711 source."
+      "uncovered": "Initial campaign 37268459342 at c8983928 remains invalid after the three A repeats terminated on genuine L0 WriteStall; six other rows cannot qualify it. Historical smoke 37270512400 validates A/r1 transport/construction only at 32911805: 256 commits, 230 measured, 100 compactions, zero stalls/waits and retained too_few_samples diagnostics. Historical nine-run 37270845568 at 32911805 remains invalid: A/r1 and A/r2 verified all data but selected active CompactionBeforeGc metadata endpoints, despite later settled owners; seven other valid rows cannot repair it. Measured c8f0de80 smoke 37273556125 is transport/construction-valid; all nine fresh attempts of 37274074026 are valid, totaling 1,376,256 real strict ACK rows, exact point/ordered scans before and after reopen and two owned shutdowns per attempt. B/C each miss the snapshot-payload target in three repeats (13.023\u201313.534% / 80.261\u201380.262%); A has one time miss and does not qualify. A/r1 end and B/r1/B/r3 warmup captured real active candidates then selected idle, without weakening the gate. This satisfies only the conditional policy-investigation predicate. Cadence remains unchanged, pre-state costs are unknown/excluded, and no physical-device, native confidence or final fourteen-hour qualification follows. Adjacent samples are not global barriers and JSON cannot prove executed body/clock. Final fourteen hours use the final merged #711 source."
     }
   ],
   "reference_refresh": {
@@ -9669,9 +10049,7 @@
     "preview": false,
     "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
     "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
-    "changed_hash_bound_paths": [
-
-    ],
+    "changed_hash_bound_paths": [],
     "preserved_ids": 63,
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
@@ -9687,9 +10065,7 @@
     "fixture_before_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
     "fixture_after_sha256": "0ca5d2b7d855b258923486ab4306de0866c62156d5485c078fbb1cd77b4e468d",
     "helper": "assert_fenced_publication_response",
-    "changed_hash_bound_paths": [
-
-    ],
+    "changed_hash_bound_paths": [],
     "preserved_ids": 63,
     "preserved_test_references": 229,
     "preserved_assertion_markers": 1068,
