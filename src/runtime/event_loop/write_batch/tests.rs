@@ -1376,7 +1376,7 @@ fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> Mi
     // Assert: the strict unit is durable but none of it is applied, so the
     // flush publishes none of it and replay keeps or drops it whole; the
     // best-effort write is flushed.
-    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
     assert!(fixture.event_loop.wal_actor.is_fenced());
     assert_eq!(keys, vec![b"best-effort".to_vec()]);
     assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
@@ -1493,8 +1493,147 @@ fn should_acknowledge_applied_unit_when_lease_lapses_inside_coalesced_group() ->
         "{first:?}"
     );
     expect_error(&second_rx, 75, |error| {
-        matches!(error, MidgeError::Fenced(_))
+        matches!(error, MidgeError::Timeout(_))
     });
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+/// Run a coalesced group of two one-put units under `policy`, with the
+/// writer lease lapsing just before the second unit is applied.
+#[cfg(feature = "failpoints")]
+struct LapsedGroup {
+    fixture: EventLoopFixture,
+    first: RuntimeResponse,
+    second: RuntimeResponse,
+}
+
+#[cfg(feature = "failpoints")]
+fn run_group_with_lease_lapse(
+    policy: DurabilityPolicy,
+    request_ids: [u64; 2],
+    keys: [&'static [u8]; 2],
+) -> MidgeResult<LapsedGroup> {
+    let mut fixture = EventLoopFixture::with_policy(policy)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(request_ids[0]);
+    let second_rx = fixture.register(request_ids[1]);
+    msg_tx
+        .send(txn_msg(
+            request_ids[1],
+            vec![put_op(0, keys[1], b"value")],
+            Some(policy),
+        ))
+        .expect("queue second transaction");
+    lapse_lease_at(
+        &mut fixture,
+        "midge::wal::before_prepared_transaction_apply",
+        1,
+    );
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            request_ids[0],
+            vec![put_op(0, keys[0], b"value")],
+            Some(policy),
+        ),
+        1024,
+    );
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+    assert_eq!(handled, 2, "both units must share one group");
+    Ok(LapsedGroup {
+        fixture,
+        first: recv_response(&first_rx),
+        second: recv_response(&second_rx),
+    })
+}
+
+#[cfg(feature = "failpoints")]
+fn is_outcome_unknown(response: &RuntimeResponse, expected_request_id: u64) -> bool {
+    matches!(
+        response,
+        RuntimeResponse::Error {
+            request_id,
+            error: MidgeError::Timeout(message),
+        } if *request_id == expected_request_id && message.contains("may be applied on restart")
+    )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_outcome_unknown_for_synced_unit_when_lease_lapses_before_its_apply(
+) -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+
+    // Act
+    let group = run_group_with_lease_lapse(
+        DurabilityPolicy::Strict,
+        [76, 77],
+        [b"strict-applied", b"strict-synced"],
+    )?;
+
+    // Assert: the first unit is synced and applied. The second is synced
+    // but not applied, so restart may apply it; Fenced would tell its
+    // caller it is not applied.
+    assert!(
+        matches!(
+            group.first,
+            RuntimeResponse::TransactionApplied { request_id: 76, .. }
+        ),
+        "{:?}",
+        group.first
+    );
+    assert!(is_outcome_unknown(&group.second, 77), "{:?}", group.second);
+    assert_eq!(
+        memtable_keys(&group.fixture, 0),
+        vec![b"strict-applied".to_vec()]
+    );
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_outcome_unknown_for_buffered_unit_applied_before_lease_lapse() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+
+    // Act
+    let group = run_group_with_lease_lapse(
+        DurabilityPolicy::Batched,
+        [78, 79],
+        [b"buffered-applied", b"buffered-queued"],
+    )?;
+
+    // Assert: the first unit is applied but its frame may still be queued,
+    // so its durability is unknown; the second unit's frame may also reach
+    // the WAL file and be replayed, so neither caller may be told the unit
+    // is definitely applied or definitely not.
+    assert!(
+        matches!(
+            group.first,
+            RuntimeResponse::Error {
+                request_id: 78,
+                error: MidgeError::Timeout(_),
+            }
+        ),
+        "{:?}",
+        group.first
+    );
+    assert!(is_outcome_unknown(&group.second, 79), "{:?}", group.second);
 
     scenario.teardown();
     drop(test_guard);

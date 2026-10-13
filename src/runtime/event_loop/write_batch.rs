@@ -466,8 +466,11 @@ impl EventLoop {
             Err(error) => (Vec::new(), Some(error)),
         };
 
-        // Units applied before a failure are visible and durable, and
-        // replay keeps them whole, so they are acknowledged like any other.
+        // Units applied before a failure are visible. A synced one is durable
+        // and replay keeps it whole, so it is acknowledged like any other. A
+        // deferred (`Batched`) one may still be queued when the failure
+        // fences the WAL, so its durability is unknown and its caller gets
+        // `Timeout`, not an acknowledgement.
         if !applied.is_empty() {
             self.publish_snapshot();
         }
@@ -476,6 +479,18 @@ impl EventLoop {
             .map(|result| result.request_id)
             .collect::<std::collections::HashSet<_>>();
         for result in applied {
+            if failure.is_some() && result.deferred {
+                self.settle_applied_write(result.request_id, true);
+                self.handle_write_error(
+                    result.request_id,
+                    MidgeError::Timeout(
+                        "the transaction is applied but the WAL was fenced before its \
+                         frame was proven durable; it may be lost on restart"
+                            .to_string(),
+                    ),
+                );
+                continue;
+            }
             let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
             self.finish_drained_write_after_publish(
                 result.request_id,

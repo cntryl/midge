@@ -178,8 +178,10 @@ impl WalActor {
     /// Append and apply `prepared_transactions` as one group. A failure
     /// before any unit is applied fails the group. A failure after some
     /// units are applied reports those units in `applied`, since they are
-    /// visible and durable, and the error that stopped the rest in
-    /// `failure`.
+    /// visible, and the error that stopped the rest in `failure`. An applied
+    /// unit is durable only under its policy: a `Strict` one is synced, a
+    /// `Batched` one may still be queued. A unit in `failure` whose frame is
+    /// appended may be applied on restart, so its error is `Timeout`.
     pub(crate) fn append_prepared_transaction_group(
         &mut self,
         state: &mut RuntimeState,
@@ -214,7 +216,11 @@ impl WalActor {
                 .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
             // A failed sync fences the WAL. None of the group is in the
             // memtables, so replay keeps or drops each unit whole.
-            self.apply_strict_transaction_group_durability(state, last_sequence)?;
+            if let Err(error) = self.apply_strict_transaction_group_durability(state, last_sequence)
+            {
+                let group = prepared_transactions.iter().collect::<Vec<_>>();
+                return Err(Self::group_durability_error(&group, error));
+            }
         }
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
@@ -226,9 +232,12 @@ impl WalActor {
                     prepared.effective_durability,
                     prepared.sequence_plan.commit_seq,
                 ) {
+                    let unapplied = std::iter::once(&prepared)
+                        .chain(pending.as_slice())
+                        .collect::<Vec<_>>();
                     return Ok(PreparedGroupOutcome {
                         applied: results,
-                        failure: Some(error),
+                        failure: Some(Self::group_durability_error(&unapplied, error)),
                     });
                 }
             }
@@ -289,6 +298,22 @@ impl WalActor {
     }
 
     /// Fence the WAL for group units none of whose ops reached the memtables.
+    /// The error for group units a durability step failed before any of
+    /// them was applied: outcome unknown when their frames are appended.
+    fn group_durability_error(
+        unapplied: &[&PreparedTransactionAppend],
+        error: MidgeError,
+    ) -> MidgeError {
+        if unapplied
+            .iter()
+            .any(|prepared| prepared.wal_batch.wal_record.is_some())
+        {
+            Self::appended_unit_error(error)
+        } else {
+            error
+        }
+    }
+
     fn fail_unapplied_group(
         &mut self,
         state: &mut RuntimeState,

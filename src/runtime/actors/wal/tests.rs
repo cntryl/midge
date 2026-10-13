@@ -2230,10 +2230,7 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 
     // Assert: the WAL already holds the whole transaction, so a partial
     // memtable apply must stop the writer instead of serving it silently.
-    assert!(
-        matches!(result, Err(MidgeError::RecoveryFailed(_))),
-        "{result:?}"
-    );
+    assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
     assert!(actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     Ok(())
@@ -2346,10 +2343,7 @@ fn should_exit_after_flushing_partly_applied_spilled_transaction_in_child() {
     // memtable; a manual flush then persists that partial memtable before restart.
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::spilled_apply_op");
-    assert!(
-        matches!(commit, Err(MidgeError::RecoveryFailed(_))),
-        "{commit:?}"
-    );
+    assert!(matches!(commit, Err(MidgeError::Timeout(_))), "{commit:?}");
     let flushed = engine.flush_cf(&family);
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
 
@@ -2447,10 +2441,7 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
         .expect("fail the second post-commit apply");
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::spilled_apply_op");
-    assert!(
-        matches!(commit, Err(MidgeError::RecoveryFailed(_))),
-        "{commit:?}"
-    );
+    assert!(matches!(commit, Err(MidgeError::Timeout(_))), "{commit:?}");
 
     // Act: the other family's write goes first, because a write refused
     // while the WAL is fenced may stop the whole runtime from writing.
@@ -2557,10 +2548,7 @@ fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
         .expect("fail the fourth post-commit apply");
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::spilled_apply_op");
-    assert!(
-        matches!(commit, Err(MidgeError::RecoveryFailed(_))),
-        "{commit:?}"
-    );
+    assert!(matches!(commit, Err(MidgeError::Timeout(_))), "{commit:?}");
 
     // Act: a stall hint on the first reply makes the second check the stall.
     let written = [b"best-effort-1".as_slice(), b"best-effort-2"]

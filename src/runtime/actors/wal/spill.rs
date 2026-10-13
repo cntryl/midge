@@ -114,33 +114,13 @@ impl WalActor {
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
-        // A failed sync fences the WAL. None of the unit is in the memtables,
-        // so replay keeps or drops it whole whatever frontier a later flush
-        // publishes.
-        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
-        // The WAL now holds the unit and `state.sequence` is past its commit.
-        // A lease that lapsed since is a failed apply.
-        let mut applied_ops = 0_usize;
-        if let Err(error) = self.ensure_lease_validity().and_then(|()| {
-            self.apply_spilled_transaction_ops(
-                state,
-                source,
-                &sequence_plan,
-                effective_durability,
-                commit_time_millis,
-                &mut applied_ops,
-            )
-        }) {
-            return Err(self.fail_unapplied_transactions(
-                state,
-                &[&sequence_plan],
-                super::UnappliedOutcome {
-                    logged: wal_records > 0,
-                    partly_applied: applied_ops > 0,
-                },
-                error,
-            ));
-        }
+        self.make_durable_and_apply_spill(
+            state,
+            source,
+            &sequence_plan,
+            (effective_durability, commit_time_millis),
+            wal_records > 0,
+        )?;
 
         let deferred = matches!(
             effective_durability,
@@ -153,6 +133,53 @@ impl WalActor {
             "streamed spilled WAL transaction apply"
         );
         Ok((sequence_plan.commit_seq, source.len(), deferred))
+    }
+
+    /// Make an appended spilled unit durable under its policy, then apply it.
+    /// `logged` says whether its WAL frames were appended.
+    fn make_durable_and_apply_spill(
+        &mut self,
+        state: &mut RuntimeState,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        sequence_plan: &TxnSequencePlan,
+        (effective_durability, commit_time_millis): (DurabilityPolicy, u64),
+        logged: bool,
+    ) -> MidgeResult<()> {
+        // A failed sync fences the WAL. None of the unit is in the memtables,
+        // so replay keeps or drops it whole whatever frontier a later flush
+        // publishes; an appended unit's outcome is unknown.
+        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
+            .map_err(|error| {
+                if logged {
+                    Self::appended_unit_error(error)
+                } else {
+                    error
+                }
+            })?;
+        // The WAL now holds the unit and `state.sequence` is past its commit.
+        // A lease that lapsed since is a failed apply.
+        let mut applied_ops = 0_usize;
+        if let Err(error) = self.ensure_lease_validity().and_then(|()| {
+            self.apply_spilled_transaction_ops(
+                state,
+                source,
+                sequence_plan,
+                effective_durability,
+                commit_time_millis,
+                &mut applied_ops,
+            )
+        }) {
+            return Err(self.fail_unapplied_transactions(
+                state,
+                &[sequence_plan],
+                super::UnappliedOutcome {
+                    logged,
+                    partly_applied: applied_ops > 0,
+                },
+                error,
+            ));
+        }
+        Ok(())
     }
 
     fn validate_assertion_only_spill(

@@ -839,6 +839,10 @@ impl WalActor {
     /// so its family is marked and refuses to freeze, and to take writes,
     /// until restart. Restart then replays a logged unit whole (#537) and
     /// discards an unlogged `BestEffort` one whole.
+    ///
+    /// The caller learns `Timeout` (outcome unknown) for a logged unit,
+    /// which replay may apply; `Fenced` only when nothing was logged or
+    /// applied; and `RecoveryFailed` otherwise.
     fn fail_unapplied_transactions(
         &mut self,
         state: &mut RuntimeState,
@@ -861,7 +865,7 @@ impl WalActor {
         let message = match (outcome.logged, outcome.partly_applied) {
             (true, true) => format!(
                 "transaction {txn_ids} is logged in the WAL but only part of it reached the \
-                 memtables; restart applies it whole: {error}"
+                 memtables; it may be applied on restart, and then whole: {error}"
             ),
             (false, true) => format!(
                 "transaction {txn_ids} has no WAL record and only part of it reached the \
@@ -878,10 +882,28 @@ impl WalActor {
         };
         self.fence_transition(state, message.clone());
         state.mark_persistence_anomaly();
-        if matches!(error, MidgeError::Fenced(_)) {
+        if outcome.logged {
+            // Replay may apply a logged unit, so its outcome is unknown.
+            MidgeError::Timeout(message)
+        } else if !outcome.partly_applied && matches!(error, MidgeError::Fenced(_)) {
+            // Nothing logged and nothing applied: definitely not applied.
             error
         } else {
             MidgeError::RecoveryFailed(message)
+        }
+    }
+
+    /// The caller's error for units whose WAL frames are appended when a
+    /// later durability step fails before any of them is applied. Replay may
+    /// still apply them, so `Fenced`, which promises the unit is not applied,
+    /// becomes `Timeout`; other errors make no such promise and pass through.
+    fn appended_unit_error(error: MidgeError) -> MidgeError {
+        match error {
+            MidgeError::Fenced(reason) => MidgeError::Timeout(format!(
+                "the transaction is in the WAL but not applied; it may be applied on \
+                 restart: {reason}"
+            )),
+            other => other,
         }
     }
 
