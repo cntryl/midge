@@ -23,6 +23,9 @@ const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 /// made durable, so a power loss can bring the lock back and block every
 /// later open.
 pub(crate) const LEASE_LOCK: &str = ".midge_leader.lock";
+/// The local writer-effect fence, which can also be resurrected by power loss.
+const WRITER_EFFECT_LOCK: &str = ".midge_writer_effect.lock";
+const STALE_COORDINATION_LOCKS: [&str; 2] = [LEASE_LOCK, WRITER_EFFECT_LOCK];
 
 /// What a campaign found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +132,7 @@ pub(crate) struct Campaign {
     restored_names: BTreeMap<String, u64>,
     values: u64,
     images: Vec<Image>,
-    /// Resurrected lease locks removed after power losses (#811).
+    /// Resurrected lease and writer-effect locks removed after power loss.
     stale_lease_locks: usize,
     config: Config,
 }
@@ -358,22 +361,27 @@ impl Campaign {
             .count()
     }
 
-    /// Open the engine once, clearing a lease lock #811 resurrected.
+    /// Open the engine, clearing a lease or writer-effect lock resurrected by
+    /// power loss as an operator would (#811).
     fn open(&mut self, stop: Stop) -> Result<Engine, cntryl_midge::MidgeError> {
-        match Engine::open(self.options()) {
-            Err(error)
-                if stop.loses_power()
-                    && self.config.clear_stale_lease_lock
-                    && error.to_string().contains(LEASE_LOCK) =>
-            {
-                self.stale_lease_locks += 1;
-                self.device
-                    .fs()
-                    .remove_file(&FsPath::new(LEASE_LOCK))
-                    .expect("remove the stale lease lock");
-                Engine::open(self.options())
+        loop {
+            match Engine::open(self.options()) {
+                Err(error) if stop.loses_power() && self.config.clear_stale_lease_lock => {
+                    let message = error.to_string();
+                    let Some(lock) = STALE_COORDINATION_LOCKS
+                        .iter()
+                        .find(|lock| message.contains(**lock))
+                    else {
+                        return Err(error);
+                    };
+                    self.stale_lease_locks += 1;
+                    self.device
+                        .fs()
+                        .remove_file(&FsPath::new(*lock))
+                        .expect("remove the stale coordination lock");
+                }
+                opened => return opened,
             }
-            opened => opened,
         }
     }
 

@@ -128,8 +128,8 @@ impl Mode {
 pub(crate) struct Config {
     /// Report a reused WAL segment name (`restarted-segment-id`).
     pub(crate) segment_reuse: bool,
-    /// After a power loss, remove a resurrected lease lock as an operator
-    /// would (#811) instead of reporting the refused open.
+    /// After a power loss, remove a resurrected lease or writer-effect lock
+    /// as an operator would (#811) instead of reporting the refused open.
     pub(crate) clear_stale_lease_lock: bool,
     /// The lease TTL, which sets how often renewals interleave with crashes.
     pub(crate) lease_ttl_millis: u64,
