@@ -893,15 +893,22 @@ impl WalActor {
         }
     }
 
-    /// The caller's error for units whose WAL frames are appended when a
-    /// later durability step fails before any of them is applied. Replay may
-    /// still apply them, so `Fenced`, which promises the unit is not applied,
-    /// becomes `Timeout`; other errors make no such promise and pass through.
+    /// The caller's error for units whose WAL frames may be in the file when
+    /// a later step fails before any of them is applied. Replay may still
+    /// apply them. A lease or authority error reads as "not applied" or
+    /// "retry", either of which could apply the unit twice, so it becomes
+    /// `Timeout`. Other errors, such as `NoSpace` from the fsync, pass
+    /// through.
     fn appended_unit_error(error: MidgeError) -> MidgeError {
         match error {
-            MidgeError::Fenced(reason) => MidgeError::Timeout(format!(
+            MidgeError::Fenced(_)
+            | MidgeError::Busy(_)
+            | MidgeError::LeaseHeld(_)
+            | MidgeError::LeaseUnavailable(_)
+            | MidgeError::LeaseIndeterminate(_)
+            | MidgeError::LeaseEpochExhausted => MidgeError::Timeout(format!(
                 "the transaction is in the WAL but not applied; it may be applied on \
-                 restart: {reason}"
+                 restart: {error}"
             )),
             other => other,
         }

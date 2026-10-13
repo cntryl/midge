@@ -1696,6 +1696,22 @@ fn run_group_with_lease_lapse(
     request_ids: [u64; 2],
     keys: [&'static [u8]; 2],
 ) -> MidgeResult<LapsedGroup> {
+    let group = run_group(policy, request_ids, keys, |fixture| {
+        lapse_lease_at(fixture, "midge::wal::before_prepared_transaction_apply", 1);
+    });
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+    group
+}
+
+/// Run a coalesced group of two one-put units under `policy`, after `arm`
+/// has prepared the fixture's failure. The caller disarms it.
+#[cfg(feature = "failpoints")]
+fn run_group(
+    policy: DurabilityPolicy,
+    request_ids: [u64; 2],
+    keys: [&'static [u8]; 2],
+    arm: impl FnOnce(&mut EventLoopFixture),
+) -> MidgeResult<LapsedGroup> {
     let mut fixture = EventLoopFixture::with_policy(policy)?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let first_rx = fixture.register(request_ids[0]);
@@ -1707,11 +1723,7 @@ fn run_group_with_lease_lapse(
             Some(policy),
         ))
         .expect("queue second transaction");
-    lapse_lease_at(
-        &mut fixture,
-        "midge::wal::before_prepared_transaction_apply",
-        1,
-    );
+    arm(&mut fixture);
     let handled = fixture.event_loop.apply_transaction_with_coalescing(
         &msg_rx,
         txn_request(
@@ -1721,7 +1733,6 @@ fn run_group_with_lease_lapse(
         ),
         1024,
     );
-    fail::remove("midge::wal::before_prepared_transaction_apply");
     assert_eq!(handled, 2, "both units must share one group");
     Ok(LapsedGroup {
         fixture,
@@ -2514,5 +2525,127 @@ fn should_sync_batched_wal_when_fairness_slot_runs_past_batch_window() -> MidgeR
 
     // Assert
     assert!(fixture.event_loop.wal_actor.sync_calls() > syncs_before);
+    Ok(())
+}
+
+/// Fail the WAL actor's sync-time epoch check with an unreachable store.
+#[cfg(feature = "failpoints")]
+struct UnreachableLeaderStore;
+
+#[cfg(feature = "failpoints")]
+impl crate::lease::LeaderStore for UnreachableLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        unreachable!("validation fixture")
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::IoError(
+            "test leader store is unreachable".to_string(),
+        ))
+    }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_outcome_unknown_when_lease_lapses_before_group_sync() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+
+    // Act: both frames are appended; the lease lapses before their sync.
+    let group = run_group(
+        DurabilityPolicy::Strict,
+        [84, 85],
+        [b"sync-lapse-a", b"sync-lapse-b"],
+        |fixture| {
+            lapse_lease_at(
+                fixture,
+                "midge::wal::txn_after_commit_append_before_sync",
+                0,
+            );
+        },
+    );
+    fail::remove("midge::wal::txn_after_commit_append_before_sync");
+    let group = group?;
+
+    // Assert: the appended frames may replay, so no caller hears "not
+    // applied", which a lease error would tell it.
+    assert!(is_outcome_unknown(&group.first, 84), "{:?}", group.first);
+    assert!(is_outcome_unknown(&group.second, 85), "{:?}", group.second);
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_outcome_unknown_when_leader_store_is_unreachable_at_group_sync() -> MidgeResult<()>
+{
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+
+    // Act: both frames are appended; the sync's epoch check cannot reach
+    // the leader store, which reads as a retryable lease error.
+    let group = run_group(
+        DurabilityPolicy::Strict,
+        [86, 87],
+        [b"store-down-a", b"store-down-b"],
+        |fixture| {
+            fixture
+                .event_loop
+                .wal_actor
+                .set_leader_store(Arc::new(UnreachableLeaderStore), "writer".to_string());
+        },
+    )?;
+
+    // Assert
+    assert!(is_outcome_unknown(&group.first, 86), "{:?}", group.first);
+    assert!(is_outcome_unknown(&group.second, 87), "{:?}", group.second);
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_outcome_unknown_when_lease_lapses_before_spilled_sync() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    lapse_lease_at(
+        &mut fixture,
+        "midge::wal::txn_after_commit_append_before_sync",
+        0,
+    );
+
+    // Act
+    let result = commit_strict_spill(&mut fixture, temp.path());
+    fail::remove("midge::wal::txn_after_commit_append_before_sync");
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::Timeout(message)) if message.contains("may be applied on restart")),
+        "{result:?}"
+    );
+
+    scenario.teardown();
+    drop(test_guard);
     Ok(())
 }
