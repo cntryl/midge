@@ -126,21 +126,65 @@ fn should_allow_unlogged_commit_to_vanish_until_its_family_is_flushed() {
 }
 
 #[test]
-fn should_require_every_acknowledged_commit_when_shut_down_cleanly() {
-    // Arrange: the best-effort delete probe behind `best-effort-delete`.
+fn should_require_only_wal_commits_when_shut_down_cleanly() {
+    // Arrange: a synced put, a buffered put, and a best-effort delete of a
+    // third key; a clean shutdown does not flush memtables.
     let mut history = history();
-    history.commit(put("k", "1"));
+    let synced = history.commit(put("a", "1"));
+    history.synced(synced);
+    history.commit(put("b", "2"));
+    history.commit(put("k", "3"));
     history.commit(write("k", None, Logging::Unlogged, true));
 
     // Act
     history.shut_down();
+    let delete_lost = history.check(
+        &observed(&[("a", "1"), ("b", "2"), ("k", "3")]),
+        &families(),
+    );
+    let delete_kept = history.check(&observed(&[("a", "1"), ("b", "2")]), &families());
+    let synced_lost = history.check(&observed(&[("b", "2"), ("k", "3")]), &families());
+    let buffered_lost = history.check(&observed(&[("a", "1"), ("k", "3")]), &families());
+
+    // Assert
+    assert!(
+        matches!(delete_lost, Verdict::Consistent { .. }),
+        "{delete_lost:?}"
+    );
+    assert!(
+        matches!(delete_kept, Verdict::Consistent { .. }),
+        "{delete_kept:?}"
+    );
+    assert!(
+        matches!(synced_lost, Verdict::Violation(_)),
+        "{synced_lost:?}"
+    );
+    assert!(
+        matches!(buffered_lost, Verdict::Violation(_)),
+        "{buffered_lost:?}"
+    );
+}
+
+#[test]
+fn should_require_flushed_best_effort_commit_when_shut_down_cleanly() {
+    // Arrange: the best-effort delete probe behind `best-effort-delete`,
+    // with a completed flush before the shutdown.
+    let mut history = history();
+    history.commit(put("k", "1"));
+    history.commit(write("k", None, Logging::Unlogged, true));
+    history.flushed(FAMILY);
+
+    // Act
+    history.shut_down();
     let resurrected = history.check(&observed(&[("k", "1")]), &families());
+    let deleted = history.check(&observed(&[]), &families());
 
     // Assert
     assert!(
         matches!(resurrected, Verdict::Violation(_)),
         "{resurrected:?}"
     );
+    assert!(matches!(deleted, Verdict::Consistent { .. }), "{deleted:?}");
 }
 
 #[test]
