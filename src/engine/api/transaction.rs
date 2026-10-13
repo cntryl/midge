@@ -598,6 +598,15 @@ impl Transaction {
     ///
     /// Returns an error when commit coordination, WAL durability, or cloud durability
     /// confirmation fails.
+    ///
+    /// For a commit with writes, [`MidgeError::Timeout`](crate::MidgeError::Timeout)
+    /// means the outcome is unknown, not that the commit failed. The
+    /// transaction may already be visible, or may be applied whole when the
+    /// database restarts and replays its WAL record. Do not assume it failed:
+    /// check whether it applied, for example with an application-level
+    /// idempotency key, before writing it again. Midge never retries a write
+    /// after `Timeout` itself. [`MidgeError::Fenced`](crate::MidgeError::Fenced)
+    /// means the transaction was not applied.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
         let mut timing = CommitTiming::maybe_start();
 

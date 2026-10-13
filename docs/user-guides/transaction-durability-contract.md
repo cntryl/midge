@@ -164,6 +164,26 @@ finish because of shutdown, upload backpressure or repeated upload failures:
 could apply it twice. A failed WAL upload keeps retrying in the background, so
 such a write may still become cloud-durable.
 
+`MidgeError::Timeout` also reports a write whose WAL record was written but
+which did not reach the memtable before the writer was fenced, for example
+because its writer lease lapsed, its leader store could not confirm
+authority, or a WAL write failed partway and could not be rolled back. The
+write is not visible now, but restart replays its WAL record and may apply
+it, whole. Neither a lapsed lease nor a failed sync after the WAL append
+makes the write "not applied".
+
+When `buffered()` writes share one WAL append and the writer is fenced
+partway through applying them, a write that already reached the memtable
+also reports `Timeout`: it is visible, but its WAL record is not yet synced
+and may not survive a crash. A `sync()` write in the same position
+is acknowledged, because its record was synced before it was applied.
+
+`MidgeError::Fenced` from `commit()` means the write was not applied and has
+no WAL record restart could replay. That includes a write that waited
+behind a failed batch and was never logged. Midge never retries a write after
+`Timeout`, so a caller that retries must first check whether the write
+applied, as described above.
+
 `abandoned_runtime_requests_total` and `late_runtime_responses_total` are global
 diagnostic counters. Their deltas include unrelated requests and both successful
 and failed late responses, so they cannot establish whether one specific timed-out

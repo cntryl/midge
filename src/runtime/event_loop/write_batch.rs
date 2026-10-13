@@ -468,9 +468,9 @@ impl EventLoop {
 
         // Units applied before a failure are visible. A synced one is durable
         // and replay keeps it whole, so it is acknowledged like any other. A
-        // deferred (`Batched`) one may still be queued when the failure
-        // fences the WAL, so its durability is unknown and its caller gets
-        // `Timeout`, not an acknowledgement.
+        // deferred (`Batched`) one is written but not synced when the failure
+        // fences the WAL, and no later sync will run, so its durability is
+        // unknown and its caller gets `Timeout`, not an acknowledgement.
         if !applied.is_empty() {
             self.publish_snapshot();
         }
@@ -485,7 +485,7 @@ impl EventLoop {
                     result.request_id,
                     MidgeError::Timeout(
                         "the transaction is applied but the WAL was fenced before its \
-                         frame was proven durable; it may be lost on restart"
+                         frame was synced; it may be lost in a crash"
                             .to_string(),
                     ),
                 );

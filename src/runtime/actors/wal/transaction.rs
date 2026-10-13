@@ -180,7 +180,7 @@ impl WalActor {
     /// units are applied reports those units in `applied`, since they are
     /// visible, and the error that stopped the rest in `failure`. An applied
     /// unit is durable only under its policy: a `Strict` one is synced, a
-    /// `Batched` one may still be queued. A unit in `failure` whose frame is
+    /// `Batched` one is written but not synced. A unit in `failure` whose frame is
     /// appended may be applied on restart, so its error is `Timeout`.
     pub(crate) fn append_prepared_transaction_group(
         &mut self,
