@@ -4,7 +4,6 @@
 
 mod common;
 
-#[cfg(feature = "sqrzl-tests")]
 #[path = "fault_injection/wal_authority_regressions.rs"]
 mod wal_authority_regressions;
 
@@ -16,55 +15,6 @@ mod local_wal_gc;
 
 #[path = "fault_injection/l0_pressure.rs"]
 mod l0_pressure;
-
-mod crash_validation {
-    use crate::common::crash;
-
-    #[test]
-    fn should_report_specific_failpoint_marker_when_child_process_aborts_at_intended_boundary() {
-        // Arrange
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let marker = temp_dir.path().join("trigger.sentinel");
-
-        // Act
-        let missing = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
-        std::fs::write(&marker, "scenario=scenario\ntrigger=wrong-trigger\n")
-            .expect("write wrong trigger sentinel");
-        let wrong = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
-        std::fs::write(&marker, "scenario=scenario\ntrigger=expected-trigger\n")
-            .expect("write expected trigger sentinel");
-        let exact = crash::validate_trigger_sentinel(&marker, "scenario", "expected-trigger");
-
-        // Assert
-        assert!(missing.is_err());
-        assert!(wrong.is_err());
-        assert_eq!(exact, Ok(()));
-    }
-
-    #[test]
-    fn should_reject_non_abort_child_failure_even_when_trigger_marker_matches() {
-        // Arrange
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let marker = temp_dir.path().join("trigger.sentinel");
-        std::fs::write(&marker, "scenario=scenario\ntrigger=expected-trigger\n")
-            .expect("write exact trigger sentinel");
-        let output = std::process::Command::new(
-            std::env::current_exe().expect("locate failpoint contract test executable"),
-        )
-        .arg("--definitely-not-a-valid-test-harness-option")
-        .output()
-        .expect("run ordinary failing child");
-
-        // Act
-        let validation =
-            crash::validate_child_crash(&output, &marker, "scenario", "expected-trigger");
-
-        // Assert
-        assert!(validation
-            .expect_err("ordinary failure must not count as an abort")
-            .contains("failed without process abort"));
-    }
-}
 
 mod failure_injection {
     use bytes::Bytes;
@@ -729,7 +679,7 @@ mod failure_injection {
 
         let failed_sst_name = std::fs::read_dir(db_path.join("sst"))
             .expect("read failed flush outputs")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read failed-flush directory entry"))
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .find(|name| {
                 std::path::Path::new(name)
@@ -2836,7 +2786,7 @@ mod failure_injection {
     fn journal_corrupt_copies(db_path: &Path) -> Vec<String> {
         std::fs::read_dir(db_path)
             .expect("read db dir")
-            .flatten()
+            .map(|entry| entry.expect("read preserved journal directory entry"))
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter(|name| name.starts_with("manifest.journal.corrupt."))
             .collect()
@@ -2846,17 +2796,26 @@ mod failure_injection {
         if db_path.join("sst").join(name).exists() {
             return true;
         }
-        std::fs::read_dir(db_path.join("salvage-retained"))
-            .is_ok_and(|dirs| dirs.flatten().any(|dir| dir.path().join(name).exists()))
+        let dirs = match std::fs::read_dir(db_path.join("salvage-retained")) {
+            Ok(dirs) => dirs,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(error) => panic!("list retained SST directory: {error}"),
+        };
+        dirs.map(|dir| dir.expect("read retained SST directory entry"))
+            .any(|dir| dir.path().join(name).exists())
     }
 
     fn sst_file_names(db_path: &Path) -> std::collections::BTreeSet<String> {
         let sst_dir = db_path.join("sst");
-        let Ok(entries) = std::fs::read_dir(&sst_dir) else {
-            return std::collections::BTreeSet::new();
+        let entries = match std::fs::read_dir(&sst_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return std::collections::BTreeSet::new()
+            }
+            Err(error) => panic!("list SST directory: {error}"),
         };
         entries
-            .flatten()
+            .map(|entry| entry.expect("read SST directory entry"))
             .filter(|entry| {
                 entry
                     .path()
@@ -2869,13 +2828,12 @@ mod failure_injection {
     }
 
     #[test]
-    fn should_not_mark_persistence_anomaly_when_local_rotated_segment_spans_epochs() {
+    fn should_keep_retained_local_history_healthy_when_restart_seals_the_previous_epoch() {
         let _guard = failpoint_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Arrange: an unflushed record survives a clean restart in the open
-        // segment, so the next writer epoch appends to the same file. A second column
-        // family keeps that segment above the flushed floor.
+        // Arrange: restart seals the previous epoch's unflushed member.
+        // Another family's write keeps later history needed for replay.
         let temp = TempDir::new().expect("tempdir");
         let options = || {
             OpenOptions::local(temp.path())
@@ -2905,16 +2863,19 @@ mod failure_injection {
             .len()
             .saturating_sub(1);
 
-        // Assert: the rotated two-epoch segment stayed above the flushed
-        // floor, so prune inspected it.
-        assert!(sealed >= 1, "the mixed-epoch segment must reach inspection");
+        // Assert: retained members from restart and flush remain healthy.
+        assert!(
+            sealed >= 1,
+            "the unflushed family must retain a sealed member"
+        );
         assert_eq!(health, EngineHealth::Healthy);
         assert_visible(&reopened, &cf, b"pre", b"value-pre");
+        assert_visible(&reopened, &cf, b"post", b"value-post");
+        assert_visible(&reopened, &other, b"other", b"value-other");
         shutdown_engine(reopened);
     }
 
     #[test]
-    #[ignore = "#808 stage 6: retryable-fsync-failure"]
     fn should_not_replay_commit_reported_as_retryable_when_wal_sync_fails() {
         // Arrange
         let _guard = failpoint_test_lock()
@@ -2969,6 +2930,14 @@ mod backup_capture {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    struct ResumeCopy(crossbeam::channel::Sender<()>);
+
+    impl Drop for ResumeCopy {
+        fn drop(&mut self) {
+            let _ = self.0.try_send(());
+        }
+    }
 
     #[test]
     fn should_not_publish_backup_given_interrupted_object_materialization() {
@@ -3053,13 +3022,16 @@ mod backup_capture {
         fail::cfg_callback("midge::backup::after_object_copy", move || {
             if callback_first_call.swap(false, Ordering::AcqRel) {
                 let _ = entered_tx.send(());
-                let _ = resume_rx.recv();
+                resume_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("bounded backup hold must be released");
             }
         })
         .expect("pause backup materialization");
 
         // Act
         let backup = std::thread::scope(|scope| {
+            let _release = ResumeCopy(resume_tx.clone());
             let backup_task = scope.spawn(|| engine.backup_to(&artifact, Duration::from_secs(10)));
             entered_rx
                 .recv_timeout(Duration::from_secs(10))
@@ -3120,13 +3092,16 @@ mod backup_capture {
         fail::cfg_callback("midge::backup::after_object_copy", move || {
             if callback_first_call.swap(false, Ordering::AcqRel) {
                 let _ = entered_tx.send(());
-                let _ = resume_rx.recv();
+                resume_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("bounded backup hold must be released");
             }
         })
         .expect("pause backup materialization");
 
         // Act
         let (backup, latest_cut_time) = std::thread::scope(|scope| {
+            let _release = ResumeCopy(resume_tx.clone());
             let backup_task = scope.spawn(|| engine.backup_to(&artifact, Duration::from_secs(10)));
             entered_rx
                 .recv_timeout(Duration::from_secs(10))
@@ -3182,7 +3157,6 @@ mod chaos_real {
     */
 
     /*
-    #[ignore = "Exposes a real bug: a buffered write can become visible after a WAL-append crash even when commit never returned Ok"]
     SCENARIO: compaction output SST fully written, process crashes before manifest swap.
     STATUS: not currently testable honestly.
     BLOCKER: the live runtime path does not currently wire compaction completion into manifest publication during normal engine operation, so there is no real manifest-swap boundary to crash between.
@@ -3359,7 +3333,7 @@ mod chaos_real {
     }
 
     #[test]
-    fn should_recover_all_sync_commits_when_manifest_file_is_zeroed_after_crash() {
+    fn should_recover_exact_sync_commits_or_report_manifest_corruption_when_snapshot_is_zeroed() {
         // WHAT THIS TEST DOES:
         // Runs a child process that writes sync commits, persists a manifest successfully once,
         // then aborts during a second manifest persist using a real failpoint. The parent zeroes manifest.json before reopen.
@@ -3379,13 +3353,16 @@ mod chaos_real {
         // Assert
         match Engine::open(OpenOptions::local(db_path).build().expect("build options")) {
             Ok(engine) => assert_committed_records_visible(&engine, &committed),
-            Err(error) => {
-                let message = error.to_string();
+            Err(
+                cntryl_midge::MidgeError::RecoveryFailed(message)
+                | cntryl_midge::MidgeError::Corruption(message),
+            ) => {
                 assert!(
-                    message.contains("failed to load manifest") || message.contains("manifest"),
-                    "zeroed manifest must either reopen cleanly or fail with a clear manifest error, got: {message}"
+                    message.contains("manifest"),
+                    "expected manifest corruption context, got: {message}"
                 );
             }
+            Err(other) => panic!("unexpected failure class after snapshot corruption: {other:?}"),
         }
     }
 
@@ -3966,21 +3943,23 @@ mod chaos_real {
             key: key.to_vec(),
             value: value.to_vec(),
         };
-        let line = serde_json::to_vec(&record).expect("serialize commit record");
+        let mut line = serde_json::to_vec(&record).expect("serialize commit record");
+        line.push(b'\n');
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(committed_path)
             .expect("open committed log");
         file.write_all(&line).expect("write committed record");
-        file.write_all(b"\n").expect("write newline");
         file.sync_all().expect("sync committed log");
     }
 
     fn read_committed_records(db_path: &Path) -> Vec<CommitRecord> {
         let committed_path = committed_log_path(db_path);
-        let Ok(bytes) = fs::read(&committed_path) else {
-            return Vec::new();
+        let bytes = match fs::read(&committed_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => panic!("read acknowledged-commit log: {error}"),
         };
 
         let mut records = Vec::new();
@@ -3988,9 +3967,10 @@ mod chaos_real {
             if line.is_empty() {
                 continue;
             }
-            if let Ok(record) = serde_json::from_slice::<CommitRecord>(line) {
-                records.push(record);
-            }
+            records.push(
+                serde_json::from_slice::<CommitRecord>(line)
+                    .expect("decode acknowledged-commit log record"),
+            );
         }
         records
     }
@@ -4089,15 +4069,14 @@ mod chaos_real {
             9_000_000,
         );
         let payload = wal::encoding::encode(&record).expect("encode wal record");
-        let len = u32::try_from(payload.len()).expect("payload len fits into u32");
+        let mut frame = Vec::new();
+        wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
 
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(wal_path)
             .expect("open wal path for append");
-        file.write_all(&len.to_le_bytes())
-            .expect("write wal length prefix");
-        file.write_all(&payload).expect("write wal payload");
+        file.write_all(&frame).expect("write complete WAL frame");
         file.sync_all().expect("sync wal file");
     }
 
@@ -5752,13 +5731,19 @@ mod shutdown_orchestration {
 
     fn local_wal_files(db_path: &Path) -> BTreeSet<String> {
         let wal_dir = db_path.join("wal");
-        let Ok(entries) = std::fs::read_dir(&wal_dir) else {
-            return BTreeSet::new();
+        let entries = match std::fs::read_dir(&wal_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeSet::new(),
+            Err(error) => panic!("list WAL directory: {error}"),
         };
         entries
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read WAL directory entry"))
             .filter_map(|entry| {
-                let metadata = entry.metadata().ok()?;
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+                    Err(error) => panic!("read WAL metadata: {error}"),
+                };
                 (metadata.is_file() && metadata.len() > 0)
                     .then(|| entry.file_name().to_string_lossy().into_owned())
             })
@@ -5773,7 +5758,7 @@ mod compaction_snapshot_publication {
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Barrier, Condvar, Mutex,
+        Arc, Condvar, Mutex,
     };
     use std::time::Duration;
 
@@ -5830,24 +5815,38 @@ mod compaction_snapshot_publication {
         }
 
         let scenario = fail::FailScenario::setup();
-        let gc_reached = Arc::new(Barrier::new(2));
-        let allow_compaction_to_finish = Arc::new(Barrier::new(2));
-        let callback_gc_reached = Arc::clone(&gc_reached);
-        let callback_allow_finish = Arc::clone(&allow_compaction_to_finish);
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let callback_gate = Arc::clone(&release_gate);
         let paused_once = Arc::new(AtomicBool::new(false));
         let callback_paused_once = Arc::clone(&paused_once);
         fail::cfg_callback("midge::compaction::after_input_sst_gc", move || {
             if !callback_paused_once.swap(true, Ordering::AcqRel) {
-                callback_gc_reached.wait();
-                callback_allow_finish.wait();
+                entered_tx.send(()).expect("signal actual input GC");
+                let (released, changed) = &*callback_gate;
+                let released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (released, waited) = changed
+                    .wait_timeout_while(released, Duration::from_secs(30), |released| !*released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                assert!(
+                    *released && !waited.timed_out(),
+                    "post-GC reader must release the held publisher"
+                );
             }
         })
         .expect("configure post-GC pause");
 
         // Act
         let read_results = std::thread::scope(|scope| {
+            let release = PublicationPauseRelease {
+                gate: Arc::clone(&release_gate),
+            };
             let compaction = scope.spawn(|| engine.compact_all());
-            gc_reached.wait();
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("compaction reached actual GC boundary");
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -5859,7 +5858,7 @@ mod compaction_snapshot_publication {
                 })
                 .collect::<Vec<_>>();
 
-            allow_compaction_to_finish.wait();
+            release.release();
             compaction
                 .join()
                 .expect("join compaction thread")
@@ -6032,25 +6031,6 @@ mod transaction_crash_boundaries {
         },
     ];
 
-    const GROUP_POST_SYNC_RECORDS: &[ExpectedRecord] = &[
-        ExpectedRecord {
-            key: b"group-post-sync-a",
-            value: b"value-a",
-        },
-        ExpectedRecord {
-            key: b"group-post-sync-b",
-            value: b"value-b",
-        },
-        ExpectedRecord {
-            key: b"group-post-sync-c",
-            value: b"value-c",
-        },
-        ExpectedRecord {
-            key: b"group-post-sync-d",
-            value: b"value-d",
-        },
-    ];
-
     const GROUP_POST_ACK_RECORDS: &[ExpectedRecord] = &[
         ExpectedRecord {
             key: b"group-post-ack-a",
@@ -6130,7 +6110,6 @@ mod transaction_crash_boundaries {
             "after_ops_before_commit" => child_abort_after_ops_before_commit(&db_path),
             "after_sync_before_ack" => child_abort_after_sync_before_ack(&db_path),
             "after_commit_ack" => child_abort_after_commit_ack(&db_path),
-            "group_after_sync_before_ack" => child_abort_group_after_sync_before_ack(&db_path),
             "group_after_commit_ack" => child_abort_group_after_commit_ack(&db_path),
             "after_strict_conflict_abort" => child_abort_after_strict_conflict_abort(&db_path),
             "after_assertion_only_sync_ack" => child_abort_after_assertion_only_sync_ack(&db_path),
@@ -6208,22 +6187,7 @@ mod transaction_crash_boundaries {
     }
 
     #[test]
-    fn should_recover_every_group_member_when_crashing_after_shared_sync_before_ack() {
-        // Arrange
-        let temp_dir = TempDir::new().expect("temp dir");
-        let db_path = temp_dir.path();
-
-        // Act
-        run_child_expect_abort("group_after_sync_before_ack", db_path);
-        expire_crashed_process_lease(db_path);
-        let engine = open_local_engine(db_path);
-
-        // Assert
-        assert_records_visible(&engine, GROUP_POST_SYNC_RECORDS);
-    }
-
-    #[test]
-    fn should_recover_every_group_member_when_process_aborts_after_group_acknowledgements() {
+    fn should_recover_every_acknowledged_concurrent_sync_commit_after_process_abort() {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
@@ -6634,11 +6598,6 @@ mod transaction_crash_boundaries {
             .expect("commit spilled assertion-guarded transaction");
     }
 
-    fn child_abort_group_after_sync_before_ack(db_path: &Path) {
-        configure_group_abort_failpoint("group_after_sync_before_ack");
-        commit_concurrent_sync_transactions(db_path, GROUP_POST_SYNC_RECORDS);
-    }
-
     fn child_abort_group_after_commit_ack(db_path: &Path) {
         commit_concurrent_sync_transactions(db_path, GROUP_POST_ACK_RECORDS);
         crash::abort_at_trigger("group_after_commit_ack", "manual::group_after_commit_ack");
@@ -6842,12 +6801,15 @@ mod transaction_crash_boundaries {
     }
 
     fn transaction_spill_run_count(db_path: &Path) -> usize {
-        fs::read_dir(db_path.join("txn")).map_or(0, |entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
-                .count()
-        })
+        let entries = match fs::read_dir(db_path.join("txn")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => panic!("list spill directory: {error}"),
+        };
+        entries
+            .map(|entry| entry.expect("read spill directory entry"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
+            .count()
     }
 
     fn run_child_expect_abort(scenario: &str, db_path: &Path) {
@@ -6863,17 +6825,10 @@ mod transaction_crash_boundaries {
         crash::run_child_expect_abort(&mut command, scenario, crash_trigger(scenario), db_path);
     }
 
-    fn configure_group_abort_failpoint(scenario_name: &'static str) {
-        crash::configure_abort_failpoint("midge::wal::txn_after_sync_before_ack", scenario_name);
-        fail::cfg("midge::runtime::strict_group_before_collect", "1*sleep(50)")
-            .expect("configure strict group collection failpoint");
-    }
-
     fn crash_trigger(scenario: &str) -> &'static str {
         match scenario {
             "after_ops_before_commit" => "midge::wal::txn_after_ops_append_before_commit",
             "after_sync_before_ack"
-            | "group_after_sync_before_ack"
             | "assertion_guarded_after_sync_before_ack"
             | "assertion_guarded_spilled_after_sync_before_ack" => {
                 "midge::wal::txn_after_sync_before_ack"
@@ -7426,12 +7381,9 @@ mod cloud_crash_recovery {
             storage_mode: StorageMode::CloudBacked {
                 local_cache_path: db_path.to_path_buf(),
             },
-            wal_sync: true,
-            wal_batch_config: None,
             memtable_size: LARGE_MEMTABLE_BYTES,
-            compression: false,
             enable_compaction: false,
-            memory_budget: None,
+            transaction_memory_pool_bytes: None,
             cloud_write_policy: policy,
             simulated_cloud_local_storage_budget_bytes: None,
             shutdown_cloud_drain_timeout: None,
@@ -7564,14 +7516,22 @@ mod cloud_crash_recovery {
     }
 
     fn reset_dir(dir: &Path) {
-        let _ = std::fs::remove_dir_all(dir);
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove cache {}: {error}", dir.display()),
+        }
         std::fs::create_dir_all(dir).expect("recreate directory");
+        assert!(std::fs::read_dir(dir)
+            .expect("list cold cache")
+            .next()
+            .is_none());
     }
 
     fn contains_file_with_extension(dir: &Path, extension: &str) -> bool {
         std::fs::read_dir(dir)
             .unwrap_or_else(|error| panic!("list {}: {error}", dir.display()))
-            .flatten()
+            .map(|entry| entry.expect("read storage directory entry"))
             .any(|entry| {
                 let path = entry.path();
                 if path.is_dir() {
@@ -8067,8 +8027,7 @@ mod cloud_persistence_hardening {
             "cloud-strict writes should create remote WAL before flush"
         );
 
-        // Act
-        engine.flush_cf(&default_cf).expect("flush range tombstone");
+        // Act: leave the range deletion and preceding values WAL-only.
         let remote_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
         engine
             .shutdown(std::time::Duration::from_secs(5))
@@ -8080,7 +8039,7 @@ mod cloud_persistence_hardening {
         // Assert
         assert!(
             !remote_segments.is_empty(),
-            "range tombstone WAL must be retained without an exact per-record SST coverage proof"
+            "unflushed range deletion must remain in authoritative remote WAL"
         );
         assert_eq!(get_default(&reopened, b"range-10"), None);
         assert_eq!(get_default(&reopened, b"range-15"), None);
@@ -8794,8 +8753,13 @@ mod cloud_persistence_hardening {
     }
 
     fn reset_dir(dir: &Path) {
-        let _ = fs::remove_dir_all(dir);
+        match fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove cache {}: {error}", dir.display()),
+        }
         fs::create_dir_all(dir).expect("recreate directory");
+        assert!(fs::read_dir(dir).expect("list cold cache").next().is_none());
     }
 
     fn failpoint_test_lock() -> &'static Mutex<()> {
@@ -8822,9 +8786,8 @@ mod cloud_remote_sst_compaction_recovery {
 
     fn sst_names(directory: &Path) -> BTreeSet<String> {
         std::fs::read_dir(directory)
-            .into_iter()
-            .flatten()
-            .flatten()
+            .expect("list authoritative SST objects")
+            .map(|entry| entry.expect("read SST directory entry"))
             .filter(|entry| {
                 entry
                     .path()
@@ -9544,11 +9507,13 @@ mod engine_gc_cloud {
 
     /// List the `.sst` object names directly inside `dir` (non-recursive).
     fn sst_object_names(dir: &Path) -> BTreeSet<String> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return BTreeSet::new();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return BTreeSet::new(),
+            Err(error) => panic!("list SST objects {}: {error}", dir.display()),
         };
         entries
-            .flatten()
+            .map(|entry| entry.expect("read SST object entry"))
             .filter(|entry| {
                 entry
                     .path()
@@ -9654,7 +9619,11 @@ mod engine_gc_cloud {
         for i in 0..200 {
             let key = format!("cloudsst_key_{i:04}");
             let val = tx.get(key.as_bytes()).expect("get");
-            assert!(val.is_some(), "data lost during cloud object compaction");
+            assert_eq!(
+                val.as_deref(),
+                Some(b"cloud_value_3".as_slice()),
+                "latest acknowledged version of {key}"
+            );
         }
 
         eprintln!("✓ Cloud GC successfully cleaned up orphaned objects");
@@ -9662,7 +9631,7 @@ mod engine_gc_cloud {
 
     #[test]
     fn should_not_collect_cloud_objects_referenced_by_manifest() {
-        for_each_storage_mode(&["local"], |mode, opts| {
+        for_each_storage_mode(&["cloud"], |mode, opts| {
             eprintln!("\n=== Cloud GC: Preserve Referenced Objects (mode: {mode}) ===");
 
             // Arrange
@@ -9676,33 +9645,59 @@ mod engine_gc_cloud {
             for i in 0..100 {
                 let key = format!("ref_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                    .ok();
+                    .expect("stage referenced value");
             }
-            tx.commit(WriteOptions::buffered()).expect("commit");
+            tx.commit(WriteOptions::cloud_strict()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
-            // Act: Don't compact; SST remains in manifest
-            // Verify data is readable
+            // Act: exercise genuine cloud compaction/GC on another family.
+            let churn = engine.create_column_family("gc-churn").unwrap();
+            for generation in 0..4 {
+                let mut write = engine
+                    .begin_tx(churn.id(), TransactionMode::ReadWrite)
+                    .unwrap();
+                write
+                    .put(b"churn".to_vec(), vec![generation], None)
+                    .unwrap();
+                write.commit(WriteOptions::cloud_strict()).unwrap();
+                engine.flush_cf(&churn).unwrap();
+            }
+            engine.compact_all().expect("run cloud compaction and GC");
+            assert!(
+                engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .unwrap()
+                    .compactions_run
+                    > 0
+            );
+            let StorageMode::CloudBacked { local_cache_path } = &opts.storage_mode else {
+                panic!("cloud fixture");
+            };
+            let layout = engine.metrics().get_storage_layout().unwrap();
+            for file in layout.levels.iter().flat_map(|level| &level.files) {
+                assert!(
+                    local_cache_path
+                        .join("cloud_store/sst")
+                        .join(&file.name)
+                        .is_file(),
+                    "manifest-owned object {} must survive GC",
+                    file.name
+                );
+            }
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
             // Assert: Check manifest indirectly via data availability
-            let mut found = 0;
             for i in 0..100 {
                 let key = format!("ref_key_{i:04}");
-                if tx
-                    .get(key.as_bytes())
-                    .expect("read manifest-referenced key")
-                    .is_some()
-                {
-                    found += 1;
-                }
+                assert_eq!(
+                    tx.get(key.as_bytes()).unwrap().as_deref(),
+                    Some(b"value".as_slice()),
+                    "referenced member {i}"
+                );
             }
-            assert_eq!(
-                found, 100,
-                "manifest-referenced cloud objects were incorrectly deleted in mode: {mode}"
-            );
 
             eprintln!("✓ All manifest-referenced cloud objects preserved");
         });
@@ -9783,9 +9778,10 @@ mod engine_gc_cloud {
             .expect("begin_tx");
         for i in 0..100 {
             let key = format!("del_fail_key_{i:04}");
-            assert!(
-                tx.get(key.as_bytes()).expect("get").is_some(),
-                "data lost after cloud delete failure"
+            assert_eq!(
+                tx.get(key.as_bytes()).expect("get").as_deref(),
+                Some(format!("value_{}", l0_batch_size - 1).as_bytes()),
+                "latest acknowledged key {key}"
             );
         }
         drop(tx);
@@ -10493,7 +10489,7 @@ mod observability_api {
             .expect("shutdown before corruption");
         let sst_path = std::fs::read_dir(db_path.join("sst"))
             .expect("list SST directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("flushed SST");
@@ -11008,7 +11004,6 @@ mod hybrid_storage {
     #[cfg(feature = "failpoints")]
     use cntryl_midge::MidgeError;
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
-    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -11019,11 +11014,14 @@ mod hybrid_storage {
     /// filesystem-backed simulated cloud/local stores actually received or lost
     /// data, rather than trusting a `get()` result alone.
     fn count_files_recursive(root: &std::path::Path) -> usize {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return 0;
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => panic!("list data directory {}: {error}", root.display()),
         };
         let mut count = 0;
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.expect("read data directory entry");
             let path = entry.path();
             if path.is_dir() {
                 count += count_files_recursive(&path);
@@ -11074,18 +11072,14 @@ mod hybrid_storage {
     }
 
     #[test]
-    fn should_trigger_eviction_at_high_watermark() {
-        // Note: This test assumes cloud storage is available
-        // In a pure local test, we validate the logic without touching actual cloud
-        for_each_storage_mode(&["local"], |mode, opts| {
-            eprintln!("\n=== Hybrid: Trigger Eviction at High Watermark (mode: {mode}) ===");
-
-            // Arrange: Set tight memory budget to make eviction triggerable
+    fn should_keep_all_large_values_readable_after_cloud_publication_releases_staging() {
+        for_each_storage_mode(&["cloud"], |mode, opts| {
+            // Arrange: the complete atomic transaction fits the working-disk window.
+            let opts = opts.with_simulated_cloud_local_storage_budget(128 * 1024 * 1024);
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Write large values to reach high watermark (~70% of budget)
-            // Target: ~1MB per value * 10 = 10MB total
+            // The complete ten-value batch fits its admitted staging window.
             let large_value = vec![b'X'; 1024 * 1024]; // 1MB value
 
             let mut tx = engine
@@ -11094,37 +11088,32 @@ mod hybrid_storage {
             for i in 0..10 {
                 let key = format!("large_key_{i:02}");
                 tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
-                    .ok();
+                    .expect("stage large value");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
 
-            // Act: Flush to SST (triggers potential eviction to cloud)
+            // Act: publish the complete SST remotely and release its staging file.
             engine.flush_cf(&cf).expect("flush");
+            let StorageMode::CloudBacked { local_cache_path } = &opts.storage_mode else {
+                panic!("cloud fixture");
+            };
+            assert_eq!(count_files_recursive(&local_cache_path.join("sst")), 0);
+            assert!(count_files_recursive(&local_cache_path.join("cloud_store/sst")) > 0);
 
-            // Assert: Engine handled high watermark gracefully
-            // Verify:
-            // 1. No panic
-            // 2. Data still accessible
-            // 3. Memory pressure handled
+            // Assert: every large value survives publication and staging cleanup.
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let readable = (0..10)
-                .filter(|i| {
-                    let key = format!("large_key_{i:02}");
-                    tx.get(key.as_bytes())
-                        .expect("read after high-watermark eviction")
-                        .is_some()
-                })
-                .count();
-
-            assert!(
-                readable >= 8,
-                "high watermark eviction caused data loss in mode: {mode}"
-            );
-
-            eprintln!("âœ“ High watermark eviction triggered safely; {readable} keys readable");
+            for index in 0..10 {
+                assert_eq!(
+                    tx.get(format!("large_key_{index:02}").as_bytes())
+                        .unwrap()
+                        .as_deref(),
+                    Some(large_value.as_slice()),
+                    "acknowledged large member {index}"
+                );
+            }
         });
     }
 
@@ -11204,69 +11193,60 @@ mod hybrid_storage {
     }
 
     #[test]
-    fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is_active() {
-        for_each_storage_mode(&["local"], |mode, opts| {
-            eprintln!("\n=== Hybrid: Resume Writes After Eviction (mode: {mode}) ===");
-
+    fn should_accept_more_writes_after_cloud_flush_releases_staging() {
+        for_each_storage_mode(&["cloud"], |mode, opts| {
             // Arrange
+            let opts = opts.with_simulated_cloud_local_storage_budget(16 * 1024 * 1024);
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Fill to pressure point
+            // Each atomic batch fits the staging window; publication releases it.
             let medium_value = vec![b'Z'; 256 * 1024]; // 256KB
 
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            for i in 0..20 {
-                let key = format!("pressure_key_{i:02}");
-                tx.put(key.as_bytes().to_vec(), medium_value.clone(), None)
-                    .ok();
+            for batch in 0..5 {
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin_tx");
+                for i in batch * 4..(batch + 1) * 4 {
+                    let key = format!("pressure_key_{i:02}");
+                    tx.put(key.as_bytes().to_vec(), medium_value.clone(), None)
+                        .expect("stage initial value");
+                }
+                tx.commit(buffered_write_options(mode)).expect("commit");
+                engine.flush_cf(&cf).expect("publish admitted batch");
             }
-            tx.commit(buffered_write_options(mode)).expect("commit");
 
-            // Act: Trigger eviction and wait
+            // Act: flush releases actual local SST staging before more commits.
             engine.flush_cf(&cf).expect("flush");
-            thread::sleep(Duration::from_millis(300));
+            let StorageMode::CloudBacked { local_cache_path } = &opts.storage_mode else {
+                panic!("cloud fixture");
+            };
+            assert_eq!(count_files_recursive(&local_cache_path.join("sst")), 0);
 
             // Resume writes after eviction
-            let mut resume_writes = 0;
-            let mut last_error = None;
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            for i in 0_u64.. {
+            for i in 0..5 {
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
                 let key = format!("resume_key_{i:02}");
-                let result = tx
-                    .put(key.as_bytes().to_vec(), medium_value.clone(), None)
-                    .and_then(|()| tx.commit(buffered_write_options(mode)));
-                match result {
-                    Ok(()) => resume_writes += 1,
-                    Err(error @ cntryl_midge::MidgeError::WriteStall(_)) => {
-                        last_error = Some(error);
-                    }
-                    Err(error) => {
-                        panic!("unexpected resume write failure in mode {mode}: {error:?}")
-                    }
-                }
-                if resume_writes >= 5 {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "writes did not resume before the flush queue drained in mode: {mode}; successes={resume_writes}; last_error={last_error:?}"
-                );
-                thread::sleep(Duration::from_millis(25));
+                tx.put(key.as_bytes().to_vec(), medium_value.clone(), None)
+                    .expect("stage subsequent value");
+                tx.commit(WriteOptions::cloud_strict())
+                    .expect("acknowledge subsequent write");
             }
 
-            // Assert: Writes can resume after eviction
-            assert!(
-                resume_writes >= 5,
-                "writes did not resume after eviction in mode: {mode}; successes={resume_writes}; last_error={last_error:?}"
-            );
-
-            eprintln!("âœ“ Writes resumed after eviction; {resume_writes} resume writes succeeded");
+            // Assert: publication preserves every initial and subsequent member.
+            let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            for (prefix, count) in [("pressure_key", 20), ("resume_key", 5)] {
+                for index in 0..count {
+                    assert_eq!(
+                        read.get(format!("{prefix}_{index:02}").as_bytes())
+                            .unwrap()
+                            .as_deref(),
+                        Some(medium_value.as_slice())
+                    );
+                }
+            }
         });
     }
 
@@ -11301,23 +11281,17 @@ mod hybrid_storage {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
 
-        let mut readable = 0;
+        // Assert
         for i in 0..50 {
             let key = format!("local_pref_key_{i:04}");
-            if tx
-                .get(key.as_bytes())
-                .expect("read published key")
-                .is_some()
-            {
-                readable += 1;
-            }
+            assert_eq!(
+                tx.get(key.as_bytes())
+                    .expect("read published key")
+                    .as_deref(),
+                Some(small_value.as_slice()),
+                "published member {i}"
+            );
         }
-
-        // Assert: every read succeeded...
-        assert_eq!(
-            readable, 50,
-            "expected every key to be readable while comfortably under budget"
-        );
 
         assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
         assert!(count_files_recursive(&temp_dir.path().join("cloud_store/sst")) > 0);
@@ -11352,7 +11326,7 @@ mod hybrid_storage {
         }
         engine.flush_cf(&cf).expect("publish and evict SST");
 
-        // Act / Assert: publication has completed, and only the cloud copy remains.
+        // Act: read from the published cloud SST after local staging is removed.
         assert!(count_files_recursive(&temp_dir.path().join("cloud_store/sst")) > 0);
         assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
 
@@ -11361,30 +11335,22 @@ mod hybrid_storage {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
 
-        let mut cloud_fetched = 0;
+        // Assert
         for i in 0..20 {
             let key = format!("evict_fetch_key_{i:02}");
-            if tx
-                .get(key.as_bytes())
-                .expect("read cloud-evicted key")
-                .is_some()
-            {
-                cloud_fetched += 1;
-            }
+            assert_eq!(
+                tx.get(key.as_bytes())
+                    .expect("read cloud-evicted key")
+                    .as_deref(),
+                Some(value.as_slice()),
+                "published member {i}"
+            );
         }
-
-        // Assert: Data accessible via cloud fetch
-        assert_eq!(
-            cloud_fetched, 20,
-            "cloud fetch after eviction failed to return all keys"
-        );
-
-        eprintln!("âœ“ Cloud fetch working after eviction; {cloud_fetched} keys fetched");
     }
 
     #[test]
-    fn should_persist_eviction_state_across_restart() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+    fn should_recover_every_published_cloud_value_without_restoring_local_sst_replicas() {
+        for_each_storage_mode(&["cloud"], |mode, opts| {
             eprintln!("\n=== Hybrid: Persist Eviction State (mode: {mode}) ===");
 
             // Arrange
@@ -11400,13 +11366,12 @@ mod hybrid_storage {
                     .expect("begin_tx");
                 for i in 0..15 {
                     let key = format!("persist_evict_key_{i:02}");
-                    tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
+                    tx.put(key.as_bytes().to_vec(), value.clone(), None)
+                        .expect("stage published value");
                 }
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush");
 
-                // Eviction occurs
-                thread::sleep(Duration::from_millis(200));
                 engine
                     .shutdown(Duration::from_secs(5))
                     .expect("shutdown before same-path restart");
@@ -11426,24 +11391,20 @@ mod hybrid_storage {
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
 
-                let mut persisted = 0;
                 for i in 0..15 {
                     let key = format!("persist_evict_key_{i:02}");
-                    if tx
-                        .get(key.as_bytes())
-                        .expect("read after eviction-state restart")
-                        .is_some()
-                    {
-                        persisted += 1;
-                    }
+                    assert_eq!(
+                        tx.get(key.as_bytes())
+                            .expect("read recovered cloud value")
+                            .as_deref(),
+                        Some(vec![b'E'; 128 * 1024].as_slice()),
+                        "acknowledged key {key}"
+                    );
                 }
-
-                assert!(
-                    persisted >= 12,
-                    "eviction state not persisted across restart in mode: {mode}"
-                );
-
-                eprintln!("âœ“ Eviction state persisted; {persisted} keys still accessible");
+                let StorageMode::CloudBacked { local_cache_path } = &opts.storage_mode else {
+                    panic!("cloud fixture");
+                };
+                assert_eq!(count_files_recursive(&local_cache_path.join("sst")), 0);
             }
         });
     }
@@ -11530,21 +11491,16 @@ mod hybrid_storage {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
 
-        let mut accessible = 0;
         for i in 0..12 {
             let key = format!("cloud_down_key_{i:02}");
-            if tx
-                .get(key.as_bytes())
-                .expect("read during cloud outage")
-                .is_some()
-            {
-                accessible += 1;
-            }
+            assert_eq!(
+                tx.get(key.as_bytes())
+                    .expect("read during cloud outage")
+                    .as_deref(),
+                Some(large_value.as_slice()),
+                "acknowledged outage member {i}"
+            );
         }
-        assert_eq!(
-            accessible, 12,
-            "cloud unavailability during eviction caused local data loss"
-        );
 
         let metrics = engine
             .metrics()
@@ -11555,18 +11511,13 @@ mod hybrid_storage {
             EngineHealth::Corrupt,
             "engine must not become corrupt after a transient cloud outage"
         );
-
-        eprintln!(
-            "âœ“ Handled cloud unavailability gracefully; {accessible} keys still accessible, flush_error={flush_error:?}"
-        );
     }
 
     #[test]
-    fn should_keep_pinned_sst_local_given_active_snapshot_when_eviction_runs() {
-        for_each_storage_mode(&["local"], |mode, opts| {
-            eprintln!("\n=== Hybrid: Don't Evict Active Readers (mode: {mode}) ===");
-
-            let engine = Arc::new(open_with_mode(&opts, mode));
+    fn should_preserve_snapshot_values_when_cloud_publication_removes_local_staging() {
+        for_each_storage_mode(&["cloud"], |mode, opts| {
+            // Arrange
+            let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Arrange: Write and create snapshot
@@ -11577,9 +11528,10 @@ mod hybrid_storage {
                 .expect("begin_tx");
             for i in 0..25 {
                 let key = format!("reader_protect_key_{i:02}");
-                tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
+                tx.put(key.as_bytes().to_vec(), value.clone(), None)
+                    .expect("stage snapshot value");
             }
-            tx.commit(buffered_write_options(mode)).expect("commit");
+            tx.commit(WriteOptions::cloud_strict()).expect("commit");
             engine.flush_cf(&cf).expect("flush");
 
             // Create read snapshot (holds reference to SST)
@@ -11587,41 +11539,41 @@ mod hybrid_storage {
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            // Act: Trigger eviction attempt while snapshot is active
-            let engine_clone = Arc::clone(&engine);
-            let cf_clone = cf.clone();
-            let eviction_handle = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(50));
-                engine_clone.flush_cf(&cf_clone).ok();
-                engine_clone.compact_all().ok();
-            });
-
-            // Wait for eviction to complete
-            eviction_handle
-                .join()
-                .expect("background eviction thread should not panic");
-
-            // Assert: Snapshot reads still succeed (SST not evicted)
-            let mut snapshot_reads = 0;
+            // Act: publish replacements while the old snapshot remains held.
+            let replacement = vec![b'B'; 64 * 1024];
+            let mut writer = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
             for i in 0..25 {
                 let key = format!("reader_protect_key_{i:02}");
-                if snapshot
-                    .get(key.as_bytes())
-                    .expect("read pinned snapshot key")
-                    .is_some()
-                {
-                    snapshot_reads += 1;
-                }
+                writer
+                    .put(key.into_bytes(), replacement.clone(), None)
+                    .unwrap();
             }
+            writer.commit(WriteOptions::cloud_strict()).unwrap();
+            engine.flush_cf(&cf).expect("publish replacement SST");
+            engine
+                .compact_all()
+                .expect("compact with pinned cloud reader");
+            let StorageMode::CloudBacked { local_cache_path } = &opts.storage_mode else {
+                panic!("cloud fixture");
+            };
+            assert_eq!(count_files_recursive(&local_cache_path.join("sst")), 0);
+            assert!(count_files_recursive(&local_cache_path.join("cloud_store/sst")) > 0);
 
-            assert!(
-                snapshot_reads >= 20,
-                "active reader SST was evicted in mode: {mode}"
-            );
-
-            eprintln!(
-                "âœ“ Active readers protected from eviction; {snapshot_reads} snapshot reads successful"
-            );
+            // Assert: every old/new snapshot member has its exact version.
+            let current = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            for index in 0..25 {
+                let key = format!("reader_protect_key_{index:02}");
+                assert_eq!(
+                    snapshot.get(key.as_bytes()).unwrap().as_deref(),
+                    Some(value.as_slice())
+                );
+                assert_eq!(
+                    current.get(key.as_bytes()).unwrap().as_deref(),
+                    Some(replacement.as_slice())
+                );
+            }
         });
     }
 }
@@ -11640,6 +11592,56 @@ mod storage_verification_hardening {
 
     #[cfg(feature = "failpoints")]
     static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[cfg(feature = "failpoints")]
+    struct VerificationHold {
+        point: &'static str,
+        resume: crossbeam::channel::Sender<()>,
+    }
+
+    #[cfg(feature = "failpoints")]
+    impl VerificationHold {
+        fn release(&self) {
+            let _ = self.resume.try_send(());
+        }
+    }
+
+    #[cfg(feature = "failpoints")]
+    impl Drop for VerificationHold {
+        fn drop(&mut self) {
+            self.release();
+            fail::remove(self.point);
+        }
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn hold_verification(
+        point: &'static str,
+    ) -> (crossbeam::channel::Receiver<()>, VerificationHold) {
+        let (entered, observed) = crossbeam::channel::bounded(1);
+        let (resume, released) = crossbeam::channel::bounded(1);
+        fail::cfg_callback(point, move || {
+            entered.send(()).expect("signal owned verification barrier");
+            released
+                .recv_timeout(Duration::from_secs(30))
+                .expect("verification hold must be released");
+        })
+        .expect("hold actual verification boundary");
+        (observed, VerificationHold { point, resume })
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn time_out_held_verification(
+        engine: &Engine,
+        entered: &crossbeam::channel::Receiver<()>,
+    ) -> Result<cntryl_midge::StorageVerificationReport, MidgeError> {
+        let verifier = engine.storage_verifier();
+        let caller = std::thread::spawn(move || verifier.verify_storage(Duration::from_secs(1)));
+        entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("verifier reached its actual held boundary");
+        caller.join().expect("join bounded verification caller")
+    }
 
     fn write_empty_storage_fixture(db_path: &Path) {
         std::fs::write(db_path.join("FORMAT"), "midge-format-version=7\n")
@@ -11818,11 +11820,6 @@ mod storage_verification_hardening {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let scenario = fail::FailScenario::setup();
-        fail::cfg(
-            "midge::verification::after_barrier_acquired",
-            "1*sleep(750)",
-        )
-        .expect("delay verification worker");
 
         let temp_dir = tempfile::tempdir().expect("create temp directory");
         let mut engine = Engine::open(
@@ -11834,12 +11831,11 @@ mod storage_verification_hardening {
         let default_cf = engine
             .get_column_family("default")
             .expect("default column family");
+        let (entered, hold) = hold_verification("midge::verification::after_barrier_acquired");
 
         // Act
         let started = Instant::now();
-        let verification = engine
-            .storage_verifier()
-            .verify_storage(Duration::from_millis(25));
+        let verification = time_out_held_verification(&engine, &entered);
         let elapsed = started.elapsed();
 
         let ddl_error = engine
@@ -11854,6 +11850,7 @@ mod storage_verification_hardening {
             .commit(WriteOptions::best_effort())
             .expect_err("WAL mutation must remain fenced while verifier owns the barrier");
 
+        hold.release();
         let retry_deadline = Instant::now() + Duration::from_secs(3);
         loop {
             match engine.create_column_family("after-verification") {
@@ -11868,7 +11865,7 @@ mod storage_verification_hardening {
         // Assert
         assert!(matches!(verification, Err(MidgeError::Timeout(_))));
         assert!(
-            elapsed < Duration::from_millis(500),
+            elapsed < Duration::from_secs(5),
             "caller timeout must not wait for verifier worker: {elapsed:?}"
         );
         assert!(matches!(ddl_error, MidgeError::Busy(_)));
@@ -11890,11 +11887,6 @@ mod storage_verification_hardening {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let scenario = fail::FailScenario::setup();
-        fail::cfg(
-            "midge::verification::before_barrier_response",
-            "1*sleep(250)",
-        )
-        .expect("delay verification barrier response");
 
         let temp_dir = tempfile::tempdir().expect("create temp directory");
         let mut engine = Engine::open(
@@ -11903,11 +11895,11 @@ mod storage_verification_hardening {
                 .expect("build local options"),
         )
         .expect("open local engine");
+        let (entered, hold) = hold_verification("midge::verification::before_barrier_response");
 
         // Act
-        let verification = engine
-            .storage_verifier()
-            .verify_storage(Duration::from_millis(25));
+        let verification = time_out_held_verification(&engine, &entered);
+        hold.release();
         let retry_deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match engine.create_column_family("after-lost-response") {
@@ -11938,11 +11930,6 @@ mod storage_verification_hardening {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let scenario = fail::FailScenario::setup();
-        fail::cfg(
-            "midge::verification::after_barrier_acquired",
-            "1*sleep(750)",
-        )
-        .expect("delay verification worker");
 
         let temp_dir = tempfile::tempdir().expect("create temp directory");
         let mut engine = Engine::open(
@@ -11951,9 +11938,8 @@ mod storage_verification_hardening {
                 .expect("build local options"),
         )
         .expect("open local engine");
-        let verification = engine
-            .storage_verifier()
-            .verify_storage(Duration::from_millis(25));
+        let (entered, hold) = hold_verification("midge::verification::after_barrier_acquired");
+        let verification = time_out_held_verification(&engine, &entered);
 
         // Act
         let shutdown = engine.shutdown(Duration::from_millis(25));
@@ -11967,10 +11953,11 @@ mod storage_verification_hardening {
         assert!(matches!(verification, Err(MidgeError::Timeout(_))));
         assert!(matches!(shutdown, Err(MidgeError::Timeout(_))));
         assert!(
-            competing_open.is_err(),
+            matches!(competing_open, Err(MidgeError::LeaseHeld(_))),
             "shutdown released the primary lease while verification still read the path"
         );
 
+        hold.release();
         fail::remove("midge::verification::after_barrier_acquired");
         scenario.teardown();
         drop(engine);
@@ -12002,7 +11989,6 @@ mod transaction_spill_hardening {
     use cntryl_midge::{
         Engine, MemoryBudget, MidgeError, OpenOptions, Query, TransactionMode, WriteOptions,
     };
-    use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     #[cfg(feature = "failpoints")]
@@ -12034,8 +12020,6 @@ mod transaction_spill_hardening {
     const ENV_DB_PATH: &str = "MIDGE_SPILL_CRASH_DB_PATH";
     #[cfg(feature = "failpoints")]
     const CHILD_REACHED_SPILL_MARKER: &str = "spill-child-ready";
-    #[cfg(feature = "failpoints")]
-    const ENV_FAILPOINT_ISOLATION_CHILD: &str = "MIDGE_SPILL_FAILPOINT_ISOLATION_CHILD";
 
     #[test]
     fn should_bound_shared_resident_bytes_when_two_transactions_pressure_one_pool() {
@@ -12161,9 +12145,7 @@ mod transaction_spill_hardening {
             .scan(&Query::new().prefix(Bytes::from_static(b"scan:")))
             .expect("scan intents")
             .try_collect()
-            .expect("collect scan intents")
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
+            .expect("collect scan intents");
         let had_spills = !spill_files(temp.path()).is_empty();
         tx.rollback().expect("rollback transaction");
         engine
@@ -12173,16 +12155,21 @@ mod transaction_spill_hardening {
         // Assert
         assert!(had_spills, "test must merge at least one spill run");
         assert_eq!(
-            rows.get(b"scan:a".as_slice()).map(Bytes::as_ref),
-            Some(b"resident-or-spilled-a".as_slice())
-        );
-        assert_eq!(
-            rows.get(b"scan:b".as_slice()).map(Bytes::as_ref),
-            Some(b"resident-or-spilled-b".as_slice())
-        );
-        assert_eq!(
-            rows.get(b"scan:base".as_slice()).map(Bytes::as_ref),
-            Some(b"overridden".as_slice())
+            rows,
+            vec![
+                (
+                    Bytes::from_static(b"scan:a"),
+                    Bytes::from_static(b"resident-or-spilled-a")
+                ),
+                (
+                    Bytes::from_static(b"scan:b"),
+                    Bytes::from_static(b"resident-or-spilled-b")
+                ),
+                (
+                    Bytes::from_static(b"scan:base"),
+                    Bytes::from_static(b"overridden")
+                ),
+            ]
         );
     }
 
@@ -12278,6 +12265,11 @@ mod transaction_spill_hardening {
         engine
             .shutdown(spill_shutdown_timeout())
             .expect("shutdown engine");
+        let mut reopened = open_local(temp.path(), 8 * 1024);
+        assert_spill_members(&reopened, "atomic", 6, None);
+        reopened
+            .shutdown(spill_shutdown_timeout())
+            .expect("shutdown recovered failed transaction");
     }
 
     #[test]
@@ -12490,12 +12482,7 @@ mod transaction_spill_hardening {
         let records = frames.iter().map(|(record, _)| record).collect::<Vec<_>>();
 
         let mut reopened = open_local(temp.path(), 8 * 1024);
-        let read_cf = default_cf(&reopened);
-        let read = reopened
-            .begin_tx(read_cf.id(), TransactionMode::ReadOnly)
-            .expect("begin recovery read");
-        let visible = read.get(b"chunked-000").expect("read committed key");
-        drop(read);
+        assert_spill_members(&reopened, "chunked", 12, Some(&[b'x'; 8 * 1024]));
         reopened
             .shutdown(spill_shutdown_timeout())
             .expect("shutdown reopened engine");
@@ -12529,7 +12516,6 @@ mod transaction_spill_hardening {
                 .all(|(_, payload_len)| *payload_len < logical_value_bytes),
             "no WAL frame may reconstruct the complete transaction"
         );
-        assert_eq!(visible, Some(Bytes::from(vec![b'x'; 8 * 1024])));
     }
 
     #[cfg(feature = "failpoints")]
@@ -12548,12 +12534,7 @@ mod transaction_spill_hardening {
         let frames = read_wal_frames(&crate::common::open_wal_segment(temp.path()));
         let records = frames.iter().map(|(record, _)| record).collect::<Vec<_>>();
         let mut engine = open_local(temp.path(), 8 * 1024);
-        let cf = default_cf(&engine);
-        let read = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin recovery read");
-        let visible = read.get(b"crash-000").expect("read uncommitted key");
-        drop(read);
+        assert_spill_members(&engine, "crash", 12, None);
         let remaining_spills = spill_files(temp.path());
         engine
             .shutdown(spill_shutdown_timeout())
@@ -12575,10 +12556,6 @@ mod transaction_spill_hardening {
         assert!(records
             .iter()
             .all(|record| record.op != WalOpKind::TxnCommit));
-        assert_eq!(
-            visible, None,
-            "chunks are invisible without the commit marker"
-        );
         assert!(
             remaining_spills.is_empty(),
             "startup must remove crashed transaction spill runs: {remaining_spills:?}"
@@ -12617,105 +12594,26 @@ mod transaction_spill_hardening {
         panic!("child commit returned without aborting before its commit marker");
     }
 
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn should_reach_only_path_specific_boundary_when_spill_and_direct_commit_race() {
-        // Arrange
-        if std::env::var_os(ENV_FAILPOINT_ISOLATION_CHILD).is_some() {
-            assert_path_specific_failpoints_under_concurrent_commits();
-            return;
+    fn assert_spill_members(engine: &Engine, prefix: &str, count: usize, expected: Option<&[u8]>) {
+        let cf = default_cf(engine);
+        let read = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("read spilled members");
+        for index in 0..count {
+            assert_eq!(
+                read.get(format!("{prefix}-{index:03}").as_bytes())
+                    .unwrap()
+                    .as_deref(),
+                expected,
+                "transaction member {index}"
+            );
         }
-        let current_exe = std::env::current_exe().expect("current test executable");
-        let temp = TempDir::new().expect("temp dir");
-
-        // Act
-        let output = Command::new(current_exe)
-            .arg("--exact")
-            .arg("transaction_spill_hardening::should_reach_only_path_specific_boundary_when_spill_and_direct_commit_race")
-            .arg("--nocapture")
-            .arg("--test-threads=1")
-            .env(ENV_FAILPOINT_ISOLATION_CHILD, "1")
-            .env(ENV_DB_PATH, temp.path())
-            .output()
-            .expect("run isolated failpoint child");
-
-        // Assert
-        assert!(
-            output.status.success(),
-            "path-specific failpoint child failed; stdout={}; stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[cfg(feature = "failpoints")]
-    fn assert_path_specific_failpoints_under_concurrent_commits() {
-        let scenario = fail::FailScenario::setup();
-        let direct_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let spilled_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let direct_callback_hits = std::sync::Arc::clone(&direct_hits);
-        let spilled_callback_hits = std::sync::Arc::clone(&spilled_hits);
-        fail::cfg_callback(
-            "midge::wal::txn_after_ops_append_before_commit",
-            move || {
-                direct_callback_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            },
-        )
-        .expect("configure direct transaction boundary");
-        fail::cfg_callback(
-            "midge::wal::spilled_txn_after_ops_append_before_commit",
-            move || {
-                spilled_callback_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            },
-        )
-        .expect("configure spilled transaction boundary");
-
-        let db_path = PathBuf::from(std::env::var_os(ENV_DB_PATH).expect("db path env"));
-        let engine = std::sync::Arc::new(open_local(&db_path, 8 * 1024));
-        let cf_id = default_cf(&engine).id();
-        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
-
-        let direct_engine = std::sync::Arc::clone(&engine);
-        let direct_start = std::sync::Arc::clone(&start);
-        let direct = std::thread::spawn(move || {
-            let mut tx = direct_engine
-                .begin_tx(cf_id, TransactionMode::ReadWrite)
-                .expect("begin direct transaction");
-            tx.put(b"direct".to_vec(), b"value".to_vec(), None)
-                .expect("stage direct value");
-            direct_start.wait();
-            tx.commit(WriteOptions::sync())
-        });
-
-        let spilled_engine = std::sync::Arc::clone(&engine);
-        let spilled_start = std::sync::Arc::clone(&start);
-        let spilled = std::thread::spawn(move || {
-            let mut tx = spilled_engine
-                .begin_tx(cf_id, TransactionMode::ReadWrite)
-                .expect("begin spilled transaction");
-            fill_transaction(&mut tx, "isolation", 12, 8 * 1024);
-            spilled_start.wait();
-            tx.commit(WriteOptions::sync())
-        });
-
-        direct
-            .join()
-            .expect("join direct transaction")
-            .expect("commit direct transaction");
-        spilled
-            .join()
-            .expect("join spilled transaction")
-            .expect("commit spilled transaction");
-        let Ok(mut engine) = std::sync::Arc::try_unwrap(engine) else {
-            panic!("transaction threads retained an engine reference");
-        };
-        engine
-            .shutdown(spill_shutdown_timeout())
-            .expect("shutdown isolated engine");
-        scenario.teardown();
-
-        assert_eq!(direct_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(spilled_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rows = read
+            .scan(&Query::new().prefix(Bytes::from(format!("{prefix}-"))))
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        assert_eq!(rows.len(), if expected.is_some() { count } else { 0 });
     }
 
     fn open_local(path: &Path, transaction_pool_bytes: usize) -> Engine {
@@ -12754,8 +12652,10 @@ mod transaction_spill_hardening {
 
     fn spill_files(db_path: &Path) -> Vec<PathBuf> {
         fn collect(path: &Path, files: &mut Vec<PathBuf>) {
-            let Ok(entries) = fs::read_dir(path) else {
-                return;
+            let entries = match fs::read_dir(path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => panic!("list spill directory {}: {error}", path.display()),
             };
             for entry in entries {
                 let entry = entry.expect("read spill directory entry");

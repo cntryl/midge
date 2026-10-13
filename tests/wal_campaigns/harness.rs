@@ -5,10 +5,10 @@ use crate::config::Config;
 use crate::workload::{Durability, Op, DEFAULT, KEYS};
 use cntryl_midge::__internal::io::{Fs, FsPath};
 use cntryl_midge::__internal::simulation::{
-    Commit, CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultOp, Histories, Key,
+    Commit, CrashDevice, Decision, Fate, Fault, FaultEffect, FaultError, FaultOp, Histories, Key,
     Recovery, SimulatedClock, SimulatedObjectStore, StoreImage, Violation, FAILURE_MESSAGE,
 };
-use cntryl_midge::{Clock, Engine, OpenOptions, TransactionMode};
+use cntryl_midge::{Clock, Engine, MidgeError, OpenOptions, Query, TransactionMode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -17,9 +17,7 @@ use std::time::Duration;
 /// How many times a faulting store's campaign restarts a process whose open
 /// the store's faults refused, as an operator would.
 const ATTEMPTS: usize = 8;
-/// How long a store must stay quiet before a settled crash, and the longest
-/// a campaign waits for that.
-const SETTLE_QUIET: Duration = Duration::from_millis(100);
+/// A fixed bound on completing admitted cloud publication work.
 const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 /// The local lease's mutation lock. #811: a completed release's unlink is not
 /// made durable, so a power loss can bring the lock back and block every
@@ -285,19 +283,77 @@ impl Campaign {
             .map_or(Ok(()), |reuse| Err(FindingKind::SegmentReuse(reuse)))
     }
 
-    /// Wait until the store's trace has stopped growing for
-    /// [`SETTLE_QUIET`], or [`SETTLE_LIMIT`] has passed.
-    fn settle(&self) {
+    /// Wait for admitted publication work, including retries, to complete.
+    fn settle(&self) -> Result<(), FindingKind> {
         let deadline = std::time::Instant::now() + SETTLE_LIMIT;
-        let mut seen = self.store.trace().len();
-        while std::time::Instant::now() < deadline {
-            std::thread::sleep(SETTLE_QUIET);
-            let now = self.store.trace().len();
-            if now == seen {
-                return;
+        loop {
+            let metrics = self
+                .engine()
+                .metrics()
+                .get_runtime_metrics()
+                .map_err(|error| FindingKind::Refused(format!("publication metrics: {error}")))?;
+            if metrics.pending_cloud_uploads == 0 && metrics.wal_pending_writes == 0 {
+                return Ok(());
             }
-            seen = now;
+            if std::time::Instant::now() >= deadline {
+                return Err(FindingKind::Refused(format!(
+                    "cloud publication did not complete: {} uploads, {} WAL writes",
+                    metrics.pending_cloud_uploads, metrics.wal_pending_writes
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    fn check_operation(
+        &self,
+        operation: &str,
+        result: Result<(), MidgeError>,
+    ) -> Result<(), FindingKind> {
+        match result {
+            Ok(()) => Ok(()),
+            // A rejected or timed-out upload may not exist at the provider.
+            // Its missing readback is a safe refusal, not an ACK or a flush:
+            // recovery must still satisfy the complete acknowledged history.
+            Err(MidgeError::Corruption(message))
+                if self.config.faulting()
+                    && message == "uploaded immutable object is absent"
+                    && self.store.trace().iter().any(|(request, fate)| {
+                        request.operation == cntryl_midge::__internal::simulation::Operation::Put
+                            && matches!(fate, Fate::Late | Fate::FailBefore(_))
+                    }) =>
+            {
+                Ok(())
+            }
+            Err(error)
+                if self.config.faulting()
+                    && (error.to_string().contains(FAILURE_MESSAGE)
+                        || (matches!(
+                            error,
+                            MidgeError::NoSpace(_) | MidgeError::WriteStall(_)
+                        ) && self
+                            .store
+                            .trace()
+                            .iter()
+                            .any(|(_, fate)| *fate != Fate::Normal))) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(FindingKind::Refused(format!("{operation}: {error}"))),
+        }
+    }
+
+    pub(crate) fn failed_segment_uploads(&self, segment: u64) -> usize {
+        let suffix = format!("/{segment:020}.wal");
+        self.store
+            .trace()
+            .iter()
+            .filter(|(request, fate)| {
+                request.operation == cntryl_midge::__internal::simulation::Operation::Put
+                    && request.key.ends_with(&suffix)
+                    && matches!(fate, Fate::FailBefore(_) | Fate::FailAfter(_))
+            })
+            .count()
     }
 
     /// Open the engine once, clearing a lease lock #811 resurrected.
@@ -333,13 +389,33 @@ impl Campaign {
             let tx = engine
                 .begin_tx(handle.id(), TransactionMode::ReadOnly)
                 .expect("read");
+            let rows = tx
+                .scan(&Query::new())
+                .and_then(cntryl_midge::ScanIterator::try_collect)
+                .map_err(|error| {
+                    FindingKind::Refused(format!("complete recovery scan: {error}"))
+                })?;
+            if !rows.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+                return Err(FindingKind::Refused(
+                    "recovery scan duplicated or reordered keys".into(),
+                ));
+            }
             for key in 0..KEYS {
                 let value = tx
                     .get(&[key])
                     .map_err(|error| FindingKind::Refused(format!("read: {error}")))?;
-                if let Some(value) = value {
-                    observed.insert((handle.name().to_string(), vec![key]), value.to_vec());
+                let scanned = rows
+                    .iter()
+                    .find(|(candidate, _)| candidate.as_ref() == [key])
+                    .map(|(_, value)| value.clone());
+                if value != scanned {
+                    return Err(FindingKind::Refused(format!(
+                        "point read and scan disagree for {key}"
+                    )));
                 }
+            }
+            for (key, value) in rows {
+                observed.insert((handle.name().to_string(), key.to_vec()), value.to_vec());
             }
         }
         self.history
@@ -351,7 +427,13 @@ impl Campaign {
         self.families[family.min(self.families.len() - 1)].clone()
     }
 
-    pub(crate) fn write(&mut self, family: usize, key: u8, delete: bool, durability: Durability) {
+    pub(crate) fn write(
+        &mut self,
+        family: usize,
+        key: u8,
+        delete: bool,
+        durability: Durability,
+    ) -> Result<bool, FindingKind> {
         let family = self.family(family);
         self.values += 1;
         let value = (!delete).then(|| format!("v{}", self.values).into_bytes());
@@ -366,15 +448,18 @@ impl Campaign {
                 }
                 tx.commit(self.config.mode.write_options(durability))
             });
+        let acknowledged = committed.is_ok();
         let id = self.history.commit(Commit {
             family,
             writes: vec![(vec![key], value)],
             logging: durability.logging(),
-            acknowledged: committed.is_ok(),
+            acknowledged,
         });
-        if committed.is_ok() && durability == Durability::Sync {
+        if acknowledged && durability == Durability::Sync {
             self.history.synced(id);
         }
+        self.check_operation("commit", committed)?;
+        Ok(acknowledged)
     }
 
     /// Flush `family`; the history counts it flushed only if the flush
@@ -437,9 +522,11 @@ impl Campaign {
             }
         } else {
             let mut engine = self.engine.take().expect("engine is open");
-            if engine.shutdown(Duration::from_secs(10)).is_ok() {
+            let shutdown = engine.shutdown(Duration::from_secs(10));
+            if shutdown.is_ok() {
                 self.history.shut_down();
             }
+            self.check_operation("clean restart shutdown", shutdown)?;
             drop(engine);
             if stop.loses_power() {
                 self.device.process_crash();
@@ -456,23 +543,31 @@ impl Campaign {
                 family,
                 key,
                 durability,
-            } => self.write(*family, *key, false, *durability),
+            } => {
+                self.write(*family, *key, false, *durability)?;
+            }
             Op::Delete {
                 family,
                 key,
                 durability,
-            } => self.write(*family, *key, true, *durability),
+            } => {
+                self.write(*family, *key, true, *durability)?;
+            }
             Op::Flush { family } => {
-                let _ = self.flush(*family);
+                let result = self.flush(*family);
+                self.check_operation("flush", result)?;
             }
             Op::Compact => {
-                let _ = self.engine().compact_all();
+                self.check_operation("compaction", self.engine().compact_all())?;
             }
             Op::CreateFamily => {
                 let name = format!("family-{}", self.families.len());
-                if self.engine().create_column_family(&name).is_ok() {
-                    self.history.create_family(&name);
-                    self.families.push(name);
+                match self.engine().create_column_family(&name) {
+                    Ok(_) => {
+                        self.history.create_family(&name);
+                        self.families.push(name);
+                    }
+                    Err(error) => self.check_operation("create family", Err(error))?,
                 }
             }
             Op::CleanRestart => self.restart(Stop::Clean, remaining, 0)?,
@@ -485,7 +580,7 @@ impl Campaign {
             Op::LandLate => {
                 let _ = self.store.land_late_effects();
             }
-            Op::Settle => self.settle(),
+            Op::Settle => self.settle()?,
             Op::FailWalRemoval { nth } => self.inject(Fault {
                 op: FaultOp::RemoveFile,
                 path: "wal".into(),
@@ -509,12 +604,7 @@ impl Campaign {
         }
         let mut engine = self.engine.take().expect("engine is open");
         let shutdown = engine.shutdown(Duration::from_secs(10));
-        // A faulting store may fail a shutdown's final upload.
-        assert!(
-            shutdown.is_ok() || self.config.faulting(),
-            "final shutdown: {shutdown:?}"
-        );
-        Ok(())
+        self.check_operation("final shutdown", shutdown)
     }
 
     /// Run `workload` on a fresh device; return the first finding.

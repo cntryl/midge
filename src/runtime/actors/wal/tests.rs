@@ -1868,7 +1868,6 @@ fn should_keep_rotation_retryable_when_next_segment_directory_sync_fails() -> Mi
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate() -> MidgeResult<()>
 {
     // Arrange
@@ -1963,8 +1962,18 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
         "the ledger already sealed segment 7"
     );
 
+    assert_best_effort_write_after_fencing(&mut wal_actor, &mut state, entries_before);
+
+    Ok(())
+}
+
+fn assert_best_effort_write_after_fencing(
+    wal_actor: &mut WalActor,
+    state: &mut RuntimeState,
+    entries_before: usize,
+) {
     let best_effort = wal_actor.append_transaction(
-        &mut state,
+        state,
         TransactionAppendParams {
             request_id: 3,
             ops: vec![crate::runtime::TransactionOp::Put {
@@ -1990,8 +1999,6 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
             .len(),
         entries_before + 1
     );
-
-    Ok(())
 }
 
 mod admission;

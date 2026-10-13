@@ -23,9 +23,11 @@ pub fn write_relative(path: &Path, relative: &str, data: &[u8]) {
 /// Replace the body of the open WAL segment a seeded database appends to,
 /// segment 1, with `data`, keeping its header: frames, not the header, are
 /// what WAL recovery fuzzes (#843).
+#[cfg(not(test))]
 pub fn write_open_segment_body(path: &Path, data: &[u8]) {
     let relative = "wal/00000000000000000001.wal";
-    let mut bytes = std::fs::read(path.join(relative)).unwrap_or_default();
+    let mut bytes = std::fs::read(path.join(relative)).expect("read seeded open WAL segment");
+    assert!(bytes.len() >= cntryl_midge::__internal::wal::segment::HEADER_LEN);
     bytes.truncate(cntryl_midge::__internal::wal::segment::HEADER_LEN);
     bytes.extend_from_slice(data);
     write_relative(path, relative, &bytes);

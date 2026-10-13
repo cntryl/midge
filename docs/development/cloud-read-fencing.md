@@ -38,7 +38,7 @@ Run the focused native regression with a running configured Sqrzl:
 ```sh
 SQRZL_SECRET_ACCESS_KEY=easy-peasy cargo test \
   --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints \
-  read_fencing:: -- --ignored --test-threads=1
+  read_fencing:: -- --test-threads=1
 ```
 
 The emulator pin includes the coherent object-read fix for

@@ -1,7 +1,6 @@
-//! Saving findings as crash images, loading them back, and the assertions
-//! that prove a saved image replays its finding.
+//! Saved crash images and invariant failure diagnostics.
 
-use crate::harness::{Campaign, Finding, Image};
+use crate::harness::{Finding, Image};
 use std::path::{Path, PathBuf};
 
 /// Write `image` below `directory`: its files under `files/`, the rest as
@@ -32,8 +31,12 @@ pub(crate) fn load_image(directory: &Path) -> Image {
     let root = directory.join("files");
     let mut pending = vec![root.clone()];
     while let Some(folder) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&folder) else {
-            continue;
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && folder == root => {
+                continue;
+            }
+            Err(error) => panic!("read crash image {}: {error}", folder.display()),
         };
         for entry in entries {
             let path = entry.expect("image entry").path();
@@ -72,16 +75,6 @@ fn save_finding(directory: &Path, finding: &Finding) {
     .expect("write finding");
 }
 
-/// Save `finding`'s image below `MIDGE_CAMPAIGN_IMAGES`, or a temporary
-/// directory, and load it back: replays run from what was saved.
-fn saved_and_loaded(case: &str, finding: &Finding) -> Image {
-    let temporary = tempfile::tempdir().expect("image directory");
-    let directory =
-        kept_image_directory(case, finding).unwrap_or_else(|| temporary.path().join(case));
-    save_finding(&directory, finding);
-    load_image(&directory)
-}
-
 /// Assert a control campaign found nothing. A finding's image is kept below
 /// `MIDGE_CAMPAIGN_IMAGES` first, so CI uploads it for replay.
 pub(crate) fn assert_clean(case: &str, finding: Option<Finding>) {
@@ -93,24 +86,4 @@ pub(crate) fn assert_clean(case: &str, finding: Option<Finding>) {
         save_finding(directory, &finding);
     }
     panic!("{case}: the control found {finding:#?}\nimage: {directory:?}");
-}
-
-/// Assert `finding` matches `signature`, save its image, and prove the saved
-/// image replays the same class of finding.
-pub(crate) fn assert_reproduced(
-    case: &str,
-    finding: Option<Finding>,
-    signature: impl Fn(&Finding) -> bool,
-) {
-    let finding = finding.unwrap_or_else(|| panic!("{case}: the campaign found nothing"));
-    assert!(signature(&finding), "{case}: found {finding:#?}");
-    let image = saved_and_loaded(case, &finding);
-    let replayed = Campaign::replay(&image);
-    assert!(
-        replayed
-            .as_ref()
-            .is_err_and(|kind| kind.same_class(&finding.kind)),
-        "{case}: the saved image did not reproduce {:?}: {replayed:?}",
-        finding.kind
-    );
 }

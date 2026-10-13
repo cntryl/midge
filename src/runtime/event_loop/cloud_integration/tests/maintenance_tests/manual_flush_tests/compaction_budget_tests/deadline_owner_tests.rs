@@ -541,7 +541,6 @@ fn should_retain_input_authority_when_second_family_compute_arrives_after_manual
 }
 
 // Keep both real completion dispositions beside their shared authority ledger.
-#[allow(clippy::too_many_lines)]
 fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
     crate::failpoints::with_read_gate(|| {
         // Arrange: one real caller owns both CF generations; no late route refresh.
@@ -614,28 +613,15 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         assert!(first_phases
             .iter()
             .all(|phase| phase.completed_at < started + CALLER_BUDGET));
-        if let Some(second_phase) = &second_phase {
-            assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);
-            assert!(
-                matches!(second_phase.error, Some(MidgeError::Timeout(_))),
-                "{second_phase:?}"
-            );
-            assert!(second_intent);
-            assert_genuine_holds(&reads, 1);
-            assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);
-            assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
-            assert!(second_budget_bound < CALLER_BUDGET);
-            assert!(reads[0]
-                .provider_budget
-                .is_some_and(|budget| budget <= second_budget_bound));
-        } else {
-            assert!(rejected_before_publication && original.is_expired());
-            assert!(
-                !second_intent,
-                "no phase or intent was accepted after expiry"
-            );
-            assert_genuine_holds(&reads, 0);
-        }
+        assert_second_family_expiry_phase(
+            second_phase.as_ref(),
+            second_intent,
+            &reads,
+            started,
+            second_budget_bound,
+            original,
+            rejected_before_publication,
+        );
         if queue_past_deadline {
             assert!(
                 second_phase.is_none(),
@@ -658,4 +644,37 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         healthy.expect("expiry of one caller does not invalidate actual lease ownership");
         Ok(())
     })
+}
+
+fn assert_second_family_expiry_phase(
+    second_phase: Option<&PhaseEvidence>,
+    second_intent: bool,
+    reads: &[ReadEvidence],
+    started: Instant,
+    second_budget_bound: Duration,
+    original: OperationDeadline,
+    rejected_before_publication: bool,
+) {
+    if let Some(second_phase) = second_phase {
+        assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);
+        assert!(
+            matches!(second_phase.error, Some(MidgeError::Timeout(_))),
+            "{second_phase:?}"
+        );
+        assert!(second_intent);
+        assert_genuine_holds(reads, 1);
+        assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);
+        assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
+        assert!(second_budget_bound < CALLER_BUDGET);
+        assert!(reads[0]
+            .provider_budget
+            .is_some_and(|budget| budget <= second_budget_bound));
+    } else {
+        assert!(rejected_before_publication && original.is_expired());
+        assert!(
+            !second_intent,
+            "no phase or intent was accepted after expiry"
+        );
+        assert_genuine_holds(reads, 0);
+    }
 }

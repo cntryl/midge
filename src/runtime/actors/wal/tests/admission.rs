@@ -513,7 +513,6 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
 }
 
 #[test]
-#[ignore = "#808 stage 6: partial-spilled-admission"]
 fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() -> MidgeResult<()> {
     // Arrange: ephemeral-cache WAL budget with room for the TxnBegin frame
     // but not for the 500-byte op frame that follows it.

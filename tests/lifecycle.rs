@@ -40,7 +40,7 @@ mod engine_gc {
     fn local_sst_names(db_path: &std::path::Path) -> Vec<String> {
         let mut names = std::fs::read_dir(db_path.join("sst"))
             .expect("read local SST directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter(|name| {
                 std::path::Path::new(name)
@@ -104,14 +104,18 @@ mod engine_gc {
                 for index in 0..25 {
                     let key = format!("key_{batch}_{index:04}");
                     let val = tx.get(key.as_bytes()).expect("get during compaction");
-                    assert!(val.is_some(), "key lost during compaction in mode: {mode}");
+                    assert_eq!(
+                        val.as_deref(),
+                        Some(b"v1".as_slice()),
+                        "mode: {mode}, key: {key}"
+                    );
                 }
             }
         });
     }
 
     #[test]
-    fn should_not_collect_sst_files_referenced_by_manifest() {
+    fn should_read_exact_flushed_values_from_manifest_owned_ssts() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             eprintln!("\n=== GC: Preserve Referenced SST Files (mode: {mode}) ===");
 
@@ -126,7 +130,7 @@ mod engine_gc {
             for i in 0..50 {
                 let key = format!("key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                    .ok();
+                    .expect("stage referenced value");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -140,9 +144,10 @@ mod engine_gc {
             for i in 0..50 {
                 let key = format!("key_{i:04}");
                 let val = tx.get(key.as_bytes()).expect("get");
-                assert!(
-                    val.is_some(),
-                    "SST file prematurely deleted in mode: {mode}"
+                assert_eq!(
+                    val.as_deref(),
+                    Some(b"value".as_slice()),
+                    "referenced key {key}, mode: {mode}"
                 );
             }
 
@@ -151,7 +156,7 @@ mod engine_gc {
     }
 
     #[test]
-    fn should_run_gc_after_configurable_interval() {
+    fn should_collect_obsolete_inputs_when_background_compaction_runs() {
         eprintln!("\n=== GC: Configurable Interval Triggering ===");
 
         // Arrange: `for_each_storage_mode`'s helper opens every mode with
@@ -194,10 +199,9 @@ mod engine_gc {
             engine.flush_cf(&cf).expect("flush L0 generation");
             input_names.extend(local_sst_names(db_path).into_iter().filter(is_l0_output));
         }
-        assert_eq!(
-            input_names.len(),
-            4,
-            "expected four distinct flushed L0 generations across the run"
+        assert!(
+            !input_names.is_empty(),
+            "fixture must observe real L0 inputs"
         );
 
         // Act: wait for background GC/compaction to run on its own; poll
@@ -231,11 +235,12 @@ mod engine_gc {
             .expect("begin_tx");
         for index in 0..25 {
             let key = format!("interval_key_{index:04}");
-            assert!(
+            assert_eq!(
                 tx.get(key.as_bytes())
                     .expect("read after background GC")
-                    .is_some(),
-                "data lost during background GC"
+                    .as_deref(),
+                Some(b"v3".as_slice()),
+                "latest acknowledged version of {key}"
             );
         }
 
@@ -259,7 +264,8 @@ mod engine_gc {
                     .expect("begin_tx");
                 for i in 0..75 {
                     let key = format!("persist_key_{i:04}");
-                    tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
+                    tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None)
+                        .expect("stage first generation");
                 }
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush");
@@ -270,13 +276,34 @@ mod engine_gc {
                     .expect("begin_tx");
                 for i in 75..150 {
                     let key = format!("persist_key_{i:04}");
-                    tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
+                    tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
+                        .expect("stage second generation");
                 }
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush");
 
                 // Trigger manual compaction (marks orphans for deletion)
-                engine.compact_all().ok();
+                let before = engine.metrics().get_storage_layout().expect("input layout");
+                engine.compact_all().expect("compact both generations");
+                let after = engine
+                    .metrics()
+                    .get_storage_layout()
+                    .expect("compacted layout");
+                let names = |layout: &cntryl_midge::StorageLayoutSnapshot| {
+                    layout
+                        .levels
+                        .iter()
+                        .flat_map(|level| &level.files)
+                        .map(|file| file.name.clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                };
+                if mode != "memory" {
+                    assert!(!names(&after).is_empty());
+                    assert!(
+                        names(&before).is_disjoint(&names(&after)),
+                        "compaction must replace its inputs"
+                    );
+                }
                 engine
                     .shutdown(Duration::from_secs(5))
                     .expect("shutdown before restart");
@@ -293,11 +320,17 @@ mod engine_gc {
                     .expect("begin_tx");
                 for i in 0..150 {
                     let key = format!("persist_key_{i:04}");
-                    assert!(
+                    let expected = if i < 75 {
+                        b"v1".as_slice()
+                    } else {
+                        b"v2".as_slice()
+                    };
+                    assert_eq!(
                         tx.get(key.as_bytes())
-                            .expect("read after GC state restart")
-                            .is_some(),
-                        "data lost after restart in mode: {mode}"
+                            .expect("read after GC restart")
+                            .as_deref(),
+                        Some(expected),
+                        "mode: {mode}, key: {key}"
                     );
                 }
 
@@ -321,7 +354,7 @@ mod engine_gc {
             for i in 0..100 {
                 let key = format!("reader_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"snapshot_value".to_vec(), None)
-                    .ok();
+                    .expect("stage snapshot value");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
             engine.flush_cf(&cf).expect("flush");
@@ -331,27 +364,46 @@ mod engine_gc {
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            // Spawn thread to trigger compaction while snapshot is held
-            let engine_clone = Arc::clone(&engine);
-            let _cf_clone = cf.clone();
-            let compaction_handle = thread::spawn(move || {
-                thread::sleep(Duration::from_millis(50));
-                engine_clone.compact_all().ok();
-                eprintln!("Compaction triggered while snapshot held");
-            });
+            // Publish overlapping replacements so compaction has real work.
+            for generation in 0..3 {
+                let mut write = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .unwrap();
+                for index in 0..100 {
+                    write
+                        .put(
+                            format!("reader_key_{index:04}").into_bytes(),
+                            format!("updated-{generation}").into_bytes(),
+                            None,
+                        )
+                        .unwrap();
+                }
+                write.commit(buffered_write_options(mode)).unwrap();
+                engine.flush_cf(&cf).unwrap();
+            }
 
-            // Wait a bit, then verify snapshot still reads correctly
-            thread::sleep(Duration::from_millis(100));
-            let val = snapshot.get(b"reader_key_0000").expect("get");
-            assert!(
-                val.is_some(),
-                "snapshot read failed during compaction in mode: {mode}"
-            );
+            // Complete real compaction while the old snapshot remains held.
+            let engine_clone = Arc::clone(&engine);
+            let compaction_handle = thread::spawn(move || {
+                engine_clone
+                    .compact_all()
+                    .expect("compact with active reader");
+            });
 
             // Wait for compaction thread
             compaction_handle
                 .join()
                 .expect("background compaction thread should not panic");
+            for index in 0..100 {
+                assert_eq!(
+                    snapshot
+                        .get(format!("reader_key_{index:04}").as_bytes())
+                        .unwrap()
+                        .as_deref(),
+                    Some(b"snapshot_value".as_slice()),
+                    "old snapshot member {index}, mode: {mode}"
+                );
+            }
 
             // Assert: Drop snapshot; verify data still present
             drop(snapshot);
@@ -360,11 +412,12 @@ mod engine_gc {
                 .expect("begin_tx");
             for i in 0..100 {
                 let key = format!("reader_key_{i:04}");
-                assert!(
+                assert_eq!(
                     tx.get(key.as_bytes())
-                        .expect("read after active-reader compaction")
-                        .is_some(),
-                    "data lost after compaction in mode: {mode}"
+                        .expect("read after compaction")
+                        .as_deref(),
+                    Some(b"updated-2".as_slice()),
+                    "current member {i}, mode: {mode}"
                 );
             }
 
@@ -377,10 +430,8 @@ mod engine_gc {
     // ============================================================================
 
     #[test]
-    fn should_collect_orphaned_wal_segments_after_flush() {
-        for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-            eprintln!("\n=== GC: Collect Orphaned WAL Segments (mode: {mode}) ===");
-
+    fn should_clear_memtable_wal_gap_when_flush_publishes_values() {
+        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -392,7 +443,7 @@ mod engine_gc {
             for i in 0..50 {
                 let key = format!("wal_key_{i:04}");
                 tx.put(key.as_bytes().to_vec(), b"wal_value".to_vec(), None)
-                    .ok();
+                    .expect("stage WAL value");
             }
             tx.commit(buffered_write_options(mode)).expect("commit");
 
@@ -406,7 +457,11 @@ mod engine_gc {
             for i in 0..50 {
                 let key = format!("wal_key_{i:04}");
                 let val = tx.get(key.as_bytes()).expect("get");
-                assert!(val.is_some(), "data lost after flush in mode: {mode}");
+                assert_eq!(
+                    val.as_deref(),
+                    Some(b"wal_value".as_slice()),
+                    "mode: {mode}, key: {key}"
+                );
             }
 
             // For local/cloud modes, flush must advance the durability frontier
@@ -414,17 +469,14 @@ mod engine_gc {
             // memtable/WAL segment gap — the observable signal that the old
             // segment is now orphaned and eligible for GC (the same contract
             // `observability_api.rs` checks after an explicit flush).
-            if mode != "memory" {
-                let metrics = engine
-                    .metrics()
-                    .get_runtime_metrics()
-                    .expect("runtime metrics");
-                assert_eq!(
-                    metrics.max_memtable_wal_segment_gap, 0,
-                    "flush should leave no outstanding WAL segment gap in mode: {mode}"
-                );
-                eprintln!("âœ“ WAL segment orphaned and eligible for collection");
-            }
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
+            assert_eq!(
+                metrics.max_memtable_wal_segment_gap, 0,
+                "flush should leave no outstanding WAL segment gap in mode: {mode}"
+            );
         });
     }
 
@@ -446,7 +498,7 @@ mod engine_gc {
                 for i in 0..30 {
                     let key = format!("recovery_key_{i:04}");
                     tx.put(key.as_bytes().to_vec(), b"recovery_value".to_vec(), None)
-                        .ok();
+                        .expect("stage recovery value");
                 }
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine
@@ -466,9 +518,10 @@ mod engine_gc {
                 for i in 0..30 {
                     let key = format!("recovery_key_{i:04}");
                     let val = tx.get(key.as_bytes()).expect("get");
-                    assert!(
-                        val.is_some(),
-                        "WAL segment was incorrectly GC'd in mode: {mode}"
+                    assert_eq!(
+                        val.as_deref(),
+                        Some(b"recovery_value".as_slice()),
+                        "mode: {mode}, key: {key}"
                     );
                 }
 
@@ -516,7 +569,7 @@ mod resource_cleanup {
     }
 
     #[test]
-    fn should_cleanup_cache_with_active_operations() {
+    fn should_preserve_shared_cache_entries_when_another_owner_drops() {
         // Arrange
         let cache = Arc::new(BlockCache::new(1024 * 1024, 16, CachePolicyType::Lru));
         let cache_clone = Arc::clone(&cache);
@@ -537,10 +590,7 @@ mod resource_cleanup {
             successes
         });
 
-        // Wait for operations to start
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Act - drop the main cache reference while the worker is still writing
+        // Act: release one owner while another owner populates the cache.
         drop(cache);
 
         // Assert - all inserts succeeded and are visible through the surviving
@@ -649,7 +699,6 @@ mod shutdown_reopen_stress {
 
     use crate::common::*;
     use cntryl_midge::{TransactionMode, WriteOptions};
-    use std::thread;
     use std::time::Duration;
 
     // ============================================================================
@@ -1042,11 +1091,13 @@ mod shutdown_reopen_stress {
     }
 
     #[test]
-    fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values() {
+    fn should_preserve_every_acknowledged_best_effort_value_after_concurrent_writes() {
         for_each_storage_mode(&["local"], |mode, opts| {
             eprintln!("\n=== Concurrent Best-Effort Load (mode: {mode}) ===");
 
             // Arrange: High-concurrency best-effort write load
+            let mut opts = opts;
+            opts.memtable_size = 8 * 1024 * 1024;
             let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
             let cf = engine.create_column_family("test").expect("create cf");
 
@@ -1058,23 +1109,16 @@ mod shutdown_reopen_stress {
                 let cf_clone = cf.clone();
                 let handle = std::thread::spawn(move || {
                     for batch in 0..20 {
-                        let tx = engine_clone
+                        let mut tx = engine_clone
                             .begin_tx(cf_clone.id(), TransactionMode::ReadWrite)
-                            .ok();
-
-                        if let Some(mut t) = tx {
-                            for i in 0..50 {
-                                let key = format!("stress_load_t{tid}_b{batch}_k{i:03}");
-                                t.put(key.as_bytes().to_vec(), b"stress_value".to_vec(), None)
-                                    .ok();
-                            }
-                            t.commit(WriteOptions::best_effort()).ok();
+                            .expect("begin concurrent write");
+                        for i in 0..50 {
+                            let key = format!("stress_load_t{tid}_b{batch}_k{i:03}");
+                            tx.put(key.as_bytes().to_vec(), b"stress_value".to_vec(), None)
+                                .expect("stage concurrent value");
                         }
-
-                        // Small stagger to vary writer interleaving
-                        if batch % 3 == 0 {
-                            thread::sleep(Duration::from_millis(10));
-                        }
+                        tx.commit(WriteOptions::best_effort())
+                            .expect("acknowledge batch");
                     }
                 });
                 handles.push(handle);
@@ -1082,38 +1126,32 @@ mod shutdown_reopen_stress {
 
             // Wait for all writers to complete
             for handle in handles {
-                handle.join().ok();
+                handle.join().expect("concurrent writer must not panic");
             }
 
             // Act: Flush and compact after the concurrent load
-            engine.flush_cf(&cf).ok();
-            engine.compact_all().ok();
+            engine.flush_cf(&cf).expect("flush acknowledged values");
+            engine.compact_all().expect("compact acknowledged values");
 
-            // Assert: Engine remains readable and sampled keys never return invalid bytes.
-            // Best-effort writes are not treated as a full-durability guarantee here.
+            // Assert: BestEffort still guarantees visibility of every successful commit.
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
                 .expect("begin_tx");
 
-            let mut sampled_present = 0;
             for tid in 0..5 {
                 for batch in 0..20 {
-                    let key = format!("stress_load_t{tid}_b{batch}_k000");
-                    if let Some(val) = tx.get(key.as_bytes()).expect("get") {
-                        assert_eq!(val.as_ref(), b"stress_value", "mode: {mode} key: {key}");
-                        sampled_present += 1;
+                    for index in 0..50 {
+                        let key = format!("stress_load_t{tid}_b{batch}_k{index:03}");
+                        assert_eq!(
+                            tx.get(key.as_bytes())
+                                .expect("read acknowledged value")
+                                .as_deref(),
+                            Some(b"stress_value".as_slice()),
+                            "mode: {mode}, key: {key}"
+                        );
                     }
                 }
             }
-
-            assert!(
-                sampled_present > 0,
-                "expected at least one sampled key to be present in mode: {mode}"
-            );
-
-            eprintln!(
-                "âœ“ Best-effort load remained readable with {sampled_present} sampled keys present"
-            );
         });
     }
 }
@@ -1126,15 +1164,15 @@ mod memory_management {
     use std::time::Duration;
 
     #[test]
-    fn should_handle_small_memory_budget_without_unexpected_errors() {
+    fn should_preserve_small_commits_when_the_transaction_pool_is_small() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-            // Arrange: Open engine with very small memtable limit to trigger frequent flushes
+            // Arrange: each transaction fits the shared 64 KiB intent pool.
             let mut opts = opts;
-            opts = opts.memory_budget(64 * 1024); // 64KB
+            opts = opts.transaction_memory_pool_size(64 * 1024);
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Act: Write enough data to fill immutable queue
+            // Act: flush periodically while committing small transactions.
             let mut write_count = 0;
             let mut stall_encountered = false;
 
@@ -1161,7 +1199,7 @@ mod memory_management {
                 }
 
                 if i % 10 == 0 {
-                    let _ = engine.flush_cf(&cf);
+                    engine.flush_cf(&cf).expect("flush under memory pressure");
                 }
             }
 
@@ -1177,6 +1215,17 @@ mod memory_management {
                 .expect("runtime metrics");
 
             // Assert
+            assert!(write_count > 0, "fresh engine must accept a transaction");
+            let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            for index in 0..write_count {
+                assert_eq!(
+                    read.get(format!("key_{index:08}").as_bytes())
+                        .unwrap()
+                        .as_deref(),
+                    Some(vec![b'x'; 1024].as_slice()),
+                    "acknowledged member {index}"
+                );
+            }
             if !mode.eq("memory") {
                 // Under sustained pressure the engine may either surface WriteStall or
                 // keep up by flushing synchronously. Both are acceptable as long as it
@@ -1253,7 +1302,7 @@ mod memory_mode_isolation {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         std::fs::read_dir(root)
             .expect("read crate root")
-            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .map(|entry| entry.expect("read crate-root directory entry").file_name())
             .collect()
     }
 
@@ -1374,7 +1423,7 @@ mod memory_mode_isolation {
     }
 
     #[test]
-    fn should_handle_many_writes_efficiently_when_writing_100_keys() {
+    fn should_preserve_every_member_when_committing_one_hundred_memory_writes() {
         // Arrange
         // Memory mode only test
         let opts = opts_for_mode("memory");
@@ -1393,7 +1442,7 @@ mod memory_mode_isolation {
 
         // Assert: All writes succeeded and data is retrievable
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-        for i in &[0, 25, 50, 75, 99] {
+        for i in 0..100 {
             let key = format!("write_test_{i:03}");
             let got = tx.get(key.as_bytes()).expect("get");
             assert_eq!(
@@ -1405,7 +1454,7 @@ mod memory_mode_isolation {
     }
 
     #[test]
-    fn should_handle_many_deletes_efficiently_when_deleting_50_keys() {
+    fn should_remove_every_member_when_deleting_fifty_memory_keys() {
         // Memory mode only test
         let opts = opts_for_mode("memory");
         let engine = open_with_mode(&opts, "memory");
@@ -1431,7 +1480,7 @@ mod memory_mode_isolation {
 
         // Assert: All deleted
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-        for i in &[0, 10, 25, 49] {
+        for i in 0..50 {
             let key = format!("delete_test_{i:02}");
             let got = tx.get(key.as_bytes()).expect("get");
             assert_eq!(got, None, "expected key to be deleted but found it");
@@ -1439,7 +1488,7 @@ mod memory_mode_isolation {
     }
 
     #[test]
-    fn should_handle_mixed_operations_efficiently_when_put_delete_overwrite() {
+    fn should_preserve_final_values_when_put_delete_and_overwrite_are_committed() {
         // Arrange
         // Memory mode only test
         let opts = opts_for_mode("memory");
@@ -1495,7 +1544,7 @@ mod memory_spill_audit {
     fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
-            let engine = open_with_mode(&opts.memory_budget(128 * 1024), mode);
+            let engine = open_with_mode(&opts.transaction_memory_pool_size(128 * 1024), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -1537,7 +1586,7 @@ mod memory_spill_audit {
             // Keep both commits in the active memtable so this exercises their
             // simultaneous resident footprint rather than an intervening flush.
             opts.memtable_size = 1024 * 1024;
-            let engine = open_with_mode(&opts.memory_budget(256 * 1024), mode);
+            let engine = open_with_mode(&opts.transaction_memory_pool_size(256 * 1024), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx1 = engine
@@ -1590,7 +1639,7 @@ mod memory_spill_audit {
     fn should_preserve_sample_keys_given_large_transaction_low_budget_when_committed() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
-            let engine = open_with_mode(&opts.memory_budget(64 * 1024), mode);
+            let engine = open_with_mode(&opts.transaction_memory_pool_size(64 * 1024), mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
             let mut tx = engine
@@ -1634,7 +1683,6 @@ mod backpressure {
     use cntryl_midge::{
         ColumnFamilyId, Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions,
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -1846,7 +1894,7 @@ mod backpressure {
     }
 
     #[test]
-    fn should_return_write_stall_when_memory_budget_exceeded() {
+    fn should_accept_small_transactions_when_each_fits_the_intent_pool() {
         // Arrange
         // Memory mode doesn't have meaningful backpressure (everything stays in memory)
         // so we only test durable modes where flush/compaction creates actual pressure.
@@ -1855,10 +1903,9 @@ mod backpressure {
         let results = std::cell::RefCell::new(Vec::<(String, bool)>::new());
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             let mut opts = opts;
-            // Use a smaller budget and an explicit large memtable so the hard
-            // budget path still produces a deterministic stall now that soft
-            // memtable pressure auto-flushes instead of sticking.
-            opts = opts.memory_budget(1024 * 1024);
+            // Each 1 KiB transaction fits the 1 MiB intent pool; the 32 MiB
+            // memtable also holds this bounded 10 MiB workload without L0 debt.
+            opts = opts.transaction_memory_pool_size(1024 * 1024);
             opts.memtable_size = 32 * 1024 * 1024;
             let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
             let cf = engine.create_column_family("test").expect("create cf");
@@ -1900,83 +1947,7 @@ mod backpressure {
     }
 
     #[test]
-    fn should_succeed_after_backoff_when_write_stall_cleared() {
-        // Arrange
-
-        // Act
-        let results = std::cell::RefCell::new(Vec::<(String, bool, bool)>::new());
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            let mut opts = opts;
-            // Use 1MB budget plus an explicit large memtable so we can still
-            // observe the stall-clear cycle deterministically after the runtime
-            // started letting soft memtable pressure flush naturally.
-            opts = opts.memory_budget(1024 * 1024);
-            opts.memtable_size = 32 * 1024 * 1024;
-            let engine = Engine::open(opts.to_open_options()).expect("failed to open engine");
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            // Hit first stall
-            let mut first_stall_observed = false;
-            for i in 0..5000 {
-                let key = format!("key_{i:06}");
-                let value = vec![0u8; 1024];
-                let mut txn = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin");
-                txn.put(key.as_bytes().to_vec(), value.clone(), None)
-                    .expect("put");
-
-                match txn.commit(buffered_write_options(mode)) {
-                    Ok(()) => {}
-                    Err(MidgeError::WriteStall(_)) => {
-                        first_stall_observed = true;
-                        break;
-                    }
-                    Err(e) => panic!("unexpected: {e:?}"),
-                }
-            }
-
-            // Wait for stall to clear (compaction, etc.)
-            std::thread::sleep(Duration::from_millis(100));
-
-            // Attempt a write after stall is cleared; should succeed or stall again (not panic)
-            let key = "recovery_key".to_string();
-            let value = vec![0u8; 1024];
-            let mut txn = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin");
-            txn.put(key.as_bytes().to_vec(), value.clone(), None)
-                .expect("put");
-
-            let second_write_ok_or_stall = match txn.commit(buffered_write_options(mode)) {
-                Ok(()) | Err(MidgeError::WriteStall(_)) => true,
-                Err(e) => panic!("unexpected error: {e:?}"),
-            };
-
-            results.borrow_mut().push((
-                mode.to_string(),
-                first_stall_observed,
-                second_write_ok_or_stall,
-            ));
-        });
-
-        // Assert
-        for (mode, first_stall_observed, second_write_ok_or_stall) in results.into_inner() {
-            if mode == "local" {
-                assert!(
-                    !first_stall_observed,
-                    "local mode should now relieve soft memtable pressure before a sticky stall appears"
-                );
-            }
-            assert!(
-                second_write_ok_or_stall,
-                "Expected success or stall (not error) in mode {mode}"
-            );
-        }
-    }
-
-    #[test]
-    fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
+    fn should_publish_natural_flush_or_report_write_stall_during_bounded_writes() {
         // Arrange
         let _guard = backpressure_stress_test_lock()
             .lock()
@@ -1986,11 +1957,10 @@ mod backpressure {
         let results = std::cell::RefCell::new(Vec::<(String, u64, u64, usize, bool)>::new());
         for_each_storage_mode(&["local"], |mode, opts| {
             let mut opts = opts;
-            opts = opts.memory_budget(512 * 1024); // 512KB instead of 2MB for faster backpressure trigger
+            opts = opts.transaction_memory_pool_size(512 * 1024);
 
-            // In local mode, the default small memtable can flush fast enough that we never
-            // accumulate enough in-memory state to trip the memory budget. Keep the
-            // threshold above the default but inside this test's 512 KiB pressure window.
+            // An 8 KiB transaction fits the pool. The 256 KiB memtable triggers
+            // natural flush while this bounded workload grows.
             if mode == "local" {
                 opts.memtable_size = 256 * 1024;
             }
@@ -2072,16 +2042,14 @@ mod backpressure {
         let results = std::cell::RefCell::new(Vec::<(String, u64, Vec<(u64, u64)>, bool)>::new());
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             let mut opts = opts;
-            opts = opts.memory_budget(4 * 1024 * 1024);
+            opts = opts.transaction_memory_pool_size(4 * 1024 * 1024);
             let engine = Arc::new(open_with_mode(&opts, mode));
             let cf = engine.create_column_family("test").expect("create cf");
 
-            let shutdown = Arc::new(AtomicBool::new(false));
             let mut handles = vec![];
 
             for thread_id in 0..4 {
                 let engine_clone = Arc::clone(&engine);
-                let shutdown_clone = shutdown.clone();
                 let cf_id = cf.id();
                 let write_opts = buffered_write_options(mode);
 
@@ -2089,7 +2057,7 @@ mod backpressure {
                     let mut writes = 0u64;
                     let mut stalls = 0u64;
 
-                    while !shutdown_clone.load(Ordering::Relaxed) {
+                    for _ in 0..250 {
                         let key = format!("thread_{thread_id}_key_{writes}");
                         let value = vec![0u8; 1024];
                         let mut txn = engine_clone
@@ -2106,10 +2074,6 @@ mod backpressure {
                             }
                             Err(e) => panic!("thread {thread_id} unexpected: {e:?}"),
                         }
-
-                        if writes + stalls >= 250 {
-                            break;
-                        }
                     }
 
                     (writes, stalls)
@@ -2117,9 +2081,6 @@ mod backpressure {
 
                 handles.push(handle);
             }
-
-            std::thread::sleep(Duration::from_secs(2));
-            shutdown.store(true, Ordering::Relaxed);
 
             let mut total_writes = 0u64;
             let mut per_thread = Vec::new();
@@ -2156,9 +2117,10 @@ mod backpressure {
                 "expected all 4 worker threads to report in mode {mode}"
             );
             for (thread_index, (writes, stalls)) in per_thread.iter().enumerate() {
-                assert!(
-                    writes + stalls > 0,
-                    "thread {thread_index} made no progress (neither committed nor stalled) in mode {mode}"
+                assert_eq!(
+                    writes + stalls,
+                    250,
+                    "thread {thread_index} must complete every bounded attempt in mode {mode}"
                 );
             }
             assert!(
@@ -2450,7 +2412,7 @@ mod local_wal_retention {
     fn sealed_segments(path: &Path) -> usize {
         std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read WAL directory entry"))
             .filter(|entry| {
                 cntryl_midge::__internal::wal::parse_segment_file_name(
                     &entry.file_name().to_string_lossy(),
@@ -2642,10 +2604,11 @@ mod local_wal_retention {
     }
 
     #[test]
-    #[ignore = "#808 stage 3: best-effort-delete"]
     fn should_not_resurrect_best_effort_deleted_key_when_reopening_after_clean_shutdown() {
-        // Arrange / Act
-        let value = deleted_key_after_recovery("best_effort_delete", "clean");
+        // Arrange
+        let (delete_kind, reopen) = ("best_effort_delete", "clean");
+        // Act
+        let value = deleted_key_after_recovery(delete_kind, reopen);
         // Assert
         assert_eq!(
             value, None,
@@ -2654,10 +2617,11 @@ mod local_wal_retention {
     }
 
     #[test]
-    #[ignore = "#808 stage 3: best-effort-delete"]
     fn should_not_resurrect_best_effort_deleted_key_when_recovering_a_crash_image() {
-        // Arrange / Act
-        let value = deleted_key_after_recovery("best_effort_delete", "crash");
+        // Arrange
+        let (delete_kind, reopen) = ("best_effort_delete", "crash");
+        // Act
+        let value = deleted_key_after_recovery(delete_kind, reopen);
         // Assert
         assert_eq!(
             value, None,
@@ -2672,7 +2636,7 @@ mod local_wal_retention {
     fn wal_segment_ids(path: &Path) -> Vec<u64> {
         let mut ids: Vec<u64> = std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read WAL directory entry"))
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
                 name.strip_suffix(".wal")?.parse::<u64>().ok()

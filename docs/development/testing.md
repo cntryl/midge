@@ -36,30 +36,43 @@ cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
 
-Pull requests into `develop` and `main` run `ci.yml` on Ubuntu, Windows, and
-macOS, plus GitHub-managed CodeQL. The Ubuntu CI job checks formatting, strict
-Clippy, test conventions, the full workspace suite with mock-backed cloud
-behavior, and serial fault injection. macOS also runs release checks, workspace
-tests, and serial fault injection. Windows runs focused filesystem, cloud
-recovery, and consistent-cut backup tests. Those test commands compile the
-Windows code they exercise.
-The Sqrzl provider tests are ignored in the mock-backed suite and run in
-`cloud-integration.yml`.
+Pull requests into `develop` and `main` run `ci.yml` on Ubuntu. It validates
+test conventions first, then runs formatting, strict Clippy, `cargo check`,
+`cargo build`, and `cargo test`. Tests enable failpoints, with the dedicated
+fault-injection target run serially because its failpoints are process-global.
+Sqrzl tests are selected by the `sqrzl-tests` feature and run in
+`integration-s3.yml`, `integration-azure.yml`, and `integration-gcs.yml`.
+Unresolved regression tests remain active and failing; tests must not use ignore
+attributes.
 
 CI also runs on pushes to both branches, weekly on the default `develop`
 revision, and by manual dispatch. A manual dispatch can select `main` for
-release qualification. `cloud-integration.yml` runs the ignored provider and
-engine suites against Sqrzl on promotion PRs, on a schedule, or by dispatch.
+release qualification. Each provider integration runs the complete existing
+Sqrzl suite: provider contracts (including OCI), engine qualification, cloud WAL
+takeover, and logical histories for S3, Azure, GCS XML and GCS JSON. The files
+repeat these commands deliberately; there are no test exclusions. Some deeper
+operational scenarios are implemented only for S3, so running the full existing
+suite does not establish equivalent operational coverage for Azure and GCS.
 
-Promotion pull requests into `main` run CI, cloud integration,
-`Docker Qualification` for the test image, `Compatibility` for Rust 1.97 and
-provider-only features, and GitHub-managed CodeQL for Actions and Rust.
+Each provider workflow has one job and uses path filters on pull requests
+and pushes to both branches. Changes to a provider implementation or resolver
+run that provider's workflow; other Rust source, test fixtures, Cargo
+configuration, and emulator configuration conservatively run all three.
+Unrelated docs and benchmark changes do not trigger these workflows. Daily
+schedules and manual dispatch run the complete existing cloud suite without
+change filtering. GitHub manages Sqrzl as a service container; there are no
+result uploads or extra coordination jobs.
+
+These workflows use workflow-level path filters. Their checks must not be
+unconditionally required by branch protection: a path-filtered workflow can
+leave its required check pending for unrelated changes.
+
+Promotion pull requests into `main` run CI, the applicable provider integrations,
+and GitHub-managed CodeQL.
 Reviewers verify that the PR head is this repository's `develop` branch.
 Documentation and packaging checks run in the tagged publish workflow.
-`Compatibility` also runs on its schedule, manual dispatch, and `main` pushes.
 
-Provider features are checked independently so one provider cannot hide a
-dependency on another provider's implementation:
+To check provider features independently when changing their dependencies:
 
 ```bash
 cargo check --workspace --all-targets --no-default-features --features cloud-aws
@@ -68,16 +81,19 @@ cargo check --workspace --all-targets --no-default-features --features cloud-gcp
 cargo check --workspace --all-targets --no-default-features --features cloud-oci
 ```
 
-The `cloud-oci` command is compile-only verification of the generic
-S3-compatible alias. It does not qualify OCI wire behavior, conditional writes,
-or provider error responses; see `docs/operations/cloud-setup.md`.
+These commands check compilation only. The provider integrations run transport contracts
+and cache-loss recovery for S3-compatible storage, Azure Blob, GCS XML, GCS JSON,
+and OCI's S3-compatible configuration. Sqrzl S3 tests exercise the shared AWS
+protocol implementation; OCI tests use `OciObjectStorageConfig` with a local
+endpoint override, not the native OCI API.
 
 The scheduled fuzz workflow builds every registered target and runs bounded
 smokes. Local smoke commands should use the same time and per-input bounds.
 
-Sqrzl provider-engine tests are explicitly ignored in ordinary test runs. The
-`cloud-integration.yml` workflow starts Sqrzl and selects those
-ignored tests. Once selected, an unreachable emulator is a hard failure; there
+Sqrzl provider-engine tests require the `sqrzl-tests` feature. The
+provider integration workflows use GitHub-managed Sqrzl services and run tests
+through Cargo, without start, wait, or cleanup steps. Once selected,
+an unreachable emulator is a hard failure; there
 is no runtime skip that can be confused with a passing qualification.
 The provider contract includes a zero-byte object PUT/HEAD/GET/DELETE lifecycle
 because empty authority documents occur in the WAL and metadata paths and some
@@ -221,7 +237,9 @@ replayable. Keep each production path's failpoint names unique: direct and
 spilled transaction commit paths, for example, must never consume the same
 global counter.
 
-```rust,ignore
+Crash fixture call sequence using the integration test's `crash` helper:
+
+```text
 crash::configure_abort_failpoint("midge::component::boundary", "scenario");
 // Parent:
 crash::run_child_expect_abort(&mut command, "scenario", "midge::component::boundary", db_path);
@@ -257,12 +275,10 @@ fn should_preserve_valid_prefix_given_truncated_wal_tail_when_recovering() {
 - Informational tests that only print status are not sufficient for trust guarantees; each guarantee should have an asserted outcome.
 
 The [#808 regression inventory](wal-redesign-808.md) documents the named WAL
-audit baseline runner, its CI partitions, and its acceptance boundary. Its
-Sqrzl-only case, `predecessor-cache` in
-`tests/fault_injection/wal_authority_regressions.rs`, is marked
-`#[ignore = "requires Sqrzl; run cloud-integration.yml"]` like the other
-provider tests. The baseline runner includes ignored tests and runs that case
-only with `--with-sqrzl`.
+audit baseline runner and its acceptance boundary. Its Sqrzl-only case,
+`predecessor-cache` in `tests/fault_injection/wal_authority_regressions.rs`, runs
+in `integration-s3.yml`; the baseline runner selects it with `--with-sqrzl`. All
+regressions are active in their Cargo targets, including unresolved failures.
 
 ## Watchdog contention qualification
 

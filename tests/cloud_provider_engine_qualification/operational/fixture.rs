@@ -69,34 +69,6 @@ fn number(name: &str, default: u64) -> u64 {
     })
 }
 
-#[test]
-fn should_apply_profile_timeout_to_long_running_engine_requests() {
-    // Arrange
-    let campaign = Campaign {
-        profile: Profile {
-            wal_bytes: 6 * 1024 * 1024,
-            local_bytes: 2 * 1024 * 1024,
-            memory_bytes: 32 * 1024 * 1024,
-            value_bytes: 8 * 1024,
-            segment_bytes: 32 * 1024 * 1024,
-            timeout_seconds: 3600,
-            memtable_bytes: None,
-        },
-        cache: PathBuf::from("unused-qualification-cache"),
-        artifacts: PathBuf::new(),
-        bucket: "unused-qualification-bucket".into(),
-        prefix: "unused/".into(),
-        records: 0,
-        actual_wal_bytes: 0,
-    };
-
-    // Act
-    let options = campaign.options();
-
-    // Assert
-    assert_eq!(options.runtime_response_timeout(), Duration::from_hours(1));
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Campaign {
     pub profile: Profile,

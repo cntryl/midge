@@ -313,12 +313,7 @@ impl Campaign<'_> {
         } else {
             command.extend(["--test".into(), case.target.clone()]);
         }
-        command.extend([
-            case.test.clone(),
-            "--".into(),
-            "--include-ignored".into(),
-            "--test-threads=1".into(),
-        ]);
+        command.extend([case.test.clone(), "--".into(), "--test-threads=1".into()]);
         let log_name = format!("{index:02}-{}.log", case.id);
         let path = self.options.output.join(&log_name);
         let (exit_code, timed_out) = run_test(root, &command, &path, self.options.timeout)?;

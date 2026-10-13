@@ -1984,133 +1984,127 @@ mod tests {
         Ok(())
     }
 
+    struct CountingWriter {
+        inner: Box<dyn crate::sst::traits::DynSstWriter>,
+        finalized: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::sst::traits::DynSstWriter for CountingWriter {
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            self.inner.encoded_size_upper_bound()
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Option<usize> {
+            self.inner
+                .encoded_size_upper_bound_after_sorted_entry(key, value)
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            start: &[u8],
+            end: &[u8],
+        ) -> Option<usize> {
+            self.inner
+                .additional_range_tombstone_size_upper_bound(start, end)
+        }
+
+        fn estimated_size_bytes(&self) -> usize {
+            self.inner.estimated_size_bytes()
+        }
+
+        #[cfg(test)]
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_sorted_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
+            self.inner.add_range_tombstone(start, end, seq)
+        }
+
+        fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+            let Self { inner, finalized } = *self;
+            inner.finish_to_path(path)?;
+            finalized.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+            self.inner.finish_bytes()
+        }
+    }
+
+    struct CountingFactory {
+        inner: crate::sst::FsSstFactoryIo,
+        finalized: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::sst::traits::SstFactory for CountingFactory {
+        fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
+            self.inner.output_fs()
+        }
+
+        fn compaction_scratch_cleanup_verified(&self) -> bool {
+            self.inner.compaction_scratch_cleanup_verified()
+        }
+
+        fn open_for_compaction(
+            &self,
+            path: &Path,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.inner.open_for_compaction(path, budget)
+        }
+
+        #[cfg(test)]
+        fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(CountingWriter {
+                inner: self.inner.create()?,
+                finalized: std::sync::Arc::clone(&self.finalized),
+            }))
+        }
+
+        fn create_for_compaction(
+            &self,
+            budget: crate::common::resource_budget::ResourceBudget,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(CountingWriter {
+                inner: self.inner.create_for_compaction(budget)?,
+                finalized: std::sync::Arc::clone(&self.finalized),
+            }))
+        }
+
+        fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.inner.open(path)
+        }
+    }
+
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn should_remove_every_completed_partition_when_cancelled_during_rollover() -> MidgeResult<()> {
         // Arrange
-        struct CountingWriter {
-            inner: Box<dyn crate::sst::traits::DynSstWriter>,
-            finalized: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        }
-
-        impl crate::sst::traits::DynSstWriter for CountingWriter {
-            fn encoded_size_upper_bound(&self) -> Option<usize> {
-                self.inner.encoded_size_upper_bound()
-            }
-
-            fn encoded_size_upper_bound_after_sorted_entry(
-                &self,
-                key: &[u8],
-                value: Option<&[u8]>,
-            ) -> Option<usize> {
-                self.inner
-                    .encoded_size_upper_bound_after_sorted_entry(key, value)
-            }
-
-            fn additional_range_tombstone_size_upper_bound(
-                &self,
-                start: &[u8],
-                end: &[u8],
-            ) -> Option<usize> {
-                self.inner
-                    .additional_range_tombstone_size_upper_bound(start, end)
-            }
-
-            fn estimated_size_bytes(&self) -> usize {
-                self.inner.estimated_size_bytes()
-            }
-
-            #[cfg(test)]
-            fn add_with_meta(
-                &mut self,
-                key: &[u8],
-                value: Option<&[u8]>,
-                seq: u64,
-                op_type: EntryType,
-                expiration: Option<u64>,
-            ) -> MidgeResult<()> {
-                self.inner
-                    .add_with_meta(key, value, seq, op_type, expiration)
-            }
-
-            fn add_sorted_with_meta(
-                &mut self,
-                key: &[u8],
-                value: Option<&[u8]>,
-                seq: u64,
-                op_type: EntryType,
-                expiration: Option<u64>,
-            ) -> MidgeResult<()> {
-                self.inner
-                    .add_sorted_with_meta(key, value, seq, op_type, expiration)
-            }
-
-            fn add_range_tombstone(
-                &mut self,
-                start: &[u8],
-                end: &[u8],
-                seq: u64,
-            ) -> MidgeResult<()> {
-                self.inner.add_range_tombstone(start, end, seq)
-            }
-
-            fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-                let Self { inner, finalized } = *self;
-                inner.finish_to_path(path)?;
-                finalized.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }
-
-            fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-                self.inner.finish_bytes()
-            }
-        }
-
-        struct CountingFactory {
-            inner: crate::sst::FsSstFactoryIo,
-            finalized: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        }
-
-        impl crate::sst::traits::SstFactory for CountingFactory {
-            fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs> {
-                self.inner.output_fs()
-            }
-
-            fn compaction_scratch_cleanup_verified(&self) -> bool {
-                self.inner.compaction_scratch_cleanup_verified()
-            }
-
-            fn open_for_compaction(
-                &self,
-                path: &Path,
-                budget: crate::common::resource_budget::ResourceBudget,
-            ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
-                self.inner.open_for_compaction(path, budget)
-            }
-
-            #[cfg(test)]
-            fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-                Ok(Box::new(CountingWriter {
-                    inner: self.inner.create()?,
-                    finalized: std::sync::Arc::clone(&self.finalized),
-                }))
-            }
-
-            fn create_for_compaction(
-                &self,
-                budget: crate::common::resource_budget::ResourceBudget,
-            ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
-                Ok(Box::new(CountingWriter {
-                    inner: self.inner.create_for_compaction(budget)?,
-                    finalized: std::sync::Arc::clone(&self.finalized),
-                }))
-            }
-
-            fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
-                self.inner.open(path)
-            }
-        }
-
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(
             crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?,

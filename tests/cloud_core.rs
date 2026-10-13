@@ -119,7 +119,7 @@ mod cloud_recovery {
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush");
 
-                engine.compact_all().ok();
+                engine.compact_all().expect("compact both flushed batches");
 
                 engine
                     .shutdown(Duration::from_secs(5))
@@ -311,10 +311,13 @@ mod cloud_remote_sst {
     use std::time::Duration;
 
     fn sst_bytes(path: &Path) -> u64 {
-        std::fs::read_dir(path)
-            .into_iter()
-            .flatten()
-            .flatten()
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => panic!("observe SST bytes in {}: {error}", path.display()),
+        };
+        entries
+            .map(|entry| entry.expect("SST directory entry"))
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "sst"))
             .map(|entry| entry.metadata().expect("SST metadata").len())
             .sum()
@@ -522,7 +525,7 @@ mod cloud_remote_sst {
         drop(engine);
         let path = std::fs::read_dir(dir.path().join("cloud_store/sst"))
             .expect("cloud inventory")
-            .flatten()
+            .map(|entry| entry.expect("read cloud SST directory entry"))
             .find(|entry| entry.path().extension().is_some_and(|ext| ext == "sst"))
             .expect("published SST")
             .path();
@@ -686,25 +689,48 @@ mod cloud_provider_validation {
     }
 }
 
-mod cloudfirst_benchmark_safe {
-    //! `CloudAsync` durability policy verification tests
-    //!
-    //! Ensures `CloudAsync` background mode never blocks on single writes,
-    //! while `CloudStrict` mode provides explicit cloud durability guarantees.
+mod cloud_write_durability {
+    //! Cloud visibility and recovery at acknowledged durability boundaries.
 
     use crate::common::{open_with_mode, opts_for_mode};
-    use cntryl_midge::{TransactionMode, WriteOptions};
+    use cntryl_midge::__internal::simulation::{Schedule, SimulatedClock, SimulatedObjectStore};
+    use cntryl_midge::{
+        CloudProviderConfig, CloudStorageLocation, Engine, OpenOptions, TransactionMode,
+        WriteOptions,
+    };
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn provider_options(
+        cache: &Path,
+        store: &SimulatedObjectStore,
+        clock: &SimulatedClock,
+    ) -> OpenOptions {
+        OpenOptions::cloud(
+            cache,
+            CloudStorageLocation::new(
+                CloudProviderConfig::aws_s3_static("bucket", "us-east-1", "access", "secret"),
+                "acknowledged/",
+            ),
+        )
+        .object_store_for_testing(Arc::new(store.process()))
+        .lease_clock_for_testing(Arc::new(clock.clone()))
+        .lease_ttl(Duration::from_secs(18))
+        .background_compaction(false)
+        .build()
+        .expect("provider durability options")
+    }
 
     #[test]
-    fn should_batch_writes_when_using_cloud_mode() {
+    fn should_read_exact_committed_values_when_using_cloud_async() {
         // Arrange
         let opts = opts_for_mode("cloud");
         let engine = open_with_mode(&opts, "cloud");
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
-        // Act: Write multiple records with CloudAsync background durability.
-        // CloudAsync batches uploads in the background, so commits should not block
+        // Act
         for i in 0..100 {
             let mut tx = engine
                 .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -716,50 +742,88 @@ mod cloudfirst_benchmark_safe {
             tx.commit(WriteOptions::cloud_async()).unwrap();
         }
 
-        // Assert: Verify all data is readable (correctness check)
+        // Assert
         for i in 0..100 {
             let tx = engine
                 .begin_tx(cf_id, TransactionMode::ReadOnly)
                 .expect("begin");
             let key = format!("key_{i:04}");
-            let value = tx.get(key.as_bytes()).unwrap();
-            assert!(value.is_some(), "key_{i:04} should exist");
+            assert_eq!(
+                tx.get(key.as_bytes()).unwrap(),
+                Some(bytes::Bytes::from(format!("value_{i:04}")))
+            );
         }
     }
 
     #[test]
-    fn should_support_cloud_strict_for_explicit_durability() {
+    fn should_recover_strictly_acknowledged_value_without_later_flush_or_shutdown() {
         // Arrange
-        let opts = opts_for_mode("cloud");
-        let engine = open_with_mode(&opts, "cloud");
-        let cf = engine.create_column_family("test").expect("create cf");
+        let cache = tempfile::tempdir().expect("writer cache");
+        let fresh_cache = tempfile::tempdir().expect("fresh cache");
+        let store = SimulatedObjectStore::new(Schedule::Eager);
+        let clock = SimulatedClock::new();
+        let mut engine =
+            Engine::open(provider_options(cache.path(), &store, &clock)).expect("writer");
+        let cf = engine.get_column_family("default").expect("default family");
         let cf_id = cf.id();
 
-        // Act: Write with CloudStrict policy (explicit cloud durability)
+        // Act: freeze only remote state present at the strict ACK boundary.
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
             .expect("begin");
         tx.put(b"strict_key".to_vec(), b"strict_value".to_vec(), None)
             .unwrap();
 
-        // CloudStrict forces immediate WAL seal + rotate + upload, blocking until complete
         tx.commit(WriteOptions::cloud_strict()).unwrap();
+        let acknowledged = SimulatedObjectStore::from_image(Schedule::Eager, &store.image());
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("close original writer");
+        drop(engine);
+        clock.advance(Duration::from_secs(36));
+        let mut recovered =
+            Engine::open(provider_options(fresh_cache.path(), &acknowledged, &clock))
+                .expect("recover only acknowledged remote objects");
 
-        // Assert: Data should be readable immediately
-        let tx = engine
-            .begin_tx(cf_id, TransactionMode::ReadOnly)
+        // Assert
+        let cf = recovered
+            .get_column_family("default")
+            .expect("recovered family");
+        let tx = recovered
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin");
-        let value = tx.get(b"strict_key").unwrap();
-        assert!(value.is_some());
-        assert_eq!(value.unwrap().as_ref(), b"strict_value");
+        assert_eq!(
+            tx.get(b"strict_key").unwrap(),
+            Some(bytes::Bytes::from_static(b"strict_value"))
+        );
+        let rows = tx
+            .scan(&cntryl_midge::Query::new())
+            .expect("recovered scan")
+            .try_collect()
+            .expect("complete recovered state");
+        assert_eq!(
+            rows,
+            vec![(
+                bytes::Bytes::from_static(b"strict_key"),
+                bytes::Bytes::from_static(b"strict_value")
+            )]
+        );
+        drop(tx);
+        recovered
+            .shutdown(Duration::from_secs(10))
+            .expect("close recovered engine");
     }
 
     #[test]
     fn should_flush_cloud_segments_on_shutdown() {
         // Arrange
-        let opts = opts_for_mode("cloud");
-        let mut engine = open_with_mode(&opts, "cloud");
-        let cf = engine.create_column_family("test").expect("create cf");
+        let cache = tempfile::tempdir().expect("writer cache");
+        let fresh_cache = tempfile::tempdir().expect("fresh cache");
+        let store = SimulatedObjectStore::new(Schedule::Eager);
+        let clock = SimulatedClock::new();
+        let mut engine =
+            Engine::open(provider_options(cache.path(), &store, &clock)).expect("writer");
+        let cf = engine.get_column_family("default").expect("default family");
         let cf_id = cf.id();
 
         // Act: Write data with background CloudAsync
@@ -778,16 +842,16 @@ mod cloudfirst_benchmark_safe {
             .shutdown(std::time::Duration::from_secs(5))
             .expect("bounded cloud shutdown");
 
-        // Assert: Shutdown must have actually flushed pending CloudAsync uploads to
-        // the simulated remote store, not merely returned without panicking. Reopen
-        // against the same simulated bucket/prefix and confirm every write survived.
-        let reopened = open_with_mode(&opts, "cloud");
-        let cf = reopened.get_column_family("test").expect("get cf");
+        drop(engine);
+        // Assert: a different cache can recover every acknowledged value.
+        let mut reopened = Engine::open(provider_options(fresh_cache.path(), &store, &clock))
+            .expect("fresh-cache recovery");
+        let cf = reopened.get_column_family("default").expect("get cf");
         let cf_id = cf.id();
+        let tx = reopened
+            .begin_tx(cf_id, TransactionMode::ReadOnly)
+            .expect("recovery snapshot");
         for i in 0..50 {
-            let tx = reopened
-                .begin_tx(cf_id, TransactionMode::ReadOnly)
-                .expect("begin");
             let key = format!("shutdown_key_{i:04}");
             let value = format!("shutdown_value_{i:04}");
             assert_eq!(
@@ -796,6 +860,24 @@ mod cloudfirst_benchmark_safe {
                 "key {key} must be recovered after a shutdown that flushed cloud segments"
             );
         }
+        let rows = tx
+            .scan(&cntryl_midge::Query::new())
+            .expect("shutdown recovery scan")
+            .try_collect()
+            .expect("complete shutdown recovery state");
+        let expected: Vec<_> = (0..50)
+            .map(|i| {
+                (
+                    bytes::Bytes::from(format!("shutdown_key_{i:04}")),
+                    bytes::Bytes::from(format!("shutdown_value_{i:04}")),
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected);
+        drop(tx);
+        reopened
+            .shutdown(Duration::from_secs(10))
+            .expect("close recovered engine");
     }
 }
 
@@ -899,7 +981,15 @@ mod engine_cloud {
             .expect("collect cloud keys");
 
         // Assert
-        assert_eq!(results.len(), 20);
+        let expected: Vec<_> = (0..20)
+            .map(|i| {
+                (
+                    Bytes::from(format!("cloud_scan_{i:02}")),
+                    Bytes::from_static(b"value"),
+                )
+            })
+            .collect();
+        assert_eq!(results, expected);
     }
 
     #[test]
@@ -1058,8 +1148,10 @@ mod cloud_wal_salvage_prefix {
     }
 
     fn files(root: &Path) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return Vec::new();
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => panic!("list cloud fixture files {}: {error}", root.display()),
         };
         let mut out = Vec::new();
         for entry in entries {

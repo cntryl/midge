@@ -3,7 +3,7 @@
 Use this checklist before publishing a release candidate or stable release.
 
 - [ ] development work is merged into `develop` with passing current-head CI
-- [ ] the `develop` → `main` promotion PR comes from this repository's `develop` branch and has passing CI on Ubuntu, Windows, and macOS, plus cloud integration, compatibility, Docker qualification, and GitHub-managed CodeQL checks on its current head
+- [ ] the `develop` → `main` promotion PR comes from this repository's `develop` branch and has passing CI, Cloud, and GitHub-managed CodeQL checks on its current head
 - [ ] the promotion uses a merge commit and post-merge `main` checks pass
 - [ ] the release tag points to a commit on `main`
 
@@ -23,8 +23,8 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cntryl-tools validate-tests`
 - [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`
 - [ ] Sqrzl `/healthz` responds successfully
-- [ ] Sqrzl provider and provider-engine qualification suites are explicitly
-      selected with `--ignored` and pass (an unreachable emulator fails hard)
+- [ ] Sqrzl provider and provider-engine suites run with the `sqrzl-tests`
+      feature and pass (an unreachable emulator fails hard)
 - [ ] known differences found by manual real-cloud integration testing are
       recorded, reproduced in Sqrzl where applicable, and covered by Midge tests
 - [ ] every registered fuzz target completed a bounded smoke run

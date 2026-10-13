@@ -22,7 +22,7 @@ fn should_match_transaction_oracle_when_replaying_histories() {
         driver::replay(std::path::Path::new(&path));
         return;
     }
-    let profile = std::env::var("MIDGE_DISCOVERY_PROFILE").unwrap_or_else(|_| "smoke".into());
+    let profile = std::env::var("MIDGE_DISCOVERY_PROFILE").unwrap_or_else(|_| "pr".into());
     let (count, max_operations, fixtures) = match profile.as_str() {
         "smoke" => (
             1,

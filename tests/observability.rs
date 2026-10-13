@@ -145,7 +145,7 @@ mod telemetry_integration {
                 .expect("runtime metrics");
 
             // Act
-            engine.compact_all().ok();
+            engine.compact_all().expect("compact flushed generations");
 
             // Assert: compaction must be recorded in the telemetry runtime
             // metrics, not just leave the data intact.
@@ -239,207 +239,6 @@ mod telemetry_integration {
 
 #[path = "../benches/bench_support/read_amp.rs"]
 mod read_amp_bench_fixture;
-
-#[path = "../benches/bench_support/config.rs"]
-mod config;
-#[path = "../benches/bench_support/ycsb.rs"]
-mod ycsb_bench_support;
-
-mod ycsb_benchmark_observations {
-    use super::ycsb_bench_support::{record_runtime_report, RuntimePerfReport};
-    use cntryl_stress::{
-        LogicalUnit, ObservationUnit, OperationOutcome, StressRunner, StressRunnerConfig,
-    };
-    use std::time::Duration;
-
-    #[test]
-    fn should_expose_typed_runtime_observations_when_ycsb_sample_completes() {
-        // Arrange
-        let report = RuntimePerfReport {
-            write_stalls_total: 2,
-            wal_append_count: 11,
-            cache_hits: 3,
-            cache_misses: 1,
-            candidate_sst_files_checked: 17,
-            data_blocks_read: 9,
-            cloud_async_wal_uploads_completed: 4,
-            cloud_async_wal_uploads_failed: 1,
-            ..RuntimePerfReport::default()
-        };
-
-        // Act
-        let observations = report.diagnostic_observations();
-
-        // Assert
-        assert!(observations.contains(&("write_stalls", 2.0, ObservationUnit::Count)));
-        assert!(observations.contains(&("wal_append_count", 11.0, ObservationUnit::Count)));
-        assert!(observations.contains(&("cache_hit_ratio", 0.75, ObservationUnit::Ratio)));
-        assert!(observations.contains(&(
-            "candidate_sst_files_checked",
-            17.0,
-            ObservationUnit::Count
-        )));
-        assert!(observations.contains(&("data_blocks_read", 9.0, ObservationUnit::Count)));
-        assert!(observations.contains(&(
-            "cloud_async_wal_uploads_completed",
-            4.0,
-            ObservationUnit::Count
-        )));
-        assert!(observations.contains(&(
-            "cloud_async_wal_uploads_failed",
-            1.0,
-            ObservationUnit::Count
-        )));
-    }
-
-    #[test]
-    fn should_keep_large_runtime_counter_finite_when_recording_observation() {
-        // Arrange
-        let large_report = RuntimePerfReport {
-            wal_append_count: u64::MAX,
-            cache_hits: u64::MAX,
-            ..RuntimePerfReport::default()
-        };
-
-        // Act
-        let observations = large_report.diagnostic_observations();
-
-        // Assert
-        assert!(observations.iter().any(|(name, value, unit)| {
-            *name == "wal_append_count" && value.is_finite() && *unit == ObservationUnit::Count
-        }));
-        assert!(observations.contains(&("cache_hit_ratio", 1.0, ObservationUnit::Ratio)));
-    }
-
-    #[test]
-    fn should_count_cloud_upload_failures_when_ycsb_report_is_recorded() {
-        // Arrange
-        let output = tempfile::tempdir().expect("temporary stress artifacts");
-        let mut config = StressRunnerConfig::default();
-        config.samples = 1;
-        config.warmup_samples = 0;
-        config.output_dir = output.path().to_path_buf();
-        let mut runner = StressRunner::with_config("ycsb-runtime-observations-test", config);
-        runner.reporters(Vec::new());
-        let report = RuntimePerfReport {
-            cloud_async_wal_uploads_failed: 2,
-            ..RuntimePerfReport::default()
-        };
-
-        // Act
-        runner.run("cloud_upload_failures", |ctx| {
-            ctx.record_external_outcome(
-                "cloud_upload_failures",
-                Duration::from_millis(1),
-                LogicalUnit::new("operation"),
-                OperationOutcome::new(3, 1),
-            );
-            record_runtime_report(ctx, &report);
-        });
-        let run = runner.finish();
-
-        // Assert
-        let summary = &run.summaries[0];
-        assert!(!summary.correctness.passed);
-        assert_eq!(summary.correctness.counters.failures, 2);
-        assert!(summary.observations.iter().any(|observation| {
-            observation.name == "cloud_async_wal_uploads_failed"
-                && observation.unit == ObservationUnit::Count
-        }));
-    }
-}
-
-mod ycsb_client_failures {
-    use super::config::MidgeOptions;
-    use super::ycsb_bench_support::{
-        run_multi_client_for_duration_with_stats, run_multi_client_for_operations_with_stats,
-    };
-    use cntryl_midge::Engine;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
-    fn engine_with_benchmark_cf() -> Arc<Engine> {
-        let engine = Arc::new(
-            Engine::open(MidgeOptions::default().to_open_options()).expect("open in-memory engine"),
-        );
-        engine
-            .create_column_family("cf1")
-            .expect("create benchmark column family");
-        engine
-    }
-
-    #[test]
-    fn should_propagate_panicked_ycsb_client_after_other_client_succeeds() {
-        // Arrange
-        let engine = engine_with_benchmark_cf();
-        let successful_steps = Arc::new(AtomicU64::new(0));
-
-        // Act: client 0 waits until client 1 completes an operation, then
-        // panics. A partial result must not look like a successful run.
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            run_multi_client_for_duration_with_stats(
-                &engine,
-                2,
-                Duration::from_millis(25),
-                |client_id, _stop| {
-                    let successful_steps = Arc::clone(&successful_steps);
-                    move |_, _, _| {
-                        if client_id == 0 {
-                            let started = Instant::now();
-                            while successful_steps.load(Ordering::Acquire) == 0 {
-                                assert!(
-                                    started.elapsed() < Duration::from_secs(2),
-                                    "other client never completed an operation"
-                                );
-                                std::thread::yield_now();
-                            }
-                            panic!("intentional YCSB client failure");
-                        }
-                        successful_steps.fetch_add(1, Ordering::Release);
-                    }
-                },
-            )
-        }));
-
-        // Assert
-        assert!(successful_steps.load(Ordering::Acquire) > 0);
-        let panic_payload = result.expect_err("a panicked client must fail the run");
-        assert_eq!(
-            panic_payload.downcast_ref::<&str>(),
-            Some(&"intentional YCSB client failure")
-        );
-    }
-
-    #[test]
-    fn should_propagate_panicked_fixed_operation_client_after_other_client_succeeds() {
-        // Arrange
-        let engine = engine_with_benchmark_cf();
-        let successful_steps = Arc::new(AtomicU64::new(0));
-
-        // Act
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            run_multi_client_for_operations_with_stats(&engine, 2, 1, |client_id, _stop| {
-                let successful_steps = Arc::clone(&successful_steps);
-                move |_, _, _| {
-                    if client_id == 0 {
-                        std::panic::panic_any("intentional fixed-operation client failure");
-                    }
-                    successful_steps.fetch_add(1, Ordering::Release);
-                }
-            })
-        }));
-
-        // Assert: the helper joins all clients, then preserves the failure.
-        assert_eq!(successful_steps.load(Ordering::Acquire), 1);
-        let panic_payload = result.expect_err("a panicked client must fail the run");
-        assert_eq!(
-            panic_payload.downcast_ref::<&str>(),
-            Some(&"intentional fixed-operation client failure")
-        );
-    }
-}
 
 mod read_amplification_benchmark {
     use super::read_amp_bench_fixture::{
@@ -979,7 +778,7 @@ mod hot_sst_tracking {
     fn should_return_latest_value_given_overlapping_l0_keys_when_multiple_batches_flushed(
     ) -> MidgeResult<()> {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         for batch in 0..3 {
@@ -1011,7 +810,7 @@ mod hot_sst_tracking {
     #[test]
     fn should_find_keys_given_disjoint_key_ranges_when_flushed() -> MidgeResult<()> {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..10 {

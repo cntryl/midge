@@ -92,7 +92,6 @@ fn should_retire_cloud_wal_when_every_ordinary_write_is_flushed() {
 }
 
 #[test]
-#[ignore = "#808 stage 3: empty-range-pin"]
 fn should_retire_cloud_wal_when_empty_range_has_no_replayable_effect() {
     // Arrange
     let pin = Pin::EmptyRange;
@@ -106,7 +105,6 @@ fn should_retire_cloud_wal_when_empty_range_has_no_replayable_effect() {
 }
 
 #[test]
-#[ignore = "#808 stage 3: dropped-family-pin"]
 fn should_retire_cloud_wal_when_flushed_family_is_dropped() {
     // Arrange
     let pin = Pin::DroppedFamily { discard: false };
@@ -120,7 +118,6 @@ fn should_retire_cloud_wal_when_flushed_family_is_dropped() {
 }
 
 #[test]
-#[ignore = "#808 stage 3: dropped-family-pin"]
 fn should_retire_cloud_wal_when_unflushed_family_is_discarded() {
     // Arrange
     let pin = Pin::DroppedFamily { discard: true };

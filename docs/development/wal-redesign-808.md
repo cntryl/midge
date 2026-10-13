@@ -165,8 +165,8 @@ Decisions that refine the #808 target design:
 ## Named regressions
 
 [The registry](wal-redesign-regressions-808.json) assigns each test to its fixing
-stage and records a specific assertion for each expected RED. An ignored test
-is an unresolved defect, not a waived acceptance requirement. The two retired
+stage and records a specific assertion for each expected RED. Unresolved
+regressions remain active and fail ordinary test execution. The two retired
 local/cloud-copy regressions remain active after #805. The other baseline
 failures remain assigned to the ledger/authority, outcome/transaction,
 frontier/retention, or salvage stages in #808.
@@ -198,8 +198,8 @@ from a successor's history once the successor's catalog entries retire. The
 catalog's retained anchor link and `next_segment_id` can: the predecessor's
 ledger does not hold the catalog head, which links the successor's history,
 so its cache is Diverged. It sets its unpublished tail aside and replays only
-the successor's history. The case needs Sqrzl: it is ignored in ordinary test
-runs and runs in the baseline runner with `--with-sqrzl`.
+the successor's history. The case needs the `sqrzl-tests` feature and runs in
+`integration-s3.yml` and the baseline runner with `--with-sqrzl`.
 
 Linked segments (#843) turn `inverted-epoch-history` and
 `recovered-tail-not-durable` GREEN. Replay follows the ledger's chain, so a

@@ -1,5 +1,12 @@
 # Tier 4–6 measurement and profiling
 
+> Historical campaign procedure: the simplified tier workflows accept only
+> `profile=smoke|standard|extended`. The checkpoint modes, investigation input,
+> and specialized workflow/readback tooling referenced here are no longer
+> available through those workflows. Existing evidence retains its original
+> qualification limits.
+
+
 This campaign addresses #752–#755 through benchmark instrumentation and
 controlled comparisons. Production checkpoint cadence, exact WAL coverage,
 reader/block limits, retry semantics and watchdog deadlines remain unchanged.

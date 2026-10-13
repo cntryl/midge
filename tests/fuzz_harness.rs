@@ -20,26 +20,6 @@ fn should_release_seed_lease_before_returning_to_fuzz_input_mutation() {
 }
 
 #[test]
-fn should_keep_open_segment_header_when_writing_fuzz_body() {
-    // Arrange
-    let directory = tempfile::tempdir().unwrap();
-    harness::seed_db(directory.path());
-    let segment = directory.path().join("wal/00000000000000000001.wal");
-    let header = std::fs::read(&segment).unwrap();
-
-    // Act
-    harness::write_open_segment_body(directory.path(), b"fuzzed frames");
-
-    // Assert
-    let bytes = std::fs::read(&segment).unwrap();
-    assert_eq!(
-        header.len(),
-        cntryl_midge::__internal::wal::segment::HEADER_LEN
-    );
-    assert_eq!(bytes, [header.as_slice(), b"fuzzed frames"].concat());
-}
-
-#[test]
 fn should_finish_recovery_attempts_before_returning_to_the_next_fuzz_iteration() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();

@@ -1,13 +1,15 @@
 //! Concurrent large-value flushes, overlapping generations and delayed uploads.
 
 use super::{fixture::Campaign, workload};
-use cntryl_midge::{ColumnFamilyHandle, Engine, Query, TransactionMode, WriteOptions};
+use cntryl_midge::{Bytes, ColumnFamilyHandle, Engine, Query, TransactionMode, WriteOptions};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const FAMILIES: u8 = 4;
 const ROUNDS: u8 = 8;
+const GENERATION_KEY: &[u8] = b"g";
 
 fn name(family: u8) -> String {
     format!("flush-stress-{family}")
@@ -70,6 +72,8 @@ fn seed(engine: &Engine) -> Vec<ColumnFamilyHandle> {
             tx.put(vec![b'd', key], b"deleted by later ranges".to_vec(), None)
                 .unwrap();
         }
+        tx.put(GENERATION_KEY.to_vec(), vec![0], None)
+            .expect("seed generation marker");
         tx.commit(WriteOptions::cloud_strict())
             .expect("seed tombstone targets");
         engine.flush_cf(cf).expect("seed older SST");
@@ -252,6 +256,8 @@ fn write(
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("stress write");
         let key = round % 4;
+        tx.put(GENERATION_KEY.to_vec(), vec![round + 1], None)
+            .expect("atomic generation marker");
         tx.put(vec![b'l', key], value(family, round, key, size), None)
             .expect("large value");
         tx.delete(vec![b'l', (round + 1) % 4])
@@ -274,14 +280,42 @@ fn scan(engine: &Engine, cf: &ColumnFamilyHandle, family: u8, size: usize) {
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("stress snapshot");
-    for entry in tx.scan(&Query::new()).expect("stress scan") {
-        let (key, actual) = entry.expect("stress scan item");
-        if key[0] == b'd' {
-            assert_eq!(actual.as_ref(), b"deleted by later ranges");
-        } else {
-            assert_eq!(actual.as_ref(), value(family, actual[1], key[1], size));
-        }
+    let marker = tx
+        .get(GENERATION_KEY)
+        .expect("generation read")
+        .expect("seeded generation");
+    assert_eq!(marker.len(), 1);
+    let completed = marker[0];
+    assert!(completed <= ROUNDS);
+    let mut expected: BTreeMap<_, _> = (0..64_u8)
+        .map(|key| (vec![b'd', key], b"deleted by later ranges".to_vec()))
+        .collect();
+    for round in 0..completed {
+        expected.retain(|key, _| key[0] != b'd');
+        let key = round % 4;
+        expected.insert(vec![b'l', key], value(family, round, key, size));
+        expected.remove(&vec![b'l', (round + 1) % 4]);
     }
+    expected.insert(GENERATION_KEY.to_vec(), vec![completed]);
+    for (key, value) in &expected {
+        assert_eq!(
+            tx.get(key).expect("snapshot point read").as_deref(),
+            Some(value.as_slice())
+        );
+    }
+    let actual: Vec<_> = tx
+        .scan(&Query::new())
+        .expect("stress scan")
+        .try_collect()
+        .expect("complete stress snapshot");
+    let expected: Vec<_> = expected
+        .into_iter()
+        .map(|(key, value)| (Bytes::from(key), Bytes::from(value)))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "snapshot must include every atomic put/delete effect"
+    );
 }
 
 pub(super) fn verify(engine: &Engine, campaign: &Campaign) {
@@ -296,6 +330,10 @@ pub(super) fn verify(engine: &Engine, campaign: &Campaign) {
             assert!(tx.get(&[b'd', key]).expect("range-deleted key").is_none());
         }
         assert!(tx.get(&[b'l', 0]).expect("point-deleted key").is_none());
+        assert_eq!(
+            tx.get(GENERATION_KEY).expect("final generation"),
+            Some(Bytes::from(vec![ROUNDS]))
+        );
         for key in 1..4_u8 {
             assert_eq!(
                 tx.get(&[b'l', key]).expect("stress live value").as_deref(),
@@ -309,7 +347,9 @@ pub(super) fn verify(engine: &Engine, campaign: &Campaign) {
             .collect();
         assert_eq!(
             keys,
-            (1..4_u8).map(|key| vec![b'l', key]).collect::<Vec<_>>()
+            std::iter::once(GENERATION_KEY.to_vec())
+                .chain((1..4_u8).map(|key| vec![b'l', key]))
+                .collect::<Vec<_>>()
         );
     }
 }

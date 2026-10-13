@@ -6140,7 +6140,6 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
 
 #[cfg(feature = "failpoints")]
 #[test]
-#[allow(clippy::too_many_lines)]
 fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -6216,6 +6215,18 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
 
     fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
 
+    assert_background_cloud_seal_retry(&mut el, failed_segment, last_sequence)?;
+
+    scenario.teardown();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_background_cloud_seal_retry(
+    el: &mut EventLoop,
+    failed_segment: u64,
+    last_sequence: u64,
+) -> crate::common::MidgeResult<()> {
     let sealed = el
         .seal_current_cloud_segment()?
         .expect("retry should seal and enqueue the same WAL segment");
@@ -6251,7 +6262,6 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         "successful retry should enqueue the sealed segment for upload"
     );
 
-    scenario.teardown();
     Ok(())
 }
 
@@ -6455,18 +6465,44 @@ fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
 }
 
 #[cfg(feature = "failpoints")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloudSealBoundaryOutcome {
+    Reversible,
+    FencedBeforeReceipt,
+    FencedAfterReceipt,
+}
+
+#[cfg(feature = "failpoints")]
+fn cloud_seal_outcome(
+    boundary: crate::runtime::wal_transition_boundary::WalTransitionBoundary,
+) -> CloudSealBoundaryOutcome {
+    use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+
+    match boundary {
+        WalTransitionBoundary::AfterSealDigest
+        | WalTransitionBoundary::BeforeSegmentCreate
+        | WalTransitionBoundary::AfterSegmentCreate => CloudSealBoundaryOutcome::Reversible,
+        // The footer is the first irreversible step (#843).
+        WalTransitionBoundary::AfterFooter | WalTransitionBoundary::AfterLedgerRotate => {
+            CloudSealBoundaryOutcome::FencedBeforeReceipt
+        }
+        WalTransitionBoundary::BeforeCoordinatorCommit
+        | WalTransitionBoundary::AfterCoordinatorCommit
+        | WalTransitionBoundary::BeforeSegmentRegistration
+        | WalTransitionBoundary::AfterSegmentRegistration
+        | WalTransitionBoundary::BeforeAccountingTransfer
+        | WalTransitionBoundary::AfterAccountingTransfer => {
+            CloudSealBoundaryOutcome::FencedAfterReceipt
+        }
+        other => panic!("cloud seal matrix has no expectation for {other:?}"),
+    }
+}
+
+#[cfg(feature = "failpoints")]
 #[test]
-#[allow(clippy::too_many_lines)]
 fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
 ) -> crate::common::MidgeResult<()> {
     use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Outcome {
-        Reversible,
-        FencedBeforeReceipt,
-        FencedAfterReceipt,
-    }
 
     // Arrange
     let _guard = failpoint_test_lock()
@@ -6474,39 +6510,15 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
-    let outcome = |boundary: WalTransitionBoundary| match boundary {
-        WalTransitionBoundary::AfterSealDigest
-        | WalTransitionBoundary::BeforeSegmentCreate
-        | WalTransitionBoundary::AfterSegmentCreate => Outcome::Reversible,
-        // The footer is the first irreversible step (#843).
-        WalTransitionBoundary::AfterFooter | WalTransitionBoundary::AfterLedgerRotate => {
-            Outcome::FencedBeforeReceipt
-        }
-        WalTransitionBoundary::BeforeCoordinatorCommit
-        | WalTransitionBoundary::AfterCoordinatorCommit
-        | WalTransitionBoundary::BeforeSegmentRegistration
-        | WalTransitionBoundary::AfterSegmentRegistration
-        | WalTransitionBoundary::BeforeAccountingTransfer
-        | WalTransitionBoundary::AfterAccountingTransfer => Outcome::FencedAfterReceipt,
-        other => panic!("cloud seal matrix has no expectation for {other:?}"),
-    };
 
     for boundary in WalTransitionBoundary::CLOUD_SEAL_BOUNDARIES {
-        let expected = outcome(boundary);
+        let expected = cloud_seal_outcome(boundary);
         let mut event_loop = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         let max_sequence = append_cloud_async_put(&mut event_loop)?;
         let segment_id = event_loop.state.wal.open_segment();
         let pending_before = event_loop.state.wal.pending_writes;
-        let sealed_path = event_loop
-            .state
-            .host_wal_dir()
-            .join(crate::wal::segment_file_name(segment_id));
-        let next_path = event_loop
-            .state
-            .host_wal_dir()
-            .join(crate::wal::segment_file_name(segment_id + 1));
         let request_id = 90_400 + segment_id;
         let response = event_loop.router.register(request_id, "CloudDurability");
         event_loop
@@ -6530,7 +6542,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
             event_loop.wal_actor.is_open() || event_loop.wal_actor.is_fenced(),
             "{boundary:?}: actor must never rest mid-transition"
         );
-        let fenced = expected != Outcome::Reversible;
+        let fenced = expected != CloudSealBoundaryOutcome::Reversible;
         assert_eq!(event_loop.wal_actor.is_fenced(), fenced, "{boundary:?}");
         assert_eq!(
             event_loop.wal_transition.is_fenced(),
@@ -6550,95 +6562,20 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
             "{boundary:?}: a fenced seal fails its waiters, a rolled back seal keeps them"
         );
         match expected {
-            Outcome::Reversible => {
-                assert_eq!(event_loop.state.wal.open_segment(), segment_id);
-                assert_eq!(event_loop.durability.current_key(), segment_id);
-                assert_eq!(event_loop.state.wal.pending_writes, pending_before);
-                assert!(sealed_path.exists(), "{boundary:?}: the open segment stays");
-                assert_eq!(
-                    next_path.exists(),
-                    boundary == WalTransitionBoundary::AfterSegmentCreate,
-                    "{boundary:?}: only an unrecorded empty next segment may remain"
-                );
-                assert_eq!(
-                    Some(event_loop.state.wal.history.ledger().open_segment()),
-                    Some(segment_id),
-                    "{boundary:?}"
-                );
-                assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
-                assert!(event_loop.cloud_coordinator.cloud_wal.backlog().is_empty());
-                assert!(response.try_recv().is_err(), "{boundary:?}");
-                let retried = event_loop
-                    .seal_current_cloud_segment()
-                    .expect("reversible failure must be retryable");
-                assert_eq!(retried, Some((segment_id, max_sequence)));
-                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
-                assert_eq!(
-                    event_loop
-                        .durability
-                        .cloud_durability_request_ids_at(segment_id),
-                    vec![request_id],
-                    "the retried seal must keep serving the original waiter"
-                );
-                assert!(response.try_recv().is_err());
+            CloudSealBoundaryOutcome::Reversible => assert_reversible_cloud_seal(
+                &mut event_loop,
+                boundary,
+                segment_id,
+                max_sequence,
+                pending_before,
+                request_id,
+                &response,
+            ),
+            CloudSealBoundaryOutcome::FencedBeforeReceipt => {
+                assert_cloud_seal_fenced_before_receipt(&mut event_loop, boundary, segment_id);
             }
-            Outcome::FencedBeforeReceipt => {
-                // Once the ledger recorded the rotation its open segment
-                // moved; a footer alone leaves it. Only restart recovery,
-                // which accepts the footer as the seal, may write again.
-                let rotated = boundary == WalTransitionBoundary::AfterLedgerRotate;
-                assert_eq!(
-                    event_loop.state.wal.open_segment(),
-                    segment_id + u64::from(rotated),
-                    "{boundary:?}"
-                );
-                assert_eq!(event_loop.durability.current_key(), segment_id);
-                assert!(
-                    sealed_path.exists(),
-                    "{boundary:?}: sealed file must survive"
-                );
-                assert_eq!(
-                    event_loop.wal_actor.fenced_sealed_segment(),
-                    Some(segment_id),
-                    "{boundary:?}"
-                );
-                assert_eq!(
-                    event_loop.wal_transition.fenced_sealed_segment(),
-                    Some(segment_id),
-                    "{boundary:?}: the orphaned seal must be recorded for restart"
-                );
-                assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
-                assert!(
-                    event_loop.cloud_coordinator.cloud_wal.backlog().is_empty(),
-                    "{boundary:?}: no receipt means nothing may be enqueued"
-                );
-                assert_eq!(
-                    event_loop.durability.cloud_segment_max_sequence(segment_id),
-                    None
-                );
-                assert!(matches!(
-                    event_loop.seal_current_cloud_segment(),
-                    Err(crate::common::MidgeError::RecoveryFailed(_))
-                ));
-            }
-            Outcome::FencedAfterReceipt => {
-                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
-                assert_eq!(event_loop.durability.current_key(), segment_id + 1);
-                assert_eq!(event_loop.state.wal.pending_writes, 0);
-                assert_eq!(event_loop.state.wal.frontiers.local_durable(), max_sequence);
-                assert_eq!(
-                    event_loop
-                        .cloud_coordinator
-                        .cloud_wal
-                        .backlog()
-                        .get(segment_id),
-                    Some(max_sequence)
-                );
-                assert_eq!(
-                    event_loop.durability.cloud_segment_max_sequence(segment_id),
-                    Some(max_sequence)
-                );
-                assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
+            CloudSealBoundaryOutcome::FencedAfterReceipt => {
+                assert_cloud_seal_fenced_after_receipt(&event_loop, segment_id, max_sequence);
             }
         }
         if fenced {
@@ -6655,6 +6592,134 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
 
     scenario.teardown();
     Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_reversible_cloud_seal(
+    event_loop: &mut EventLoop,
+    boundary: crate::runtime::wal_transition_boundary::WalTransitionBoundary,
+    segment_id: u64,
+    max_sequence: u64,
+    pending_before: usize,
+    request_id: u64,
+    response: &crossbeam::channel::Receiver<RuntimeResponse>,
+) {
+    use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+
+    let sealed_path = event_loop
+        .state
+        .host_wal_dir()
+        .join(crate::wal::segment_file_name(segment_id));
+    let next_path = event_loop
+        .state
+        .host_wal_dir()
+        .join(crate::wal::segment_file_name(segment_id + 1));
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id);
+    assert_eq!(event_loop.durability.current_key(), segment_id);
+    assert_eq!(event_loop.state.wal.pending_writes, pending_before);
+    assert!(sealed_path.exists(), "{boundary:?}: the open segment stays");
+    assert_eq!(
+        next_path.exists(),
+        boundary == WalTransitionBoundary::AfterSegmentCreate,
+        "{boundary:?}: only an unrecorded empty next segment may remain"
+    );
+    assert_eq!(
+        Some(event_loop.state.wal.history.ledger().open_segment()),
+        Some(segment_id),
+        "{boundary:?}"
+    );
+    assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
+    assert!(event_loop.cloud_coordinator.cloud_wal.backlog().is_empty());
+    assert!(response.try_recv().is_err(), "{boundary:?}");
+    let retried = event_loop
+        .seal_current_cloud_segment()
+        .expect("reversible failure must be retryable");
+    assert_eq!(retried, Some((segment_id, max_sequence)));
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
+    assert_eq!(
+        event_loop
+            .durability
+            .cloud_durability_request_ids_at(segment_id),
+        vec![request_id],
+        "the retried seal must keep serving the original waiter"
+    );
+    assert!(response.try_recv().is_err());
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_cloud_seal_fenced_before_receipt(
+    event_loop: &mut EventLoop,
+    boundary: crate::runtime::wal_transition_boundary::WalTransitionBoundary,
+    segment_id: u64,
+) {
+    use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
+
+    let sealed_path = event_loop
+        .state
+        .host_wal_dir()
+        .join(crate::wal::segment_file_name(segment_id));
+    // Once the ledger recorded the rotation its open segment
+    // moved; a footer alone leaves it. Only restart recovery,
+    // which accepts the footer as the seal, may write again.
+    let rotated = boundary == WalTransitionBoundary::AfterLedgerRotate;
+    assert_eq!(
+        event_loop.state.wal.open_segment(),
+        segment_id + u64::from(rotated),
+        "{boundary:?}"
+    );
+    assert_eq!(event_loop.durability.current_key(), segment_id);
+    assert!(
+        sealed_path.exists(),
+        "{boundary:?}: sealed file must survive"
+    );
+    assert_eq!(
+        event_loop.wal_actor.fenced_sealed_segment(),
+        Some(segment_id),
+        "{boundary:?}"
+    );
+    assert_eq!(
+        event_loop.wal_transition.fenced_sealed_segment(),
+        Some(segment_id),
+        "{boundary:?}: the orphaned seal must be recorded for restart"
+    );
+    assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
+    assert!(
+        event_loop.cloud_coordinator.cloud_wal.backlog().is_empty(),
+        "{boundary:?}: no receipt means nothing may be enqueued"
+    );
+    assert_eq!(
+        event_loop.durability.cloud_segment_max_sequence(segment_id),
+        None
+    );
+    assert!(matches!(
+        event_loop.seal_current_cloud_segment(),
+        Err(crate::common::MidgeError::RecoveryFailed(_))
+    ));
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_cloud_seal_fenced_after_receipt(
+    event_loop: &EventLoop,
+    segment_id: u64,
+    max_sequence: u64,
+) {
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
+    assert_eq!(event_loop.durability.current_key(), segment_id + 1);
+    assert_eq!(event_loop.state.wal.pending_writes, 0);
+    assert_eq!(event_loop.state.wal.frontiers.local_durable(), max_sequence);
+    assert_eq!(
+        event_loop
+            .cloud_coordinator
+            .cloud_wal
+            .backlog()
+            .get(segment_id),
+        Some(max_sequence)
+    );
+    assert_eq!(
+        event_loop.durability.cloud_segment_max_sequence(segment_id),
+        Some(max_sequence)
+    );
+    assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
 }
 
 #[cfg(feature = "failpoints")]

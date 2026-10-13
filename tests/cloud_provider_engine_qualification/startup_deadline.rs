@@ -286,7 +286,6 @@ fn assert_fast_same_path_reopens(fixture: &Fixture) {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; selected cloud-integration qualification asserts prerequisites"]
 fn should_open_through_native_startup_proxy_when_aggregate_deadline_is_absent() {
     // Arrange: qualify signed forwarding and actual namespace operations first.
     let fixture = Fixture::new(DelayMode::Fast);
@@ -299,7 +298,6 @@ fn should_open_through_native_startup_proxy_when_aggregate_deadline_is_absent() 
 }
 
 #[test]
-#[ignore = "requires Sqrzl; selected cloud-integration qualification asserts prerequisites"]
 fn should_bound_native_epoch_discovery_when_catalog_heads_exceed_total_open_budget() {
     // Arrange: two actual absent-catalog HEADs, each350ms <2s native I/O cap.
     // Their cumulative700ms exceeds one600ms deadline captured before discovery.
@@ -360,7 +358,6 @@ fn should_bound_native_epoch_discovery_when_catalog_heads_exceed_total_open_budg
 }
 
 #[test]
-#[ignore = "requires Sqrzl; selected cloud-integration qualification asserts prerequisites"]
 fn should_keep_startup_deadline_when_mandatory_native_catalog_read_follows_acquisition() {
     // Arrange: discovery/acquisition are real and fast. A scoped lease event
     // arms only a subsequent mandatory HEAD; its1.1s delay is below the2s I/O cap.
@@ -419,7 +416,6 @@ fn should_keep_startup_deadline_when_mandatory_native_catalog_read_follows_acqui
 }
 
 #[test]
-#[ignore = "requires Sqrzl; selected cloud-integration qualification asserts prerequisites"]
 fn should_abort_late_actual_runtime_preparation_when_native_open_caller_expires() {
     // Arrange: bootstrap and durably acknowledge actual rows without an open
     // deadline. The timed recovered reopen then targets a real dormant runtime,
@@ -477,7 +473,6 @@ fn should_abort_late_actual_runtime_preparation_when_native_open_caller_expires(
 }
 
 #[test]
-#[ignore = "requires Sqrzl; selected cloud-integration qualification asserts prerequisites"]
 fn should_retain_native_cleanup_when_committed_lease_cas_response_exceeds_open_budget() {
     // Arrange: forward the first signed lease CAS to real Sqrzl and buffer its
     // actual 200 response. Hold that response and any scoped reconciliation GET

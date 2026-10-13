@@ -7,7 +7,7 @@ a new persisted coordination protocol.
 
 ## Repeatable native-provider campaign
 
-The ignored integration test uses the native S3 provider against the pinned
+The integration test uses the native S3 provider against the pinned
 Sqrzl image in `compose.yml`. It creates an acknowledged seed through
 the public API, then publishes a deterministic catalog-authorized WAL fixture
 in bounded objects. Fixture records have independent reproducible values and
@@ -54,7 +54,7 @@ MIDGE_QUALIFICATION_ARTIFACT_DIR=/tmp/midge-cloud-evidence \
   cargo test --test cloud_provider_engine_qualification \
   --features sqrzl-tests,failpoints \
   operational::should_recover_cloud_backlog_after_complete_local_disk_loss \
-  -- --ignored --exact --nocapture
+  -- --exact --nocapture
 ```
 
 All sizes are independently configurable. An example larger profile is:
@@ -70,7 +70,7 @@ MIDGE_QUALIFICATION_ARTIFACT_DIR=/tmp/midge-cloud-evidence \
   cargo test --release --test cloud_provider_engine_qualification \
   --features sqrzl-tests,failpoints \
   operational::should_recover_cloud_backlog_after_complete_local_disk_loss \
-  -- --ignored --exact --nocapture
+  -- --exact --nocapture
 ```
 
 These are test profiles, not engine capacity limits. The small profiles also

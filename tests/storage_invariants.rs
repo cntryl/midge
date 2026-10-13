@@ -16,7 +16,7 @@ fn should_preserve_published_sst_bytes_given_later_flush_then_restart(
     engine.flush_cf(&cf)?;
     let sst_dir = dir.path().join("sst");
     let first_path = std::fs::read_dir(&sst_dir)?
-        .filter_map(Result::ok)
+        .map(|entry| entry.expect("read SST directory entry"))
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
         .expect("published first SST");

@@ -140,49 +140,20 @@ fn should_reject_invalid_catalog_before_admitting_encoded_storage() {
 }
 
 #[test]
-#[ignore = "bounded codec timing probe; run explicitly with --release --ignored --nocapture"]
-fn should_report_catalog_codec_cost() {
+fn should_decode_same_catalog_when_json_whitespace_changes() {
     // Arrange
     let catalog = populated_catalog();
     let budget = ResourceBudget::new(64 * 1024 * 1024);
     let pretty = serde_json::to_vec_pretty(&catalog).unwrap();
     let compact = serde_json::to_vec(&catalog).unwrap();
-    let iterations = 256;
+    for bytes in [&pretty, &compact] {
+        // Act
+        let decoded = AdmittedCatalog::decode(bytes, &budget).unwrap();
 
-    // Act
-    for repeat in 0..6 {
-        for (name, compact_encoding) in if repeat % 2 == 0 {
-            [("pretty", false), ("compact", true)]
-        } else {
-            [("compact", true), ("pretty", false)]
-        } {
-            let started = std::time::Instant::now();
-            for _ in 0..iterations {
-                if compact_encoding {
-                    std::hint::black_box(AdmittedEncoding::new(&catalog, &budget).unwrap());
-                } else {
-                    catalog.validate().unwrap();
-                    let mut count = crate::common::resource_budget::ByteCounter::default();
-                    serde_json::to_writer_pretty(&mut count, &catalog).unwrap();
-                    let _memory = budget.reserve(count.0, "codec probe").unwrap();
-                    let mut bytes = Vec::with_capacity(count.0);
-                    serde_json::to_writer_pretty(&mut bytes, &catalog).unwrap();
-                    std::hint::black_box(bytes);
-                }
-            }
-            eprintln!("catalog_codec repeat={repeat} format={name} entries=4096 iterations={iterations} elapsed_us={}", started.elapsed().as_micros());
-        }
-        for (name, bytes) in [("pretty", &pretty), ("compact", &compact)] {
-            let started = std::time::Instant::now();
-            for _ in 0..iterations {
-                std::hint::black_box(AdmittedCatalog::decode(bytes, &budget).unwrap());
-            }
-            eprintln!("catalog_decode repeat={repeat} format={name} bytes={} iterations={iterations} elapsed_us={}", bytes.len(), started.elapsed().as_micros());
-        }
+        // Assert: formatting changes neither authority nor reservation ownership.
+        assert_eq!(*decoded, catalog);
+        assert!(budget.used() > 0);
+        drop(decoded);
+        assert_eq!(budget.used(), 0);
     }
-
-    // Assert
-    assert_eq!(WalPublicationCatalog::decode(&pretty).unwrap(), catalog);
-    assert_eq!(WalPublicationCatalog::decode(&compact).unwrap(), catalog);
-    assert_eq!(budget.used(), 0);
 }

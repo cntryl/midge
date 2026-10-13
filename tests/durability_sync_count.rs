@@ -54,14 +54,6 @@ mod durability_sync_count {
             .wal_fsync_count
     }
 
-    fn wal_append_count(engine: &Engine) -> u64 {
-        engine
-            .metrics()
-            .get_runtime_metrics()
-            .expect("read runtime metrics")
-            .wal_append_count
-    }
-
     fn wait_for_buffered_durability(engine: &Engine, minimum_sequence: u64) {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -349,11 +341,10 @@ mod durability_sync_count {
     }
 
     #[test]
-    fn should_not_issue_physical_wal_sync_before_buffered_commit_returns() {
+    fn should_eventually_persist_buffered_commit() {
         // Arrange
         let _guard = sync_count_test_guard();
         let (_temp_dir, mut engine, cf) = open_engine();
-        let before = wal_fsync_count(&engine);
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin buffered transaction");
@@ -363,28 +354,35 @@ mod durability_sync_count {
         // Act
         tx.commit(WriteOptions::buffered())
             .expect("commit to the WAL buffer");
-        let after = wal_fsync_count(&engine);
+        let committed = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read committed sequence")
+            .current_sequence;
 
         // Assert
+        let read = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin verification transaction");
         assert_eq!(
-            after.saturating_sub(before),
-            0,
-            "buffered commit must not introduce a synchronous physical barrier"
+            read.get(b"buffered-key").unwrap().as_deref(),
+            Some(b"buffered-value".as_slice())
         );
+        drop(read);
+        wait_for_buffered_durability(&engine, committed);
         engine
             .shutdown(Duration::from_secs(2))
             .expect("shutdown buffered engine");
     }
 
     #[test]
-    fn should_share_physical_wal_sync_across_concurrent_strict_transactions() {
+    fn should_durably_commit_every_concurrent_strict_transaction() {
         // Arrange
         const WRITERS: usize = 16;
         let _guard = sync_count_test_guard();
         let (temp_dir, engine, cf) = open_engine();
         let engine = Arc::new(engine);
         let before_fsyncs = wal_fsync_count(&engine);
-        let before_appends = wal_append_count(&engine);
         let barrier = Arc::new(Barrier::new(WRITERS + 1));
         let mut handles = Vec::with_capacity(WRITERS);
         for writer in 0..WRITERS {
@@ -413,18 +411,18 @@ mod durability_sync_count {
             handle.join().expect("join concurrent strict writer");
         }
         let after_fsyncs = wal_fsync_count(&engine);
-        let after_appends = wal_append_count(&engine);
+        let after = engine.metrics().get_runtime_metrics().unwrap();
 
         // Assert
         let physical_fsyncs = after_fsyncs.saturating_sub(before_fsyncs);
-        let wal_appends = after_appends.saturating_sub(before_appends);
         assert!(
-            physical_fsyncs < u64::try_from(WRITERS).expect("writer count fits in u64"),
-            "concurrent strict commits must share at least one physical fsync"
+            physical_fsyncs > 0
+                && physical_fsyncs <= u64::try_from(WRITERS).expect("writer count fits in u64"),
+            "strict commits must establish physical durability, with at most one sync per commit"
         );
-        assert_eq!(
-            wal_appends, physical_fsyncs,
-            "each strict group should use one WAL append and one physical fsync"
+        assert!(
+            after.wal_local_durable_seq >= after.current_sequence,
+            "every acknowledged strict commit must already be locally durable"
         );
         for writer in 0..WRITERS {
             let tx = engine

@@ -250,11 +250,9 @@ fn should_fence_running_holder_when_a_process_with_a_later_clock_takes_over() {
     let competitor = Process::new(CrashDevice::new(), &store, old.clock.fork());
     competitor.clock.advance(PAST_EXPIRY);
 
-    // Act: the competitor takes over while the old holder still runs; the
-    // old holder accepts a write on its own validity, then renews.
+    // Act: the competitor takes over while the old holder still runs.
     let mut successor = Engine::open(competitor.options(Mode::ProviderCloud, named.path()))
         .expect("competitor takes over");
-    let zombie = put(&engine, b"zombie", WriteOptions::cloud_async());
     let deadline = Instant::now() + LEASE_TTL;
     while !old.lost_lease.load(Ordering::SeqCst) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -264,14 +262,21 @@ fn should_fence_running_holder_when_a_process_with_a_later_clock_takes_over() {
     // Assert
     assert_eq!(competitor.epoch(), old.epoch() + 1);
     assert!(
-        zombie.is_ok(),
-        "the old holder's write before renewal: {zombie:?}"
-    );
-    assert!(
         old.lost_lease.load(Ordering::SeqCst),
         "the old holder's renewal was not fenced"
     );
-    assert!(after_loss.is_err(), "a fenced holder accepted a write");
+    assert!(
+        matches!(after_loss, Err(MidgeError::Fenced(_))),
+        "a fenced holder must report its stale authority: {after_loss:?}"
+    );
+    put(&successor, b"successor", WriteOptions::cloud_strict())
+        .expect("successor remains writable");
+    assert_eq!(
+        get(&successor, b"after"),
+        None,
+        "rejected predecessor write must remain absent"
+    );
+    assert_eq!(get(&successor, b"successor"), Some(b"v".to_vec()));
     successor
         .shutdown(Duration::from_secs(10))
         .expect("successor shutdown");

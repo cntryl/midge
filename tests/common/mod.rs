@@ -44,12 +44,9 @@ pub enum StorageMode {
 #[derive(Clone)]
 pub struct MidgeOptions {
     pub storage_mode: StorageMode,
-    pub wal_sync: bool,
-    pub wal_batch_config: Option<cntryl_midge::__internal::wal::policy::BatchConfig>,
     pub memtable_size: usize,
-    pub compression: bool,
     pub enable_compaction: bool,
-    pub memory_budget: Option<usize>,
+    pub transaction_memory_pool_bytes: Option<usize>,
     pub cloud_write_policy: Option<CloudWritePolicy>,
     pub simulated_cloud_local_storage_budget_bytes: Option<u64>,
     pub shutdown_cloud_drain_timeout: Option<Duration>,
@@ -59,12 +56,9 @@ impl Default for MidgeOptions {
     fn default() -> Self {
         Self {
             storage_mode: StorageMode::Memory,
-            wal_sync: false,
-            wal_batch_config: None,
             memtable_size: 64 * 1024 * 1024,
-            compression: false,
             enable_compaction: true,
-            memory_budget: None,
+            transaction_memory_pool_bytes: None,
             cloud_write_policy: None,
             simulated_cloud_local_storage_budget_bytes: None,
             shutdown_cloud_drain_timeout: None,
@@ -73,8 +67,8 @@ impl Default for MidgeOptions {
 }
 
 impl MidgeOptions {
-    pub fn memory_budget(mut self, bytes: usize) -> Self {
-        self.memory_budget = Some(bytes);
+    pub fn transaction_memory_pool_size(mut self, bytes: usize) -> Self {
+        self.transaction_memory_pool_bytes = Some(bytes);
         self
     }
 
@@ -124,7 +118,7 @@ impl MidgeOptions {
             .background_compaction(self.enable_compaction)
             .with_memtable_size_limit(self.memtable_size)
             .with_memtable_flush_threshold(self.memtable_size);
-        if let Some(bytes) = self.memory_budget {
+        if let Some(bytes) = self.transaction_memory_pool_bytes {
             open_opts = open_opts.transaction_memory_pool_size(bytes);
         }
         if let Some(policy) = self.cloud_write_policy.clone() {
@@ -165,12 +159,9 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
     match mode {
         "memory" => MidgeOptions {
             storage_mode: StorageMode::Memory,
-            wal_sync: false,
-            wal_batch_config: None,
             memtable_size: 64 * 1024,
-            compression: false,
             enable_compaction: false,
-            memory_budget: None,
+            transaction_memory_pool_bytes: None,
             cloud_write_policy: None,
             simulated_cloud_local_storage_budget_bytes: None,
             shutdown_cloud_drain_timeout: None,
@@ -188,12 +179,9 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             let _ = std::fs::create_dir_all(&test_dir);
             MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: test_dir },
-                wal_sync: false,
-                wal_batch_config: None,
                 memtable_size: 64 * 1024,
-                compression: false,
                 enable_compaction: false,
-                memory_budget: None,
+                transaction_memory_pool_bytes: None,
                 cloud_write_policy: None,
                 simulated_cloud_local_storage_budget_bytes: None,
                 shutdown_cloud_drain_timeout: None,
@@ -214,12 +202,9 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 storage_mode: StorageMode::CloudBacked {
                     local_cache_path: test_dir,
                 },
-                wal_sync: true,
-                wal_batch_config: None,
                 memtable_size: 2 * 1024 * 1024,
-                compression: false,
                 enable_compaction: false,
-                memory_budget: None,
+                transaction_memory_pool_bytes: None,
                 cloud_write_policy: None,
                 simulated_cloud_local_storage_budget_bytes: None,
                 shutdown_cloud_drain_timeout: None,
@@ -233,8 +218,18 @@ pub fn for_each_storage_mode<F>(modes: &[&str], test_fn: F)
 where
     F: Fn(&str, MidgeOptions),
 {
+    let only = std::env::var_os("MIDGE_TEST_ONLY_MODE");
+    assert!(
+        !modes.is_empty()
+            && only.as_ref().is_none_or(|selected| {
+                modes
+                    .iter()
+                    .any(|mode| selected.as_os_str() == std::ffi::OsStr::new(mode))
+            }),
+        "MIDGE_TEST_ONLY_MODE={only:?} selects no test case from {modes:?}"
+    );
     for mode in modes {
-        if let Some(only) = std::env::var_os("MIDGE_TEST_ONLY_MODE") {
+        if let Some(only) = &only {
             if only.as_os_str() != std::ffi::OsStr::new(mode) {
                 continue;
             }
@@ -270,24 +265,6 @@ pub fn sync_write_options(mode: &str) -> WriteOptions {
         WriteOptions::sync()
     }
 }
-
-pub struct DurabilityTestContext {
-    _private: (),
-}
-
-impl DurabilityTestContext {
-    pub fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-impl Default for DurabilityTestContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub fn populate_multi_level_data(_engine: &Engine, _cf: &ColumnFamilyHandle, _levels: usize) {}
 
 pub mod test_helpers {
     use std::time::Duration;
@@ -355,12 +332,14 @@ pub fn bulk_put(
 /// ordered by id. `wal/LEDGER` and anything else that is not a segment is
 /// left out.
 pub fn wal_segment_files(db_path: &std::path::Path) -> Vec<(u64, PathBuf)> {
-    let Ok(entries) = std::fs::read_dir(db_path.join("wal")) else {
-        return Vec::new();
+    let entries = match std::fs::read_dir(db_path.join("wal")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("read WAL directory {}: {error}", db_path.display()),
     };
     let mut segments: Vec<(u64, PathBuf)> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_file())
+        .map(|entry| entry.expect("read WAL directory entry"))
+        .filter(|entry| entry.file_type().expect("WAL file type").is_file())
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
             Some((

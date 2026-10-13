@@ -533,16 +533,24 @@ mod cloud_many_families {
     use std::time::Duration;
 
     fn file_bytes(path: &Path) -> u64 {
-        std::fs::read_dir(path)
-            .into_iter()
-            .flatten()
-            .flatten()
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => panic!("observe file bytes in {}: {error}", path.display()),
+        };
+        entries
             .map(|entry| {
+                let entry = entry.expect("observed directory entry");
                 let path = entry.path();
-                if path.is_dir() {
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+                    Err(error) => panic!("observe {}: {error}", path.display()),
+                };
+                if metadata.is_dir() {
                     file_bytes(&path)
                 } else {
-                    entry.metadata().map_or(0, |metadata| metadata.len())
+                    metadata.len()
                 }
             })
             .sum()

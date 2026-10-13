@@ -517,6 +517,17 @@ fn should_back_up_served_root_when_root_is_injected() {
     engine
         .shutdown(std::time::Duration::from_secs(5))
         .expect("shutdown");
+    let target = artifacts.path().join("restored");
+    let restored_options = OpenOptions::local(&target)
+        .build()
+        .expect("restore options");
+    Engine::restore_backup(artifacts.path().join("backup"), restored_options.clone())
+        .expect("restore backed-up served bytes");
+    let mut restored = Engine::open(restored_options).expect("open restored served data");
+    assert_eq!(read_compacted(&restored), expected_compacted());
+    restored
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown restored database");
 }
 
 #[test]
@@ -645,6 +656,16 @@ fn should_spill_transaction_into_injected_root_when_pool_is_small() {
 
     // Assert
     assert_eq!(value.as_deref(), Some(&[63_u8; 512][..]));
+    let read = reopened
+        .begin_tx(default.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    for index in 0..64_u8 {
+        assert_eq!(
+            read.get(&[b's', index]).unwrap().as_deref(),
+            Some(vec![index; 512].as_slice()),
+            "spilled member {index}"
+        );
+    }
     assert_eq!(spilled_on_host, Vec::<std::path::PathBuf>::new());
     assert_eq!(host_entries(named.path()), Vec::<std::path::PathBuf>::new());
 }
@@ -787,7 +808,6 @@ fn should_keep_synced_commit_when_power_loss_tears_buffered_tail() {
 /// WAL record that spans pages at full length with one page missing, and a
 /// strict open refuses the never-synced tail as corruption.
 #[test]
-#[ignore = "#808 stage 5: torn-unsynced-tail"]
 fn should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail() {
     // Arrange: a buffered record spanning two pages.
     let tail: Vec<u8> = (0..6000_u32).map(|index| (index % 251) as u8).collect();

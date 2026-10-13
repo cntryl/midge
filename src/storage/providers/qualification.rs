@@ -6,37 +6,52 @@
 //! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1`
 
 use super::build_cloud_storage;
-use crate::config::CloudProviderConfig;
 use crate::config::{CloudPreflightOptions, CloudStorageLocation};
+use crate::config::{CloudProviderConfig, OciCredentialSource};
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::time::Duration;
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_s3_compatible_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3");
     run_provider_contract("s3", &provider);
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_azure_blob_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
     run_provider_contract("azure", &provider);
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_gcs_xml_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-gcs");
     run_provider_contract("gcs", &provider);
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_run_gcs_json_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-gcs-json");
     run_provider_contract("gcs-json", &provider);
+}
+
+#[test]
+fn should_run_oci_s3_compatibility_contract_against_sqrzl() {
+    // Arrange
+    let provider = CloudProviderConfig::oci_object_storage(
+        "sqrzl",
+        "midge-sqrzl-oci",
+        "us-east-1",
+        OciCredentialSource::access_key("admin", "easy-peasy"),
+    )
+    .with_endpoint("http://127.0.0.1:9000")
+    .expect("OCI supports endpoint overrides");
+
+    // Act
+    run_provider_contract("oci", &provider);
+
+    // Assert
+    // The shared contract asserts provider operations and conditional identities.
 }
 
 #[test]

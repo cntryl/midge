@@ -3,21 +3,30 @@
 use crate::common::crash;
 use cntryl_midge::__internal::simulation::SimulatedClock;
 use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
-use cntryl_midge::{
-    CloudProviderConfig, CloudStorageLocation, Engine, OpenOptions, RecoveryPolicy,
-    TransactionMode, WriteOptions,
-};
+#[cfg(feature = "sqrzl-tests")]
+use cntryl_midge::{CloudProviderConfig, CloudStorageLocation};
+use cntryl_midge::{Engine, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions};
+#[cfg(feature = "sqrzl-tests")]
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "sqrzl-tests")]
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "sqrzl-tests")]
+use std::time::Instant;
 
+#[cfg(feature = "sqrzl-tests")]
 const CHILD: &str =
     "wal_authority_regressions::should_abort_predecessor_when_audit_child_is_requested";
+#[cfg(feature = "sqrzl-tests")]
 const CHILD_ENV: &str = "MIDGE_808_PREDECESSOR_CASE";
+#[cfg(feature = "sqrzl-tests")]
 const SCENARIO: &str = "predecessor-cache";
+#[cfg(feature = "sqrzl-tests")]
 const TRIGGER: &str = "audit::after-unpublished-commits";
 
+#[cfg(feature = "sqrzl-tests")]
 #[derive(Deserialize, Serialize)]
 struct Case {
     root: PathBuf,
@@ -25,6 +34,7 @@ struct Case {
     prefix: String,
 }
 
+#[cfg(feature = "sqrzl-tests")]
 fn options(case: &Case, root: &Path) -> OpenOptions {
     OpenOptions::cloud(
         root,
@@ -44,6 +54,7 @@ fn get(engine: &Engine, key: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[test]
+#[cfg(feature = "sqrzl-tests")]
 fn should_abort_predecessor_when_audit_child_is_requested() {
     // Arrange
     let Some(path) = std::env::var_os(CHILD_ENV) else {
@@ -72,7 +83,7 @@ fn should_abort_predecessor_when_audit_child_is_requested() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
+#[cfg(feature = "sqrzl-tests")]
 fn should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache() {
     // Arrange: the predecessor dies with acknowledged but unpublished local WAL.
     let dir = tempfile::tempdir().unwrap();
@@ -185,7 +196,6 @@ fn should_abort_before_local_retirement_when_substitute_child_is_requested() {
 }
 
 #[test]
-#[ignore = "#808 stage 5: substitute-upload-collision"]
 fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
     // Arrange: a process dies after segment 1 is cataloged and acknowledged
     // but before its local copy retires, so the WAL ledger still names an

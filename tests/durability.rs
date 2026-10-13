@@ -30,6 +30,30 @@ mod durability_wal {
     };
     use tempfile::TempDir;
 
+    fn wait_for_retained_wal_members(
+        engine: &Engine,
+        root: &std::path::Path,
+        previous: u64,
+        count: usize,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let current = engine
+                .metrics()
+                .get_runtime_metrics()
+                .unwrap()
+                .wal_current_segment_id;
+            if current > previous && sealed_wal_segments(root).len() >= count {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "WAL rotation did not retain {count} sealed members"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     // ============================================================================
     // WAL RECOVERY TESTS
     // ============================================================================
@@ -39,7 +63,7 @@ mod durability_wal {
     fn sealed_wal_segments(db_path: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(db_path.join("wal"))
             .expect("read wal dir")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read WAL directory entry"))
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| cntryl_midge::__internal::wal::parse_segment_file_name(name).is_some())
             .collect();
@@ -154,93 +178,120 @@ mod durability_wal {
     }
 
     #[test]
-    fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let cf_id = cf.id();
+    fn should_preserve_synced_write_when_power_loss_discards_unsynced_effects() {
+        use cntryl_midge::__internal::io::Fs;
+        use cntryl_midge::__internal::simulation::{CrashDevice, SimulatedClock};
+        use std::sync::Arc;
+        use std::time::Duration;
 
-                // Write with fsync guarantee (durability_opts sets fsync_enabled: true)
-                let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-                tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).unwrap();
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
+        // Arrange
+        let named = TempDir::new().expect("named directory");
+        let device = CrashDevice::new();
+        let clock = SimulatedClock::new();
+        let options = || {
+            let root: Arc<dyn Fs> = Arc::new(device.fs());
+            OpenOptions::local(named.path())
+                .background_compaction(false)
+                .lease_ttl(Duration::from_secs(1))
+                .lease_clock_skew_tolerance(Duration::ZERO)
+                .lease_clock_for_testing(Arc::new(clock.clone()))
+                .filesystem_for_testing(root)
+                .build()
+                .expect("crash-device options")
+        };
+        let engine = Engine::open(options()).expect("open engine");
+        let cf = engine.get_column_family("default").expect("default family");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
+            .expect("stage durable write");
+        tx.commit(WriteOptions::sync())
+            .expect("sync acknowledgement");
 
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.get_column_family("test").expect("get cf");
-                let cf_id = cf.id();
+        // Act
+        device.process_crash();
+        drop(engine);
+        device.power_loss_with(|_| 0);
+        clock.advance(Duration::from_secs(2));
+        let mut reopened = Engine::open(options()).expect("recover after power loss");
 
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                assert_eq!(
-                    tx.get(b"critical_key").expect("get"),
-                    Some(Bytes::from_static(b"critical_value")),
-                    "mode: {mode}"
-                );
-            }
-        });
+        // Assert
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read.get(b"critical_key")
+                .expect("recover acknowledged write"),
+            Some(Bytes::from_static(b"critical_value"))
+        );
+        drop(read);
+        reopened
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown recovery");
     }
-
-    // `should_call_fsync_given_wal_sync_enabled_when_put` was removed: it only
-    // asserted `put()` returned `Ok`, never observing whether fsync actually ran,
-    // and its commit used `buffered_write_options` (non-durable), so it exercised
-    // no fsync path at all despite its name. A real fix — commit with a durable
-    // `WriteOptions`, shut down, and reopen to prove the write survived — is
-    // exactly what `should_persist_write_given_fsync_enabled_when_crash_occurs`
-    // above already does, so it was pruned as a near-duplicate rather than
-    // rewritten into a copy of that test.
 
     // ============================================================================
     // WAL ROTATION TESTS
     // ============================================================================
 
     #[test]
-    fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let cf_id = cf.id();
+    fn should_recover_wal_only_values_when_flush_seals_a_retained_segment() {
+        // Arrange
+        let directory = TempDir::new().expect("database directory");
+        let options = OpenOptions::local(directory.path())
+            .background_compaction(false)
+            .build()
+            .expect("local options");
+        let mut engine = Engine::open(options.clone()).expect("open engine");
+        let retained = engine
+            .create_column_family("retained")
+            .expect("retained family");
+        let flushed = engine.get_column_family("default").expect("default family");
+        for cf in [&retained, &flushed] {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(b"key".to_vec(), cf.name().as_bytes().to_vec(), None)
+                .unwrap();
+            tx.commit(WriteOptions::sync()).expect("sync commit");
+        }
+        let original = open_wal_segment(directory.path());
+        let previous = engine
+            .metrics()
+            .get_runtime_metrics()
+            .unwrap()
+            .wal_current_segment_id;
 
-                // Write enough data to trigger WAL rotation
-                let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-                for i in 0..1000 {
-                    let key = format!("key_{i:04}");
-                    let value = format!("value_{i:04}_with_padding_to_exceed_buffer_size");
-                    tx.put(key.into_bytes(), value.into_bytes(), None)
-                        .expect("put");
-                }
-                tx.commit(buffered_write_options(mode)).unwrap();
-                // Force checkpoint to ensure WAL segments are created
-                engine.flush_cf(&cf).expect("flush");
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
+        // Act
+        engine
+            .flush_cf(&flushed)
+            .expect("seal shared WAL by flushing default");
+        wait_for_retained_wal_members(&engine, directory.path(), previous, 1);
+        let active = open_wal_segment(directory.path());
+        let sealed = std::fs::read(&original).expect("idle family retains original WAL");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+        let reopened = Engine::open(options).expect("recover rotated history");
 
-            // Assert (Phase 2): All writes recovered after rotation
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.get_column_family("test").expect("get cf");
-                let cf_id = cf.id();
-
-                // Spot check across the range
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                assert!(tx.get(b"key_0000").expect("get").is_some(), "mode: {mode}");
-                assert!(tx.get(b"key_0500").expect("get").is_some(), "mode: {mode}");
-                assert!(tx.get(b"key_0999").expect("get").is_some(), "mode: {mode}");
-            }
-        });
+        // Assert
+        assert_ne!(
+            active, original,
+            "flush must install a successor WAL member"
+        );
+        assert!(cntryl_midge::__internal::wal::segment::footer_link(&sealed)
+            .expect("decode sealed member")
+            .is_some());
+        for cf in [&retained, &flushed] {
+            let read = reopened
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .unwrap();
+            assert_eq!(
+                read.get(b"key").unwrap().as_deref(),
+                Some(cf.name().as_bytes())
+            );
+        }
     }
 
     // ============================================================================
@@ -249,13 +300,14 @@ mod durability_wal {
 
     #[test]
     fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        for_each_storage_mode(&["local"], |mode, opts| {
             // Arrange
             // Act (Phase 1)
             {
                 let mut engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
                 let cf_id = cf.id();
+                let flushed = engine.get_column_family("default").expect("default family");
 
                 // Write in phases to create multiple WAL segments
                 for batch in 0..3 {
@@ -266,7 +318,31 @@ mod durability_wal {
                         tx.put(key.into_bytes(), value.into_bytes(), None)
                             .expect("put");
                     }
-                    tx.commit(buffered_write_options(mode)).unwrap();
+                    tx.commit(WriteOptions::sync()).unwrap();
+                    let mut marker = engine
+                        .begin_tx(flushed.id(), TransactionMode::ReadWrite)
+                        .unwrap();
+                    marker
+                        .put(vec![batch], b"flushed marker".to_vec(), None)
+                        .unwrap();
+                    marker.commit(WriteOptions::sync()).unwrap();
+                    let previous = engine
+                        .metrics()
+                        .get_runtime_metrics()
+                        .unwrap()
+                        .wal_current_segment_id;
+                    engine
+                        .flush_cf(&flushed)
+                        .expect("rotate while test family pins each batch");
+                    let StorageMode::LocalDisk { db_path } = &opts.storage_mode else {
+                        panic!("local fixture");
+                    };
+                    wait_for_retained_wal_members(
+                        &engine,
+                        db_path,
+                        previous,
+                        usize::from(batch) + 1,
+                    );
                 }
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
@@ -284,9 +360,10 @@ mod durability_wal {
                 for batch in 0..3 {
                     for i in 0..100 {
                         let key = format!("batch_{batch}_key_{i:03}");
-                        assert!(
-                            tx.get(key.as_bytes()).expect("get").is_some(),
-                            "Missing key from batch {batch} in mode: {mode}"
+                        assert_eq!(
+                            tx.get(key.as_bytes()).expect("get"),
+                            Some(Bytes::from(format!("batch_{batch}_value_{i:03}"))),
+                            "batch {batch}, mode: {mode}"
                         );
                     }
                 }
@@ -295,7 +372,7 @@ mod durability_wal {
     }
 
     #[test]
-    fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
+    fn should_recover_all_buffered_values_when_reopening_after_concurrent_commits() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             // Act (Phase 1)
@@ -345,9 +422,10 @@ mod durability_wal {
                 for thread_id in 0..5 {
                     for i in 0..20 {
                         let key = format!("thread_{thread_id}_key_{i:02}");
-                        assert!(
-                            tx.get(key.as_bytes()).expect("get").is_some(),
-                            "Missing write from thread {thread_id} in mode: {mode}"
+                        assert_eq!(
+                            tx.get(key.as_bytes()).expect("get"),
+                            Some(Bytes::from(format!("thread_{thread_id}_value_{i:02}"))),
+                            "thread {thread_id}, mode: {mode}"
                         );
                     }
                 }
@@ -1260,7 +1338,7 @@ mod durability_recovery {
     }
 
     #[test]
-    fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
+    fn should_recover_flushed_best_effort_values_without_wal_data() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             // Act (Phase 1)
@@ -1268,13 +1346,14 @@ mod durability_recovery {
                 let mut engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
-                // Write v1, flush to SST (WAL can be discarded)
+                // BestEffort records reach only the memtable and flushed SST.
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
                 tx.put(b"key".to_vec(), b"value_v1".to_vec(), None)
                     .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
+                tx.commit(cntryl_midge::WriteOptions::best_effort())
+                    .expect("commit");
                 engine.flush_cf(&cf).expect("flush");
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
@@ -1286,7 +1365,7 @@ mod durability_recovery {
                 let engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
-                // Should recover from SST (WAL not needed)
+                // This value has no corresponding WAL data record to replay.
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
@@ -1310,12 +1389,11 @@ mod durability_recovery {
 
                 // Write sequence (order matters)
                 for i in 0..100 {
-                    let key = format!("seq_key_{i:03}");
                     let mut tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadWrite)
                         .expect("begin_tx");
                     tx.put(
-                        key.as_bytes().to_vec(),
+                        b"ordered".to_vec(),
                         format!("value_{i:03}").as_bytes().to_vec(),
                         None,
                     )
@@ -1332,19 +1410,14 @@ mod durability_recovery {
                 let engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
-                // Verify correct order (last write wins for same key)
-                for i in 0..100 {
-                    let key = format!("seq_key_{i:03}");
-                    let expected = Bytes::from(format!("value_{i:03}"));
-                    let tx = engine
-                        .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                        .expect("begin_tx");
-                    assert_eq!(
-                        tx.get(key.as_bytes()).expect("get"),
-                        Some(expected),
-                        "mode: {mode}"
-                    );
-                }
+                let tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                    .expect("begin read");
+                assert_eq!(
+                    tx.get(b"ordered").expect("read final overwrite"),
+                    Some(Bytes::from_static(b"value_099")),
+                    "replay must preserve last-write order in mode {mode}"
+                );
             }
         });
     }
@@ -1745,56 +1818,59 @@ mod durability_atomicity {
 
     #[test]
     fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recovering() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
+        // Arrange: use a real SST from a separate database as an unlisted output.
+        let directory = tempfile::tempdir().expect("database directory");
+        let donor = tempfile::tempdir().expect("donor database");
+        let donor_file = flushed_default_sst(donor.path(), b"unlisted", b"must stay absent");
+        flushed_default_sst(directory.path(), b"owned", b"acknowledged");
+        let orphan = directory
+            .path()
+            .join("sst/000000_00_00000000000000000099.sst");
+        std::fs::copy(donor_file, &orphan).expect("plant valid unlisted SST");
+        assert!(orphan.exists());
 
-                // Write and flush to create SST file
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine.flush_cf(&cf).expect("flush");
+        // Act
+        let reopened = Engine::open(OpenOptions::local(directory.path()).build().unwrap())
+            .expect("reopen with orphan");
+        let cf = reopened.get_column_family("default").unwrap();
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .unwrap();
 
-                // Write more data (will create another SST)
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
+        // Assert
+        assert_eq!(read.get(b"unlisted").unwrap(), None);
+        assert_eq!(
+            read.get(b"owned").unwrap(),
+            Some(Bytes::from_static(b"acknowledged"))
+        );
+        assert!(!orphan.exists(), "startup must remove the unowned output");
+    }
 
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-
-                // key1 should be visible (from first SST, manifest entry exists)
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert!(tx.get(b"key1").expect("get").is_some(), "mode: {mode}");
-
-                // key2 should be readable from the later committed write on reopen
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert_eq!(
-                    tx.get(b"key2").expect("get"),
-                    Some(Bytes::from_static(b"value2")),
-                    "mode: {mode}"
-                );
-            }
-        });
+    fn flushed_default_sst(root: &std::path::Path, key: &[u8], value: &[u8]) -> std::path::PathBuf {
+        let mut engine = Engine::open(
+            OpenOptions::local(root)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .expect("open fixture database");
+        let cf = engine.get_column_family("default").unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(key.to_vec(), value.to_vec(), None).unwrap();
+        tx.commit(WriteOptions::best_effort()).unwrap();
+        engine.flush_cf(&cf).expect("publish fixture SST");
+        let layout = engine.metrics().get_storage_layout().unwrap();
+        let file = layout
+            .levels
+            .iter()
+            .flat_map(|level| &level.files)
+            .next()
+            .expect("published SST");
+        let path = root.join("sst").join(&file.name);
+        engine.shutdown(std::time::Duration::from_secs(5)).unwrap();
+        path
     }
 
     #[test]
@@ -1866,50 +1942,39 @@ mod durability_atomicity {
     }
 
     #[test]
-    fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
+    fn should_report_unavailable_authority_when_a_manifest_owned_sst_is_missing() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("database directory");
+        let owned = flushed_default_sst(directory.path(), b"key", b"flushed value");
+        std::fs::remove_file(owned).expect("remove manifest-owned SST");
 
-                // Write, flush, then overwrite
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key".to_vec(), b"value_old".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine.flush_cf(&cf).expect("flush");
-
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key".to_vec(), b"value_new".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
+        // Act
+        let error = match Engine::open(OpenOptions::local(directory.path()).build().unwrap()) {
+            Err(error) => error,
+            Ok(mut engine) => {
+                let family = engine.get_column_family("default").unwrap();
+                let read = engine
+                    .begin_tx(family.id(), TransactionMode::ReadOnly)
+                    .unwrap();
+                let result = read.get(b"key");
+                drop(read);
+                engine.shutdown(std::time::Duration::from_secs(5)).unwrap();
+                result.expect_err(
+                    "missing authoritative SST must not become a successful missing-key read",
+                )
             }
+        };
 
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-
-                // WAL should take precedence over SST when both exist
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert_eq!(
-                    tx.get(b"key").expect("get"),
-                    Some(Bytes::from_static(b"value_new")),
-                    "mode: {mode}"
-                );
-            }
-        });
+        // Assert
+        assert!(
+            matches!(
+                &error,
+                cntryl_midge::MidgeError::NotFound
+                    | cntryl_midge::MidgeError::RecoveryFailed(_)
+                    | cntryl_midge::MidgeError::Corruption(_)
+            ) || matches!(&error, cntryl_midge::MidgeError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "missing SST must report unavailable or corrupt authority: {error:?}"
+        );
     }
 
     #[test]
@@ -2155,9 +2220,10 @@ mod durability_atomicity {
                         let tx = engine
                             .begin_tx(cf.id(), TransactionMode::ReadOnly)
                             .expect("begin_tx");
-                        assert!(
-                            tx.get(key.as_bytes()).expect("get").is_some(),
-                            "mode: {mode}"
+                        assert_eq!(
+                            tx.get(key.as_bytes()).expect("get").as_deref(),
+                            Some(b"value".as_slice()),
+                            "mode: {mode}, key: {key}"
                         );
                     }
                 }
@@ -2205,9 +2271,10 @@ mod durability_atomicity {
                     let tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadOnly)
                         .expect("begin_tx");
-                    assert!(
-                        tx.get(key.as_bytes()).expect("get").is_some(),
-                        "mode: {mode}"
+                    assert_eq!(
+                        tx.get(key.as_bytes()).expect("get").as_deref(),
+                        Some(format!("value_{i:03}").as_bytes()),
+                        "mode: {mode}, key: {key}"
                     );
                 }
             }
@@ -2317,17 +2384,8 @@ mod durability_atomicity {
         });
     }
 
-    /// Phase 0 Guardrail #3: Transaction atomicity barrier enforcement
-    ///
-    /// Validates that reads see consistent state when a transaction is committed
-    /// in Batched mode: a transaction's operations reach the memtables together,
-    /// so no read observes part of one.
-    ///
-    /// NOTE: This test validates that the transaction is atomic - the read sees
-    /// either the old value or the new value, never partial state. The actual
-    /// barrier implementation is internal to the runtime.
     #[test]
-    fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
+    fn should_keep_read_snapshot_consistent_when_transaction_commits_between_reads() {
         use std::sync::{Arc, Barrier};
         use std::thread;
 
@@ -2375,34 +2433,23 @@ mod durability_atomicity {
         // Wait until the writer has staged both updates but not yet committed them
         start_barrier.wait();
 
-        // Issue reads while transaction may be in progress
+        // Establish the old snapshot and read the first member before commit.
         let tx_read = engine
             .begin_tx(cf_id, TransactionMode::ReadOnly)
             .expect("begin_tx");
 
         let val1 = tx_read.get(b"key1").expect("get key1");
-        let val2 = tx_read.get(b"key2").expect("get key2");
 
-        // Allow the writer to commit after the read snapshot is established
+        // Commit both replacements between reads through the same snapshot.
         release_barrier.wait();
 
         // Wait for transaction to complete
         tx_handle.join().expect("tx thread");
+        let val2 = tx_read.get(b"key2").expect("get key2 after commit");
 
-        // Assert: Both keys should have consistent state
-        // Either both are "initial" or both are "updated" - never mixed
-        let val1_bytes = val1.expect("key1 should exist");
-        let val2_bytes = val2.expect("key2 should exist");
-
-        let is_initial = val1_bytes.as_ref() == b"initial1" && val2_bytes.as_ref() == b"initial2";
-        let is_updated = val1_bytes.as_ref() == b"updated1" && val2_bytes.as_ref() == b"updated2";
-
-        assert!(
-            is_initial || is_updated,
-            "Transaction atomicity violated: key1={:?}, key2={:?}",
-            String::from_utf8_lossy(&val1_bytes),
-            String::from_utf8_lossy(&val2_bytes)
-        );
+        // Assert: publication cannot change an already established snapshot.
+        assert_eq!(val1.as_deref(), Some(b"initial1".as_slice()));
+        assert_eq!(val2.as_deref(), Some(b"initial2".as_slice()));
 
         // Verify final state is updated
         let tx_final = engine
@@ -2414,8 +2461,6 @@ mod durability_atomicity {
 
         assert_eq!(final1.unwrap().as_ref(), b"updated1");
         assert_eq!(final2.unwrap().as_ref(), b"updated2");
-
-        eprintln!("Transaction atomicity maintained: reads see consistent state");
     }
 }
 
@@ -2438,6 +2483,7 @@ mod best_effort_durability {
         let opts = opts_for_mode("local");
         let engine = Engine::open(opts.to_open_options())?;
         let cf = engine.create_column_family("test")?;
+        let before = engine.metrics().get_runtime_metrics()?.wal_append_count;
 
         // Act - Write with BestEffort (should skip WAL)
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
@@ -2451,6 +2497,10 @@ mod best_effort_durability {
         let val2 = tx.get(b"key2")?;
         assert_eq!(val1.as_deref(), Some(&b"value1"[..]));
         assert_eq!(val2.as_deref(), Some(&b"value2"[..]));
+        assert_eq!(
+            engine.metrics().get_runtime_metrics()?.wal_append_count,
+            before
+        );
 
         Ok(())
     }
@@ -2492,17 +2542,22 @@ mod best_effort_durability {
         let val_0 = tx.get(b"key0")?;
         let marker = tx.get(b"durable_marker")?;
 
-        assert!(
-            val_0.is_some(),
-            "BestEffort data should survive restart once flush_cf() succeeds"
-        );
+        assert_eq!(val_0.as_deref(), Some(b"value0".as_slice()));
+        for index in 1..100 {
+            assert_eq!(
+                tx.get(format!("key{index}").as_bytes())?.as_deref(),
+                Some(format!("value{index}").as_bytes()),
+                "flushed best-effort key {index}"
+            );
+        }
         assert_eq!(marker.as_deref(), Some(&b"marker"[..]));
 
         Ok(())
     }
 
     #[test]
-    fn should_lose_best_effort_data_when_not_flushed() -> cntryl_midge::MidgeResult<()> {
+    fn should_lose_unflushed_best_effort_data_when_reopening_after_shutdown(
+    ) -> cntryl_midge::MidgeResult<()> {
         // Arrange
         let opts = opts_for_mode("local");
         let mut engine = Engine::open(opts.clone().to_open_options())?;
@@ -2520,7 +2575,7 @@ mod best_effort_durability {
         assert_eq!(val_before.as_deref(), Some(&b"ephemeral_value"[..]));
         drop(tx);
 
-        // Simulate crash: drop engine WITHOUT flush
+        // Act: close without explicitly flushing the best-effort memtable.
         engine.shutdown(Duration::from_secs(2))?;
 
         // Reopen engine
@@ -2531,7 +2586,7 @@ mod best_effort_durability {
         let val_after = tx.get(b"ephemeral_key")?;
         assert_eq!(
             val_after, None,
-            "BestEffort data should be lost on crash without flush"
+            "unflushed best-effort data has no persistent record"
         );
 
         Ok(())
@@ -2560,13 +2615,13 @@ mod best_effort_durability {
 
         // Assert - All data is visible
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-        let val_first = tx.get(b"key00000000")?;
-        let val_mid = tx.get(b"key00025000")?;
-        let val_last = tx.get(b"key00049999")?;
-
-        assert!(val_first.is_some(), "First key should exist");
-        assert!(val_mid.is_some(), "Middle key should exist");
-        assert!(val_last.is_some(), "Last key should exist");
+        for index in 0..50_000 {
+            assert_eq!(
+                tx.get(format!("key{index:08}").as_bytes())?.as_deref(),
+                Some(format!("value{index:08}").as_bytes()),
+                "acknowledged key {index}"
+            );
+        }
 
         Ok(())
     }

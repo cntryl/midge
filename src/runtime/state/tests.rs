@@ -2657,17 +2657,6 @@ impl crate::io::Fs for CountingFs {
     }
 }
 
-/// Publishes `flushes` distinct SSTs through the real flush-publication path
-/// and returns (journal bytes, checkpoint bytes, durable syncs, final
-/// checkpoint size in bytes).
-fn measure_flush_publication_io(flushes: u64) -> (u64, u64, u64, u64) {
-    measure_flush_publication_io_for(
-        flushes,
-        crate::metadata::accounting::Origin::Unclassified,
-        true,
-    )
-}
-
 fn measure_flush_publication_io_for(
     flushes: u64,
     origin: crate::metadata::accounting::Origin,
@@ -2767,7 +2756,11 @@ fn measure_flush_publication_io_with_sst_size(
 fn should_reduce_snapshot_bytes_when_ordinary_local_flushes_defer_checkpoints() {
     // Arrange
     let flushes = 128;
-    let (_, forced_bytes, _, _) = measure_flush_publication_io(flushes);
+    let (_, forced_bytes, _, _) = measure_flush_publication_io_for(
+        flushes,
+        crate::metadata::accounting::Origin::Unclassified,
+        true,
+    );
 
     // Act
     let (_, ordinary_bytes, _, _) = measure_flush_publication_io_for(
@@ -2882,74 +2875,6 @@ fn should_keep_forced_cadence_when_checkpoint_payload_is_small_relative_to_flush
     assert!(
         ordinary_bytes >= forced_bytes,
         "cheap checkpoints must remain forced: {ordinary_bytes} vs {forced_bytes}"
-    );
-}
-
-/// Characterizes #670: every flush rewrites the full manifest, so cumulative
-/// checkpoint bytes grow quadratically with live SST cardinality while the
-/// journal stays linear. Update the bounds when checkpoint cadence is bounded.
-#[test]
-fn should_grow_checkpoint_bytes_quadratically_when_every_flush_rewrites_the_manifest() {
-    // Arrange
-    let small = 64;
-    let large = 128;
-
-    // Act
-    let (small_journal, small_checkpoint, _, _) = measure_flush_publication_io(small);
-    let (large_journal, large_checkpoint, _, large_final) = measure_flush_publication_io(large);
-
-    // Assert
-    assert!(
-        (18 * small_journal..=23 * small_journal).contains(&(10 * large_journal)),
-        "journal bytes must stay linear in flush count: {small_journal} -> {large_journal}"
-    );
-    assert!(
-        (34 * small_checkpoint..=46 * small_checkpoint).contains(&(10 * large_checkpoint)),
-        "doubling flushes must roughly quadruple checkpoint bytes: {small_checkpoint} -> {large_checkpoint}"
-    );
-    assert!(
-        large_checkpoint > large_final * large / 2,
-        "cumulative checkpoint bytes must dwarf the final snapshot: {large_checkpoint} vs {large_final}"
-    );
-}
-
-/// Measurement harness for #670, run on demand:
-/// `cargo test --release --lib -- --ignored --nocapture should_report_flush_publication_scaling`
-#[test]
-#[allow(clippy::cast_precision_loss)]
-#[ignore = "measurement report; run explicitly in release mode"]
-fn should_report_flush_publication_scaling_when_cardinality_grows() {
-    // Arrange
-    let cardinalities = [64_u64, 128, 256, 512, 1024, 2048];
-    let mut rows = Vec::new();
-
-    // Act
-    for flushes in cardinalities {
-        let started = std::time::Instant::now();
-        let (journal, checkpoint, syncs, final_size) = measure_flush_publication_io(flushes);
-        rows.push((
-            flushes,
-            journal,
-            checkpoint,
-            syncs,
-            final_size,
-            started.elapsed(),
-        ));
-    }
-
-    // Assert
-    eprintln!("flushes journal_B checkpoint_B final_B amplification syncs/flush us/flush");
-    for (flushes, journal, checkpoint, syncs, final_size, elapsed) in &rows {
-        eprintln!(
-            "{flushes:>7} {journal:>9} {checkpoint:>12} {final_size:>7} {:>13.1} {:>11.1} {:>8.0}",
-            *checkpoint as f64 / *final_size as f64,
-            *syncs as f64 / *flushes as f64,
-            elapsed.as_micros() as f64 / *flushes as f64,
-        );
-    }
-    assert!(
-        rows.iter().all(|row| row.2 > 0),
-        "counters must observe checkpoint writes"
     );
 }
 

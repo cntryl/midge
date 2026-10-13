@@ -13,6 +13,7 @@ use crate::runtime::{IntentLogEntry, PublicationPhase};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -556,6 +557,21 @@ pub struct RuntimeState {
     pub pending_compaction_waits: std::collections::BTreeMap<u64, crate::common::OperationDeadline>,
 }
 
+struct RuntimeMetricsGauges {
+    active_memtables: usize,
+    immutable_memtables: usize,
+    pinned_ssts: usize,
+    oldest_snapshot_age_seconds: u64,
+    sst_count: usize,
+    sst_bytes: u64,
+    obsolete_file_backlog: usize,
+    flush_queue_depth: usize,
+    flush_inflight: usize,
+    write_stall_ns_total: u64,
+    write_stall_ns_max: u64,
+    write_stall_active_ns: u64,
+}
+
 impl RuntimeState {
     pub(crate) fn observed_time_millis(&self) -> u64 {
         self.ttl_clock.now_millis()
@@ -618,7 +634,6 @@ impl RuntimeState {
         )
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
         let now = Instant::now();
         let (pinned_ssts, oldest_snapshot_age_seconds) = self.snapshot_retention_metrics(now);
@@ -628,7 +643,39 @@ impl RuntimeState {
         let read_path = self.diagnostics.snapshot();
         // This engine's own counters: no telemetry setup needed, and another
         // engine in the process never shows up here.
-        let telemetry = Some(self.diagnostics.counters());
+        let telemetry = self.diagnostics.counters();
+        let (flush_queue_depth, flush_inflight) = self.flush_metrics_gauges();
+        let write_stall_active_ns = self
+            .flush_metrics
+            .write_stall_started_at
+            .map_or(0, |started| {
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+            });
+        let gauges = RuntimeMetricsGauges {
+            active_memtables,
+            immutable_memtables,
+            pinned_ssts,
+            oldest_snapshot_age_seconds,
+            sst_count,
+            sst_bytes,
+            obsolete_file_backlog: residue.orphan_ssts.len(),
+            flush_queue_depth,
+            flush_inflight,
+            write_stall_ns_total: self
+                .flush_metrics
+                .write_stall_ns_total
+                .saturating_add(write_stall_active_ns),
+            write_stall_ns_max: self
+                .flush_metrics
+                .write_stall_ns_max
+                .max(write_stall_active_ns),
+            write_stall_active_ns,
+        };
+
+        self.assemble_runtime_metrics(&gauges, &telemetry, &read_path)
+    }
+
+    fn flush_metrics_gauges(&self) -> (usize, usize) {
         let flush_queue_depth = self
             .column_families
             .values()
@@ -650,19 +697,21 @@ impl RuntimeState {
                 )
             })
         }));
-        let write_stall_active_ns = self
-            .flush_metrics
-            .write_stall_started_at
-            .map_or(0, |started| {
-                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-            });
+        (flush_queue_depth, flush_inflight)
+    }
 
+    fn assemble_runtime_metrics(
+        &self,
+        gauges: &RuntimeMetricsGauges,
+        telemetry: &crate::telemetry::metrics::MetricsSnapshot,
+        read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
+    ) -> crate::types::RuntimeMetricsSnapshot {
         crate::types::RuntimeMetricsSnapshot {
             health: self.health(),
             current_sequence: self.sequence,
             manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
-            active_memtables,
-            immutable_memtables,
+            active_memtables: gauges.active_memtables,
+            immutable_memtables: gauges.immutable_memtables,
             total_memtable_bytes: self.total_memtable_bytes,
             memtable_size_limit: self.limits.memtable_size_limit,
             memtable_flush_threshold: self.limits.memtable_flush_threshold,
@@ -674,49 +723,43 @@ impl RuntimeState {
             wal_local_durable_seq: self.wal.frontiers.local_durable(),
             wal_cloud_durable_seq: self.wal.frontiers.cloud_durable(),
             compacting_ssts: self.compaction.compacting_ssts.len(),
-            active_compactions: self
-                .active_compactions
-                .load(std::sync::atomic::Ordering::SeqCst),
+            active_compactions: self.active_compactions.load(Ordering::SeqCst),
             pending_cloud_uploads: self.cloud.pending_uploads.len(),
             active_snapshots: self.snapshot_pins.active_count(),
-            pinned_ssts,
-            oldest_snapshot_age_seconds,
-            sst_count,
-            sst_bytes,
+            pinned_ssts: gauges.pinned_ssts,
+            oldest_snapshot_age_seconds: gauges.oldest_snapshot_age_seconds,
+            sst_count: gauges.sst_count,
+            sst_bytes: gauges.sst_bytes,
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode()),
-            no_space_events: telemetry.as_ref().map_or(0, |m| m.no_space_events),
-            compactions_run: telemetry.as_ref().map_or(0, |m| m.compactions_run),
-            compaction_bytes_rewritten: telemetry
-                .as_ref()
-                .map_or(0, |m| m.compaction_bytes_rewritten),
-            compaction_failures: telemetry.as_ref().map_or(0, |m| m.compaction_failures),
-            obsolete_file_backlog: residue.orphan_ssts.len(),
-            write_stalls_total: telemetry.as_ref().map_or(0, |m| m.write_stalls),
-            write_stalls_memory_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_memory),
-            write_stalls_compaction_total: telemetry
-                .as_ref()
-                .map_or(0, |m| m.write_stalls_compaction),
-            write_stalls_cloud_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_cloud),
-            write_stalls_no_space_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_no_space),
-            write_conflicts_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts),
-            write_conflicts_point_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_point),
-            write_conflicts_range_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_range),
+            no_space_events: telemetry.no_space_events,
+            compactions_run: telemetry.compactions_run,
+            compaction_bytes_rewritten: telemetry.compaction_bytes_rewritten,
+            compaction_failures: telemetry.compaction_failures,
+            obsolete_file_backlog: gauges.obsolete_file_backlog,
+            write_stalls_total: telemetry.write_stalls,
+            write_stalls_memory_total: telemetry.write_stalls_memory,
+            write_stalls_compaction_total: telemetry.write_stalls_compaction,
+            write_stalls_cloud_total: telemetry.write_stalls_cloud,
+            write_stalls_no_space_total: telemetry.write_stalls_no_space,
+            write_conflicts_total: telemetry.write_conflicts,
+            write_conflicts_point_total: telemetry.write_conflicts_point,
+            write_conflicts_range_total: telemetry.write_conflicts_range,
             cache_hits: read_path.sst_block_cache_hits,
             cache_misses: read_path.sst_block_cache_misses,
-            wal_append_count: telemetry.as_ref().map_or(0, |m| m.wal_append_count),
-            wal_flush_count: telemetry.as_ref().map_or(0, |m| m.wal_flush_count),
-            wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
-            wal_append_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_append_ns_total),
-            wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
-            wal_fsync_ns_max: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_max),
+            wal_append_count: telemetry.wal_append_count,
+            wal_flush_count: telemetry.wal_flush_count,
+            wal_fsync_count: telemetry.wal_fsync_count,
+            wal_append_ns_total: telemetry.wal_append_ns_total,
+            wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
+            wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
             durability_waiters_fanned_out_total: 0,
             abandoned_runtime_requests_total: 0,
             late_runtime_responses_total: 0,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,
             sst_data_blocks_read_total: read_path.data_blocks_read,
-            flush_queue_depth,
-            flush_inflight,
+            flush_queue_depth: gauges.flush_queue_depth,
+            flush_inflight: gauges.flush_inflight,
             flush_enqueued_total: self.flush_metrics.enqueued_total,
             flush_build_count: self.flush_metrics.build_count,
             flush_build_ns_total: self.flush_metrics.build_ns_total,
@@ -726,39 +769,17 @@ impl RuntimeState {
             flush_publish_ns_max: self.flush_metrics.publish_ns_max,
             flush_failures_total: self.flush_metrics.failures_total,
             flush_retries_total: self.flush_metrics.retries_total,
-            write_stall_ns_total: self
-                .flush_metrics
-                .write_stall_ns_total
-                .saturating_add(write_stall_active_ns),
-            write_stall_ns_max: self
-                .flush_metrics
-                .write_stall_ns_max
-                .max(write_stall_active_ns),
-            write_stall_active_ns,
-            cloud_async_wal_segments_sealed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_segments_sealed),
-            cloud_async_wal_bytes_sealed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_bytes_sealed),
-            cloud_async_wal_seal_latency_us: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_seal_latency_us),
-            cloud_async_wal_uploads_started: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_uploads_started),
-            cloud_async_wal_uploads_completed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_uploads_completed),
-            cloud_async_wal_uploads_failed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_uploads_failed),
-            cloud_async_wal_upload_latency_us: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_upload_latency_us),
-            cloud_async_wal_ack_latency_us: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_ack_latency_us),
+            write_stall_ns_total: gauges.write_stall_ns_total,
+            write_stall_ns_max: gauges.write_stall_ns_max,
+            write_stall_active_ns: gauges.write_stall_active_ns,
+            cloud_async_wal_segments_sealed: telemetry.cloud_async_wal_segments_sealed,
+            cloud_async_wal_bytes_sealed: telemetry.cloud_async_wal_bytes_sealed,
+            cloud_async_wal_seal_latency_us: telemetry.cloud_async_wal_seal_latency_us,
+            cloud_async_wal_uploads_started: telemetry.cloud_async_wal_uploads_started,
+            cloud_async_wal_uploads_completed: telemetry.cloud_async_wal_uploads_completed,
+            cloud_async_wal_uploads_failed: telemetry.cloud_async_wal_uploads_failed,
+            cloud_async_wal_upload_latency_us: telemetry.cloud_async_wal_upload_latency_us,
+            cloud_async_wal_ack_latency_us: telemetry.cloud_async_wal_ack_latency_us,
             hybrid_max_local_bytes: 0,
             hybrid_total_committed_bytes: 0,
             hybrid_free_bytes: 0,

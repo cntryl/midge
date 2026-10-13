@@ -20,8 +20,8 @@
 //! Control campaigns, which must find nothing, run a seed budget: the
 //! default per pull request, and `MIDGE_CAMPAIGN_PROFILE=nightly` for the
 //! nightly run, which also moves its seeds to `MIDGE_CAMPAIGN_SEED_BASE`.
-//! Detection campaigns keep fixed seeds, so they prove the same findings on
-//! every run. `MIDGE_CAMPAIGN_REPLAY` names a saved image to replay.
+//! Regression campaigns keep fixed seeds and require the invariant to hold.
+//! `MIDGE_CAMPAIGN_REPLAY` can select a saved image for the crash control.
 
 #[path = "wal_campaigns/config.rs"]
 mod config;
@@ -29,8 +29,6 @@ mod config;
 mod harness;
 #[path = "wal_campaigns/images.rs"]
 mod images;
-#[path = "wal_campaigns/known.rs"]
-mod known;
 #[path = "wal_campaigns/search.rs"]
 mod search;
 #[path = "wal_campaigns/workload.rs"]
@@ -38,9 +36,8 @@ mod workload;
 
 use cntryl_midge::__internal::simulation::{Fault, FaultEffect, FaultError, FaultOp};
 use config::{Config, Mode, StoreFaults, RENEWING_LEASE_TTL_MILLIS};
-use harness::{Campaign, FindingKind, Stop, LEASE_LOCK};
-use images::{assert_clean, assert_reproduced, load_image};
-use known::resurrects;
+use harness::{Campaign, Stop};
+use images::{assert_clean, load_image};
 use search::campaign;
 use std::path::Path;
 use workload::{control_seeds, Durability, Op, Profile, DEFAULT, DETECTION_SEEDS, KEYS};
@@ -48,6 +45,12 @@ use workload::{control_seeds, Durability, Op, Profile, DEFAULT, DETECTION_SEEDS,
 #[test]
 fn should_find_no_violation_when_synced_writes_survive_crashes() {
     // Arrange: lease renewals interleave with the crashes.
+    if let Some(directory) = std::env::var_os("MIDGE_CAMPAIGN_REPLAY") {
+        let image = load_image(Path::new(&directory));
+        let recovered = Campaign::replay(&image);
+        assert!(recovered.is_ok(), "saved recovery image: {recovered:#?}");
+        return;
+    }
     let workloads = control_seeds(32);
     let config = Config {
         lease_ttl_millis: RENEWING_LEASE_TTL_MILLIS,
@@ -95,7 +98,7 @@ fn should_keep_created_families_when_process_crash_precedes_power_loss() {
 }
 
 #[test]
-fn should_reproduce_best_effort_delete_when_campaigning() {
+fn should_keep_best_effort_deleted_keys_absent_when_recovering_completed_flushes() {
     // Arrange
     let config = Config {
         segment_reuse: false,
@@ -105,19 +108,8 @@ fn should_reproduce_best_effort_delete_when_campaigning() {
     // Act
     let finding = campaign(Profile::BestEffortDelete, DETECTION_SEEDS, 16, config);
 
-    // Assert: a key came back after a best-effort delete.
-    assert_reproduced("best-effort-delete", finding, |finding| {
-        resurrects(&finding.kind)
-            && finding.workload.iter().any(|op| {
-                matches!(
-                    op,
-                    Op::Delete {
-                        durability: Durability::BestEffort,
-                        ..
-                    }
-                )
-            })
-    });
+    // Assert: a completed flush or shutdown makes the delete recoverable.
+    assert_clean("best-effort-delete", finding);
 }
 
 /// Formerly the detection of `failed-local-unlink`: a failed removal of a
@@ -177,7 +169,7 @@ fn should_find_no_violation_when_buffered_tails_meet_power_loss() {
 /// directory sync commits every earlier namespace change, the unlink
 /// included. The release a clean shutdown completes has no open after it.
 #[test]
-fn should_reproduce_stale_lease_lock_when_power_is_lost() {
+fn should_allow_successor_when_power_loss_follows_completed_lease_release() {
     // Arrange: the operator's workaround is off.
     let config = Config {
         clear_stale_lease_lock: false,
@@ -198,29 +190,7 @@ fn should_reproduce_stale_lease_lock_when_power_is_lost() {
         .map(|finding| *finding);
 
     // Assert
-    assert_reproduced(
-        "stale-lease-lock",
-        found,
-        |finding| matches!(&finding.kind, FindingKind::Refused(error) if error.contains(LEASE_LOCK)),
-    );
-}
-
-/// Replay the image `MIDGE_CAMPAIGN_REPLAY` names, as a campaign saved it
-/// below `MIDGE_CAMPAIGN_IMAGES`; CI uploads those as artifacts. Without the
-/// variable there is nothing to replay.
-#[test]
-fn should_replay_saved_image_when_one_is_named() {
-    // Arrange
-    let Some(directory) = std::env::var_os("MIDGE_CAMPAIGN_REPLAY") else {
-        return;
-    };
-    let image = load_image(Path::new(&directory));
-
-    // Act
-    let replayed = Campaign::replay(&image);
-
-    // Assert
-    assert!(replayed.is_ok(), "the image reproduces {replayed:#?}");
+    assert_clean("completed-lease-release", found);
 }
 
 /// Registered case `recovered-tail-not-durable`, found by the buffered-crash
@@ -234,7 +204,9 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
     // recovers and serves the replayed tail.
     let mut campaign = Campaign::new(Config::default(), 0);
     campaign.recover(Stop::Clean).expect("first open");
-    campaign.write(0, 1, false, Durability::Buffered);
+    campaign
+        .write(0, 1, false, Durability::Buffered)
+        .expect("buffered put");
     campaign.crash_process();
     campaign
         .recover(Stop::ProcessCrash)
@@ -264,14 +236,17 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
 /// WAL's next sync fails and drops its writeback, so either way the device
 /// keeps the WAL from before the delete.
 #[test]
-#[ignore = "#808 stage 3: lost-buffered-delete"]
 fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
     // Arrange: a synced put, a buffered delete of it and a completed flush,
     // then power is lost with the WAL page from before the delete.
     let mut campaign = Campaign::new(Config::default(), 0);
     campaign.recover(Stop::Clean).expect("first open");
-    campaign.write(0, 1, false, Durability::Sync);
-    campaign.write(0, 1, true, Durability::Buffered);
+    campaign
+        .write(0, 1, false, Durability::Sync)
+        .expect("synced put");
+    campaign
+        .write(0, 1, true, Durability::Buffered)
+        .expect("buffered delete");
     campaign.inject(Fault {
         op: FaultOp::Sync,
         path: "wal".into(),
@@ -344,7 +319,8 @@ fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
 fn should_keep_earlier_writes_when_a_segment_exhausts_its_upload_attempts() {
     // Arrange: segment 1's first three upload attempts fail, and segments
     // seal every two asynchronous writes, so later segments upload past it.
-    // The store settles before a fresh-cache takeover.
+    // A successful clean shutdown promises every acknowledged write before
+    // a fresh-cache takeover, including the segment whose uploads fail.
     let config = Config {
         segment_reuse: false,
         store_faults: StoreFaults::FailSegment {
@@ -353,22 +329,31 @@ fn should_keep_earlier_writes_when_a_segment_exhausts_its_upload_attempts() {
         },
         ..Config::cloud(Mode::ProviderCloud)
     };
-    let mut workload: Vec<Op> = (0..KEYS)
-        .map(|key| Op::Put {
-            family: 0,
-            key,
-            durability: Durability::Buffered,
-        })
-        .collect();
-    workload.extend([Op::Settle, Op::FreshCache]);
+    let mut campaign = Campaign::new(config, 0);
+    campaign
+        .recover(Stop::Clean)
+        .expect("open provider campaign");
+    for key in 0..KEYS {
+        assert!(
+            campaign
+                .write(0, key, false, Durability::Buffered)
+                .expect("cloud_async admission"),
+            "every seeded cloud_async write must be acknowledged"
+        );
+    }
 
     // Act
-    let finding = Campaign::run(0, &workload, config)
-        .err()
-        .map(|finding| *finding);
+    campaign
+        .apply(&Op::CleanRestart, &[])
+        .expect("shutdown must publish every ACK");
+    let recovered = campaign.apply(&Op::FreshCache, &[]);
 
     // Assert
-    assert_clean("segment-upload-attempts", finding);
+    assert_eq!(campaign.failed_segment_uploads(1), 3);
+    assert!(
+        recovered.is_ok(),
+        "published writes must survive takeover: {recovered:?}"
+    );
 }
 
 #[test]

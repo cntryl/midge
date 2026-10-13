@@ -768,61 +768,103 @@ mod tests {
     }
 
     #[cfg(feature = "failpoints")]
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn should_resolve_every_local_sync_boundary_without_partial_operational_state() {
-        // Arrange
-        struct Expected {
-            generation: u64,
-            frontier: u64,
-            fenced: bool,
-            succeeded: bool,
-        }
-        let expected = |boundary: WalTransitionBoundary| match boundary {
-            WalTransitionBoundary::BeforeFsync => Expected {
+    struct LocalSyncExpectation {
+        generation: u64,
+        frontier: u64,
+        fenced: bool,
+        succeeded: bool,
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn local_sync_expectation(boundary: WalTransitionBoundary) -> LocalSyncExpectation {
+        match boundary {
+            WalTransitionBoundary::BeforeFsync => LocalSyncExpectation {
                 generation: 0,
                 frontier: 0,
                 fenced: false,
                 succeeded: false,
             },
             WalTransitionBoundary::AfterFsync | WalTransitionBoundary::BeforeCoordinatorCommit => {
-                Expected {
+                LocalSyncExpectation {
                     generation: 0,
                     frontier: 0,
                     fenced: true,
                     succeeded: false,
                 }
             }
-            WalTransitionBoundary::AfterCoordinatorCommit => Expected {
+            WalTransitionBoundary::AfterCoordinatorCommit => LocalSyncExpectation {
                 generation: 1,
                 frontier: 0,
                 fenced: true,
                 succeeded: false,
             },
-            WalTransitionBoundary::BeforeWaiterCompletion => Expected {
+            WalTransitionBoundary::BeforeWaiterCompletion => LocalSyncExpectation {
                 generation: 1,
                 frontier: 9,
                 fenced: true,
                 succeeded: false,
             },
-            WalTransitionBoundary::AfterCommitBeforeReturn => Expected {
+            WalTransitionBoundary::AfterCommitBeforeReturn => LocalSyncExpectation {
                 generation: 1,
                 frontier: 9,
                 fenced: false,
                 succeeded: true,
             },
             other => panic!("local sync matrix has no expectation for {other:?}"),
-        };
+        }
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn assert_local_sync_state(
+        event_loop: &EventLoop,
+        boundary: WalTransitionBoundary,
+        expected: &LocalSyncExpectation,
+    ) {
+        assert_eq!(
+            event_loop.durability.current_key(),
+            expected.generation,
+            "{boundary:?}"
+        );
+        assert_eq!(
+            event_loop.state.wal.frontiers.local_durable(),
+            expected.frontier,
+            "{boundary:?}"
+        );
+        assert_eq!(
+            event_loop.state.wal.frontiers.last_synced(),
+            expected.frontier,
+            "{boundary:?}"
+        );
+        assert_eq!(
+            event_loop.wal_actor.is_fenced(),
+            expected.fenced,
+            "{boundary:?}"
+        );
+        assert_eq!(
+            event_loop.wal_transition.is_fenced(),
+            expected.fenced,
+            "{boundary:?}"
+        );
+        assert_eq!(
+            event_loop.state.persistence_anomaly_detected(),
+            expected.fenced,
+            "{boundary:?}"
+        );
+        assert!(
+            event_loop.wal_actor.is_open() || event_loop.wal_actor.is_fenced(),
+            "{boundary:?}: actor must never rest mid-transition"
+        );
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_resolve_every_local_sync_boundary_without_partial_operational_state() {
+        // Arrange
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
 
         for boundary in WalTransitionBoundary::LOCAL_SYNC_BOUNDARIES {
-            let Expected {
-                generation: expected_generation,
-                frontier: expected_frontier,
-                fenced,
-                succeeded,
-            } = expected(boundary);
+            let expected = local_sync_expectation(boundary);
             let mut event_loop =
                 create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
                     .expect("create event loop");
@@ -833,7 +875,7 @@ mod tests {
                 )));
             event_loop.state.sequence = 9;
             event_loop.state.wal.pending_writes = 1;
-            let request_id = 91_000 + expected_generation + expected_frontier;
+            let request_id = 91_000 + expected.generation + expected.frontier;
             let response = event_loop.router.register(request_id, "CloudDurability");
             event_loop
                 .durability
@@ -849,36 +891,7 @@ mod tests {
 
             // Assert
             assert!(matches!(error, crate::common::MidgeError::Internal(_)));
-            assert_eq!(
-                event_loop.durability.current_key(),
-                expected_generation,
-                "{boundary:?}"
-            );
-            assert_eq!(
-                event_loop.state.wal.frontiers.local_durable(),
-                expected_frontier,
-                "{boundary:?}"
-            );
-            assert_eq!(
-                event_loop.state.wal.frontiers.last_synced(),
-                expected_frontier,
-                "{boundary:?}"
-            );
-            assert_eq!(event_loop.wal_actor.is_fenced(), fenced, "{boundary:?}");
-            assert_eq!(
-                event_loop.wal_transition.is_fenced(),
-                fenced,
-                "{boundary:?}"
-            );
-            assert_eq!(
-                event_loop.state.persistence_anomaly_detected(),
-                fenced,
-                "{boundary:?}"
-            );
-            assert!(
-                event_loop.wal_actor.is_open() || event_loop.wal_actor.is_fenced(),
-                "{boundary:?}: actor must never rest mid-transition"
-            );
+            assert_local_sync_state(&event_loop, boundary, &expected);
 
             if boundary == WalTransitionBoundary::BeforeFsync {
                 assert!(event_loop.durability.has_pending_waiters());
@@ -895,7 +908,7 @@ mod tests {
                 let terminal = response
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .expect("durability waiter terminal outcome");
-                if succeeded {
+                if expected.succeeded {
                     assert!(matches!(
                         terminal,
                         RuntimeResponse::Ok { request_id: actual } if actual == request_id

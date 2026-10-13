@@ -23,7 +23,7 @@ mod sst_reads_integration {
         use std::io::{Read, Seek, Write};
 
         let sst_path = std::fs::read_dir(db_path.join("sst"))?
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("flushed SST file");
@@ -40,10 +40,16 @@ mod sst_reads_integration {
         Ok(())
     }
 
+    fn assert_published_sst(engine: &cntryl_midge::Engine) -> MidgeResult<()> {
+        let layout = engine.metrics().get_storage_layout()?;
+        assert!(layout.levels.iter().any(|level| level.file_count > 0));
+        Ok(())
+    }
+
     #[test]
     fn should_read_from_sst_after_flush() -> MidgeResult<()> {
         // Arrange: Create engine
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write keys that will be flushed to SST
@@ -56,7 +62,7 @@ mod sst_reads_integration {
 
         // Force flush to SST
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(100)); // Give flush time to complete
+        assert_published_sst(&engine)?;
 
         // Act: Read keys that should be in SST now
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
@@ -69,14 +75,13 @@ mod sst_reads_integration {
         assert_eq!(value2, Some(b"value_from_sst".to_vec().into()));
         assert_eq!(value3, None);
 
-        println!("SST reads completed successfully");
         Ok(())
     }
 
     #[test]
-    fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
+    fn should_read_boundary_keys_given_flushed_sst() -> MidgeResult<()> {
         // Arrange: Create engine
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write sorted keys
@@ -88,7 +93,7 @@ mod sst_reads_integration {
         }
 
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_published_sst(&engine)?;
 
         // Act: Read various keys
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
@@ -103,14 +108,13 @@ mod sst_reads_integration {
         assert_eq!(last, Some(b"test_value".to_vec().into()));
         assert_eq!(missing, None);
 
-        println!("Range-aware SST reads completed successfully");
         Ok(())
     }
 
     #[test]
     fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
         // Arrange: Mix of memtable and SST data
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write to SST
@@ -118,7 +122,7 @@ mod sst_reads_integration {
         tx1.put(b"sst_key".to_vec(), b"sst_value".to_vec(), None)?;
         tx1.commit(WriteOptions::buffered())?;
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_published_sst(&engine)?;
 
         // Write to memtable
         let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
@@ -142,7 +146,6 @@ mod sst_reads_integration {
         let updated = read_tx2.get(b"sst_key")?;
         assert_eq!(updated, Some(b"updated_value".to_vec().into()));
 
-        println!("Mixed memtable/SST reads completed successfully");
         Ok(())
     }
 
@@ -271,8 +274,8 @@ mod sst_regressions {
             .unwrap();
 
         // Assert
-        assert_eq!(after_reopen.as_deref().map(<[u8]>::len), Some(value.len()));
-        assert_eq!(result.as_deref().map(<[u8]>::len), Some(value.len()));
+        assert_eq!(after_reopen.as_deref(), Some(value.as_slice()));
+        assert_eq!(result.as_deref(), Some(value.as_slice()));
     }
 
     #[test]
@@ -785,7 +788,7 @@ mod streaming_scan_hardening {
         use std::io::{Read, Seek, Write};
 
         let sst_path = std::fs::read_dir(db_path.join("sst"))?
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("flushed SST file");
@@ -1349,7 +1352,7 @@ mod compression_compatibility {
         write_fresh_adaptive_database(temp.path(), &records);
         let sst_path = fs::read_dir(temp.path().join("sst"))
             .expect("read SST directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("SST path");

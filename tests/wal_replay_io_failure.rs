@@ -70,7 +70,6 @@ fn fail_wal_read(named: &Path, device: &CrashDevice, nth: u64) -> Option<Vec<usi
 }
 
 #[test]
-#[ignore = "#808 stage 5: noncorruption-salvage"]
 fn should_keep_acknowledged_writes_when_salvage_replay_hits_a_transient_io_error() {
     // Arrange: sync-acknowledged writes live only in the WAL. The healthy
     // control proves recovery replays every one of them.

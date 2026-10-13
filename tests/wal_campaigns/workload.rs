@@ -149,7 +149,6 @@ pub(crate) enum Profile {
 }
 
 impl Profile {
-    #[allow(clippy::too_many_lines)] // One weighted table per profile.
     fn op(self, rng: &mut Rng, families: usize, mode: Mode) -> Op {
         let family = usize::try_from(rng.below(families as u64)).expect("family fits usize");
         let key = rng.key();
@@ -212,25 +211,8 @@ impl Profile {
                 4..=5 => Op::Flush { family: 0 },
                 _ => Op::CleanRestart,
             },
-            Self::CloudControl => match rng.below(16) {
-                0..=5 => put(0, logged),
-                6..=7 => delete(0, Durability::Sync),
-                8..=9 => Op::Flush { family: 0 },
-                10 => Op::Compact,
-                11 => Op::CleanRestart,
-                12..=13 => Op::PowerLoss { seed: rng.next() },
-                _ if mode.has_fresh_cache_takeovers() => Op::FreshCache,
-                _ => Op::CleanRestart,
-            },
-            Self::CloudFaults => match rng.below(16) {
-                0..=6 => put(0, Durability::Buffered),
-                7 => put(0, Durability::Sync),
-                8..=9 => Op::Flush { family: 0 },
-                10..=11 => Op::Settle,
-                12..=13 if mode.has_fresh_cache_takeovers() => Op::FreshCache,
-                14 => Op::LandLate,
-                _ => Op::CleanRestart,
-            },
+            Self::CloudControl => cloud_control_op(rng, key, logged, mode),
+            Self::CloudFaults => cloud_fault_op(rng, key, mode),
         }
     }
 
@@ -246,5 +228,46 @@ impl Profile {
                 op
             })
             .collect()
+    }
+}
+
+fn cloud_control_op(rng: &mut Rng, key: u8, logged: Durability, mode: Mode) -> Op {
+    match rng.below(16) {
+        0..=5 => Op::Put {
+            family: 0,
+            key,
+            durability: logged,
+        },
+        6..=7 => Op::Delete {
+            family: 0,
+            key,
+            durability: Durability::Sync,
+        },
+        8..=9 => Op::Flush { family: 0 },
+        10 => Op::Compact,
+        11 => Op::CleanRestart,
+        12..=13 => Op::PowerLoss { seed: rng.next() },
+        _ if mode.has_fresh_cache_takeovers() => Op::FreshCache,
+        _ => Op::CleanRestart,
+    }
+}
+
+fn cloud_fault_op(rng: &mut Rng, key: u8, mode: Mode) -> Op {
+    match rng.below(16) {
+        0..=6 => Op::Put {
+            family: 0,
+            key,
+            durability: Durability::Buffered,
+        },
+        7 => Op::Put {
+            family: 0,
+            key,
+            durability: Durability::Sync,
+        },
+        8..=9 => Op::Flush { family: 0 },
+        10..=11 => Op::Settle,
+        12..=13 if mode.has_fresh_cache_takeovers() => Op::FreshCache,
+        14 => Op::LandLate,
+        _ => Op::CleanRestart,
     }
 }
