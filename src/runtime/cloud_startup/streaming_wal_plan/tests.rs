@@ -1606,6 +1606,7 @@ fn commit_as_startup(
         catalog.fencing_epoch(),
         &catalog,
         history,
+        None,
         &|| Ok(()),
         &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
     )
@@ -2149,6 +2150,50 @@ fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<
     let reopened = fixture.history()?;
     assert_eq!(reopened.ledger().log_start(), 2);
     assert!(!fixture.segment(1).exists());
+    Ok(())
+}
+
+#[test]
+fn should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains() -> MidgeResult<()>
+{
+    // Arrange: segment 1 is retired in the catalog, but its local cache copy
+    // is damaged while segment 2 remains authoritative history.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    let second = framed_wal(2, b"two");
+    let retired_local = fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &second)?;
+    fixture.publish(2, 2, 8, &second)?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    fixture.retire_through(1);
+    let mut damaged = std::fs::read(&retired_local)?;
+    damaged[crate::wal::format::HEADER_LEN + 8] ^= 1;
+    std::fs::write(&retired_local, damaged)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+    let history = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
+    )?;
+
+    // Assert: retired local corruption cannot block later catalog history.
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(history.ledger().log_start() >= 2);
+    drop(history);
+    assert!(!retired_local.exists());
     Ok(())
 }
 

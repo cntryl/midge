@@ -217,7 +217,10 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
         state,
         false,
         router,
-        crate::runtime::RuntimeConfig::default(),
+        crate::runtime::RuntimeConfig {
+            retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
+            ..crate::runtime::RuntimeConfig::default()
+        },
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
@@ -287,6 +290,7 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         leader_store: Some(store),
         leader_holder_id: Some("test-writer".into()),
         writer_epoch: 1,
+        retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
         ..crate::runtime::RuntimeConfig::default()
     };
     EventLoop::new(
@@ -309,9 +313,55 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
         state,
         false,
         router,
-        crate::runtime::RuntimeConfig::default(),
+        crate::runtime::RuntimeConfig {
+            retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
+            ..crate::runtime::RuntimeConfig::default()
+        },
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
+}
+
+#[test]
+fn should_use_injected_retry_policy_for_each_cloud_schedule() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let policy = crate::runtime::RuntimeRetryPolicy {
+        cloud_seal: Duration::from_millis(11),
+        cloud_wal: Duration::from_millis(13),
+        cloud_delete: Duration::from_millis(17),
+        manifest_reclamation: Duration::from_millis(19),
+    };
+    let config = crate::runtime::RuntimeConfig {
+        retry_policy: policy,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+
+    // Act
+    let event_loop = EventLoop::new(
+        create_test_state(),
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+
+    // Assert
+    assert_eq!(
+        event_loop.durability.cloud_seal_retry_delay(),
+        policy.cloud_seal
+    );
+    assert_eq!(
+        event_loop.cloud_coordinator.cloud_wal_retry_delay(),
+        policy.cloud_wal
+    );
+    assert_eq!(
+        event_loop.gc_actor.retry_delays(),
+        (
+            policy.cloud_delete,
+            policy.manifest_reclamation,
+            policy.cloud_delete
+        )
+    );
+    Ok(())
 }
 
 #[test]

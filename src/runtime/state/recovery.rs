@@ -112,6 +112,7 @@ impl RuntimeState {
             crate::config::RecoveryPolicy::Strict,
             RecoveryWal::Replay { writer_epoch },
             None,
+            None,
         )
         .expect("runtime state initialization failed")
     }
@@ -131,6 +132,7 @@ impl RuntimeState {
             root,
             recovery_policy,
             RecoveryWal::Replay { writer_epoch: 0 },
+            None,
             None,
         )
     }
@@ -162,6 +164,7 @@ impl RuntimeState {
         root: Arc<dyn Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
         wal: RecoveryWal,
+        wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         check_scope(scope, "recovery filesystem")?;
@@ -174,7 +177,15 @@ impl RuntimeState {
             Some(scope) => crate::io::scope_fs(root, scope.clone()),
             None => root,
         };
-        Self::initialize_recovery_core(db_path, memory_mode, recovery_policy, wal, fs, scope)
+        Self::initialize_recovery_core(
+            db_path,
+            memory_mode,
+            recovery_policy,
+            wal,
+            wal_fence,
+            fs,
+            scope,
+        )
     }
 
     fn initialize_recovery_core(
@@ -182,6 +193,7 @@ impl RuntimeState {
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
         wal: RecoveryWal,
+        wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
         fs: Arc<dyn Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
@@ -191,7 +203,15 @@ impl RuntimeState {
             manifest,
             intent_log,
             wal: wal_recovery,
-        } = Self::load_startup_recovery(db_path, persistence, recovery_policy, wal, &fs, scope)?;
+        } = Self::load_startup_recovery(
+            db_path,
+            persistence,
+            recovery_policy,
+            wal,
+            wal_fence,
+            &fs,
+            scope,
+        )?;
         let recovered_memtable_bytes = Self::recovered_memtable_bytes(&wal_recovery);
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
@@ -279,6 +299,7 @@ impl RuntimeState {
         persistence: RuntimePersistence,
         recovery_policy: crate::config::RecoveryPolicy,
         wal: RecoveryWal,
+        wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
         fs: &Arc<dyn Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<RecoveredStartup> {
@@ -303,7 +324,7 @@ impl RuntimeState {
                 recovery_policy,
                 &manifest,
                 column_families,
-                (writer_epoch, scope),
+                (writer_epoch, scope, wal_fence),
             )?,
             RecoveryWal::Deferred(history) => {
                 Self::empty_wal_recovery(&manifest, column_families, history)
@@ -514,7 +535,11 @@ impl RuntimeState {
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
-        (writer_epoch, scope): (u64, Option<&DeadlineScope>),
+        (writer_epoch, scope, wal_fence): (
+            u64,
+            Option<&DeadlineScope>,
+            Option<crate::runtime::wal_history::WalHistoryFence>,
+        ),
     ) -> MidgeResult<WalRecoveryState> {
         let mut wal_recovery = if memory_mode {
             Self::empty_wal_recovery(
@@ -525,8 +550,19 @@ impl RuntimeState {
         } else {
             check_scope(scope, "WAL ledger")?;
             let wal = crate::io::subdirectory(Arc::clone(root), "wal");
-            let history =
-                crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1, writer_epoch)?;
+            let history = match wal_fence {
+                Some(fence) => crate::runtime::wal_history::WalHistory::open_with_fence(
+                    Arc::clone(&wal),
+                    1,
+                    writer_epoch,
+                    fence,
+                )?,
+                None => crate::runtime::wal_history::WalHistory::open(
+                    Arc::clone(&wal),
+                    1,
+                    writer_epoch,
+                )?,
+            };
             Self::replay_wal_storage_within(
                 replay_dir,
                 root,
@@ -1362,7 +1398,7 @@ mod salvage_quarantine_tests {
             policy,
             &Manifest::default(),
             HashMap::new(),
-            (0, None),
+            (0, None, None),
         )
     }
 

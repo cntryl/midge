@@ -95,6 +95,7 @@ pub(crate) fn commit_recovery_plan_within(
     writer_epoch: u64,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     mut history: CacheHistory,
+    wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
     validate: &dyn Fn() -> crate::common::MidgeResult<()>,
     scope: &crate::common::DeadlineScope,
 ) -> crate::common::MidgeResult<crate::runtime::wal_history::WalHistory> {
@@ -138,12 +139,21 @@ pub(crate) fn commit_recovery_plan_within(
                 open_at_least,
             },
             CacheHistory::Fresh(wal),
-        ) => crate::runtime::wal_history::WalHistory::genesis(
-            wal,
-            writer_epoch,
-            anchor,
-            open_at_least,
-        )?,
+        ) => match wal_fence {
+            Some(fence) => crate::runtime::wal_history::WalHistory::genesis_with_fence(
+                wal,
+                writer_epoch,
+                anchor,
+                open_at_least,
+                fence,
+            ),
+            None => crate::runtime::wal_history::WalHistory::genesis(
+                wal,
+                writer_epoch,
+                anchor,
+                open_at_least,
+            ),
+        }?,
         (HistoryAction::Keep { retire_local_below }, CacheHistory::Existing(mut history)) => {
             if let Some(to) = retire_local_below {
                 history.retire_below(to)?;

@@ -137,6 +137,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
         crate::config::RecoveryPolicy::Strict,
         super::super::recovery::RecoveryWal::Replay { writer_epoch: 0 },
         None,
+        None,
     )
     .unwrap();
     let below = recovered.wal.history.ledger().retirable_prefix(|cf, sequence| {

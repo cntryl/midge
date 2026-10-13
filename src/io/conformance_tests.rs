@@ -255,11 +255,9 @@ fn should_create_missing_parents_when_opening_with_create() {
     });
 }
 
-/// `RealFs` reports a missing rename source as `Io`, unlike its other
-/// operations; #832 tracks moving both faithful backends to `NotFound`.
 #[test]
-fn should_report_io_when_renaming_missing_source() {
-    for_each_faithful_backend(|backend, fs| {
+fn should_report_not_found_when_renaming_missing_source() {
+    for_each_backend(|backend, fs| {
         // Arrange
         let from = FsPath::new("missing");
 
@@ -268,7 +266,7 @@ fn should_report_io_when_renaming_missing_source() {
 
         // Assert
         assert!(
-            matches!(result, Err(FsError::Io(_))),
+            matches!(result, Err(FsError::NotFound(_))),
             "{backend}: {result:?}"
         );
     });
@@ -307,11 +305,16 @@ fn should_keep_length_when_writing_nothing_past_end() {
 }
 
 #[test]
-fn should_report_io_when_creating_new_over_existing_file() {
-    for_each_faithful_backend(|backend, fs| {
+fn should_report_already_exists_when_creating_new_over_existing_file() {
+    for_each_backend(|backend, fs| {
         // Arrange
         let path = FsPath::new("exists.bin");
-        fs.open(&path, CREATE).expect("create file");
+        write_file(fs, "exists.bin", b"original contents");
+        let before = fs
+            .open(&path, READ_ONLY)
+            .expect("open original file")
+            .read_at(0, 17)
+            .expect("read original file");
 
         // Act
         let result = fs
@@ -324,11 +327,16 @@ fn should_report_io_when_creating_new_over_existing_file() {
             )
             .map(|_| ());
 
-        // Assert: `RealFs` classifies only a missing file specially (#832).
         assert!(
-            matches!(result, Err(FsError::Io(_))),
+            matches!(result, Err(FsError::AlreadyExists(_))),
             "{backend}: {result:?}"
         );
+        let after = fs
+            .open(&path, READ_ONLY)
+            .expect("reopen original file")
+            .read_at(0, 17)
+            .expect("read original file after rejected create_new");
+        assert_eq!(after, before, "{backend}: rejected open changed the file");
     });
 }
 

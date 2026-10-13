@@ -64,6 +64,7 @@ impl RecoveryInputs {
             crate::config::RecoveryPolicy::Strict,
             crate::runtime::state::RecoveryWal::Deferred(history),
             None,
+            None,
         )?;
         let recovered_names = manifest_names(&recovered.manifest);
         let before_replay = recovered.intent_log.clone();

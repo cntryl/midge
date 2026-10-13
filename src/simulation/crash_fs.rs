@@ -1165,9 +1165,12 @@ impl CrashFs {
             }
             let (parent, name) = state.parent(&parts)?;
             let inode = match state.directory(parent)?.live.get(&name).copied() {
-                // `RealFs` classifies everything but a missing file as `Io`.
+                // Match `RealFs`' typed create-new collision.
                 Some(_) if opts.create_new => {
-                    return Err(FsError::Io(format!("open {}: file exists", path.0)))
+                    return Err(FsError::AlreadyExists(format!(
+                        "open {}: file exists",
+                        path.0
+                    )))
                 }
                 Some(inode) if state.is_directory(inode) => {
                     return Err(FsError::Io(format!("open {}: is a directory", path.0)))
@@ -1332,8 +1335,12 @@ impl Fs for CrashFs {
                 if let Some((_, parents)) = to_parts.split_last() {
                     state.create_dirs(parents)?;
                 }
-                // `RealFs` reports every rename failure as `Io` (#832).
-                let failed = |error: FsError| FsError::Io(format!("rename {}: {error}", to.0));
+                // Match `RealFs`' typed missing-source result while keeping
+                // other rename failures in the general I/O class.
+                let failed = |error: FsError| match error {
+                    FsError::NotFound(path) => FsError::NotFound(path),
+                    other => FsError::Io(format!("rename {}: {other}", to.0)),
+                };
                 let inode = state.lookup(&from_parts).map_err(failed)?;
                 if from_parts == to_parts {
                     return Ok(());

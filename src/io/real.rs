@@ -166,13 +166,9 @@ impl RealFs {
             std_opts.truncate(true);
         }
 
-        let file = std_opts.open(&full).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                super::traits::FsError::NotFound(format!("{}: {error}", full.display()))
-            } else {
-                io_error(format!("open {}", full.display()), &error)
-            }
-        })?;
+        let file = std_opts
+            .open(&full)
+            .map_err(|error| file_op_err("open", &full, &error))?;
         Ok(Box::new(RealFile { file }))
     }
 }
@@ -354,16 +350,17 @@ impl Fs for RealFs {
                     // write-through fast path above for ordinary WAL sealing;
                     // staged replacements also sync their parent directory.
                     return fs::rename(&from_full, &to_full)
-                        .map_err(|error| io_err("rename", &to_full, &error));
+                        .map_err(|error| file_op_err("rename", &to_full, &error));
                 }
-                return Err(io_err("rename", &to_full, &error));
+                return Err(file_op_err("rename", &to_full, &error));
             }
             Ok(())
         }
 
         #[cfg(not(windows))]
         {
-            fs::rename(&from_full, &to_full).map_err(|e| io_err("rename", &to_full, &e))
+            fs::rename(&from_full, &to_full)
+                .map_err(|error| file_op_err("rename", &to_full, &error))
         }
     }
 }

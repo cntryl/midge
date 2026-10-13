@@ -244,27 +244,51 @@ impl std::fmt::Debug for SpillDiskBudget {
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct OwnedSpillPaths(parking_lot::Mutex<Vec<FsPath>>);
+
+impl OwnedSpillPaths {
+    pub(super) fn track(&self, path: &FsPath) {
+        let mut paths = self.0.lock();
+        if !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+
+    pub(super) fn forget(&self, path: &FsPath) {
+        self.0.lock().retain(|owned| owned != path);
+    }
+
+    fn remove_all(&self, root: &dyn Fs) -> bool {
+        let mut paths = self.0.lock();
+        let owned = std::mem::take(&mut *paths);
+        let mut failed = Vec::new();
+        for path in owned {
+            match root.remove_file(&path) {
+                Ok(()) | Err(FsError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(path = %path.0.as_str(), %error, "failed to remove owned transaction spill file");
+                    failed.push(path);
+                }
+            }
+        }
+        let removed = failed.is_empty();
+        *paths = failed;
+        removed
+    }
+}
+
 #[derive(Debug)]
 struct SpillDiskCharge {
     budget: SpillDiskBudget,
     bytes: u64,
     root: SpillRoot,
-    paths: [FsPath; 4],
+    owned_paths: Arc<OwnedSpillPaths>,
 }
 
 impl Drop for SpillDiskCharge {
     fn drop(&mut self) {
-        let mut removed = true;
-        for path in &self.paths {
-            match self.root.remove_file(path) {
-                Ok(()) | Err(FsError::NotFound(_)) => {}
-                Err(error) => {
-                    removed = false;
-                    tracing::warn!(path = path.0, %error, "retaining transaction spill disk charge after cleanup failure");
-                }
-            }
-        }
-        if removed {
+        if self.owned_paths.remove_all(&*self.root) {
             self.budget.0.release_local_scratch_bytes(self.bytes);
         }
     }

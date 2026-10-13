@@ -139,9 +139,11 @@ pub(super) fn write_range_index_file(
     root: &dyn Fs,
     path: &FsPath,
     ops: &[OrdinalOp],
+    owned_paths: &super::OwnedSpillPaths,
 ) -> MidgeResult<()> {
     let nodes = build_range_nodes(ops)?;
     let mut file = create_spill_file(root, path)?;
+    owned_paths.track(path);
     file.write_all(&[0; RANGE_HEADER_LEN])?;
     let table_bytes = range_tables_len(nodes.len()).ok_or_else(|| {
         MidgeError::ResourceLimit("transaction range index table overflow".to_string())

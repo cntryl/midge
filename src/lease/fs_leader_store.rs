@@ -21,6 +21,7 @@ use std::sync::Arc;
 /// Well-known filename for the leader record.
 const LEADER_RECORD_FILE: &str = ".midge_leader";
 const LEADER_LOCK_FILE: &str = ".midge_leader.lock";
+const WRITER_EFFECT_LOCK_FILE: &str = ".midge_writer_effect.lock";
 const METADATA_POINTER_FILE: &str = ".midge_shared_metadata";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -60,8 +61,7 @@ impl FsLeaderStore {
         format!("holder_id={holder_id}\nowner_token={owner_token}\ncreated_at={created_at}\n")
     }
 
-    fn read_lock_contents(&self) -> Result<Option<String>, LeaseError> {
-        let lock_path = FsPath::new(LEADER_LOCK_FILE);
+    fn read_lock_contents(&self, lock_path: &FsPath) -> Result<Option<String>, LeaseError> {
         match self.fs.exists(&lock_path) {
             Ok(false) => return Ok(None),
             Ok(true) => {}
@@ -108,19 +108,21 @@ impl FsLeaderStore {
     /// Remove the acquisition lock only while it still carries the ownership
     /// token observed by the caller. A stale guard or cleanup attempt must not
     /// unlink a lock created by a newer acquirer.
-    fn remove_lock_if_owner(&self, expected_owner_token: &str) -> Result<bool, LeaseError> {
-        let Some(content) = self.read_lock_contents()? else {
+    fn remove_lock_if_owner(
+        &self,
+        lock_path: &FsPath,
+        expected_owner_token: &str,
+    ) -> Result<bool, LeaseError> {
+        let Some(content) = self.read_lock_contents(lock_path)? else {
             return Ok(false);
         };
         if Self::parse_lock_owner_token(&content) != Some(expected_owner_token) {
             return Ok(false);
         }
 
-        self.fs
-            .remove_file(&FsPath::new(LEADER_LOCK_FILE))
-            .map_err(|error| {
-                LeaseError::IoError(format!("failed to remove leader lock: {error}"))
-            })?;
+        self.fs.remove_file(lock_path).map_err(|error| {
+            LeaseError::IoError(format!("failed to remove lease lock: {error}"))
+        })?;
         self.fs
             .sync_dir(&FsPath::new("."), Durability::Durable)
             .map_err(|error| {
@@ -130,46 +132,62 @@ impl FsLeaderStore {
     }
 
     fn acquire_lock(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
-        let lock_path = FsPath::new(LEADER_LOCK_FILE);
+        self.acquire_lock_at(holder_id, FsPath::new(LEADER_LOCK_FILE), "lease mutation")
+    }
+
+    fn acquire_writer_effect_lock(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
+        self.acquire_lock_at(
+            holder_id,
+            FsPath::new(WRITER_EFFECT_LOCK_FILE),
+            "writer storage effect",
+        )
+    }
+
+    fn acquire_lock_at(
+        &self,
+        holder_id: &str,
+        lock_path: FsPath,
+        purpose: &str,
+    ) -> Result<LockGuard<'_>, LeaseError> {
         let now = self.clock.now();
         let owner_token = uuid::Uuid::new_v4().to_string();
         let payload = Self::lock_contents(holder_id, &owner_token, &now.to_rfc3339());
 
         match self.fs.open(
-                &lock_path,
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: true,
-                    create_new: true,
-                    truncate: false,
-                },
-            ) {
-                Ok(mut lock_file) => {
-                    let initialized = lock_file
-                        .write_at(0, bytes::Bytes::from(payload.clone()))
-                        .and_then(|()| lock_file.sync(Durability::Durable));
-                    drop(lock_file);
-                    if let Err(error) = initialized {
-                        // create_new succeeded, so this process owns the file
-                        // and no one else can depend on it. Leaving it would
-                        // block every later lease mutation until an operator
-                        // removed it by hand.
-                        if let Err(remove_error) = self.fs.remove_file(&lock_path) {
-                            tracing::warn!(%remove_error, "failed to remove partially initialized leader lock");
-                        }
-                        return Err(LeaseError::IoError(format!(
-                            "failed to initialize leader lock: {error}"
-                        )));
+            &lock_path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        ) {
+            Ok(mut lock_file) => {
+                let initialized = lock_file
+                    .write_at(0, bytes::Bytes::from(payload))
+                    .and_then(|()| lock_file.sync(Durability::Durable));
+                drop(lock_file);
+                if let Err(error) = initialized {
+                    // create_new succeeded, so this process owns the file
+                    // and no one else can depend on it. Leaving it would
+                    // block later operations until an operator removed it.
+                    if let Err(remove_error) = self.fs.remove_file(&lock_path) {
+                        tracing::warn!(%remove_error, "failed to remove partially initialized lease lock");
                     }
-                    Ok(LockGuard {
-                        store: self,
-                        owner_token,
-                    })
+                    return Err(LeaseError::IoError(format!(
+                        "failed to initialize lease lock: {error}"
+                    )));
                 }
-                Err(error) => Err(LeaseError::AcquisitionFailed(format!(
-                    "another lease mutation is in progress: {error}; automatic stale-lock removal is unsafe because filesystem renames are not cancellable"
-                ))),
+                Ok(LockGuard {
+                    store: self,
+                    owner_token,
+                    lock_path,
+                })
             }
+            Err(error) => Err(LeaseError::AcquisitionFailed(format!(
+                "another {purpose} is in progress: {error}; automatic stale-lock removal is unsafe because filesystem renames are not cancellable"
+            ))),
+        }
     }
 }
 
@@ -392,17 +410,62 @@ impl LeaderStore for FsLeaderStore {
             )
         })
     }
+
+    fn with_writer_epoch(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: std::time::Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "writer effect deadline exhausted".into(),
+            ));
+        }
+        let _effect_lock = self.acquire_writer_effect_lock(expected_holder_id)?;
+        self.validate_epoch(expected_holder_id, expected_epoch)?;
+        operation();
+        Ok(())
+    }
+
+    fn validate_epoch(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+    ) -> Result<(), LeaseError> {
+        match self.read_current()? {
+            Some(record)
+                if record.holder_id == expected_holder_id
+                    && record.epoch == expected_epoch
+                    && record.acquired_at != RELEASED_TIMESTAMP =>
+            {
+                Ok(())
+            }
+            Some(record) => Err(LeaseError::RenewalFailed(format!(
+                "epoch/holder mismatch or released lease: expected holder={expected_holder_id} epoch={expected_epoch}, found holder={} epoch={}",
+                record.holder_id, record.epoch
+            ))),
+            None => Err(LeaseError::RenewalFailed(
+                "leader record missing".to_string(),
+            )),
+        }
+    }
 }
 
 struct LockGuard<'a> {
     store: &'a FsLeaderStore,
     owner_token: String,
+    lock_path: FsPath,
 }
 
 impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
-        if let Err(error) = self.store.remove_lock_if_owner(&self.owner_token) {
-            tracing::warn!(%error, "failed to release leader acquisition lock");
+        if let Err(error) = self
+            .store
+            .remove_lock_if_owner(&self.lock_path, &self.owner_token)
+        {
+            tracing::warn!(%error, "failed to release lease lock");
         }
     }
 }
@@ -439,6 +502,7 @@ impl FsLeaderStore {
         V: FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
         P: FnOnce(&LeaderRecord) -> Result<(), LeaseError>,
     {
+        let _effect_lock = self.acquire_writer_effect_lock(holder_id)?;
         let _lock = self.acquire_lock(holder_id)?;
         let current = self.read_current()?;
         validate_current(current.as_ref())?;
@@ -474,7 +538,10 @@ impl FsLeaderStore {
         // Read current record and verify ownership
         let current = self.read_current()?;
         match current {
-            Some(rec) if rec.holder_id == holder_id && rec.epoch == expected_epoch => {}
+            Some(rec)
+                if rec.holder_id == holder_id
+                    && rec.epoch == expected_epoch
+                    && rec.acquired_at != RELEASED_TIMESTAMP => {}
             Some(rec) => {
                 return Err(LeaseError::RenewalFailed(format!(
                     "leader record changed: expected holder={} epoch={}, got holder={} epoch={}",
@@ -536,6 +603,7 @@ impl FsLeaderStore {
         holder_id: &str,
         expected_epoch: u64,
     ) -> Result<bool, LeaseError> {
+        let _effect_lock = self.acquire_writer_effect_lock(holder_id)?;
         let lock = self.acquire_lock(holder_id)?;
         let Some(current) = self.read_current()? else {
             return Ok(false);
@@ -557,7 +625,7 @@ impl FsLeaderStore {
             format_leader_record(&released).as_bytes(),
             LeaseError::IoError,
         )?;
-        self.remove_lock_if_owner(&lock.owner_token)?;
+        self.remove_lock_if_owner(&lock.lock_path, &lock.owner_token)?;
         Ok(true)
     }
 
@@ -984,6 +1052,78 @@ mod tests {
     }
 
     #[test]
+    fn should_skip_writer_effect_when_successor_owns_the_epoch() {
+        // Arrange
+        let store = make_store();
+        let predecessor = store.acquire_leadership("predecessor").unwrap();
+        let successor = store.acquire_leadership("successor").unwrap();
+        let mut effect_ran = false;
+
+        // Act
+        let result = store.with_writer_epoch(
+            "predecessor",
+            predecessor.epoch,
+            std::time::Duration::from_secs(1),
+            &mut || effect_ran = true,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert!(!effect_ran);
+        assert_eq!(
+            store.read_current().unwrap().unwrap().epoch,
+            successor.epoch
+        );
+    }
+
+    #[test]
+    fn should_finish_an_admitted_writer_effect_before_successor_acquisition() {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let predecessor_store = Arc::new(FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::clock::LeaseClock::default(),
+        ));
+        let successor_store = FsLeaderStore::new(fs, crate::lease::clock::LeaseClock::default());
+        let predecessor = predecessor_store.acquire_leadership("predecessor").unwrap();
+        let effect_entered = Arc::new(Barrier::new(2));
+        let effect_continue = Arc::new(Barrier::new(2));
+        let effect_store = Arc::clone(&predecessor_store);
+        let effect_entered_worker = Arc::clone(&effect_entered);
+        let effect_continue_worker = Arc::clone(&effect_continue);
+
+        // Act: hold the real writer-effect fence after validation. A successor
+        // using another store instance must wait until that admitted effect ends.
+        let writer = thread::spawn(move || {
+            let mut operation = || {
+                effect_entered_worker.wait();
+                effect_continue_worker.wait();
+            };
+            effect_store.with_writer_epoch(
+                "predecessor",
+                predecessor.epoch,
+                std::time::Duration::from_secs(1),
+                &mut operation,
+            )
+        });
+        effect_entered.wait();
+        let while_effect_is_active = successor_store.acquire_leadership("successor");
+        effect_continue.wait();
+        writer.join().expect("writer thread completed").unwrap();
+        let successor = successor_store
+            .acquire_leadership("successor")
+            .expect("successor acquires after writer effect completes");
+
+        // Assert
+        assert!(matches!(
+            while_effect_is_active,
+            Err(LeaseError::AcquisitionFailed(_))
+        ));
+        assert_eq!(successor.holder_id, "successor");
+        assert!(successor.epoch > predecessor.epoch);
+    }
+
+    #[test]
     fn should_strictly_increase_epoch_when_multiple_acquisitions() {
         // Arrange
         let store = make_store();
@@ -1080,6 +1220,51 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_writer_effect_after_clean_release() {
+        // Arrange
+        let store = make_store();
+        let released = store.acquire_leadership("node-a").unwrap();
+        assert!(store.release_if_owner("node-a", released.epoch).unwrap());
+        let mut effect_ran = false;
+
+        // Act
+        let result = store.with_writer_epoch(
+            "node-a",
+            released.epoch,
+            std::time::Duration::from_secs(1),
+            &mut || effect_ran = true,
+        );
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert!(!effect_ran);
+    }
+
+    #[test]
+    fn should_allow_successor_after_power_loss_follows_completed_release() {
+        // Arrange
+        let device = crate::simulation::crash_fs::CrashDevice::new();
+        let first_store = FsLeaderStore::new(
+            Arc::new(device.fs()),
+            crate::lease::clock::LeaseClock::default(),
+        );
+        let first = first_store.acquire_leadership("first").unwrap();
+
+        // Act
+        assert!(first_store.release_if_owner("first", first.epoch).unwrap());
+        device.power_loss(0);
+        let successor_store = FsLeaderStore::new(
+            Arc::new(device.fs()),
+            crate::lease::clock::LeaseClock::default(),
+        );
+        let successor = successor_store.acquire_leadership("successor").unwrap();
+
+        // Assert
+        assert!(successor.epoch > first.epoch);
+        assert_eq!(successor.holder_id, "successor");
+    }
+
+    #[test]
     fn should_reject_stale_refresh_after_new_holder_acquires() {
         // Arrange
         let store = make_store();
@@ -1123,6 +1308,46 @@ mod tests {
     }
 
     #[test]
+    fn should_fail_closed_when_power_loss_interrupts_acquisition_lock() {
+        // Arrange: stop at the real acquisition mutation lock before the
+        // leader record can be published.
+        let device = crate::simulation::crash_fs::CrashDevice::new();
+        let interrupted_store = FsLeaderStore::new(
+            Arc::new(device.fs()),
+            crate::lease::clock::LeaseClock::default(),
+        );
+        let lock = interrupted_store
+            .acquire_writer_effect_lock("interrupted")
+            .expect("acquire writer effect lock");
+
+        // Act
+        device.power_loss(0);
+        for seed in 0..64 {
+            let fork = device.fork();
+            fork.power_loss(seed);
+            let successor_store = FsLeaderStore::new(
+                Arc::new(fork.fs()),
+                crate::lease::clock::LeaseClock::default(),
+            );
+
+            // Assert: the uncommitted acquisition either leaves its lock and
+            // blocks a new owner, or loses the lock name and permits a fresh
+            // first epoch. It never publishes a false predecessor owner.
+            match successor_store.acquire_leadership("successor") {
+                Ok(record) => {
+                    assert_eq!(record.epoch, 1);
+                    assert_eq!(record.holder_id, "successor");
+                }
+                Err(LeaseError::AcquisitionFailed(_)) => {
+                    assert!(successor_store.read_current().unwrap().is_none());
+                }
+                Err(error) => panic!("unexpected interrupted acquisition result: {error:?}"),
+            }
+        }
+        drop(lock);
+    }
+
+    #[test]
     fn should_reject_takeover_given_renewal_write_still_owns_mutation_lock() {
         // Arrange
         let fs = Arc::new(MockFs::new());
@@ -1162,7 +1387,7 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
         let current = store
-            .read_lock_contents()
+            .read_lock_contents(&lock_path)
             .expect("read owned lock")
             .expect("owned lock remains present");
         assert_eq!(

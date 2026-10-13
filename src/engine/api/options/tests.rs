@@ -1,5 +1,21 @@
 use super::*;
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_apply_fast_cloud_retry_policy_when_test_builder_is_used() {
+    // Arrange and Act
+    let options = OpenOptions::in_memory()
+        .fast_cloud_retries_for_testing()
+        .build()
+        .expect("test options");
+
+    // Assert
+    assert_eq!(
+        options.retry_policy(),
+        crate::runtime::RuntimeRetryPolicy::fast_for_testing()
+    );
+}
+
 #[test]
 fn should_leave_startup_unbounded_when_no_open_timeout_is_configured() {
     // Arrange

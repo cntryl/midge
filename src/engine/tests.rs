@@ -399,10 +399,13 @@ fn install_blocking_renewal_lease(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let healthy = heartbeat.healthy_flag();
     heartbeat.stop();
-    if let Some(original_lease) = engine.lease_state.lease.take() {
-        original_lease.release()?;
+    // Keep the filesystem writer record current while replacing only the
+    // heartbeat used by this test. Releasing it would correctly fence every
+    // later WAL effect through the runtime's still-installed leader store.
+    drop(engine.lease_state.lease.take());
+    if let Some(guard) = engine.lease_state.guard.take() {
+        guard.disarm_for_test();
     }
-    engine.lease_state.guard.take();
 
     let lease_guard = Arc::clone(lease).try_acquire()?;
     let engine_lease: Arc<dyn crate::lease::PrimaryLease> = lease.clone();
@@ -425,7 +428,19 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard, None)?;
+    if let Some(heartbeat) = lease_heartbeat {
+        let mut heartbeat = heartbeat
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        heartbeat.stop();
+    }
+    // This fixture replaces the PrimaryLease implementation while the WAL
+    // actor keeps using the engine's filesystem LeaderStore. Retain its
+    // current epoch for the later shutdown retry; the temp directory owns it.
+    drop(lease);
+    if let Some(lease_guard) = lease_guard {
+        lease_guard.disarm_for_test();
+    }
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;

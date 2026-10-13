@@ -26,6 +26,7 @@ fn commit(
         9,
         catalog,
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
+        None,
         &|| Ok(()),
         &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
     )
@@ -266,6 +267,7 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
         9,
         &catalog,
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
+        None,
         &|| {
             check
                 .remaining(9)

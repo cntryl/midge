@@ -453,7 +453,7 @@ mod tests {
 
     struct PanickingSyncWriter(std::sync::atomic::AtomicBool);
 
-    struct StaleWriterLeaderStore;
+    struct StaleWriterLeaderStore(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl crate::lease::LeaderStore for StaleWriterLeaderStore {
         fn acquire_leadership(
@@ -468,9 +468,10 @@ mod tests {
         fn read_current(
             &self,
         ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            let stale = self.0.load(std::sync::atomic::Ordering::SeqCst);
             Ok(Some(crate::lease::LeaderRecord {
-                epoch: 2,
-                holder_id: "new-writer".to_string(),
+                epoch: if stale { 2 } else { 1 },
+                holder_id: if stale { "new-writer" } else { "old-writer" }.to_string(),
                 acquired_at: "test".to_string(),
             }))
         }
@@ -478,7 +479,7 @@ mod tests {
 
     /// A leader store that cannot be reached, so writer authority cannot be
     /// proven either way.
-    struct UnreachableLeaderStore;
+    struct UnreachableLeaderStore(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl crate::lease::LeaderStore for UnreachableLeaderStore {
         fn acquire_leadership(
@@ -493,9 +494,17 @@ mod tests {
         fn read_current(
             &self,
         ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
-            Err(crate::lease::LeaseError::IoError(
-                "leader store unreachable".to_string(),
-            ))
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(Some(crate::lease::LeaderRecord {
+                    epoch: 1,
+                    holder_id: "writer".to_string(),
+                    acquired_at: "test".to_string(),
+                }))
+            } else {
+                Err(crate::lease::LeaseError::IoError(
+                    "leader store unreachable".to_string(),
+                ))
+            }
         }
     }
 
@@ -616,12 +625,13 @@ mod tests {
     #[test]
     fn should_report_one_fence_cause_when_sync_cannot_prove_writer_authority(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: an unreachable leader store is not a lost lease, but the
-        // actor conservatively fences as if authority were lost. The protocol
-        // must report the same cause, not a local poison (#537 review).
+        // Arrange: the leader store becomes unreachable after one valid WAL
+        // append. The protocol must report that same cause, not a local poison.
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(UnreachableLeaderStore);
+        let authority_available = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let leader_store: Arc<dyn crate::lease::LeaderStore> =
+            Arc::new(UnreachableLeaderStore(Arc::clone(&authority_available)));
         let config = RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             writer_epoch: 1,
@@ -647,6 +657,7 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
+        authority_available.store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = event_loop.sync_wal_generation(CompletionSource::WalSync);
 
         // Act
@@ -682,7 +693,9 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
-        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(StaleWriterLeaderStore);
+        let stale_authority = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leader_store: Arc<dyn crate::lease::LeaderStore> =
+            Arc::new(StaleWriterLeaderStore(Arc::clone(&stale_authority)));
         let config = RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             writer_epoch: 1,
@@ -714,6 +727,7 @@ mod tests {
                 conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
+        stale_authority.store(true, std::sync::atomic::Ordering::SeqCst);
         let request_id = 79;
         let response = router.register(request_id, "CloudDurability");
         event_loop

@@ -180,15 +180,17 @@ impl Campaign {
 
     fn options(&self) -> OpenOptions {
         let root: Arc<dyn Fs> = Arc::new(self.device.fs());
-        self.config
+        let builder = self
+            .config
             .mode
             .open_builder(self.named.path(), &self.view)
             .background_compaction(false)
             .lease_ttl(self.config.lease_ttl())
             .lease_clock_for_testing(Arc::new(self.clock.clone()))
-            .filesystem_for_testing(root)
-            .build()
-            .expect("open options")
+            .filesystem_for_testing(root);
+        #[cfg(feature = "failpoints")]
+        let builder = builder.fast_cloud_retries_for_testing();
+        builder.build().expect("open options")
     }
     fn engine(&self) -> &Engine {
         self.engine.as_ref().expect("engine is open")

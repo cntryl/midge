@@ -1567,10 +1567,11 @@ fn should_answer_outcome_unknown_when_group_append_is_partly_written_and_authori
         fixture
             .event_loop
             .wal_actor
-            .set_write_authority_for_test(Arc::new(move || {
+            .set_write_authority_for_test(Arc::new(move |operation: &mut dyn FnMut()| {
                 if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
                     Err(MidgeError::Fenced("test writer authority lost".to_string()))
                 } else {
+                    operation();
                     Ok(())
                 }
             }));

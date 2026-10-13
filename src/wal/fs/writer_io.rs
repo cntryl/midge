@@ -143,7 +143,8 @@ impl FsWalWriterIo {
         authority: Option<crate::wal::traits::WriteAuthority>,
     ) -> MidgeResult<Self> {
         if let Some(check) = &authority {
-            check()?;
+            let mut no_op = || {};
+            check(&mut no_op)?;
         }
         let path = FsPath::new(path_str);
         // The segment holds exactly its header, which the WAL history wrote
@@ -171,7 +172,8 @@ impl FsWalWriterIo {
         let header = SegmentHeader::decode(&header_bytes)?;
         drop(file);
         if let Some(check) = &authority {
-            check()?;
+            let mut no_op = || {};
+            check(&mut no_op)?;
         }
 
         let writer = Self {
@@ -587,9 +589,11 @@ mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
     use crate::io::{Durability, File, FsResult, OpenOptions, ReadFs};
+    use crate::lease::LeaderStore;
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
 
     fn writer_without_background_worker() -> FsWalWriterIo {
         FsWalWriterIo {
@@ -1060,11 +1064,13 @@ mod tests {
             fs.clone(),
             Duration::from_secs(5),
             crate::telemetry::CounterSink::default(),
-            Some(Arc::new(move || {
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))
+                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))?;
+                operation();
+                Ok(())
             })),
         )?;
         validity.expire_for_test();
@@ -1073,6 +1079,76 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
         assert_eq!(fs.durable_sync_count.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_hold_filesystem_writer_fence_around_background_append() -> MidgeResult<()> {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::LeaseClock::default(),
+        ));
+        let predecessor = store.acquire_leadership("predecessor").unwrap();
+        let predecessor_epoch = predecessor.epoch;
+        create_test_segment(fs.as_ref(), "wal.log")?;
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let authority_store = Arc::clone(&store);
+        let authority_entered = Arc::clone(&entered);
+        let authority_resume = Arc::clone(&resume);
+        let authority_calls = Arc::clone(&calls);
+        let writer = Arc::new(FsWalWriterIo::new_with_authority(
+            "wal.log",
+            Arc::clone(&fs),
+            Duration::from_secs(5),
+            crate::telemetry::CounterSink::default(),
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
+                let call = authority_calls.fetch_add(1, Ordering::SeqCst);
+                let mut run = || {
+                    if call >= 2 {
+                        authority_entered.wait();
+                        authority_resume.wait();
+                    }
+                    operation();
+                };
+                authority_store
+                    .with_writer_epoch(
+                        "predecessor",
+                        predecessor_epoch,
+                        Duration::from_secs(1),
+                        &mut run,
+                    )
+                    .map_err(|error| error.into_validation_error("background WAL append"))
+            })),
+        )?);
+        let append_writer = Arc::clone(&writer);
+
+        // Act: pause inside the actual background write while its epoch guard
+        // is held, then try takeover from a second store handle.
+        let append = std::thread::spawn(move || {
+            append_writer.append_record(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"fenced-key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            ))
+        });
+        entered.wait();
+        let blocked_successor = store.acquire_leadership("successor");
+        resume.wait();
+        append.join().expect("append thread completed")?;
+        let successor = store.acquire_leadership("successor").unwrap();
+
+        // Assert
+        assert!(matches!(
+            blocked_successor,
+            Err(crate::lease::LeaseError::AcquisitionFailed(_))
+        ));
+        assert!(successor.epoch > predecessor.epoch);
+        drop(writer);
         Ok(())
     }
 
@@ -1096,11 +1172,13 @@ mod tests {
             fs.clone(),
             Duration::from_secs(10),
             crate::telemetry::CounterSink::default(),
-            Some(Arc::new(move || {
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("queued WAL authority"))
+                    .map_err(|error| error.into_validation_error("queued WAL authority"))?;
+                operation();
+                Ok(())
             })),
         )?);
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();

@@ -158,6 +158,19 @@ impl LeaderStore for StartupLeaderStore {
         })
     }
 
+    fn with_writer_epoch(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        self.within_operation(timeout, "writer storage effect", |timeout| {
+            self.inner
+                .with_writer_epoch(holder_id, epoch, timeout, operation)
+        })
+    }
+
     // Renewal and release are fencing lifecycle operations. The startup
     // owner retains the original store; its cleanup/heartbeat budget survives
     // cancellation even if a caller keeps this private authority view.

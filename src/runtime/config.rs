@@ -44,6 +44,38 @@ impl Default for CloudRuntimePolicy {
     }
 }
 
+/// Delays for cloud retry schedules owned by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeRetryPolicy {
+    pub cloud_seal: Duration,
+    pub cloud_wal: Duration,
+    pub cloud_delete: Duration,
+    pub manifest_reclamation: Duration,
+}
+
+impl RuntimeRetryPolicy {
+    #[cfg(any(test, feature = "failpoints"))]
+    pub(crate) fn fast_for_testing() -> Self {
+        Self {
+            cloud_seal: Duration::from_millis(10),
+            cloud_wal: Duration::from_millis(10),
+            cloud_delete: Duration::from_millis(10),
+            manifest_reclamation: Duration::from_millis(10),
+        }
+    }
+}
+
+impl Default for RuntimeRetryPolicy {
+    fn default() -> Self {
+        Self {
+            cloud_seal: Duration::from_secs(1),
+            cloud_wal: Duration::from_secs(1),
+            cloud_delete: Duration::from_secs(1),
+            manifest_reclamation: Duration::from_secs(1),
+        }
+    }
+}
+
 /// Runtime configuration for wiring durability/storage behavior.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -57,6 +89,7 @@ pub struct RuntimeConfig {
     /// default; deterministic shutdown tests inject a shorter budget.
     pub(crate) shutdown_cloud_drain_timeout: Duration,
     pub cloud_runtime_policy: CloudRuntimePolicy,
+    pub(crate) retry_policy: RuntimeRetryPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
@@ -128,6 +161,7 @@ impl Default for RuntimeConfig {
             runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
             shutdown_cloud_drain_timeout: crate::config::DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT,
             cloud_runtime_policy: CloudRuntimePolicy::default(),
+            retry_policy: RuntimeRetryPolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
@@ -156,6 +190,33 @@ impl Default for RuntimeConfig {
             max_replayable_txn_bytes: None,
             startup_observer: None,
             startup_scope: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn should_keep_cloud_retry_delays_out_of_cfg_test_constants() {
+        // Arrange
+        let sources = [
+            include_str!("durability.rs"),
+            include_str!("event_loop/coordination.rs"),
+            include_str!("actors/gc.rs"),
+        ];
+
+        // Act and Assert
+        for source in sources {
+            let lines = source.lines().collect::<Vec<_>>();
+            for pair in lines.windows(2) {
+                assert!(
+                    !(pair[0].trim() == "#[cfg(test)]"
+                        && pair[1].trim_start().starts_with("const ")
+                        && pair[1].contains("_RETRY_DELAY")),
+                    "retry delays must come from RuntimeRetryPolicy, not cfg(test) constants: {}",
+                    pair[1].trim()
+                );
+            }
         }
     }
 }

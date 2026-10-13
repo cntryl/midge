@@ -297,6 +297,25 @@ fn should_refuse_append_when_edit_does_not_apply() {
 }
 
 #[test]
+fn should_refuse_append_when_ledger_changes_without_changing_length() {
+    // Arrange
+    let fs = mock_fs();
+    let ledger = genesis_ledger();
+    let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    let mut successor_image = ledger_bytes(&fs);
+    let last = successor_image.last_mut().expect("snapshot has bytes");
+    *last ^= 1;
+    write_ledger_bytes(&fs, &successor_image);
+
+    // Act
+    let result = store.append(&rotate(1));
+
+    // Assert: a same-size rewrite is not the cached image this writer opened.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert_eq!(ledger_bytes(&fs), successor_image);
+}
+
+#[test]
 fn should_report_torn_when_final_frame_is_truncated() {
     // Arrange
     let fs = mock_fs();

@@ -452,6 +452,15 @@ impl LeaseGuard {
             }
         }
     }
+
+    /// Disarm release when a test replaces only the heartbeat implementation
+    /// but keeps the filesystem writer record active for WAL effect checks.
+    #[cfg(test)]
+    pub(crate) fn disarm_for_test(self) {
+        if let Ok(mut guard) = self.release_fn.lock() {
+            guard.take();
+        }
+    }
 }
 
 impl Drop for LeaseGuard {
@@ -899,6 +908,23 @@ pub trait LeaderStore: Send + Sync {
         _timeout: Duration,
     ) -> Result<(), LeaseError> {
         self.validate_epoch(expected_holder_id, expected_epoch)
+    }
+
+    /// Run one writer-owned storage effect only while this holder and epoch
+    /// remain current. Stores with a local mutation lock override this to
+    /// serialize the validation and effect with takeover; provider stores
+    /// validate immediately before the local effect. Shared cloud publication
+    /// still requires its own conditional commit at the provider boundary.
+    fn with_writer_epoch(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)?;
+        operation();
+        Ok(())
     }
 }
 

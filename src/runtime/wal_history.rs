@@ -18,10 +18,75 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
+use crate::lease::LeaderStore;
 use crate::wal::format::{holds_no_records, ChainLink, SealedFacts, SegmentHeader, SegmentScan};
 use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts, SegmentId, WalLedger};
 use crate::wal::ledger_store::{LedgerStore, LEDGER_FILE};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Current ownership required for one durable WAL history mutation.
+#[derive(Clone)]
+pub(crate) struct WalHistoryFence {
+    store: Arc<dyn LeaderStore>,
+    holder_id: String,
+    writer_epoch: u64,
+    timeout: Duration,
+}
+
+impl WalHistoryFence {
+    pub(crate) fn new(
+        store: Arc<dyn LeaderStore>,
+        holder_id: String,
+        writer_epoch: u64,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            store,
+            holder_id,
+            writer_epoch,
+            timeout,
+        }
+    }
+}
+
+fn with_writer_fence<T>(
+    fence: Option<&WalHistoryFence>,
+    writer_epoch: u64,
+    operation: impl FnOnce() -> MidgeResult<T>,
+) -> MidgeResult<T> {
+    let Some(fence) = fence else {
+        return operation();
+    };
+    if fence.writer_epoch != writer_epoch {
+        return Err(MidgeError::Fenced(format!(
+            "WAL history epoch changed from fenced epoch {} to {writer_epoch}",
+            fence.writer_epoch
+        )));
+    }
+
+    let mut operation = Some(operation);
+    let mut result = None;
+    let mut run = || {
+        if let Some(operation) = operation.take() {
+            result = Some(operation());
+        }
+    };
+    fence
+        .store
+        .with_writer_epoch(
+            &fence.holder_id,
+            fence.writer_epoch,
+            fence.timeout,
+            &mut run,
+        )
+        .map_err(MidgeError::from)?;
+    result.unwrap_or_else(|| {
+        Err(MidgeError::Internal(
+            "writer authority completed without running its storage effect".into(),
+        ))
+    })
+}
 
 /// Where a [`WalHistory`] persists its ledger edits.
 pub(crate) trait LedgerJournal: Send {
@@ -79,6 +144,7 @@ pub(crate) struct WalHistory {
     segments: Option<Arc<dyn Fs>>,
     journal: Box<dyn LedgerJournal>,
     epoch: u64,
+    fence: Option<WalHistoryFence>,
 }
 
 impl std::fmt::Debug for WalHistory {
@@ -117,15 +183,64 @@ impl WalHistory {
     /// the files it does not name. A database without one starts a new
     /// history in segment `first_open`.
     pub(crate) fn open(wal: Arc<dyn Fs>, first_open: SegmentId, epoch: u64) -> MidgeResult<Self> {
-        match Self::load(Arc::clone(&wal), epoch)? {
+        Self::open_inner(wal, first_open, epoch, None)
+    }
+
+    /// [`Self::open`] bound to the acquired writer lease for all ledger and
+    /// segment effects performed during recovery initialization.
+    pub(crate) fn open_with_fence(
+        wal: Arc<dyn Fs>,
+        first_open: SegmentId,
+        epoch: u64,
+        fence: WalHistoryFence,
+    ) -> MidgeResult<Self> {
+        with_writer_fence(Some(&fence), epoch, || {
+            Self::open_inner(wal, first_open, epoch, Some(fence.clone()))
+        })
+    }
+
+    fn open_inner(
+        wal: Arc<dyn Fs>,
+        first_open: SegmentId,
+        epoch: u64,
+        fence: Option<WalHistoryFence>,
+    ) -> MidgeResult<Self> {
+        match Self::load_inner(Arc::clone(&wal), epoch, fence.clone())? {
             Some(history) => Ok(history),
-            None => Self::genesis(wal, epoch, ChainLink::GENESIS, first_open),
+            None => Self::genesis_inner(
+                wal,
+                epoch,
+                ChainLink::GENESIS,
+                first_open,
+                HolderId::new(),
+                fence,
+            ),
         }
     }
 
     /// Open the existing ledger in `wal` for writing and sweep the files it
     /// does not name; `None` when there is none.
     pub(crate) fn load(wal: Arc<dyn Fs>, epoch: u64) -> MidgeResult<Option<Self>> {
+        Self::load_inner(wal, epoch, None)
+    }
+
+    /// [`Self::load`] bound to the acquired writer lease while it republishes
+    /// the ledger and sweeps orphan files.
+    pub(crate) fn load_with_fence(
+        wal: Arc<dyn Fs>,
+        epoch: u64,
+        fence: WalHistoryFence,
+    ) -> MidgeResult<Option<Self>> {
+        with_writer_fence(Some(&fence), epoch, || {
+            Self::load_inner(wal, epoch, Some(fence.clone()))
+        })
+    }
+
+    fn load_inner(
+        wal: Arc<dyn Fs>,
+        epoch: u64,
+        fence: Option<WalHistoryFence>,
+    ) -> MidgeResult<Option<Self>> {
         let Some(store) = LedgerStore::open(Arc::clone(&wal))? else {
             return Ok(None);
         };
@@ -133,6 +248,7 @@ impl WalHistory {
             segments: Some(wal),
             journal: Box::new(store),
             epoch,
+            fence,
         };
         history.sweep_orphans()?;
         Ok(Some(history))
@@ -154,7 +270,28 @@ impl WalHistory {
         anchor: ChainLink,
         open: SegmentId,
     ) -> MidgeResult<Self> {
-        Self::genesis_as(wal, epoch, anchor, open, HolderId::new())
+        Self::genesis_inner(wal, epoch, anchor, open, HolderId::new(), None)
+    }
+
+    /// [`Self::genesis`] bound to the acquired writer lease across creation
+    /// of the segment and its authoritative ledger entry.
+    pub(crate) fn genesis_with_fence(
+        wal: Arc<dyn Fs>,
+        epoch: u64,
+        anchor: ChainLink,
+        open: SegmentId,
+        fence: WalHistoryFence,
+    ) -> MidgeResult<Self> {
+        with_writer_fence(Some(&fence), epoch, || {
+            Self::genesis_inner(
+                wal,
+                epoch,
+                anchor,
+                open,
+                HolderId::new(),
+                Some(fence.clone()),
+            )
+        })
     }
 
     /// [`Self::genesis`] for a fixed `holder`, so fixtures can build
@@ -167,15 +304,16 @@ impl WalHistory {
         open: SegmentId,
         holder: HolderId,
     ) -> MidgeResult<Self> {
-        Self::genesis_as(wal, epoch, anchor, open, holder)
+        Self::genesis_inner(wal, epoch, anchor, open, holder, None)
     }
 
-    fn genesis_as(
+    fn genesis_inner(
         wal: Arc<dyn Fs>,
         epoch: u64,
         anchor: ChainLink,
         open: SegmentId,
         holder: HolderId,
+        fence: Option<WalHistoryFence>,
     ) -> MidgeResult<Self> {
         wal.create_dir_all(&FsPath::new(""))
             .map_err(FsError::into_midge)?;
@@ -200,6 +338,7 @@ impl WalHistory {
             segments: Some(wal),
             journal: Box::new(store),
             epoch,
+            fence,
         };
         history.sweep_orphans()?;
         Ok(history)
@@ -220,6 +359,7 @@ impl WalHistory {
             segments: None,
             journal: Box::new(MemoryJournal { ledger }),
             epoch,
+            fence: None,
         }
     }
 
@@ -230,6 +370,15 @@ impl WalHistory {
     /// The WAL directory this history governs; `None` in memory mode.
     pub(crate) fn segment_files(&self) -> Option<Arc<dyn Fs>> {
         self.segments.clone()
+    }
+
+    fn under_writer_fence<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        let fence = self.fence.clone();
+        let epoch = self.epoch;
+        with_writer_fence(fence.as_ref(), epoch, || operation(self))
     }
 
     /// Make `edit` durable, then apply it. Every edit pairs with its file
@@ -281,6 +430,14 @@ impl WalHistory {
         sealed: SealedFacts,
         first_seq: u64,
     ) -> MidgeResult<PreparedRotation> {
+        self.under_writer_fence(|history| history.prepare_rotation_inner(sealed, first_seq))
+    }
+
+    fn prepare_rotation_inner(
+        &mut self,
+        sealed: SealedFacts,
+        first_seq: u64,
+    ) -> MidgeResult<PreparedRotation> {
         self.journal.heal()?;
         let ledger = self.ledger();
         let seal = ledger.open_segment();
@@ -312,6 +469,10 @@ impl WalHistory {
     /// The ledger write error; the rotation may or may not have become
     /// durable.
     pub(crate) fn record_rotation(&mut self, prepared: PreparedRotation) -> MidgeResult<()> {
+        self.under_writer_fence(|history| history.record_rotation_inner(prepared))
+    }
+
+    fn record_rotation_inner(&mut self, prepared: PreparedRotation) -> MidgeResult<()> {
         let PreparedRotation { sealed, open } = prepared;
         self.commit(&LedgerEdit::Rotate { sealed, open })
     }
@@ -338,6 +499,14 @@ impl WalHistory {
     /// The scan, I/O or ledger error; the open segment's records stay where
     /// they are.
     pub(crate) fn start_epoch(
+        &mut self,
+        epoch: u64,
+        first_seq: u64,
+    ) -> MidgeResult<Option<SealedSegment>> {
+        self.under_writer_fence(|history| history.start_epoch_inner(epoch, first_seq))
+    }
+
+    fn start_epoch_inner(
         &mut self,
         epoch: u64,
         first_seq: u64,
@@ -387,11 +556,15 @@ impl WalHistory {
     /// The ledger's refusal or write error; the reservation may or may not
     /// have become durable, so the caller hands out nothing past the old one.
     pub(crate) fn reserve(&mut self, through: u64) -> MidgeResult<()> {
-        self.commit(&LedgerEdit::Reserve { through })
+        self.under_writer_fence(|history| history.commit(&LedgerEdit::Reserve { through }))
     }
 
     /// Persist evidence of a completed WAL fsync before acknowledging it.
     pub(crate) fn record_sync(&mut self, through_bytes: u64) -> MidgeResult<()> {
+        self.under_writer_fence(|history| history.record_sync_inner(through_bytes))
+    }
+
+    fn record_sync_inner(&mut self, through_bytes: u64) -> MidgeResult<()> {
         if self
             .ledger()
             .open_member()
@@ -412,10 +585,12 @@ impl WalHistory {
         cut: crate::wal::planner::OpenCut,
         floor: u64,
     ) -> MidgeResult<()> {
-        self.commit(&LedgerEdit::SalvageOpen {
-            id: cut.id,
-            valid_bytes: cut.valid_bytes,
-            floor,
+        self.under_writer_fence(|history| {
+            history.commit(&LedgerEdit::SalvageOpen {
+                id: cut.id,
+                valid_bytes: cut.valid_bytes,
+                floor,
+            })
         })
     }
 
@@ -433,6 +608,10 @@ impl WalHistory {
         anchor: ChainLink,
         open_at_least: SegmentId,
     ) -> MidgeResult<()> {
+        self.under_writer_fence(|history| history.rebase_inner(anchor, open_at_least))
+    }
+
+    fn rebase_inner(&mut self, anchor: ChainLink, open_at_least: SegmentId) -> MidgeResult<()> {
         let wal = self.files_for("rebase")?;
         let ledger = self.ledger();
         let dropped: Vec<SegmentId> = ledger.members().collect();
@@ -489,6 +668,10 @@ impl WalHistory {
     /// Returns an error, removing nothing, if the ledger refuses or cannot
     /// record the new log start.
     pub(crate) fn retire_below(&mut self, to: SegmentId) -> MidgeResult<RetiredWal> {
+        self.under_writer_fence(|history| history.retire_below_inner(to))
+    }
+
+    fn retire_below_inner(&mut self, to: SegmentId) -> MidgeResult<RetiredWal> {
         let Some(wal) = self.segments.clone() else {
             self.commit(&LedgerEdit::AdvanceLogStart { to })?;
             return Ok(RetiredWal::default());
@@ -521,6 +704,14 @@ impl WalHistory {
     /// next salvage sets aside from the same point. After it, only the
     /// orphan sweep remains, and any open repeats it.
     pub(crate) fn set_aside(
+        &mut self,
+        set_aside: SetAside,
+        open_at_least: SegmentId,
+    ) -> MidgeResult<()> {
+        self.under_writer_fence(|history| history.set_aside_inner(set_aside, open_at_least))
+    }
+
+    fn set_aside_inner(
         &mut self,
         set_aside: SetAside,
         open_at_least: SegmentId,

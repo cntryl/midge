@@ -765,6 +765,9 @@ impl WalActor {
     ) {
         self.leader_store = Some(store);
         self.leader_holder_id = holder_id;
+        if let Some(writer) = self.writer() {
+            writer.set_write_authority(self.write_authority());
+        }
     }
 
     #[cfg(test)]
@@ -1020,12 +1023,35 @@ impl WalActor {
     }
 
     fn write_authority(&self) -> Option<crate::wal::traits::WriteAuthority> {
-        let validity = Arc::clone(self.lease_validity.as_ref()?);
+        let validity = self.lease_validity.clone();
+        let leader_store = self.leader_store.clone();
+        if validity.is_none() && leader_store.is_none() {
+            return None;
+        }
+        let holder_id = self.leader_holder_id.clone();
         let epoch = self.current_epoch;
-        Some(Arc::new(move || {
-            validity.remaining(epoch).map(|_| ()).map_err(|error| {
-                error.into_validation_error("monotonic writer lease validity lost")
-            })
+        let timeout = self.storage_io_timeout;
+        Some(Arc::new(move |operation: &mut dyn FnMut()| {
+            let mut validity_error = None;
+            let mut run = || {
+                if let Some(validity) = &validity {
+                    if let Err(error) = validity.remaining(epoch) {
+                        validity_error = Some(
+                            error.into_validation_error("monotonic writer lease validity lost"),
+                        );
+                        return;
+                    }
+                }
+                operation();
+            };
+            if let Some(store) = &leader_store {
+                store
+                    .with_writer_epoch(&holder_id, epoch, timeout, &mut run)
+                    .map_err(|error| error.into_validation_error("WAL writer storage effect"))?;
+            } else {
+                run();
+            }
+            validity_error.map_or(Ok(()), Err)
         }))
     }
 

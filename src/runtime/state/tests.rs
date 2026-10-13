@@ -2111,6 +2111,28 @@ fn should_retain_salvage_kept_sst_when_later_strict_cleanup_runs() {
     );
 }
 
+#[test]
+fn should_ignore_salvage_sst_that_vanishes_before_quarantine_rename() {
+    // Arrange: this SST was observed as residue, then disappeared before the
+    // quarantine rename could run.
+    let temp_dir = tempfile::tempdir().expect("create residue directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let vanished_name = crate::cloud_layout::file_name(0, 1, 10);
+    let _vanished = write_valid_sst_for_recovery_test(&state, &vanished_name, 1, b"vanished", 10);
+    std::fs::remove_file(state.host_sst_dir().join(&vanished_name))
+        .expect("remove SST before quarantine");
+    state.mark_opened_in_salvage_mode();
+
+    // Act
+    state
+        .quarantine_salvage_retained_ssts(std::slice::from_ref(&vanished_name))
+        .expect("a vanished SST is already absent from the quarantine source");
+
+    // Assert
+    assert!(!state.persistence_anomaly_detected());
+    assert!(!state.host_sst_dir().join(vanished_name).exists());
+}
+
 fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -3492,6 +3514,7 @@ fn state_on_device(
         Arc::new(device.fs()),
         crate::config::RecoveryPolicy::Strict,
         crate::runtime::state::RecoveryWal::Replay { writer_epoch: 1 },
+        None,
         None,
     )
 }

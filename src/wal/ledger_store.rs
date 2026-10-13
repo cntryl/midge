@@ -73,6 +73,9 @@ pub(crate) struct LedgerStore {
     ledger: WalLedger,
     /// LEDGER's length in bytes.
     len: u64,
+    /// Exact synced image this open store is allowed to extend. Length alone
+    /// cannot distinguish a same-size successor rewrite from its own image.
+    image: Bytes,
     /// Edits appended after the snapshot.
     edits: usize,
     /// A write failed, so `ledger` and `len` may not describe LEDGER.
@@ -128,6 +131,7 @@ impl LedgerStore {
             fs,
             ledger: ledger.clone(),
             len: 0,
+            image: Bytes::new(),
             edits: 0,
             failed: true,
         };
@@ -150,6 +154,7 @@ impl LedgerStore {
             fs,
             ledger: parsed.ledger,
             len: 0,
+            image: Bytes::new(),
             edits: 0,
             failed: true,
         };
@@ -180,6 +185,9 @@ impl LedgerStore {
             return Err(error);
         }
         self.ledger = next;
+        let mut image = self.image.to_vec();
+        image.extend_from_slice(&frame);
+        self.image = Bytes::from(image);
         self.len += byte_len(&frame);
         self.edits += 1;
         if self.edits >= COMPACT_AFTER_EDITS {
@@ -215,6 +223,7 @@ impl LedgerStore {
         self.failed = true;
         publish(&self.fs, &image)?;
         self.len = byte_len(&image);
+        self.image = Bytes::from(image);
         self.edits = 0;
         self.failed = false;
         Ok(())
@@ -234,6 +243,16 @@ impl LedgerStore {
             )
             .map_err(FsError::into_midge)?;
         let len = file.len().map_err(FsError::into_midge)?;
+        let Some(current) = read_ledger(self.fs.as_ref())? else {
+            return Err(MidgeError::Fenced(
+                "WAL ledger disappeared after this writer opened it".into(),
+            ));
+        };
+        if current.as_ref() != self.image.as_ref() {
+            return Err(MidgeError::Fenced(
+                "WAL ledger changed after this writer opened it".into(),
+            ));
+        }
         if len != self.len {
             return Err(corruption(format!(
                 "holds {len} bytes where {} were written",

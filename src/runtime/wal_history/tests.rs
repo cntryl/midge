@@ -5,9 +5,10 @@
 //! WAL must reopen, and every member the ledger names must still hold the
 //! bytes it held when it became history.
 
-use super::{SalvageCut, SetAside, WalHistory};
+use super::{SalvageCut, SetAside, WalHistory, WalHistoryFence};
 use crate::common::MidgeError;
 use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, ReadFs};
+use crate::lease::LeaderStore;
 use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
 use crate::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
 use crate::wal::ledger::SegmentId;
@@ -36,6 +37,39 @@ fn key(id: SegmentId) -> String {
 /// Open the WAL at segment 1 under epoch 0, starting it if needed.
 fn open(device: &CrashDevice) -> WalHistory {
     WalHistory::open(wal(device), 1, 0).expect("open the WAL history")
+}
+
+#[test]
+fn should_fence_stale_history_before_successor_wal_effects() {
+    // Arrange
+    let wal: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    let leader = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+        Arc::clone(&wal),
+        crate::lease::LeaseClock::default(),
+    ));
+    let predecessor = leader.acquire_leadership("predecessor").unwrap();
+    let fence = WalHistoryFence::new(
+        leader.clone(),
+        "predecessor".into(),
+        predecessor.epoch,
+        std::time::Duration::from_secs(1),
+    );
+    let mut history =
+        WalHistory::open_with_fence(Arc::clone(&wal), 1, predecessor.epoch, fence).unwrap();
+    let ledger_path = FsPath::new(crate::wal::ledger_store::LEDGER_FILE);
+    let before = crate::io::read_all(wal.as_ref(), &ledger_path).unwrap();
+    leader.acquire_leadership("successor").unwrap();
+
+    // Act
+    let result = history.start_epoch(predecessor.epoch + 1, 1);
+
+    // Assert: neither the ledger nor the segment directory is touched.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert_eq!(
+        crate::io::read_all(wal.as_ref(), &ledger_path).unwrap(),
+        before
+    );
+    assert_eq!(history.ledger().members().collect::<Vec<_>>(), vec![1]);
 }
 
 /// The frame of a put at `seq`, the sequence segment `id` uses.

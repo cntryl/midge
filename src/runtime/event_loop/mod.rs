@@ -308,7 +308,7 @@ impl EventLoop {
         // CloudAsync waiters are keyed by segment id. Local waiters start at
         // generation zero; the durability coordinator is the sole owner of
         // that logical generation.
-        let mut gc_actor = GcActor::new();
+        let mut gc_actor = GcActor::with_retry_policy(config.retry_policy);
         gc_actor.set_retry_notifier(worker_msg_tx.clone());
         let durability =
             Self::create_durability_coordinator(&wal_actor, initial_segment_id, &config);
@@ -419,10 +419,11 @@ impl EventLoop {
         } else {
             0
         };
-        DurabilityCoordinator::new(
+        DurabilityCoordinator::new_with_retry_policy(
             initial_durability_key,
             is_cloud_async,
             config.cloud_runtime_policy.clone(),
+            config.retry_policy,
         )
     }
 

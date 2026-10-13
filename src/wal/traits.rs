@@ -39,10 +39,11 @@ impl WalAppendError {
 /// Implementations must provide append semantics and durability controls.
 /// A writer appends to one segment, whose header names the writer epoch
 /// (#843); records carry no epoch of their own.
-pub(crate) type WriteAuthority = std::sync::Arc<dyn Fn() -> MidgeResult<()> + Send + Sync>;
+pub(crate) type WriteAuthority =
+    std::sync::Arc<dyn Fn(&mut dyn FnMut()) -> MidgeResult<()> + Send + Sync>;
 
 pub trait WalWriter: Send + Sync {
-    /// Install the authority check used immediately before background mutations.
+    /// Install the authority fence held around each background storage effect.
     fn set_write_authority(&self, _authority: Option<WriteAuthority>) {}
 
     /// Append a pre-encoded record to the log and return the position where
