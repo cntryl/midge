@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn should_refuse_name_collisions_and_non_family_edits_when_the_registry_applies_an_edit() {
+    fn should_refuse_invalid_family_edits_when_registry_applies_them() {
         // Arrange: family 1 was created and dropped, then its name reused.
         let mut registry = DdlRegistry::from_manifest(&Manifest::default());
         let original = ManifestEdit::CreateColumnFamily {
