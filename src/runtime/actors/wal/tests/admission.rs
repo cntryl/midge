@@ -441,10 +441,7 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             append_admission_test_transaction(&mut actor, &mut state, temp.path(), spilled);
 
         // Assert
-        assert!(matches!(
-            result,
-            Err(MidgeError::NoSpace(_) | MidgeError::Timeout(_))
-        ));
+        assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));
         assert!(
             actor.is_fenced(),
             "an ambiguous append failure must make writer loss explicit"

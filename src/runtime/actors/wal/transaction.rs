@@ -648,7 +648,7 @@ impl WalActor {
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());
             if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
                 self.fence_transition(state, error.to_string());
-                return Err(error);
+                return Err(Self::appended_unit_error(error));
             }
             crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         }

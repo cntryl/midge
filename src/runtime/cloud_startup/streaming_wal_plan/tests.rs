@@ -479,9 +479,12 @@ fn should_truncate_only_incomplete_active_wal_tail_before_virtual_replay() -> Mi
     // Arrange
     let mut fixture = Fixture::new()?;
     let valid = framed_wal(4, b"value");
-    let mut torn = valid.clone();
-    torn.extend_from_slice(&[0xFF; 3]);
-    let path = fixture.active(&torn)?;
+    let path = fixture.active(&valid)?;
+    let history = fixture.history()?;
+    drop(history);
+    let mut active = std::fs::OpenOptions::new().append(true).open(&path)?;
+    std::io::Write::write_all(&mut active, &[0xFF; 3])?;
+    drop(active);
 
     // Act
     let recovered = fixture.build(RecoveryPolicy::Strict)?;
@@ -1004,9 +1007,12 @@ fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeRes
     // Arrange
     let mut fixture = Fixture::new()?;
     let valid = framed_wal(3, b"value");
-    let mut padded = valid.clone();
-    padded.extend_from_slice(&[0; 64]);
-    let path = fixture.active(&padded)?;
+    let path = fixture.active(&valid)?;
+    let history = fixture.history()?;
+    drop(history);
+    let mut active = std::fs::OpenOptions::new().append(true).open(&path)?;
+    std::io::Write::write_all(&mut active, &[0; 64])?;
+    drop(active);
 
     // Act
     let recovered = fixture.build(RecoveryPolicy::Strict)?;
@@ -1017,6 +1023,26 @@ fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeRes
         std::fs::metadata(path)?.len(),
         (crate::wal::format::HEADER_LEN + valid.len()) as u64
     );
+    Ok(())
+}
+
+#[test]
+fn should_reject_strict_recovery_when_incomplete_active_tail_crosses_durable_boundary(
+) -> MidgeResult<()> {
+    // Arrange: the ledger records the complete file length as synced.
+    let mut fixture = Fixture::new()?;
+    let valid = framed_wal(5, b"acknowledged");
+    let mut torn = valid;
+    torn.extend_from_slice(&[0xFF; 3]);
+    let path = fixture.active(&torn)?;
+    let before = std::fs::metadata(&path)?.len();
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert: synced bytes are never discarded as an interrupted tail.
+    assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+    assert_eq!(std::fs::metadata(path)?.len(), before);
     Ok(())
 }
 

@@ -55,6 +55,7 @@ fn unread(id: u64, epoch: u64) -> Expectation {
                 prev: crate::wal::format::ChainLink::GENESIS,
             },
             sealed: None,
+            durable_bytes: None,
         },
         holder: crate::wal::format::segment::FIXTURE_HOLDER,
     }
@@ -72,6 +73,7 @@ fn holding(bytes: &[u8]) -> Option<Expectation> {
         member: crate::wal::ledger::Member {
             open: header.open_facts(),
             sealed,
+            durable_bytes: None,
         },
         holder: header.holder,
     })

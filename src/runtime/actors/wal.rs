@@ -840,7 +840,7 @@ impl WalActor {
     /// until restart. Restart then replays a logged unit whole (#537) and
     /// discards an unlogged `BestEffort` one whole.
     ///
-    /// The caller learns `Timeout` (outcome unknown) for a logged unit,
+    /// The caller learns `OutcomeUnknown` for a logged unit,
     /// which replay may apply; `Fenced` only when nothing was logged or
     /// applied; and `RecoveryFailed` otherwise.
     fn fail_unapplied_transactions(
@@ -884,7 +884,7 @@ impl WalActor {
         state.mark_persistence_anomaly();
         if outcome.logged {
             // Replay may apply a logged unit, so its outcome is unknown.
-            MidgeError::Timeout(message)
+            MidgeError::OutcomeUnknown(message)
         } else if !outcome.partly_applied && matches!(error, MidgeError::Fenced(_)) {
             // Nothing logged and nothing applied: definitely not applied.
             error
@@ -897,20 +897,14 @@ impl WalActor {
     /// a later step fails before any of them is applied. Replay may still
     /// apply them. A lease or authority error reads as "not applied" or
     /// "retry", either of which could apply the unit twice, so it becomes
-    /// `Timeout`. Other errors, such as `NoSpace` from the fsync, pass
-    /// through.
+    /// `OutcomeUnknown`, including a failed fsync or an ambiguous append.
     fn appended_unit_error(error: MidgeError) -> MidgeError {
         match error {
-            MidgeError::Fenced(_)
-            | MidgeError::Busy(_)
-            | MidgeError::LeaseHeld(_)
-            | MidgeError::LeaseUnavailable(_)
-            | MidgeError::LeaseIndeterminate(_)
-            | MidgeError::LeaseEpochExhausted => MidgeError::Timeout(format!(
+            MidgeError::OutcomeUnknown(_) => error,
+            other => MidgeError::OutcomeUnknown(format!(
                 "the transaction is in the WAL but not applied; it may be applied on \
-                 restart: {error}"
+                 restart: {other}"
             )),
-            other => other,
         }
     }
 

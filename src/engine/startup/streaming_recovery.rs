@@ -28,6 +28,39 @@ pub(super) struct CloudReplay {
     /// Sequences at or below this belong to WAL salvage set aside unreplayed.
     pub sequence_floor: u64,
     pub scope: Option<crate::common::DeadlineScope>,
+    pub substituted_wal: Option<SubstitutedWal>,
+}
+
+/// A damaged catalog suffix replayed through verified local members. Its
+/// original immutable keys must never be uploaded again.
+pub(super) struct SubstitutedWal {
+    entries: Vec<crate::wal::cloud_catalog::CatalogEntry>,
+    anchor: crate::wal::format::ChainLink,
+}
+
+impl SubstitutedWal {
+    pub(super) fn from_plan(
+        plan: &crate::wal::planner::RecoveryPlan,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    ) -> Option<Self> {
+        let first = plan
+            .local_segments
+            .keys()
+            .filter(|id| plan.retire_catalog_from.is_none_or(|from| **id < from))
+            .find_map(|id| catalog.entries().iter().position(|entry| entry.id() == *id))?;
+        let end = catalog
+            .entries()
+            .iter()
+            .position(|entry| plan.retire_catalog_from == Some(entry.id()))
+            .unwrap_or(catalog.entries().len());
+        if first >= end {
+            return None;
+        }
+        Some(Self {
+            entries: catalog.entries()[first..end].to_vec(),
+            anchor: catalog.entries()[first].prev(),
+        })
+    }
 }
 
 impl CloudReplay {
@@ -117,22 +150,39 @@ impl CloudReplay {
             },
         );
         // Accepted worker work stays owned while the outer startup worker holds its lease.
+        let recovery = (|| {
+            let stats = replay_result?;
+            // Planning sets aside what it finds unreadable and covers it with
+            // the sequence floor. A break only replay sees has neither, so
+            // do not seal and upload what follows it (#821).
+            if let Some(stop) = &stats.salvage_stop {
+                return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                    "cloud WAL replay stopped at segment {} after planning; salvage cannot set it aside",
+                    stop.segment
+                )));
+            }
+            if let Some(substitute) = &self.substituted_wal {
+                let boundary = stats.max_sequence.unwrap_or(0).max(self.sequence_floor);
+                checkpoint(
+                    materialized,
+                    &mut actor,
+                    &rx,
+                    &mut memtables,
+                    &mut names,
+                    boundary,
+                )?;
+                crate::failpoints::fail_point!(
+                    "midge::startup::substituted_wal_after_checkpoint_before_catalog_retire"
+                );
+                substitute.retire_after_checkpoint(materialized, boundary)?;
+            }
+            Ok(stats)
+        })();
         #[cfg(test)]
         super::test_control::actor_join_started();
         let shutdown = actor.shutdown_and_join();
-        let stats = replay_result?;
+        let stats = recovery?;
         shutdown?;
-        // Planning sets aside what it finds unreadable and covers it with the
-        // sequence floor. A break only replay sees (a chain link, a header or
-        // footer the ledger disagrees with) has neither, so the open refuses
-        // rather than seal and upload what follows it; setting such a break
-        // aside belongs to the one salvage rule (#821).
-        if let Some(stop) = &stats.salvage_stop {
-            return Err(crate::common::MidgeError::RecoveryFailed(format!(
-                "cloud WAL replay stopped at segment {} after planning; salvage cannot set it aside",
-                stop.segment
-            )));
-        }
         self.install_recovered_tables(materialized, &stats, memtables)
     }
 
@@ -178,6 +228,63 @@ impl CloudReplay {
             .map(|cf| cf.memtable.size_bytes())
             .sum();
         runtime.reinitialize_active_memtable_segment_tracking();
+        Ok(())
+    }
+}
+
+impl SubstitutedWal {
+    /// Publish recovered rows and frontiers first; only then withdraw the
+    /// damaged suffix in a fenced CAS and replace local history. A crash at
+    /// any boundary retains either the original local WAL or authoritative SSTs.
+    fn retire_after_checkpoint(
+        &self,
+        materialized: &mut RuntimeStorageMaterialization,
+        floor: u64,
+    ) -> MidgeResult<()> {
+        let config = &materialized.runtime_config;
+        let storage = config
+            .hybrid_storage
+            .as_ref()
+            .ok_or_else(|| MidgeError::Internal("substituted WAL without cloud storage".into()))?;
+        let scope = materialized.state.startup_scope.clone().unwrap_or_else(|| {
+            crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded())
+        });
+        let first = self
+            .entries
+            .first()
+            .expect("substituted suffix is nonempty")
+            .id();
+        crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(storage))
+            .set_aside_catalog_suffix_with_authority_within(
+                config.writer_epoch,
+                Some(first),
+                &self.entries,
+                floor,
+                &|| validate_lease(config),
+                &scope.deadline(),
+            )?;
+        crate::failpoints::fail_point!(
+            "midge::startup::substituted_wal_after_catalog_retire_before_local_rebase"
+        );
+        scope.check("substituted WAL local history")?;
+        let history = &mut materialized.state.wal.history;
+        let floor = floor.max(history.ledger().seq_reserved_through());
+        if floor > history.ledger().seq_reserved_through() {
+            history.reserve(floor)?;
+        }
+        history.rebase(self.anchor, history.ledger().next_segment_id())?;
+        let config = &mut materialized.runtime_config;
+        config
+            .recovered_cloud_wal_entries
+            .retain(|id, _| *id < first);
+        config
+            .recovered_cloud_wal_segments
+            .retain(|id, _| *id < first);
+        config
+            .recovered_cloud_wal_segment_epochs
+            .retain(|id, _| *id < first);
+        config.recovered_local_wal_segments.clear();
+        config.recovered_local_wal_segment_epochs.clear();
         Ok(())
     }
 }

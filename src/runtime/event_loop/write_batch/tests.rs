@@ -1259,10 +1259,10 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     // Assert
     assert_eq!(handled, 2);
     expect_error(&first_rx, 65, |error| {
-        matches!(error, MidgeError::NoSpace(_))
+        matches!(error, MidgeError::OutcomeUnknown(_))
     });
     expect_error(&second_rx, 66, |error| {
-        matches!(error, MidgeError::NoSpace(_))
+        matches!(error, MidgeError::OutcomeUnknown(_))
     });
     assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
     assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
@@ -1394,7 +1394,7 @@ fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> Mi
     // flush publishes none of it and replay keeps or drops it whole; the
     // best-effort write is flushed.
     assert!(
-        matches!(&result, Err(MidgeError::Timeout(message)) if message.contains("may be applied on restart")),
+        matches!(&result, Err(MidgeError::OutcomeUnknown(message)) if message.contains("may be applied on restart")),
         "{result:?}"
     );
     assert!(fixture.event_loop.wal_actor.is_fenced());
@@ -1435,7 +1435,7 @@ fn should_freeze_without_mark_when_spilled_apply_fails_before_its_first_op() -> 
     // Assert: nothing of the unit is in the memtable, so the family is not
     // marked and the flush publishes only the best-effort write.
     assert!(
-        matches!(&result, Err(MidgeError::Timeout(message)) if message.contains("may be applied on restart")),
+        matches!(&result, Err(MidgeError::OutcomeUnknown(message)) if message.contains("may be applied on restart")),
         "{result:?}"
     );
     assert!(fixture.event_loop.wal_actor.is_fenced());
@@ -1691,7 +1691,7 @@ fn should_promise_nothing_for_buffered_units_when_lease_lapses_inside_coalesced_
             &first,
             RuntimeResponse::Error {
                 request_id: 80,
-                error: MidgeError::Timeout(message),
+                error: MidgeError::OutcomeUnknown(message),
             } if message.contains("is applied but") && message.contains("may be lost")
         ),
         "{first:?}"
@@ -1768,7 +1768,7 @@ fn is_outcome_unknown(response: &RuntimeResponse, expected_request_id: u64) -> b
         response,
         RuntimeResponse::Error {
             request_id,
-            error: MidgeError::Timeout(message),
+            error: MidgeError::OutcomeUnknown(message),
         } if *request_id == expected_request_id && message.contains("may be applied on restart")
     )
 }
@@ -1808,7 +1808,7 @@ fn should_freeze_without_failed_unit_when_strict_sync_fails_after_wal_append() -
     );
     fail::remove("midge::wal::inject_no_space_on_sync");
     expect_error(&failed_rx, 68, |error| {
-        matches!(error, MidgeError::NoSpace(_))
+        matches!(error, MidgeError::OutcomeUnknown(_))
     });
 
     let keys = memtable_keys(&fixture, 0);
@@ -2583,7 +2583,7 @@ fn should_answer_outcome_unknown_when_lease_lapses_before_spilled_sync() -> Midg
 
     // Assert
     assert!(
-        matches!(&result, Err(MidgeError::Timeout(message)) if message.contains("may be applied on restart")),
+        matches!(&result, Err(MidgeError::OutcomeUnknown(message)) if message.contains("may be applied on restart")),
         "{result:?}"
     );
 

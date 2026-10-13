@@ -390,6 +390,35 @@ impl WalHistory {
         self.commit(&LedgerEdit::Reserve { through })
     }
 
+    /// Persist evidence of a completed WAL fsync before acknowledging it.
+    pub(crate) fn record_sync(&mut self, through_bytes: u64) -> MidgeResult<()> {
+        if self
+            .ledger()
+            .open_member()
+            .durable_bytes
+            .is_some_and(|bytes| through_bytes <= bytes)
+        {
+            return Ok(());
+        }
+        self.commit(&LedgerEdit::SyncOpen {
+            id: self.ledger().open_segment(),
+            through_bytes,
+        })
+    }
+
+    /// Record a salvage cut only after shared authority committed its floor.
+    pub(crate) fn prepare_open_cut(
+        &mut self,
+        cut: crate::wal::planner::OpenCut,
+        floor: u64,
+    ) -> MidgeResult<()> {
+        self.commit(&LedgerEdit::SalvageOpen {
+            id: cut.id,
+            valid_bytes: cut.valid_bytes,
+            floor,
+        })
+    }
+
     /// Continue from `anchor`, a history another writer published past this
     /// one (cloud failback): every member is kept aside, a new segment at
     /// least `open_at_least` is created linked to `anchor`, and `Rebase`

@@ -8328,7 +8328,7 @@ mod cloud_persistence_hardening {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_finish_cloud_strict_upload_after_reporting_timeout_when_provider_recovers() {
+    fn should_finish_cloud_strict_upload_after_reporting_unknown_outcome_when_provider_recovers() {
         // Arrange: every upload attempt fails until the provider recovers.
         let _guard = failpoint_test_lock()
             .lock()
@@ -8365,7 +8365,7 @@ mod cloud_persistence_hardening {
         // Assert: an applied commit whose durability is unconfirmed has an
         // unknown outcome, never a retryable or internal failure.
         assert!(
-            matches!(&error, MidgeError::Timeout(_)),
+            matches!(&error, MidgeError::OutcomeUnknown(_)),
             "expected an unknown outcome, got: {error:?}"
         );
         assert!(durable.wal_cloud_durable_seq >= durable.current_sequence);

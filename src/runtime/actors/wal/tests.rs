@@ -827,7 +827,7 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     );
 
     // Assert
-    assert!(matches!(error, MidgeError::Io(_)));
+    assert!(matches!(error, MidgeError::OutcomeUnknown(_)));
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.frontiers.local_durable(), 0);
@@ -1334,7 +1334,7 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
     let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(wal_actor.sync_calls(), 0);
     assert_eq!(
@@ -1796,7 +1796,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
         let sequence_after_failure = state.sequence;
 
         // Assert
-        assert!(matches!(error, MidgeError::Internal(_)));
+        assert!(matches!(error, MidgeError::OutcomeUnknown(_)), "{error:?}");
         assert!(actor.is_fenced());
         assert!(state.persistence_anomaly_detected());
         assert_eq!(state.wal.pending_writes, 0);
@@ -2181,7 +2181,7 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
 fn may_be_applied_on_restart<T>(result: &MidgeResult<T>) -> bool {
     matches!(
         result,
-        Err(MidgeError::Timeout(message))
+        Err(MidgeError::OutcomeUnknown(message))
             if message.contains("is logged in the WAL")
                 && message.contains("may be applied on restart")
     )
@@ -2700,7 +2700,10 @@ fn should_exit_after_flushing_past_failed_strict_sync_in_child() {
     fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("fail the strict sync");
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::inject_no_space_on_sync");
-    assert!(matches!(commit, Err(MidgeError::NoSpace(_))), "{commit:?}");
+    assert!(
+        matches!(commit, Err(MidgeError::OutcomeUnknown(_))),
+        "{commit:?}"
+    );
 
     // Act
     let flushed = engine.flush_cf(&family);

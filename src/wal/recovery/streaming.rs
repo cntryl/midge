@@ -740,6 +740,7 @@ fn admit_segment(
     chain: &mut Chain,
 ) -> MidgeResult<SegmentScan> {
     let scan = SegmentScan::start(&read_header(source)?)?;
+    let file_len = crate::wal::frame::FrameBytes::len(source)?;
     let header = *scan.header();
     chain.admit(&header, path.id)?;
     let expected = match &path.expect {
@@ -755,6 +756,8 @@ fn admit_segment(
                     "its header {actual:?} is not the ledger's {:?}",
                     member.open
                 ))
+            } else if member.durable_bytes.is_some_and(|bytes| file_len < bytes) {
+                Err("its file is shorter than its persisted fsync boundary".into())
             } else {
                 Ok(())
             }
@@ -866,7 +869,30 @@ impl ReplayState<'_> {
         failure: ReplayFailure,
     ) -> MidgeResult<()> {
         let path = &paths[index];
-        match replay_error_action(path, policy, &failure) {
+        // Only persisted fsync evidence licenses treating corruption as an
+        // unsynced open tail. Never guess from zeros or checksum symptoms.
+        let durable_bytes = match &path.expect {
+            Expectation::Member { member, .. } => member.durable_bytes,
+            Expectation::Published(_) => None,
+        };
+        let action = if path.kind == ReplayFileKind::FinalActive
+            && durable_bytes.is_some_and(|bytes| valid_bytes >= bytes)
+            && failure.error().is_salvageable()
+        {
+            ReplayErrorAction::TolerateFinalActiveTail
+        } else if path.kind == ReplayFileKind::FinalActive
+            && durable_bytes.is_some_and(|bytes| valid_bytes < bytes)
+            && failure.is_incomplete_tail()
+        {
+            if policy == ReplayPolicy::SalvageValidPrefix {
+                ReplayErrorAction::SalvageVerifiedPrefix
+            } else {
+                ReplayErrorAction::Fail
+            }
+        } else {
+            replay_error_action(path, policy, &failure)
+        };
+        match action {
             ReplayErrorAction::TolerateFinalActiveTail => {
                 tracing::info!(
                     path = %path.path,

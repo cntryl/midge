@@ -399,12 +399,9 @@ fn should_stop_salvage_journal_replay_when_successful_reads_exhaust_shared_budge
 }
 
 #[test]
-fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_failure() {
-    // Arrange: the wrapper forwards a genuine WAL read before an explicitly
-    // injected local Io failure, then lets salvage copy the segment aside.
-    // Its next genuine directory listing, the orphan sweep that ends the
-    // set-aside, times out. This is recovery error-policy coverage, not a
-    // native provider failure.
+fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_local_wal() {
+    // Arrange: a genuine WAL read fails with Io. Any later quarantine walk
+    // would time out, but an unreadable segment is never evidence of damage.
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
@@ -430,6 +427,7 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         ReadDelivery::IoBeforeQuarantine,
     );
     let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1, 0).unwrap();
+    let completed_lists_before_replay = evidence.completed_lists.load(Ordering::Acquire);
 
     // Act: exercise the actual replay and its production salvage boundary.
     let result = RuntimeState::replay_wal_storage_within(
@@ -443,22 +441,18 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         history,
     );
 
-    // Assert: a secondary timeout retains its type and all source bytes.
+    // Assert: the original error and history survive; quarantine never runs.
     let Err(error) = result else {
         panic!("local read failure must stop recovery");
     };
-    assert!(
-        matches!(error, MidgeError::Timeout(message) if message == "timed local quarantine inventory")
-    );
+    assert!(matches!(error, MidgeError::Io(_)), "{error:?}");
     assert!(evidence.read_failed.load(Ordering::Acquire));
-    assert!(evidence.completed_lists.load(Ordering::Acquire) >= 1);
-    let aside = std::fs::read_dir(&wal_dir)
-        .unwrap()
-        .filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().starts_with("salvaged-"))
-        .expect("salvage keeps the segment aside before changing history")
-        .path();
-    assert_eq!(std::fs::read(aside.join(target)).unwrap(), before);
+    assert_eq!(
+        evidence.completed_lists.load(Ordering::Acquire),
+        completed_lists_before_replay,
+        "recovery did not start a quarantine inventory after the read failure"
+    );
+    assert_eq!(std::fs::read(wal_dir.join(target)).unwrap(), before);
 }
 
 /// Forwards to the host, except that every directory listing fails.

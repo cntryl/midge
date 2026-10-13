@@ -1477,9 +1477,12 @@ fn should_capture_runtime_health_at_verification_barrier_acquisition() {
 fn should_reject_storage_verification_while_flush_publication_is_active() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop
+    assert!(event_loop
         .publication_gate
-        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune));
+    event_loop
+        .background_compaction_schedule
+        .defer_for(Duration::from_secs(60));
     let request_id = 104;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
 

@@ -120,7 +120,7 @@ impl StreamingCloudWalRecovery {
                 let probe = if member.sealed.is_some() {
                     probe_sealed_member(local.as_ref(), id, policy, limits)?
                 } else {
-                    probe_open_member(local.as_ref(), id, policy, limits)?
+                    probe_open_member(local.as_ref(), id, member.durable_bytes, policy, limits)?
                 };
                 probes.local.insert(id, probe);
             }
@@ -385,6 +385,7 @@ fn verified_maximum(
 fn probe_open_member(
     local: &dyn Fs,
     id: SegmentId,
+    durable_bytes: Option<u64>,
     policy: RecoveryPolicy,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<Probe> {
@@ -404,7 +405,20 @@ fn probe_open_member(
         {
             return Err(failure.error().replay())
         }
-        Err(failure) if failure.is_incomplete_tail() => (failure.verified_prefix(), OpenEnd::Torn),
+        Err(failure)
+            if failure.is_incomplete_tail()
+                && durable_bytes
+                    .is_none_or(|bytes| failure.verified_prefix().valid_bytes as u64 >= bytes) =>
+        {
+            (failure.verified_prefix(), OpenEnd::Torn)
+        }
+        Err(failure)
+            if failure.error().is_salvageable()
+                && durable_bytes
+                    .is_some_and(|bytes| failure.verified_prefix().valid_bytes as u64 >= bytes) =>
+        {
+            (failure.verified_prefix(), OpenEnd::Torn)
+        }
         Err(failure) if failure.error().is_salvageable() => {
             let prefix = failure.verified_prefix();
             let suffix_max = if policy == RecoveryPolicy::Salvage {

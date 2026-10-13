@@ -295,8 +295,8 @@ fn validate_optional_readable_file(path: &Path) -> Result<(), String> {
 ///
 /// Classification is delegated to `MidgeError::severity()` so that a new error
 /// variant is classified in exactly one place. Backpressure reports as
-/// `EXIT_DEGRADED` rather than `EXIT_INTERNAL`: a full pool or an exhausted
-/// deadline is an operational condition to retry, not a defect to file.
+/// `EXIT_DEGRADED`; an unknown write outcome reports as storage because it
+/// needs reconciliation and does not prove corruption.
 fn outcome_for_verification_error(error: &MidgeError, format: OutputFormat) -> CliOutcome {
     let message = error.to_string();
     if matches!(error, MidgeError::NotFound | MidgeError::InvalidPath) {
@@ -306,7 +306,9 @@ fn outcome_for_verification_error(error: &MidgeError, format: OutputFormat) -> C
         Severity::Caller => (EXIT_USAGE, ErrorKind::Usage),
         // A lost lease is an authority change, and transient faults are
         // environmental; both are storage-domain conditions.
-        Severity::Transient | Severity::Fenced => (EXIT_STORAGE, ErrorKind::Storage),
+        Severity::Transient | Severity::Fenced | Severity::OutcomeUnknown => {
+            (EXIT_STORAGE, ErrorKind::Storage)
+        }
         Severity::Backpressure => (EXIT_DEGRADED, ErrorKind::Storage),
         Severity::Defect => (EXIT_INTERNAL, ErrorKind::Internal),
         Severity::Fatal => (EXIT_CORRUPTION, ErrorKind::Corruption),
@@ -415,6 +417,25 @@ mod tests {
 
         // Assert
         assert_eq!(outcome.exit_code, EXIT_STORAGE);
+    }
+
+    #[test]
+    fn should_report_storage_when_a_write_outcome_needs_reconciliation() {
+        // Arrange
+        let error = MidgeError::OutcomeUnknown("sync acknowledgment was lost".into());
+
+        // Act
+        let outcome = outcome_for_verification_error(&error, OutputFormat::Plain);
+
+        // Assert
+        assert_eq!(outcome.exit_code, EXIT_STORAGE);
+        assert!(matches!(
+            outcome.payload,
+            OutcomePayload::Error(ErrorOutput {
+                error_kind: ErrorKind::Storage,
+                ..
+            })
+        ));
     }
 
     #[test]

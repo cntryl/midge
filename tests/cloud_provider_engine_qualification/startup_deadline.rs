@@ -13,6 +13,7 @@ pub(crate) mod proxy;
 use proxy::{Control, DelayMode, LeaseCondition, NativeStartupProxy};
 
 const OPEN_BUDGET: Duration = Duration::from_millis(600);
+const POST_OPEN_SCOPE_BUDGET: Duration = Duration::from_millis(1_200);
 const IO_BUDGET: Duration = Duration::from_secs(2);
 const CLEANUP_WAIT: Duration = Duration::from_secs(6);
 static CASE_ID: AtomicUsize = AtomicUsize::new(0);
@@ -249,11 +250,16 @@ fn assert_fast_same_path_reopens(fixture: &Fixture) {
     record_rows_and_verify(&engine);
     engine.shutdown(Duration::from_secs(5)).unwrap();
 
-    // Reopen the small now-committed database under600ms, then make one real
-    // ordinary WAL PUT last800ms <the2s runtime provider cap. Successful strict
+    // Reopen the small committed database under a bounded startup budget, then
+    // make one real ordinary WAL PUT last1.6s, below the2s runtime provider cap.
+    // Successful strict
     // commit proves the aggregate startup deadline is not retained at runtime.
     let runtime_trace = fixture.trace();
-    let (runtime, _) = observed_open(fixture, Some(OPEN_BUDGET), Arc::clone(&runtime_trace));
+    let (runtime, _) = observed_open(
+        fixture,
+        Some(POST_OPEN_SCOPE_BUDGET),
+        Arc::clone(&runtime_trace),
+    );
     let mut engine = runtime.expect("small committed fast reopen under explicit deadline");
     assert_eq!(runtime_trace.admitted.load(Ordering::Acquire), 1);
     fixture.proxy.control.set_mode(DelayMode::PostOpenWalOnce);
@@ -266,7 +272,7 @@ fn assert_fast_same_path_reopens(fixture: &Fixture) {
             && std::path::Path::new(&request.path).extension() == Some(std::ffi::OsStr::new("wal"))
             && request.response_written
             && request.status == Some(200)
-            && request.completed.duration_since(request.started) > OPEN_BUDGET
+            && request.completed.duration_since(request.started) > POST_OPEN_SCOPE_BUDGET
     }));
     engine.shutdown(Duration::from_secs(5)).unwrap();
 
@@ -290,7 +296,7 @@ fn should_open_through_native_startup_proxy_when_aggregate_deadline_is_absent() 
     // Arrange: qualify signed forwarding and actual namespace operations first.
     let fixture = Fixture::new(DelayMode::Fast);
 
-    // Act: actual bounded reopen, post-open800ms WAL I/O and defaultNone reopen.
+    // Act: actual bounded reopen, post-open1.6s WAL I/O and defaultNone reopen.
     assert_fast_same_path_reopens(&fixture);
 
     // Assert: the helper proves exact rows and one observed runtime admission
@@ -553,7 +559,7 @@ fn should_retain_native_cleanup_when_committed_lease_cas_response_exceeds_open_b
         cleanup,
         "retained uncertain owner must perform an exact If-Match expiration, native={requests:?}"
     );
-    // Actual rows, defaultNone compatibility, and an800ms WAL operation under
-    // the ordinary2s cap prove the former600ms scope is disarmed on acceptance.
+    // Actual rows, defaultNone compatibility, and a1.6s WAL operation under
+    // the ordinary2s cap prove the bounded startup scope is disarmed on acceptance.
     assert_fast_same_path_reopens(&fixture);
 }

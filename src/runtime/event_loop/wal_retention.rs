@@ -51,6 +51,7 @@ impl EventLoop {
         &mut self,
         to: u64,
     ) -> Option<crate::runtime::wal_history::RetiredWal> {
+        crate::failpoints::fail_point!("midge::cloud::before_local_wal_retirement");
         match self.wal_actor.retire_wal_below(&mut self.state, to) {
             Ok(retired) => {
                 crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");

@@ -567,24 +567,14 @@ impl RuntimeState {
         let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
             crate::io::FsPath::new(crate::wal::segment_file_name(id))
         });
-        let stats = match crate::wal::recovery::replay_wal_with_frontiers_within(
+        let stats = crate::wal::recovery::replay_wal_with_frontiers_within(
             storage,
             &segments,
             &mut recovery_memtables,
             replay_policy,
             manifest.flush_frontiers(),
             scope,
-        ) {
-            Ok(stats) => stats,
-            Err(error) => {
-                return Self::handle_local_wal_replay_failure(
-                    history,
-                    recovery_policy,
-                    error,
-                    column_families,
-                );
-            }
-        };
+        )?;
 
         if let Some(tail) = &stats.tolerated_active_tail {
             // Fail the open under either policy: appending past a torn tail
@@ -633,41 +623,6 @@ impl RuntimeState {
         })
     }
 
-    fn handle_local_wal_replay_failure(
-        mut history: crate::runtime::wal_history::WalHistory,
-        recovery_policy: crate::config::RecoveryPolicy,
-        error: MidgeError,
-        column_families: HashMap<u32, ColumnFamilyState>,
-    ) -> MidgeResult<WalRecoveryState> {
-        // Byte-prefix salvage is handled by replay itself. Unhandled corruption
-        // includes invalid family authority and must never reset durable history.
-        if matches!(error, MidgeError::Timeout(_) | MidgeError::Corruption(_)) {
-            return Err(error);
-        }
-        if recovery_policy == crate::config::RecoveryPolicy::Salvage {
-            // Salvage continues without the WAL's state, so set every
-            // member aside first: new records must not land behind them or
-            // reuse the sequences they hold.
-            let log_start = history.ledger().log_start();
-            if let Err(quarantine_error) =
-                history.set_aside(crate::runtime::wal_history::SetAside::From(log_start), 0)
-            {
-                if matches!(quarantine_error, MidgeError::Timeout(_)) {
-                    return Err(quarantine_error);
-                }
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "WAL recovery failed ({error}) and the WAL could not be set aside: {quarantine_error}"
-                )));
-            }
-        }
-        Self::handle_wal_recovery_failure(
-            recovery_policy,
-            format!("WAL recovery failed: {error}"),
-            column_families,
-            history,
-        )
-    }
-
     /// Cut the active WAL back to its verified prefix before the writer
     /// reopens it for append. Otherwise new frames land after the torn bytes,
     /// and the next recovery sees mid-file corruption instead of a tail.
@@ -686,26 +641,6 @@ impl RuntimeState {
             );
         }
         Ok(())
-    }
-
-    fn handle_wal_recovery_failure(
-        recovery_policy: crate::config::RecoveryPolicy,
-        message: String,
-        column_families: HashMap<u32, ColumnFamilyState>,
-        history: crate::runtime::wal_history::WalHistory,
-    ) -> MidgeResult<WalRecoveryState> {
-        if recovery_policy == crate::config::RecoveryPolicy::Strict {
-            return Err(MidgeError::RecoveryFailed(message));
-        }
-        tracing::error!("{message}, continuing without recovered state in salvage mode");
-        Ok(WalRecoveryState {
-            column_families,
-            recovered_sequence: 0,
-            history,
-            records_replayed: 0,
-            bytes_replayed: 0,
-            opened_in_salvage_mode: true,
-        })
     }
 
     fn record_wal_recovery_stats(

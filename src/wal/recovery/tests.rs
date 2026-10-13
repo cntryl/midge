@@ -174,6 +174,7 @@ fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() 
                     prev: crate::wal::format::ChainLink::GENESIS,
                 },
                 sealed: None,
+                durable_bytes: None,
             },
             holder: crate::wal::format::segment::FIXTURE_HOLDER,
         },

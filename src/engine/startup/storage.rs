@@ -1005,6 +1005,10 @@ impl RuntimeStorageMaterialization {
                 segments: streaming.segments,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
+                substituted_wal: super::streaming_recovery::SubstitutedWal::from_plan(
+                    &recovery_plan,
+                    &wal_catalog,
+                ),
                 scope: scope.cloned(),
             }),
         })
@@ -1145,6 +1149,10 @@ impl RuntimeStorageMaterialization {
                 segments: streaming.segments,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
+                substituted_wal: super::streaming_recovery::SubstitutedWal::from_plan(
+                    &recovery_plan,
+                    &wal_catalog,
+                ),
                 scope: scope.cloned(),
             }),
         })
@@ -1415,7 +1423,7 @@ mod shared_simulated_authority_tests {
         assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
         assert_eq!(value.as_deref(), Some(b"shared".as_slice()));
         assert!(
-            matches!(stale_result, Err(crate::MidgeError::Fenced(_))),
+            matches!(stale_result, Err(crate::MidgeError::OutcomeUnknown(_))),
             "{stale_result:?}"
         );
         assert_eq!(

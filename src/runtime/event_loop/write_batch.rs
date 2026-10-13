@@ -483,7 +483,7 @@ impl EventLoop {
                 self.settle_applied_write(result.request_id, true);
                 self.handle_write_error(
                     result.request_id,
-                    MidgeError::Timeout(
+                    MidgeError::OutcomeUnknown(
                         "the transaction is applied but the WAL was fenced before its \
                          frame was synced; it may be lost in a crash"
                             .to_string(),
@@ -669,8 +669,10 @@ impl EventLoop {
         // A WAL append failure fences the actor itself, so ask it rather than
         // looking for "wal writer" in the message: a NoSpace raised elsewhere
         // (storage admission) is backpressure, not lost durability.
-        let must_fence =
-            matches!(error, crate::common::MidgeError::Timeout(_)) || self.wal_actor.is_fenced();
+        let must_fence = matches!(
+            error,
+            crate::common::MidgeError::Timeout(_) | crate::common::MidgeError::OutcomeUnknown(_)
+        ) || self.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
             if let Some(healthy) = &self.fencing.lease_healthy {
@@ -687,12 +689,12 @@ impl EventLoop {
 }
 
 /// The error for a request a failed group never prepared: it was neither
-/// logged nor applied. The group's `Timeout` speaks only for logged units,
+/// logged nor applied. The group's `OutcomeUnknown` speaks only for logged units,
 /// so it becomes `Fenced`, which says the request is not applied; any other
 /// group error already makes no claim that it was.
 fn not_attempted(group_error: MidgeError) -> MidgeError {
     match group_error {
-        MidgeError::Timeout(reason) => MidgeError::Fenced(format!(
+        MidgeError::OutcomeUnknown(reason) => MidgeError::Fenced(format!(
             "the transaction was not logged or applied because an earlier \
              transaction in its batch failed: {reason}"
         )),

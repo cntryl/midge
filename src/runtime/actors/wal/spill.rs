@@ -120,7 +120,11 @@ impl WalActor {
                         format!("spilled transaction WAL append failed: {error}"),
                     );
                 }
-                return Err(error);
+                return Err(if wal_may_have_changed {
+                    Self::appended_unit_error(error)
+                } else {
+                    error
+                });
             }
         };
         state.wal.pending_writes = state.wal.pending_writes.saturating_add(wal_records);
@@ -441,7 +445,9 @@ impl WalActor {
         total_bytes = total_bytes.saturating_add(commit.estimated_size());
         self.append_spilled_record(&commit, wal_may_have_changed)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
-        WalTransitionBoundary::AfterAppendBeforeAccounting.check()?;
+        if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
+            return Err(Self::appended_unit_error(error));
+        }
         crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
         tracing::trace!(request_id, "appended split transaction WAL frames");
         Ok((total_bytes, source.len().saturating_add(2)))
