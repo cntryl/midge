@@ -127,10 +127,10 @@ impl WalActor {
                 commit_time_millis,
             )
         }) {
-            return Err(self.fail_partial_spilled_apply(
+            return Err(self.fail_unapplied_transactions(
                 state,
-                &sequence_plan,
-                effective_durability,
+                &[&sequence_plan],
+                wal_records > 0,
                 error,
             ));
         }
@@ -146,46 +146,6 @@ impl WalActor {
             "streamed spilled WAL transaction apply"
         );
         Ok((sequence_plan.commit_seq, source.len(), deferred))
-    }
-
-    /// Stop a writer whose spilled transaction reached the memtables only in
-    /// part. When the WAL holds the whole unit, a restart replays all of it
-    /// (#537), provided no flush frontier passes its commit first. A
-    /// `BestEffort` unit has no WAL record, so a restart drops all of it,
-    /// provided the partial memtable is never flushed. Either way the family
-    /// refuses to freeze, and to take writes, until restart.
-    fn fail_partial_spilled_apply(
-        &mut self,
-        state: &mut RuntimeState,
-        sequence_plan: &TxnSequencePlan,
-        effective_durability: DurabilityPolicy,
-        error: MidgeError,
-    ) -> MidgeError {
-        let logged = !matches!(effective_durability, DurabilityPolicy::BestEffort)
-            && self.writer().is_some();
-        if let Some(cf) = state.get_cf_mut(sequence_plan.cf_id) {
-            cf.mark_partially_applied(sequence_plan.commit_seq);
-        }
-        let message = if logged {
-            format!(
-                "spilled transaction {} is durably logged but failed to apply to memtables; \
-                 it will be fully applied on restart: {error}",
-                sequence_plan.txn_id
-            )
-        } else {
-            format!(
-                "spilled transaction {} has no WAL record and failed to apply to memtables; \
-                 restart discards all of it: {error}",
-                sequence_plan.txn_id
-            )
-        };
-        self.fence_transition(state, message.clone());
-        state.mark_persistence_anomaly();
-        if matches!(error, MidgeError::Fenced(_)) {
-            error
-        } else {
-            MidgeError::RecoveryFailed(message)
-        }
     }
 
     fn validate_assertion_only_spill(

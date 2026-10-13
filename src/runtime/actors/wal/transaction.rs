@@ -194,7 +194,32 @@ impl WalActor {
         }
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
-        for prepared in prepared_transactions {
+        let mut pending = prepared_transactions.into_iter();
+        while let Some(prepared) = pending.next() {
+            if !strict_group {
+                self.apply_transaction_durability(
+                    state,
+                    prepared.effective_durability,
+                    prepared.sequence_plan.commit_seq,
+                )?;
+            }
+            crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
+            // Every unit in the group is in the WAL and `state.sequence` is
+            // past every commit; the earlier units are applied. A lease that
+            // lapsed since is a failed apply of this unit and the rest.
+            if let Err(error) = self.ensure_lease_validity() {
+                let unapplied = std::iter::once(&prepared)
+                    .chain(pending.as_slice())
+                    .collect::<Vec<_>>();
+                let logged = unapplied
+                    .iter()
+                    .any(|prepared| prepared.wal_batch.wal_record.is_some());
+                let plans = unapplied
+                    .iter()
+                    .map(|prepared| &prepared.sequence_plan)
+                    .collect::<Vec<_>>();
+                return Err(self.fail_unapplied_transactions(state, &plans, logged, error));
+            }
             let PreparedTransactionAppend {
                 request_id,
                 sequence_plan,
@@ -204,11 +229,6 @@ impl WalActor {
             } = prepared;
             let last_sequence = sequence_plan.commit_seq;
             let apply_op_count = apply_ops.len();
-
-            if !strict_group {
-                self.apply_transaction_durability(state, effective_durability, last_sequence)?;
-            }
-            self.ensure_lease_validity()?;
             Self::apply_prevalidated_transaction_ops(
                 state,
                 apply_ops,

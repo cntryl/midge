@@ -812,6 +812,56 @@ impl WalActor {
         }
     }
 
+    /// Record that each unit in `plans`, whose sequences are allocated and
+    /// whose WAL records, if any, are appended, did not reach the memtables
+    /// whole. Each family then refuses to freeze, and to take writes, until
+    /// restart, so no flush frontier passes a unit restart must replay.
+    fn mark_unapplied(state: &mut RuntimeState, plans: &[&TxnSequencePlan]) {
+        for plan in plans {
+            if let Some(cf) = state.get_cf_mut(plan.cf_id) {
+                cf.mark_partially_applied(plan.commit_seq);
+            }
+        }
+    }
+
+    /// Stop a writer whose units in `plans` did not reach the memtables
+    /// whole. When the WAL holds them (`logged`), restart replays each one
+    /// whole (#537), provided no flush frontier passes its commit first. A
+    /// `BestEffort` unit has no WAL record, so restart discards all of it,
+    /// provided the partial memtable is never flushed.
+    fn fail_unapplied_transactions(
+        &mut self,
+        state: &mut RuntimeState,
+        plans: &[&TxnSequencePlan],
+        logged: bool,
+        error: MidgeError,
+    ) -> MidgeError {
+        Self::mark_unapplied(state, plans);
+        let txn_ids = plans
+            .iter()
+            .map(|plan| plan.txn_id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = if logged {
+            format!(
+                "transaction {txn_ids} is logged in the WAL but did not fully reach the \
+                 memtables; restart applies it whole: {error}"
+            )
+        } else {
+            format!(
+                "transaction {txn_ids} has no WAL record and did not fully reach the \
+                 memtables; restart discards all of it: {error}"
+            )
+        };
+        self.fence_transition(state, message.clone());
+        state.mark_persistence_anomaly();
+        if matches!(error, MidgeError::Fenced(_)) {
+            error
+        } else {
+            MidgeError::RecoveryFailed(message)
+        }
+    }
+
     pub(crate) fn can_coalesce_transaction_append(
         &self,
         durability_policy: Option<DurabilityPolicy>,

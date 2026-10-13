@@ -2177,6 +2177,83 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_mark_family_when_lease_lapses_inside_logged_transaction_group() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity.activate(1, Instant::now() + Duration::from_mins(1))?;
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let first = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        1,
+        b"first",
+        b"value",
+        DurabilityPolicy::Batched,
+    )?;
+    let second = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        2,
+        b"second",
+        b"value",
+        DurabilityPolicy::Batched,
+    )?;
+    let second_commit = state.sequence;
+    let observed = Arc::clone(&validity);
+    let applies = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&applies);
+    fail::cfg_callback("midge::wal::before_prepared_transaction_apply", move || {
+        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            observed.expire_for_test();
+        }
+    })
+    .expect("lapse the lease after the first unit is applied");
+
+    // Act
+    let result = actor.append_prepared_transactions(&mut state, vec![first, second]);
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+
+    // Assert: both units are in the WAL, the first is applied and the
+    // second is not, while `state.sequence` is at the second's commit. The
+    // family must refuse to freeze so restart replays the second unit.
+    assert!(
+        matches!(result, Err(MidgeError::Fenced(_))),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(state.wal.pending_writes, 2, "both units are in the WAL");
+    assert_eq!(
+        state.get_cf(0).map(|cf| cf.memtable.iter_all().len()),
+        Some(1),
+        "only the first unit reached the memtable"
+    );
+    assert_eq!(
+        state
+            .get_cf(0)
+            .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit),
+        Some(second_commit)
+    );
+    assert!(actor.is_fenced());
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
