@@ -197,8 +197,20 @@ impl RuntimeState {
         })
     }
 
+    /// Whether the memtable bytes a flush can relieve reach the global hard
+    /// limit. The active memtable of a family holding a partly applied unit
+    /// is left out: that family rejects every new write, so the memtable no
+    /// longer grows, and it cannot freeze until restart, so counting it would
+    /// stall every other family for bytes no flush can release.
     pub fn is_total_memtable_hard_limit_exceeded(&self) -> bool {
-        self.total_memtable_bytes >= self.limits.memtable_flush_threshold.saturating_mul(2)
+        let held = self
+            .column_families
+            .values()
+            .filter(|cf| cf.partially_applied_commit().is_some())
+            .map(|cf| cf.memtable.size_bytes())
+            .fold(0_usize, usize::saturating_add);
+        self.total_memtable_bytes.saturating_sub(held)
+            >= self.limits.memtable_flush_threshold.saturating_mul(2)
     }
 
     /// Maximum number of published or reserved L0 generations for one column
@@ -546,6 +558,28 @@ impl RuntimeState {
 #[cfg(test)]
 mod retention_tests {
     use super::*;
+
+    #[test]
+    fn should_not_stall_for_active_memtable_held_by_partly_applied_family() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::new(directory.path().to_path_buf(), true);
+        state.limits.memtable_flush_threshold = 1024;
+        let other = state.create_cf("other".into()).unwrap();
+        let cf = state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 4096], 1, None)
+            .unwrap();
+        cf.mark_partially_applied(2);
+        state.recompute_total_memtable_bytes();
+
+        // Act
+        let stalled = state.should_hard_stall_writes(other);
+
+        // Assert
+        assert!(state.total_memtable_bytes >= 2048);
+        assert!(!stalled);
+    }
 
     #[test]
     fn should_force_the_family_blocking_the_oldest_segment_before_a_larger_gap() {

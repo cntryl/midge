@@ -2519,6 +2519,92 @@ fn should_reject_best_effort_write_when_family_holds_partly_applied_spilled_tran
 }
 
 #[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_STALL_CHILD: &str = "MIDGE_PARTIAL_SPILL_STALL_CHILD";
+
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_STALL_THRESHOLD: usize = 16 * 1024;
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
+    // Arrange: runs only as the child of the stall test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(PARTIAL_SPILL_STALL_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let options = crate::OpenOptions::local(&path)
+        .transaction_memory_pool_size(1024)
+        .with_memtable_flush_threshold(PARTIAL_SPILL_STALL_THRESHOLD)
+        .background_compaction(false)
+        .build()
+        .expect("stall options");
+    let mut engine = crate::Engine::open(options).expect("open spill writer");
+    let family = engine.get_column_family("default").expect("default family");
+    let other = engine.create_column_family("other").expect("other family");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("spilled transaction");
+    for key in [b"first".as_slice(), b"second", b"third", b"fourth"] {
+        tx.put(
+            key.to_vec(),
+            vec![7_u8; PARTIAL_SPILL_STALL_THRESHOLD],
+            None,
+        )
+        .expect("spill op");
+    }
+    fail::cfg("midge::wal::spilled_apply_op", "3*off->return")
+        .expect("fail the fourth post-commit apply");
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(
+        matches!(commit, Err(MidgeError::RecoveryFailed(_))),
+        "{commit:?}"
+    );
+
+    // Act: a stall hint on the first reply makes the second check the stall.
+    let written = [b"best-effort-1".as_slice(), b"best-effort-2"]
+        .map(|key| put_one(&engine, &other, key, crate::WriteOptions::best_effort()));
+    let cleared = engine.wait_for_write_stall_clear(other.id(), std::time::Duration::from_secs(1));
+
+    // Assert: the marked family holds more than twice the flush threshold
+    // but takes no writes and cannot flush until restart; it must not stall
+    // a family that can.
+    assert!(written.iter().all(Result::is_ok), "{written:?}");
+    assert!(matches!(cleared, Ok(true)), "{cleared:?}");
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_accept_write_beside_family_holding_large_partly_applied_spilled_transaction() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("database directory");
+
+    // Act: a child process partly applies a spilled transaction larger than
+    // twice the flush threshold, then writes to another family.
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_writing_beside_large_partly_applied_family_in_child",
+            "--nocapture",
+        ])
+        .env(PARTIAL_SPILL_STALL_CHILD, directory.path())
+        .output()
+        .expect("run partial spill stall child");
+
+    // Assert
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "failpoints")]
 const FAILED_SYNC_CHILD: &str = "MIDGE_FAILED_SYNC_FLUSH_CHILD";
 
 #[cfg(feature = "failpoints")]
