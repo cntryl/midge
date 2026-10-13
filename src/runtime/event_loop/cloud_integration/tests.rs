@@ -66,18 +66,8 @@ fn publish_test_flush_frontier(el: &mut EventLoop, cf_id: u32, sequence: u64) {
     set_test_flush_frontier(el, cf_id, sequence);
     crate::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
         .expect("save durable fixture frontier");
-    // The shared readback can exhaust its deadline on a loaded machine. Publishing
-    // the same frontier again is idempotent, so retry only that timeout.
-    let mut attempts_left = 2;
-    loop {
-        match el.mirror_metadata_to_authoritative_cloud() {
-            Ok(()) => return,
-            Err(crate::common::MidgeError::Timeout(_)) if attempts_left > 0 => {
-                attempts_left -= 1;
-            }
-            Err(error) => panic!("commit shared fixture frontier: {error}"),
-        }
-    }
+    el.mirror_metadata_to_authoritative_cloud()
+        .expect("commit shared fixture frontier");
 }
 
 #[cfg(feature = "failpoints")]
@@ -2718,7 +2708,6 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(100);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open delayed prune cloud backend"),
@@ -2741,6 +2730,9 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
     add_valid_manifest_sst_for_test(&mut el, "deadline-prune.sst", max_sequence);
+    // Apply the attempt budget after publishing the fixture's authority.
+    // Setup is not a maintenance attempt and must not consume its deadline.
+    el.runtime_response_timeout = Duration::from_millis(100);
     delayed_cloud.arm();
 
     // Act: submission remains asynchronous, but joining the attempt must also
