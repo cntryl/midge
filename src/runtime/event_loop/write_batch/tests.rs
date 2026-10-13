@@ -1324,17 +1324,10 @@ fn lapse_lease_at(fixture: &mut EventLoopFixture, failpoint: &str, lapse_at: usi
     .expect("configure the lease lapse");
 }
 
+/// Leave family 0's memtable non-empty with a best-effort write, so a
+/// freeze has something to publish.
 #[cfg(feature = "failpoints")]
-#[test]
-fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> MidgeResult<()> {
-    // Arrange: a best-effort write leaves the family's memtable non-empty.
-    let _guard = failpoint_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
-    let scenario = fail::FailScenario::setup();
-    let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
-    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+fn seed_best_effort_write(fixture: &mut EventLoopFixture) -> MidgeResult<()> {
     fixture.event_loop.wal_actor.append_transaction(
         &mut fixture.event_loop.state,
         crate::runtime::actors::wal::TransactionAppendParams {
@@ -1346,17 +1339,25 @@ fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> Mi
             conflict_policy: ConflictPolicy::LastWriteWins,
         },
     )?;
+    Ok(())
+}
+
+/// Commit a strict spilled transaction of one put to family 0.
+#[cfg(feature = "failpoints")]
+fn commit_strict_spill(
+    fixture: &mut EventLoopFixture,
+    spill_dir: &std::path::Path,
+) -> MidgeResult<(u64, usize, bool)> {
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
         pool,
-        &crate::io::real::test_root(temp.path()),
+        &crate::io::real::test_root(spill_dir),
         false,
         1,
     );
     write_set.push(put_op(0, b"spilled", b"value"))?;
     let source = write_set.take_source();
-    lapse_lease_at(&mut fixture, "midge::wal::txn_after_sync_before_ack", 0);
-    let result = fixture.event_loop.wal_actor.append_spilled_transaction(
+    fixture.event_loop.wal_actor.append_spilled_transaction(
         &mut fixture.event_loop.state,
         &source,
         crate::runtime::actors::wal::SpilledTransactionAppendParams {
@@ -1366,7 +1367,23 @@ fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> Mi
             start_sequence: 0,
             conflict_policy: ConflictPolicy::LastWriteWins,
         },
-    );
+    )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> MidgeResult<()> {
+    // Arrange: a best-effort write leaves the family's memtable non-empty.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    seed_best_effort_write(&mut fixture)?;
+    lapse_lease_at(&mut fixture, "midge::wal::txn_after_sync_before_ack", 0);
+    let result = commit_strict_spill(&mut fixture, temp.path());
     fail::remove("midge::wal::txn_after_sync_before_ack");
     let keys = memtable_keys(&fixture, 0);
 
@@ -1379,6 +1396,45 @@ fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> Mi
     assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
     assert!(fixture.event_loop.wal_actor.is_fenced());
     assert_eq!(keys, vec![b"best-effort".to_vec()]);
+    assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_freeze_without_mark_when_spilled_apply_fails_before_its_first_op() -> MidgeResult<()> {
+    // Arrange: the apply fails before any op reaches the memtable, the
+    // `applied_ops == 0` boundary between a fence and a mark.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    seed_best_effort_write(&mut fixture)?;
+    fail::cfg("midge::wal::spilled_apply_op", "return").expect("fail the first apply");
+    let result = commit_strict_spill(&mut fixture, temp.path());
+    fail::remove("midge::wal::spilled_apply_op");
+    let keys = memtable_keys(&fixture, 0);
+    let marked = fixture
+        .event_loop
+        .state
+        .get_cf(0)
+        .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit);
+
+    // Act
+    let frozen = fixture.event_loop.freeze_active_memtable(0);
+
+    // Assert: nothing of the unit is in the memtable, so the family is not
+    // marked and the flush publishes only the best-effort write.
+    assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
+    assert!(fixture.event_loop.wal_actor.is_fenced());
+    assert_eq!(keys, vec![b"best-effort".to_vec()]);
+    assert_eq!(marked, None);
     assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
 
     scenario.teardown();
