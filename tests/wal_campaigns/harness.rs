@@ -330,6 +330,10 @@ impl Campaign {
             {
                 Ok(())
             }
+            // A commit admission stall is a definite pre-WAL refusal. The
+            // history already records this commit as unacknowledged; only
+            // acknowledged writes constrain crash recovery.
+            Err(MidgeError::WriteStall(_)) if operation == "commit" => Ok(()),
             Err(error)
                 if self.config.faulting()
                     && (error.to_string().contains(FAILURE_MESSAGE)
