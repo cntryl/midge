@@ -114,6 +114,10 @@ impl Fs for Subdirectory {
         self.inner.coordination_key()
     }
 
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn super::traits::FsLock>> {
+        self.inner.try_lock_exclusive(&self.path(path)?)
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         self.inner.open(&self.path(path)?, opts)
     }

@@ -550,12 +550,12 @@ impl RuntimeState {
         } else {
             check_scope(scope, "WAL ledger")?;
             let wal = crate::io::subdirectory(Arc::clone(root), "wal");
-            let history = match wal_fence {
+            let history = match wal_fence.as_ref() {
                 Some(fence) => crate::runtime::wal_history::WalHistory::open_with_fence(
                     Arc::clone(&wal),
                     1,
                     writer_epoch,
-                    fence,
+                    fence.clone(),
                 )?,
                 None => crate::runtime::wal_history::WalHistory::open(
                     Arc::clone(&wal),
@@ -570,6 +570,7 @@ impl RuntimeState {
                 manifest,
                 column_families,
                 scope,
+                wal_fence.as_ref(),
                 wal.as_ref(),
                 history,
             )?
@@ -588,6 +589,7 @@ impl RuntimeState {
         manifest: &Manifest,
         mut column_families: HashMap<u32, ColumnFamilyState>,
         scope: Option<&DeadlineScope>,
+        wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
         storage: &dyn Fs,
         mut history: crate::runtime::wal_history::WalHistory,
     ) -> MidgeResult<WalRecoveryState> {
@@ -616,7 +618,7 @@ impl RuntimeState {
             // Fail the open under either policy: appending past a torn tail
             // would corrupt acknowledged writes, and salvage's fallback would
             // discard the state replay just recovered.
-            Self::truncate_tolerated_active_tail(storage, tail).map_err(|error| {
+            Self::truncate_tolerated_active_tail(storage, tail, wal_fence).map_err(|error| {
                 preserve_timeout(error, "failed to truncate torn active WAL tail")
             })?;
         }
@@ -665,18 +667,25 @@ impl RuntimeState {
     fn truncate_tolerated_active_tail(
         storage: &dyn crate::io::Fs,
         tail: &crate::wal::recovery::ToleratedActiveTail,
+        wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
     ) -> MidgeResult<()> {
-        let discarded = crate::io::truncate_durably(storage, &tail.path, tail.valid_bytes)
-            .map_err(FsError::into_midge)?;
-        if discarded > 0 {
-            tracing::warn!(
-                path = %tail.path,
-                discarded_bytes = discarded,
-                valid_bytes = tail.valid_bytes,
-                "truncated torn active WAL tail before reopening for append"
-            );
+        let truncate = || {
+            let discarded = crate::io::truncate_durably(storage, &tail.path, tail.valid_bytes)
+                .map_err(FsError::into_midge)?;
+            if discarded > 0 {
+                tracing::warn!(
+                    path = %tail.path,
+                    discarded_bytes = discarded,
+                    valid_bytes = tail.valid_bytes,
+                    "truncated torn active WAL tail before reopening for append"
+                );
+            }
+            Ok(())
+        };
+        match wal_fence {
+            Some(fence) => fence.with_writer_effect(truncate),
+            None => truncate(),
         }
-        Ok(())
     }
 
     fn record_wal_recovery_stats(

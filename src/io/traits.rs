@@ -43,6 +43,12 @@ pub enum FsError {
 
 pub type FsResult<T> = Result<T, FsError>;
 
+/// An acquired, non-durable exclusive filesystem lock.
+///
+/// Locks are coordination state, not durable data. Dropping the guard releases
+/// the lock, and the operating system releases host locks when a process exits.
+pub trait FsLock: Send + Sync {}
+
 /// Durability semantics for filesystem operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
@@ -305,6 +311,24 @@ pub trait Fs: ReadFs {
     /// a stable root identity.
     fn coordination_key(&self) -> u64 {
         0
+    }
+
+    /// Try to acquire a non-durable exclusive lock for `path`.
+    ///
+    /// Backends with process-scoped locking should override this. Returning
+    /// `AlreadyExists` means another process currently holds the lock;
+    /// `Unsupported` asks callers to use their portable fallback. The lock is
+    /// released when the returned guard is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AlreadyExists` when another owner holds the lock, `Unsupported`
+    /// when the backend has no native locking support, or another filesystem
+    /// error when lock acquisition fails.
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+        Err(FsError::Unsupported(format!(
+            "exclusive filesystem locks are unavailable for {path}"
+        )))
     }
 
     // --- Files ---

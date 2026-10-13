@@ -8,7 +8,6 @@ use super::traits::{
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -21,6 +20,7 @@ struct MockFileData {
 #[derive(Debug, Clone, Default)]
 pub struct MockFs {
     files: Arc<Mutex<HashMap<String, MockFileData>>>,
+    exclusive_locks: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Directories created explicitly. A directory also exists implicitly
     /// while some file lies below it, as on a real filesystem.
     directories: Arc<Mutex<std::collections::BTreeSet<String>>>,
@@ -29,6 +29,16 @@ pub struct MockFs {
     #[cfg(test)]
     fail_sync_dir: Arc<AtomicBool>,
 }
+
+struct MockFsLock(Arc<AtomicBool>);
+
+impl Drop for MockFsLock {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl super::traits::FsLock for MockFsLock {}
 
 impl MockFs {
     /// Create a new empty mock filesystem
@@ -159,6 +169,18 @@ impl ReadFs for MockFs {
 }
 
 impl Fs for MockFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn super::traits::FsLock>> {
+        let lock = Arc::clone(
+            self.exclusive_locks
+                .lock()
+                .entry(path.0.clone())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false))),
+        );
+        lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .map_err(|_| FsError::AlreadyExists(path.0.clone()))?;
+        Ok(Box::new(MockFsLock(lock)))
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let mut files = self.files.lock();
 

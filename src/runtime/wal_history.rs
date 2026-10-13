@@ -48,6 +48,13 @@ impl WalHistoryFence {
             timeout,
         }
     }
+
+    pub(crate) fn with_writer_effect<T>(
+        &self,
+        operation: impl FnOnce() -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        with_writer_fence(Some(self), self.writer_epoch, operation)
+    }
 }
 
 fn with_writer_fence<T>(

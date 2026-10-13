@@ -1153,6 +1153,100 @@ mod tests {
     }
 
     #[test]
+    fn should_serialize_background_append_with_same_epoch_wal_reservation() -> MidgeResult<()> {
+        // Arrange: the engine's WAL writer and event loop share one filesystem
+        // lease and can request effects concurrently in the same epoch.
+        let directory = tempfile::tempdir().expect("temporary database root");
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::LeaseClock::default(),
+        ));
+        let lease = store.acquire_leadership("holder").unwrap();
+        let epoch = lease.epoch;
+        let wal = crate::io::subdirectory(Arc::clone(&fs), crate::wal::WAL_DIR);
+        let fence = crate::runtime::wal_history::WalHistoryFence::new(
+            Arc::clone(&store) as Arc<dyn LeaderStore>,
+            "holder".into(),
+            epoch,
+            Duration::from_secs(2),
+        );
+        let mut history = crate::runtime::wal_history::WalHistory::open_with_fence(
+            Arc::clone(&wal),
+            1,
+            epoch,
+            fence,
+        )?;
+        let writer = FsWalWriterIo::new_with_counters(
+            &crate::wal::segment_file_name(1),
+            Arc::clone(&wal),
+            Duration::from_secs(2),
+            crate::telemetry::CounterSink::default(),
+        )?;
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let first_effect = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let authority_store = Arc::clone(&store);
+        let authority_entered = Arc::clone(&entered);
+        let authority_resume = Arc::clone(&resume);
+        let authority_first_effect = Arc::clone(&first_effect);
+        writer.set_write_authority(Some(Arc::new(move |operation: &mut dyn FnMut()| {
+            let mut run = || {
+                if authority_first_effect.swap(false, Ordering::AcqRel) {
+                    authority_entered.wait();
+                    authority_resume.wait();
+                }
+                operation();
+            };
+            authority_store
+                .with_writer_epoch("holder", epoch, Duration::from_secs(2), &mut run)
+                .map_err(|error| error.into_validation_error("background WAL append"))
+        })));
+        let writer = Arc::new(writer);
+        let append_writer = Arc::clone(&writer);
+        let append = std::thread::spawn(move || {
+            append_writer.append_record(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"concurrent-key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            ))
+        });
+        entered.wait();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reserve = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal reservation start");
+            result_tx
+                .send(history.reserve(10))
+                .expect("send reservation result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reservation thread started");
+
+        // Act: the same-epoch reservation must wait while the background
+        // writer holds the real filesystem effect lock, then run successfully.
+        let early_result = result_rx.recv_timeout(Duration::from_millis(20));
+        resume.wait();
+        append.join().expect("background append thread completed")?;
+        reserve.join().expect("reservation thread completed");
+
+        // Assert
+        assert!(matches!(
+            early_result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        result_rx
+            .try_recv()
+            .expect("reservation result is available")?;
+        drop(writer);
+        Ok(())
+    }
+
+    #[test]
     fn should_reject_queued_append_when_validity_expires_during_handle_open() -> MidgeResult<()> {
         // Arrange
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();

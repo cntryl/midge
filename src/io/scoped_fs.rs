@@ -120,6 +120,12 @@ impl Fs for ScopedFs<dyn Fs> {
         self.inner.coordination_key()
     }
 
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+        checked(&self.scope, "filesystem exclusive lock", || {
+            self.inner.try_lock_exclusive(path)
+        })
+    }
+
     fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let inner = checked(&self.scope, "filesystem open", || {
             self.inner.open(path, options)

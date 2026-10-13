@@ -437,6 +437,7 @@ fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_loca
         &Manifest::default(),
         HashMap::new(),
         None,
+        None,
         fs.as_ref(),
         history,
     );

@@ -10,7 +10,7 @@
 //! - `sync_dir` uses a directory durability barrier on Unix and Windows.
 
 use super::traits::{
-    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, Metadata,
+    DirEntry, Durability, File, Fs, FsError, FsLock, FsPath, FsResult, HostAddressing, Metadata,
     OpenOptions, ReadFs,
 };
 use std::fs;
@@ -229,6 +229,24 @@ impl Fs for RealFs {
         hasher.finish()
     }
 
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+        let full = self.full_path(path)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&full)
+            .map_err(|error| file_op_err("open_lock", &full, &error))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Box::new(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(FsError::AlreadyExists(path.0.clone())),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(io_err("lock_exclusive", &full, &error))
+            }
+        }
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         // Delegate to shared implementation that returns a 'static file handle.
         self.open_inner(path, opts)
@@ -364,6 +382,8 @@ impl Fs for RealFs {
         }
     }
 }
+
+impl FsLock for fs::File {}
 
 pub struct RealFile {
     file: fs::File,
