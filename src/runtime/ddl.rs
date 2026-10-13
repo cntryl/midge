@@ -75,8 +75,8 @@ pub(crate) struct DdlRegistry {
     pub(crate) column_families: Vec<ColumnFamilyMeta>,
     #[serde(default)]
     pub(crate) operations: Vec<DdlOperation>,
-    /// Present only for the provider-backed V2 wire format. V1 serialization
-    /// remains unchanged for simulated cloud stores.
+    /// The writer epoch carried by the V2 wire format, which every cloud store
+    /// writes, simulated ones included. A V1 document has none.
     #[serde(skip)]
     writer_epoch: Option<u64>,
 }
