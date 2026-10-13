@@ -1518,6 +1518,75 @@ fn reopen_and_find(fixture: EventLoopFixture, keys: [&[u8]; 2]) -> MidgeResult<[
     Ok(found)
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_outcome_unknown_when_group_append_is_partly_written_and_authority_lost(
+) -> MidgeResult<()> {
+    // Arrange: one positional write carries both units' frames. It writes
+    // half of them and fails, and the authority check that follows fails
+    // too, so the written prefix stays in the file.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let first_keys: [&[u8]; 2] = [b"partial-a1", b"partial-a2"];
+    let (fixture, first, second) = {
+        let test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let first_rx = fixture.register(82);
+        let second_rx = fixture.register(83);
+        msg_tx
+            .send(txn_msg(
+                83,
+                vec![put_op(0, b"partial-b", b"value")],
+                Some(DurabilityPolicy::Strict),
+            ))
+            .expect("queue second strict transaction");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        fixture
+            .event_loop
+            .wal_actor
+            .set_write_authority_for_test(Arc::new(move || {
+                if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                    Err(MidgeError::Fenced("test writer authority lost".to_string()))
+                } else {
+                    Ok(())
+                }
+            }));
+        fail::cfg("midge::wal::partial_write_then_no_space", "return")
+            .expect("configure partial WAL write");
+
+        // Act
+        fixture.event_loop.apply_transaction_with_coalescing(
+            &msg_rx,
+            txn_request(
+                82,
+                vec![
+                    put_op(0, first_keys[0], b"value"),
+                    put_op(0, first_keys[1], b"value"),
+                ],
+                Some(DurabilityPolicy::Strict),
+            ),
+            1024,
+        );
+        fail::remove("midge::wal::partial_write_then_no_space");
+        let responses = (recv_response(&first_rx), recv_response(&second_rx));
+        scenario.teardown();
+        drop(test_guard);
+        (fixture, responses.0, responses.1)
+    };
+    let recovered = reopen_and_find(fixture, first_keys)?;
+
+    // Assert: a written frame may replay, so neither caller may be told its
+    // unit is not applied; the first unit comes back whole or not at all.
+    assert!(is_outcome_unknown(&first, 82), "{first:?}");
+    assert!(is_outcome_unknown(&second, 83), "{second:?}");
+    assert_eq!(recovered[0], recovered[1], "{recovered:?}");
+    Ok(())
+}
+
 /// Run `run_group_with_lease_lapse` under the failpoint gate, releasing the
 /// gate before returning, and capture the family's memtable keys.
 #[cfg(feature = "failpoints")]

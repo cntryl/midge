@@ -997,6 +997,17 @@ impl Default for WalActor {
 mod tests;
 
 impl WalActor {
+    /// Replace the open writer's authority check, as a lease would.
+    #[cfg(test)]
+    pub(crate) fn set_write_authority_for_test(
+        &self,
+        authority: crate::wal::traits::WriteAuthority,
+    ) {
+        if let Some(writer) = self.writer() {
+            writer.set_write_authority(Some(authority));
+        }
+    }
+
     pub(crate) fn set_lease_validity(
         &mut self,
         validity: Option<Arc<crate::lease::LeaseValidity>>,
