@@ -2240,6 +2240,71 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 }
 
 #[cfg(feature = "failpoints")]
+#[test]
+fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
+    for key in [b"first".as_slice(), b"second".as_slice()] {
+        write_set.push(crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::from_static(b"spilled-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+    }
+    let source = write_set.take_source();
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return").expect("fail the second apply");
+
+    // Act
+    let result = actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 340,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::spilled_apply_op");
+
+    // Assert: a BestEffort unit has no WAL record, so restart cannot apply
+    // it; the error must not promise that it will.
+    let Err(MidgeError::RecoveryFailed(message)) = result else {
+        panic!("expected RecoveryFailed, got {result:?}");
+    };
+    assert!(message.contains("restart discards all of it"), "{message}");
+    assert!(!message.contains("fully applied on restart"), "{message}");
+    assert!(state
+        .get_cf(0)
+        .is_some_and(|cf| cf.partially_applied_commit().is_some()));
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
 const PARTIAL_SPILL_CHILD: &str = "MIDGE_PARTIAL_SPILL_FLUSH_CHILD";
 
 #[cfg(feature = "failpoints")]
@@ -2342,6 +2407,115 @@ fn should_apply_whole_spilled_transaction_on_restart_when_flushed_after_partial_
     reopened
         .shutdown(std::time::Duration::from_secs(30))
         .expect("shutdown restarted engine");
+}
+
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_WRITE_CHILD: &str = "MIDGE_PARTIAL_SPILL_WRITE_CHILD";
+
+#[cfg(feature = "failpoints")]
+fn put_one(
+    engine: &crate::Engine,
+    family: &crate::ColumnFamilyHandle,
+    key: &[u8],
+    options: crate::WriteOptions,
+) -> MidgeResult<()> {
+    let mut tx = engine.begin_tx(family.id(), crate::TransactionMode::ReadWrite)?;
+    tx.put(key.to_vec(), b"after-partial-apply".to_vec(), None)?;
+    tx.commit(options)
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_writing_to_partly_applied_family_in_child() {
+    // Arrange: runs only as the child of the rejection test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(PARTIAL_SPILL_WRITE_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open spill writer");
+    let family = engine.get_column_family("default").expect("default family");
+    let other = engine.create_column_family("other").expect("other family");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("spilled transaction");
+    tx.put(b"first".to_vec(), partial_spill_value(), None)
+        .expect("spill first");
+    tx.put(b"second".to_vec(), partial_spill_value(), None)
+        .expect("spill second");
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return")
+        .expect("fail the second post-commit apply");
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(
+        matches!(commit, Err(MidgeError::RecoveryFailed(_))),
+        "{commit:?}"
+    );
+
+    // Act: the other family's write goes first, because a write refused
+    // while the WAL is fenced may stop the whole runtime from writing.
+    let best_effort_other = put_one(
+        &engine,
+        &other,
+        b"best-effort",
+        crate::WriteOptions::best_effort(),
+    );
+    let best_effort_same = put_one(
+        &engine,
+        &family,
+        b"best-effort",
+        crate::WriteOptions::best_effort(),
+    );
+    let sync_same = put_one(&engine, &family, b"sync", crate::WriteOptions::sync());
+    let flushed = engine.flush_cf(&family);
+
+    // Assert: the marked family cannot freeze until restart, so it must not
+    // acknowledge a write it could never persist; the other family, which
+    // holds no partly applied unit, still takes the writes the fenced WAL
+    // allows.
+    assert!(best_effort_other.is_ok(), "{best_effort_other:?}");
+    assert!(
+        matches!(best_effort_same, Err(MidgeError::RecoveryFailed(_))),
+        "{best_effort_same:?}"
+    );
+    assert!(
+        matches!(
+            sync_same,
+            Err(MidgeError::RecoveryFailed(_) | MidgeError::Fenced(_))
+        ),
+        "{sync_same:?}"
+    );
+    assert!(flushed.is_err(), "{flushed:?}");
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_reject_best_effort_write_when_family_holds_partly_applied_spilled_transaction() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("database directory");
+
+    // Act: a child process partly applies a durably logged spilled
+    // transaction, then writes to the marked family and to another one.
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_writing_to_partly_applied_family_in_child",
+            "--nocapture",
+        ])
+        .env(PARTIAL_SPILL_WRITE_CHILD, directory.path())
+        .output()
+        .expect("run partial spill write child");
+
+    // Assert
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

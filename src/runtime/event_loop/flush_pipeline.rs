@@ -68,7 +68,7 @@ impl EventLoop {
         if let Some(commit_seq) = cf.partially_applied_commit() {
             return Err(crate::common::MidgeError::RecoveryFailed(format!(
                 "column family {cf_id} holds a partly applied transaction committed at \
-                 sequence {commit_seq}; restart to replay it before flushing"
+                 sequence {commit_seq}; restart before flushing it"
             )));
         }
         if self.state.is_immutable_memtable_queue_full(cf_id) {

@@ -791,6 +791,27 @@ impl WalActor {
         self.ensure_filesystem_wal_available(state)
     }
 
+    /// Refuse a write, under any durability policy, to a family whose active
+    /// memtable holds a partly applied unit. That memtable cannot freeze
+    /// until restart, so the family could never persist the write it would
+    /// acknowledge; refusing it before it reaches the memtable keeps the
+    /// write unacknowledged instead of acknowledged and unflushable.
+    fn ensure_family_accepts_writes(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> MidgeResult<()> {
+        match state
+            .get_cf(cf_id)
+            .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit)
+        {
+            Some(commit_seq) => Err(MidgeError::RecoveryFailed(format!(
+                "column family {cf_id} holds a partly applied transaction committed at \
+                 sequence {commit_seq}; restart before writing to it"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn can_coalesce_transaction_append(
         &self,
         durability_policy: Option<DurabilityPolicy>,

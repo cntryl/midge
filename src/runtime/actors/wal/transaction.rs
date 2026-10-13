@@ -122,6 +122,7 @@ impl WalActor {
 
         let cf_id =
             Self::transaction_family(ops.iter().map(crate::runtime::transaction_spill::op_cf_id))?;
+        Self::ensure_family_accepts_writes(state, cf_id)?;
         Self::validate_transaction_preconditions(
             state,
             self.read_resources.clone(),
@@ -171,6 +172,7 @@ impl WalActor {
 
         for prepared in &prepared_transactions {
             self.ensure_write_durability_available(state, prepared.effective_durability)?;
+            Self::ensure_family_accepts_writes(state, prepared.sequence_plan.cf_id)?;
         }
 
         let apply_ops = prepared_transactions

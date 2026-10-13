@@ -66,6 +66,7 @@ impl WalActor {
             start_sequence,
             conflict_policy,
         )?;
+        Self::ensure_family_accepts_writes(state, cf_id)?;
 
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         self.ensure_write_durability_available(state, effective_durability)?;
@@ -122,7 +123,12 @@ impl WalActor {
             effective_durability,
             commit_time_millis,
         ) {
-            return Err(self.fail_logged_spilled_apply(state, &sequence_plan, error));
+            return Err(self.fail_partial_spilled_apply(
+                state,
+                &sequence_plan,
+                effective_durability,
+                error,
+            ));
         }
 
         let deferred = matches!(
@@ -138,24 +144,37 @@ impl WalActor {
         Ok((sequence_plan.commit_seq, source.len(), deferred))
     }
 
-    /// Stop a writer whose durably logged spilled transaction reached the
-    /// memtables only in part (#537). The WAL holds the whole unit, so a
-    /// restart replays all of it, provided no flush frontier passes its
-    /// commit first; the family therefore refuses to freeze until then.
-    fn fail_logged_spilled_apply(
+    /// Stop a writer whose spilled transaction reached the memtables only in
+    /// part. When the WAL holds the whole unit, a restart replays all of it
+    /// (#537), provided no flush frontier passes its commit first. A
+    /// `BestEffort` unit has no WAL record, so a restart drops all of it,
+    /// provided the partial memtable is never flushed. Either way the family
+    /// refuses to freeze, and to take writes, until restart.
+    fn fail_partial_spilled_apply(
         &mut self,
         state: &mut RuntimeState,
         sequence_plan: &TxnSequencePlan,
+        effective_durability: DurabilityPolicy,
         error: MidgeError,
     ) -> MidgeError {
+        let logged = !matches!(effective_durability, DurabilityPolicy::BestEffort)
+            && self.writer().is_some();
         if let Some(cf) = state.get_cf_mut(sequence_plan.cf_id) {
             cf.mark_partially_applied(sequence_plan.commit_seq);
         }
-        let message = format!(
-            "spilled transaction {} is durably logged but failed to apply to memtables; \
-             it will be fully applied on restart: {error}",
-            sequence_plan.txn_id
-        );
+        let message = if logged {
+            format!(
+                "spilled transaction {} is durably logged but failed to apply to memtables; \
+                 it will be fully applied on restart: {error}",
+                sequence_plan.txn_id
+            )
+        } else {
+            format!(
+                "spilled transaction {} has no WAL record and failed to apply to memtables; \
+                 restart discards all of it: {error}",
+                sequence_plan.txn_id
+            )
+        };
         self.fence_transition(state, message.clone());
         state.mark_persistence_anomaly();
         if matches!(error, MidgeError::Fenced(_)) {
