@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      SQRZL_SECRET_ACCESS_KEY: easy-peasy
     steps:
       - name: Check out release tag
         uses: actions/checkout@v7
@@ -112,12 +114,12 @@ jobs:
       - name: Sqrzl provider qualification
         env:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
+        run: cargo test --lib --features sqrzl-tests storage::providers::qualification
 
       - name: Sqrzl engine qualification
         env:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --test-threads=1
 
       - name: Validate test conventions
         run: cntryl-tools validate-tests
