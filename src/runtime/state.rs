@@ -757,20 +757,7 @@ impl RuntimeState {
             oldest_snapshot_age_seconds: gauges.oldest_snapshot_age_seconds,
             sst_count: gauges.sst_count,
             sst_bytes: gauges.sst_bytes,
-            manifest_flush_frontiers: self
-                .manifest
-                .flush_frontiers()
-                .iter()
-                .map(|(id, frontier)| {
-                    let through = match frontier {
-                        crate::metadata::FamilyFrontier::Live { through_sequence } => {
-                            Some(through_sequence)
-                        }
-                        crate::metadata::FamilyFrontier::Dropped => None,
-                    };
-                    (id, through)
-                })
-                .collect(),
+            manifest_flush_frontiers: self.manifest_flush_frontier_metrics(),
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode()),
             no_space_events: telemetry.no_space_events,
             compactions_run: telemetry.compactions_run,
@@ -837,6 +824,24 @@ impl RuntimeState {
             intent_log_replay_runs: self.recovery_stats.intent_log_replay_runs,
             intent_log_entries_replayed: self.recovery_stats.intent_log_entries_replayed,
         }
+    }
+
+    fn manifest_flush_frontier_metrics(
+        &self,
+    ) -> std::collections::BTreeMap<crate::types::ColumnFamilyId, Option<u64>> {
+        self.manifest
+            .flush_frontiers()
+            .iter()
+            .map(|(id, frontier)| {
+                let through = match frontier {
+                    crate::metadata::FamilyFrontier::Live { through_sequence } => {
+                        Some(through_sequence)
+                    }
+                    crate::metadata::FamilyFrontier::Dropped => None,
+                };
+                (id, through)
+            })
+            .collect()
     }
 
     pub fn storage_layout_snapshot(&self) -> crate::types::StorageLayoutSnapshot {
