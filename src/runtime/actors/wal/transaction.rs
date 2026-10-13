@@ -190,18 +190,35 @@ impl WalActor {
             let last_sequence = prepared_transactions
                 .last()
                 .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
-            self.apply_strict_transaction_group_durability(state, last_sequence)?;
+            // A failed sync leaves the group's records in the WAL file, where
+            // restart may find them; keep every frontier below them.
+            if let Err(error) = self.apply_strict_transaction_group_durability(state, last_sequence)
+            {
+                let plans = prepared_transactions
+                    .iter()
+                    .map(|prepared| &prepared.sequence_plan)
+                    .collect::<Vec<_>>();
+                Self::mark_unapplied(state, &plans);
+                return Err(error);
+            }
         }
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
         let mut pending = prepared_transactions.into_iter();
         while let Some(prepared) = pending.next() {
             if !strict_group {
-                self.apply_transaction_durability(
+                if let Err(error) = self.apply_transaction_durability(
                     state,
                     prepared.effective_durability,
                     prepared.sequence_plan.commit_seq,
-                )?;
+                ) {
+                    let plans = std::iter::once(&prepared)
+                        .chain(pending.as_slice())
+                        .map(|prepared| &prepared.sequence_plan)
+                        .collect::<Vec<_>>();
+                    Self::mark_unapplied(state, &plans);
+                    return Err(error);
+                }
             }
             crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
             // Every unit in the group is in the WAL and `state.sequence` is

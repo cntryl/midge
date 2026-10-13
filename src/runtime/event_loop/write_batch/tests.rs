@@ -1288,6 +1288,59 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_refuse_flush_when_strict_sync_fails_after_wal_append() -> MidgeResult<()> {
+    // Arrange: an earlier write leaves the family's memtable non-empty, so
+    // a freeze would publish a frontier at `state.sequence`.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let _applied_rx = fixture.register(67);
+    let failed_rx = fixture.register(68);
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            67,
+            vec![put_op(0, b"strict-applied", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1,
+    );
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("configure WAL sync failure");
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            68,
+            vec![put_op(0, b"strict-sync-failed", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1,
+    );
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    expect_error(&failed_rx, 68, |error| {
+        matches!(error, MidgeError::NoSpace(_))
+    });
+
+    // Act
+    let frozen = fixture.event_loop.freeze_active_memtable(0);
+
+    // Assert: the failed unit's records are in the WAL file and may survive
+    // restart; a frontier at or past its commit would make replay skip it.
+    assert!(
+        matches!(frozen, Err(MidgeError::RecoveryFailed(_))),
+        "{frozen:?}"
+    );
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeResult<()> {
     // Arrange
     let _guard = failpoint_test_lock()

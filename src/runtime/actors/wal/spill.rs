@@ -114,7 +114,14 @@ impl WalActor {
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
-        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
+        if let Err(error) =
+            self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
+        {
+            // A failed sync leaves the unit's records in the WAL file, where
+            // restart may find them; keep the frontier below them.
+            Self::mark_unapplied(state, &[&sequence_plan]);
+            return Err(error);
+        }
         // The WAL now holds the unit and `state.sequence` is past its commit.
         // A lease that lapsed since is a failed apply: the family must not
         // publish a frontier past the commit before restart replays the unit.

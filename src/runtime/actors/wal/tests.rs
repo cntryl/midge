@@ -2318,6 +2318,69 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_mark_family_when_strict_spilled_sync_fails_after_wal_append() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
+    write_set.push(crate::runtime::TransactionOp::Put {
+        cf_id: 0,
+        key: Bytes::from_static(b"first"),
+        value: Bytes::from_static(b"spilled-value"),
+        ttl_seconds: None,
+        insert_only: false,
+    })?;
+    let source = write_set.take_source();
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("fail the strict sync");
+
+    // Act
+    let result = actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 342,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::inject_no_space_on_sync");
+
+    // Assert: the unit's records are in the WAL file and may survive
+    // restart, so the family must not publish a frontier past its commit.
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))), "{result:?}");
+    assert_eq!(
+        state
+            .get_cf(0)
+            .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit),
+        Some(state.sequence)
+    );
+    assert!(actor.is_fenced());
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_mark_family_when_lease_lapses_after_durable_spilled_commit() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
