@@ -66,8 +66,18 @@ fn publish_test_flush_frontier(el: &mut EventLoop, cf_id: u32, sequence: u64) {
     set_test_flush_frontier(el, cf_id, sequence);
     crate::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
         .expect("save durable fixture frontier");
-    el.mirror_metadata_to_authoritative_cloud()
-        .expect("commit shared fixture frontier");
+    // The shared readback can exhaust its deadline on a loaded machine. Publishing
+    // the same frontier again is idempotent, so retry only that timeout.
+    let mut attempts_left = 2;
+    loop {
+        match el.mirror_metadata_to_authoritative_cloud() {
+            Ok(()) => return,
+            Err(crate::common::MidgeError::Timeout(_)) if attempts_left > 0 => {
+                attempts_left -= 1;
+            }
+            Err(error) => panic!("commit shared fixture frontier: {error}"),
+        }
+    }
 }
 
 #[cfg(feature = "failpoints")]
