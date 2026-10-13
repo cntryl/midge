@@ -458,28 +458,38 @@ impl EventLoop {
             deferred_error,
         } = batch;
 
-        let append_result = self
+        let (applied, failure) = match self
             .wal_actor
-            .append_prepared_transactions(&mut self.state, prepared);
+            .append_prepared_transaction_group(&mut self.state, prepared)
+        {
+            Ok(outcome) => (outcome.applied, outcome.failure),
+            Err(error) => (Vec::new(), Some(error)),
+        };
 
-        match append_result {
-            Ok(results) => {
-                if !results.is_empty() {
-                    self.publish_snapshot();
-                }
-                for result in results {
-                    let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
-                    self.finish_drained_write_after_publish(
-                        result.request_id,
-                        Ok(WriteResult {
-                            last_sequence: result.last_sequence,
-                            op_count: result.op_count,
-                            deferred: result.deferred,
-                            touched_cfs,
-                        }),
-                    );
-                }
+        // Units applied before a failure are visible and durable, and
+        // replay keeps them whole, so they are acknowledged like any other.
+        if !applied.is_empty() {
+            self.publish_snapshot();
+        }
+        let applied_ids = applied
+            .iter()
+            .map(|result| result.request_id)
+            .collect::<std::collections::HashSet<_>>();
+        for result in applied {
+            let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
+            self.finish_drained_write_after_publish(
+                result.request_id,
+                Ok(WriteResult {
+                    last_sequence: result.last_sequence,
+                    op_count: result.op_count,
+                    deferred: result.deferred,
+                    touched_cfs,
+                }),
+            );
+        }
 
+        match failure {
+            None => {
                 if let Some((request_id, error)) = deferred_error {
                     self.finish_drained_write(request_id, Err(error));
                     handled += 1;
@@ -490,9 +500,11 @@ impl EventLoop {
                     handled += 1;
                 }
             }
-            Err(error) => {
+            Some(error) => {
                 for request_id in request_ids {
-                    self.finish_drained_write(request_id, Err(error.replay()));
+                    if !applied_ids.contains(&request_id) {
+                        self.finish_drained_write(request_id, Err(error.replay()));
+                    }
                 }
 
                 if let Some((request_id, error)) = deferred_error {

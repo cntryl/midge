@@ -130,6 +130,13 @@ pub(crate) struct TransactionAppendResult {
     pub deferred: bool,
 }
 
+/// Outcome of a prepared group: the units applied, in order, and the error
+/// that stopped the remaining units, if any.
+pub(crate) struct PreparedGroupOutcome {
+    pub applied: Vec<TransactionAppendResult>,
+    pub failure: Option<MidgeError>,
+}
+
 enum TransactionIntent<'a> {
     Point {
         cf_id: crate::types::ColumnFamilyId,

@@ -1441,6 +1441,68 @@ fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_acknowledge_applied_unit_when_lease_lapses_inside_coalesced_group() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(74);
+    let second_rx = fixture.register(75);
+    msg_tx
+        .send(txn_msg(
+            75,
+            vec![put_op(0, b"acked-second", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue second strict transaction");
+    lapse_lease_at(
+        &mut fixture,
+        "midge::wal::before_prepared_transaction_apply",
+        1,
+    );
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            74,
+            vec![put_op(0, b"acked-first", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+
+    // Assert: the first unit is synced and applied, so it is visible and
+    // replayed whole; only the unit the lapse stopped is refused.
+    assert_eq!(handled, 2);
+    let first = recv_response(&first_rx);
+    assert!(
+        matches!(
+            first,
+            RuntimeResponse::TransactionApplied { request_id: 74, .. }
+                | RuntimeResponse::Error {
+                    request_id: 74,
+                    error: MidgeError::Timeout(_),
+                }
+        ),
+        "{first:?}"
+    );
+    expect_error(&second_rx, 75, |error| {
+        matches!(error, MidgeError::Fenced(_))
+    });
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_freeze_without_failed_unit_when_strict_sync_fails_after_wal_append() -> MidgeResult<()> {
     // Arrange: an earlier write leaves the family's memtable non-empty, so
     // a freeze would publish a frontier at `state.sequence`.

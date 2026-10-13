@@ -1,8 +1,8 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::TransactionIntent;
 use super::{
-    PreparedTransactionAppend, TransactionAppendParams, TransactionAppendResult,
-    TransactionApplyOp, TxnSequencePlan, TxnWalBatch, WalActor,
+    PreparedGroupOutcome, PreparedTransactionAppend, TransactionAppendParams,
+    TransactionAppendResult, TransactionApplyOp, TxnSequencePlan, TxnWalBatch, WalActor,
 };
 #[cfg(all(test, feature = "failpoints"))]
 use super::{
@@ -161,13 +161,35 @@ impl WalActor {
         })
     }
 
+    /// Append and apply `prepared_transactions` as one group, failing the
+    /// whole group unless every unit is applied.
     pub(crate) fn append_prepared_transactions(
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: Vec<PreparedTransactionAppend>,
     ) -> MidgeResult<Vec<TransactionAppendResult>> {
+        let outcome = self.append_prepared_transaction_group(state, prepared_transactions)?;
+        match outcome.failure {
+            Some(error) => Err(error),
+            None => Ok(outcome.applied),
+        }
+    }
+
+    /// Append and apply `prepared_transactions` as one group. A failure
+    /// before any unit is applied fails the group. A failure after some
+    /// units are applied reports those units in `applied`, since they are
+    /// visible and durable, and the error that stopped the rest in
+    /// `failure`.
+    pub(crate) fn append_prepared_transaction_group(
+        &mut self,
+        state: &mut RuntimeState,
+        prepared_transactions: Vec<PreparedTransactionAppend>,
+    ) -> MidgeResult<PreparedGroupOutcome> {
         if prepared_transactions.is_empty() {
-            return Ok(Vec::new());
+            return Ok(PreparedGroupOutcome {
+                applied: Vec::new(),
+                failure: None,
+            });
         }
 
         for prepared in &prepared_transactions {
@@ -199,11 +221,16 @@ impl WalActor {
         let mut pending = prepared_transactions.into_iter();
         while let Some(prepared) = pending.next() {
             if !strict_group {
-                self.apply_transaction_durability(
+                if let Err(error) = self.apply_transaction_durability(
                     state,
                     prepared.effective_durability,
                     prepared.sequence_plan.commit_seq,
-                )?;
+                ) {
+                    return Ok(PreparedGroupOutcome {
+                        applied: results,
+                        failure: Some(error),
+                    });
+                }
             }
             crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
             // Every unit in the group is in the WAL and `state.sequence` is
@@ -214,22 +241,10 @@ impl WalActor {
                 let unapplied = std::iter::once(&prepared)
                     .chain(pending.as_slice())
                     .collect::<Vec<_>>();
-                let logged = unapplied
-                    .iter()
-                    .any(|prepared| prepared.wal_batch.wal_record.is_some());
-                let plans = unapplied
-                    .iter()
-                    .map(|prepared| &prepared.sequence_plan)
-                    .collect::<Vec<_>>();
-                return Err(self.fail_unapplied_transactions(
-                    state,
-                    &plans,
-                    super::UnappliedOutcome {
-                        logged,
-                        partly_applied: false,
-                    },
-                    error,
-                ));
+                return Ok(PreparedGroupOutcome {
+                    applied: results,
+                    failure: Some(self.fail_unapplied_group(state, &unapplied, error)),
+                });
             }
             let PreparedTransactionAppend {
                 request_id,
@@ -267,7 +282,35 @@ impl WalActor {
             });
         }
 
-        Ok(results)
+        Ok(PreparedGroupOutcome {
+            applied: results,
+            failure: None,
+        })
+    }
+
+    /// Fence the WAL for group units none of whose ops reached the memtables.
+    fn fail_unapplied_group(
+        &mut self,
+        state: &mut RuntimeState,
+        unapplied: &[&PreparedTransactionAppend],
+        error: MidgeError,
+    ) -> MidgeError {
+        let logged = unapplied
+            .iter()
+            .any(|prepared| prepared.wal_batch.wal_record.is_some());
+        let plans = unapplied
+            .iter()
+            .map(|prepared| &prepared.sequence_plan)
+            .collect::<Vec<_>>();
+        self.fail_unapplied_transactions(
+            state,
+            &plans,
+            super::UnappliedOutcome {
+                logged,
+                partly_applied: false,
+            },
+            error,
+        )
     }
 
     fn validate_transaction_preconditions(
