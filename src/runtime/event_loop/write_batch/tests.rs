@@ -1439,6 +1439,46 @@ fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -
     Ok(())
 }
 
+/// Close the group's runtime, reopen its directory as an engine and report
+/// which of `keys` family 0 holds after recovery. Call it without the
+/// failpoint gate: the engine's workers wait on it.
+#[cfg(feature = "failpoints")]
+fn reopen_and_find(fixture: EventLoopFixture, keys: [&[u8]; 2]) -> MidgeResult<[bool; 2]> {
+    let EventLoopFixture {
+        _temp_dir: directory,
+        event_loop,
+        router: _,
+    } = fixture;
+    drop(event_loop);
+    let options = crate::OpenOptions::local(directory.path())
+        .background_compaction(false)
+        .build()?;
+    let mut engine = crate::Engine::open(options)?;
+    let found = {
+        let tx = engine.begin_tx(0, crate::TransactionMode::ReadOnly)?;
+        [tx.get(keys[0])?.is_some(), tx.get(keys[1])?.is_some()]
+    };
+    engine.shutdown(Duration::from_secs(30))?;
+    Ok(found)
+}
+
+/// Run `run_group_with_lease_lapse` under the failpoint gate, releasing the
+/// gate before returning, and capture the family's memtable keys.
+#[cfg(feature = "failpoints")]
+fn lapsed_group_outside_gate(
+    policy: DurabilityPolicy,
+    request_ids: [u64; 2],
+    keys: [&'static [u8]; 2],
+) -> MidgeResult<(LapsedGroup, Vec<Vec<u8>>)> {
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let group = run_group_with_lease_lapse(policy, request_ids, keys)?;
+    let memtable = memtable_keys(&group.fixture, 0);
+    scenario.teardown();
+    drop(test_guard);
+    Ok((group, memtable))
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_acknowledge_applied_unit_when_lease_lapses_inside_coalesced_group() -> MidgeResult<()> {
@@ -1446,58 +1486,73 @@ fn should_acknowledge_applied_unit_when_lease_lapses_inside_coalesced_group() ->
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
-    let scenario = fail::FailScenario::setup();
-    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
-    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let first_rx = fixture.register(74);
-    let second_rx = fixture.register(75);
-    msg_tx
-        .send(txn_msg(
-            75,
-            vec![put_op(0, b"acked-second", b"value")],
-            Some(DurabilityPolicy::Strict),
-        ))
-        .expect("queue second strict transaction");
-    lapse_lease_at(
-        &mut fixture,
-        "midge::wal::before_prepared_transaction_apply",
-        1,
-    );
+    let keys: [&[u8]; 2] = [b"acked-first", b"acked-second"];
 
     // Act
-    let handled = fixture.event_loop.apply_transaction_with_coalescing(
-        &msg_rx,
-        txn_request(
-            74,
-            vec![put_op(0, b"acked-first", b"value")],
-            Some(DurabilityPolicy::Strict),
-        ),
-        1024,
-    );
-    fail::remove("midge::wal::before_prepared_transaction_apply");
+    let (
+        LapsedGroup {
+            fixture,
+            first,
+            second,
+        },
+        memtable,
+    ) = lapsed_group_outside_gate(DurabilityPolicy::Strict, [74, 75], keys)?;
+    let recovered = reopen_and_find(fixture, keys)?;
 
-    // Assert: the first unit is synced and applied, so it is visible and
-    // replayed whole; only the unit the lapse stopped is refused.
-    assert_eq!(handled, 2);
-    let first = recv_response(&first_rx);
+    // Assert: the first unit is synced and applied, so it is acknowledged
+    // and survives restart. The second is synced but not applied, so its
+    // caller learns nothing definite, and replay applies it.
     assert!(
         matches!(
             first,
             RuntimeResponse::TransactionApplied { request_id: 74, .. }
-                | RuntimeResponse::Error {
-                    request_id: 74,
-                    error: MidgeError::Timeout(_),
-                }
         ),
         "{first:?}"
     );
-    expect_error(&second_rx, 75, |error| {
-        matches!(error, MidgeError::Timeout(_))
-    });
+    assert!(is_outcome_unknown(&second, 75), "{second:?}");
+    assert_eq!(memtable, vec![keys[0].to_vec()]);
+    assert_eq!(recovered, [true, true]);
+    Ok(())
+}
 
-    scenario.teardown();
-    drop(test_guard);
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_promise_nothing_for_buffered_units_when_lease_lapses_inside_coalesced_group(
+) -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let keys: [&[u8]; 2] = [b"buffered-first", b"buffered-second"];
+
+    // Act
+    let (
+        LapsedGroup {
+            fixture,
+            first,
+            second,
+        },
+        memtable,
+    ) = lapsed_group_outside_gate(DurabilityPolicy::Batched, [80, 81], keys)?;
+    let recovered = reopen_and_find(fixture, keys)?;
+
+    // Assert: neither frame is proven durable, so neither caller is told
+    // its unit is applied or not. The first unit is applied and the second
+    // is not; restart keeps each one whole, so a key it recovers is a unit
+    // whose frame reached the WAL file.
+    assert!(
+        matches!(
+            first,
+            RuntimeResponse::Error {
+                request_id: 80,
+                error: MidgeError::Timeout(_),
+            }
+        ),
+        "{first:?}"
+    );
+    assert!(is_outcome_unknown(&second, 81), "{second:?}");
+    assert_eq!(memtable, vec![keys[0].to_vec()]);
+    assert!(recovered[0] || !recovered[1], "{recovered:?}");
     Ok(())
 }
 
