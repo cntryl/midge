@@ -582,6 +582,34 @@ mod retention_tests {
     }
 
     #[test]
+    fn should_stall_when_flushable_bytes_reach_hard_limit_beside_partly_applied_family() {
+        // Arrange: the exemption covers only the marked family's bytes; an
+        // unmarked family at twice the flush threshold still stalls.
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::new(directory.path().to_path_buf(), true);
+        state.limits.memtable_flush_threshold = 1024;
+        let other = state.create_cf("other".into()).unwrap();
+        let cf = state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 4096], 1, None)
+            .unwrap();
+        cf.mark_partially_applied(2);
+        state
+            .get_cf_mut(other)
+            .unwrap()
+            .memtable
+            .put_with_seq(b"flushable".to_vec(), vec![2; 2048], 3, None)
+            .unwrap();
+        state.recompute_total_memtable_bytes();
+
+        // Act
+        let stalled = state.should_hard_stall_writes(other);
+
+        // Assert
+        assert!(stalled);
+    }
+
+    #[test]
     fn should_force_the_family_blocking_the_oldest_segment_before_a_larger_gap() {
         // Arrange
         let directory = tempfile::tempdir().unwrap();

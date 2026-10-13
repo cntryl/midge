@@ -254,6 +254,45 @@ mod tests {
     }
 
     #[test]
+    fn should_freeze_only_unmarked_family_when_its_staging_crosses_half_the_window(
+    ) -> MidgeResult<()> {
+        // Arrange: the exemption covers only the marked family; an unmarked
+        // family over half the staging window still freezes.
+        let (_directory, mut event_loop, _hybrid) = fixture()?;
+        let other = event_loop.state.create_cf("other".into())?;
+        let cf = event_loop.state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 24 * 1024], 1, None)?;
+        cf.mark_partially_applied(2);
+        event_loop
+            .state
+            .get_cf_mut(other)
+            .unwrap()
+            .memtable
+            .put_with_seq(b"flushable".to_vec(), vec![2; 24 * 1024], 3, None)?;
+        event_loop.state.sequence = 3;
+
+        // Act
+        let frozen = event_loop.freeze_cloud_memtables_near_staging_limit();
+
+        // Assert
+        assert!(matches!(frozen, Ok(1)), "{frozen:?}");
+        let marked = event_loop.state.get_cf(0).unwrap();
+        assert!(marked.memtable.size_bytes() > 0);
+        assert!(marked.immutable_flushes.is_empty());
+        assert_eq!(
+            event_loop
+                .state
+                .get_cf(other)
+                .unwrap()
+                .memtable
+                .size_bytes(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
     fn should_preserve_flush_capacity_before_admitting_cloud_transaction_wal() -> MidgeResult<()> {
         // Arrange
         let (_directory, mut event_loop, hybrid) = fixture()?;
