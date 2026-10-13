@@ -307,7 +307,9 @@ fn should_account_forced_checkpoint_failure_when_snapshot_commits_before_truncat
         .append_for(Origin::CompactionBeforeGc, &edit)
         .expect("durable actual journal");
     let mut manifest = crate::metadata::Manifest::default();
-    manifest.apply_edit(&edit);
+    manifest
+        .apply_edit(&edit)
+        .expect("valid manifest fixture edit");
     manifest.note_applied_journal_edit(edit_id);
     let journal_before =
         std::fs::read(directory.path().join(crate::metadata::files::JOURNAL)).unwrap();

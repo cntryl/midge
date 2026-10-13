@@ -108,7 +108,7 @@ fn should_keep_best_effort_deleted_keys_absent_when_recovering_completed_flushes
     // Act
     let finding = campaign(Profile::BestEffortDelete, DETECTION_SEEDS, 16, config);
 
-    // Assert: a completed flush or shutdown makes the delete recoverable.
+    // Assert: a completed flush makes the delete recoverable.
     assert_clean("best-effort-delete", finding);
 }
 
@@ -290,6 +290,50 @@ fn should_find_no_violation_when_provider_writes_survive_takeovers() {
 
     // Assert
     assert_clean("provider-control", finding);
+}
+
+/// Found by the provider control (seed 15): a restart reserves a block of
+/// sequences in the cache's WAL ledger and a flush then records the family's
+/// frontier at a sequence inside that block. A fresh-cache takeover has no
+/// ledger, so it starts its sequences from the SSTs and the catalog, below
+/// the frontier, and the next recovery skips its acknowledged strict put as
+/// already flushed.
+#[test]
+fn should_keep_strict_put_when_a_fresh_cache_takes_over_after_a_flush() {
+    // Arrange: a restart moves the sequence past its predecessor's
+    // reservation, then a flush records the family's frontier there.
+    let config = Config {
+        segment_reuse: false,
+        ..Config::cloud(Mode::ProviderCloud)
+    };
+    let workload = [
+        Op::Delete {
+            family: 0,
+            key: 4,
+            durability: Durability::Sync,
+        },
+        Op::PowerLoss {
+            seed: 10_350_570_903_621_081_399,
+        },
+        Op::Flush { family: 0 },
+        Op::FreshCache,
+        Op::Put {
+            family: 0,
+            key: 1,
+            durability: Durability::Sync,
+        },
+        Op::PowerLoss {
+            seed: 14_639_653_375_325_880_093,
+        },
+    ];
+
+    // Act: the cache that wrote the put recovers it after a power loss.
+    let finding = Campaign::run(0, &workload, config)
+        .err()
+        .map(|finding| *finding);
+
+    // Assert
+    assert_clean("fresh-cache-below-frontier", finding);
 }
 
 #[test]

@@ -85,7 +85,6 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
         StorageErrorKind::Timeout
     } else {
         match &error {
-            #[cfg(any(test, feature = "cloud-common"))]
             CloudError::NotFound(_) => StorageErrorKind::NotFound,
             CloudError::PreconditionFailed(_) => StorageErrorKind::PreconditionFailed,
             #[cfg(any(test, feature = "cloud-common"))]

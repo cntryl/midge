@@ -145,6 +145,11 @@ pub(crate) fn record(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -
             rotate(&mut history)?;
         }
     }
+    let len = wal
+        .metadata(&FsPath::new(crate::wal::segment_file_name(open)))
+        .map_err(FsError::into_midge)?
+        .len;
+    history.record_sync(len)?;
     Ok(())
 }
 

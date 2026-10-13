@@ -324,7 +324,6 @@ impl BudgetFixture {
                 fs: self.el.state.fs.as_ref(),
                 publication_lock: &self.el.metadata_publication_lock,
                 lock_wait_budget: PROVIDER_CAP,
-                local_manifest_sequence: self.el.state.manifest.last_persisted_sequence,
                 deadline: &deadline,
                 authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                     store: store.as_ref(),

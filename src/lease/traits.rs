@@ -4,6 +4,8 @@ use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::types::SharedGenerationId;
+
 // Type alias to improve readability and satisfy Clippy's type_complexity lint
 type ReleaseFn = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
@@ -612,11 +614,30 @@ pub struct CloudMetadataObject {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloudMetadataGeneration {
-    /// Manifest sequence observed while capturing these bodies.
-    pub manifest_sequence: u64,
+    /// Shared publication ordinal, preserved across writer takeover.
+    pub id: SharedGenerationId,
+    /// Applied durable manifest journal horizon, distinct from publication order.
+    pub manifest_horizon: u64,
     /// Present control-metadata bodies. Unchanged bodies may retain keys from
     /// earlier immutable generations.
     pub objects: Vec<CloudMetadataObject>,
+}
+
+impl CloudMetadataGeneration {
+    pub(crate) fn validate_successor(&self, previous: Option<&Self>) -> Result<(), LeaseError> {
+        if previous == Some(self) {
+            return Ok(());
+        }
+        let expected = previous
+            .map_or(Some(SharedGenerationId::FIRST), |old| old.id.checked_next())
+            .ok_or_else(|| LeaseError::Internal("shared metadata generation exhausted".into()))?;
+        if self.id != expected
+            || previous.is_some_and(|old| self.manifest_horizon < old.manifest_horizon)
+        {
+            return Err(LeaseError::RenewalFailed("shared metadata publication must follow its exact predecessor without regressing the manifest horizon".into()));
+        }
+        Ok(())
+    }
 }
 
 /// State of the authority pointer in a provider-backed cloud lease.
@@ -832,13 +853,6 @@ pub trait LeaderStore: Send + Sync {
 
     #[cfg(test)]
     fn write_test_coordination_document(&self, _content: &str) -> Result<(), LeaseError> {
-        Err(LeaseError::Internal(
-            "leader store has no test coordination document".to_string(),
-        ))
-    }
-
-    #[cfg(test)]
-    fn remove_test_coordination_document(&self) -> Result<(), LeaseError> {
         Err(LeaseError::Internal(
             "leader store has no test coordination document".to_string(),
         ))

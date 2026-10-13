@@ -101,7 +101,11 @@ impl EventLoop {
             .iter()
             .flat_map(|(&cf_id, cf)| {
                 let additional = growth.get(&cf_id).copied().unwrap_or(0);
-                let active = if cf.memtable.size_bytes() == 0 && additional == 0 {
+                // A family holding a partly applied unit cannot freeze its
+                // active memtable until restart, so it needs no staging.
+                let active = if cf.partially_applied_commit().is_some()
+                    || (cf.memtable.size_bytes() == 0 && additional == 0)
+                {
                     0
                 } else {
                     let projected = flush_staging_bytes(
@@ -151,7 +155,7 @@ impl EventLoop {
             .state
             .column_families
             .values()
-            .filter(|cf| cf.memtable.size_bytes() > 0)
+            .filter(|cf| cf.memtable.size_bytes() > 0 && cf.partially_applied_commit().is_none())
             .map(|cf| flush_staging_bytes(cf.memtable.encoded_size_upper_bound()))
             .fold(0_u64, u64::saturating_add);
         if combined_staging < window / 2 {
@@ -161,7 +165,9 @@ impl EventLoop {
             .state
             .column_families
             .iter()
-            .filter(|(_, cf)| cf.memtable.size_bytes() > 0)
+            .filter(|(_, cf)| {
+                cf.memtable.size_bytes() > 0 && cf.partially_applied_commit().is_none()
+            })
             .map(|(&cf_id, _)| cf_id)
             .collect();
         let mut count = 0;
@@ -226,6 +232,64 @@ mod tests {
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         Ok((directory, event_loop, setup.hybrid_storage))
+    }
+
+    #[test]
+    fn should_not_freeze_for_staging_pressure_held_by_partly_applied_family() -> MidgeResult<()> {
+        // Arrange: a family holding a partly applied unit cannot freeze until
+        // restart, so its memtable never needs flush staging before then.
+        let (_directory, mut event_loop, _hybrid) = fixture()?;
+        let cf = event_loop.state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 80 * 1024], 1, None)?;
+        cf.mark_partially_applied(2);
+        event_loop.state.sequence = 2;
+
+        // Act
+        let frozen = event_loop.freeze_cloud_memtables_near_staging_limit();
+
+        // Assert
+        assert!(matches!(frozen, Ok(0)), "{frozen:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn should_freeze_only_unmarked_family_when_its_staging_crosses_half_the_window(
+    ) -> MidgeResult<()> {
+        // Arrange: the exemption covers only the marked family; an unmarked
+        // family over half the staging window still freezes.
+        let (_directory, mut event_loop, _hybrid) = fixture()?;
+        let other = event_loop.state.create_cf("other".into())?;
+        let cf = event_loop.state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 24 * 1024], 1, None)?;
+        cf.mark_partially_applied(2);
+        event_loop
+            .state
+            .get_cf_mut(other)
+            .unwrap()
+            .memtable
+            .put_with_seq(b"flushable".to_vec(), vec![2; 24 * 1024], 3, None)?;
+        event_loop.state.sequence = 3;
+
+        // Act
+        let frozen = event_loop.freeze_cloud_memtables_near_staging_limit();
+
+        // Assert
+        assert!(matches!(frozen, Ok(1)), "{frozen:?}");
+        let marked = event_loop.state.get_cf(0).unwrap();
+        assert!(marked.memtable.size_bytes() > 0);
+        assert!(marked.immutable_flushes.is_empty());
+        assert_eq!(
+            event_loop
+                .state
+                .get_cf(other)
+                .unwrap()
+                .memtable
+                .size_bytes(),
+            0
+        );
+        Ok(())
     }
 
     #[test]

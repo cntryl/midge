@@ -15,7 +15,7 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 7 is current. Version 5 named the WAL's history
+Database `FORMAT` version 8 is current. Version 5 named the WAL's history
 with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
@@ -58,12 +58,29 @@ metadata compatibility paths older databases needed:
   Maintenance no longer re-summarizes SSTs whose manifest entry lacks
   complete key bounds.
 
-Version 7 is an intentional pre-1.0 break with no in-place upgrade and no
-migration: current binaries reject database FORMAT versions 1 through 6 with
+Version 8 (#819) replaces SST value-by-value WAL coverage with durable per-family
+flush frontiers. The manifest requires canonical `flushed_through` rows sorted by
+family id: default family 0 starts at zero, every created family starts at zero,
+and a dropped family retains `u64::MAX` permanently. A flush journals name
+allocation, `AddSst`, and `AdvanceFlushFrontier` in one atomic batch; the frontier
+is the frozen commit boundary, including best-effort writes. Compaction and SST
+reclamation leave these frontiers unchanged. Missing, duplicate, unsorted or
+inconsistent rows are corruption in strict and salvage recovery.
+
+Catalog v3 persists each sealed segment's record count and canonical per-family
+maximum sequences. Retirement requires every family maximum to be covered by
+the committed shared manifest generation. The catalog records the generation
+authorizing retirement; physical deletion is conditional on that exact WAL
+object identity. Shared metadata publication order is a separate checked ordinal
+from the manifest journal horizon. New generations preserve every old frontier,
+never regress live families, and never revive dropped families.
+
+Version 8 is an intentional pre-1.0 break with no in-place upgrade and no
+migration: current binaries reject database FORMAT versions 1 through 7 with
 `CompatibilityError`, and leave the marker untouched. Cloud databases are
 rejected the same way, because their hydrated metadata carries the marker,
 and a publication catalog of any other format version fails with
-`CompatibilityError` and neither catalog copy changes. FORMAT 7 requires SST
+`CompatibilityError` and neither catalog copy changes. FORMAT 8 requires SST
 V4; current binaries also reject SST versions 1 through 3 and unknown future
 versions. There is no legacy decoder or best-effort fallback in the V4
 reader.
@@ -136,14 +153,14 @@ and a header and footer naming the entry's epoch, `prev` and `link`.
 
 A catalog of any other format version fails startup with `CompatibilityError`;
 Midge neither repairs it from the mirror nor converts it, and older binaries
-cannot read a version 2 catalog. Malformed entries, a broken chain, a future
+cannot read a version 3 catalog. Malformed entries, a broken chain, a future
 writer epoch, or WAL objects without the required catalog fail startup
 explicitly; salvage mode does not invent publication authority. If both
 catalog copies are invalid, startup fails closed. Metadata bootstrap refuses
 any catalog that is not pristine: a catalog whose entries have all retired
 still holds history.
 
-Provider-backed cloud metadata now uses lease document version 2. Its committed
+Provider-backed cloud metadata now uses lease document version 3. Its committed
 descriptor names the complete set of mirrored local control files under
 `metadata/generations/`, with exact lengths and CRC32C checksums. The lease CAS
 publishes the descriptor; mutable `metadata/` copies and unreferenced uploads
@@ -154,7 +171,7 @@ parse or rewrite it. A successor conditionally fences the registry before
 recovery; a predecessor write that wins first is incorporated before serving.
 The `metadata/authority-initialized.v1` marker starts pending and becomes active
 only after the first lease is stored. Loss of a lease with an active marker is a
-fail-closed condition. A version 2 lease document intentionally cannot be parsed
+fail-closed condition. A version 3 lease document intentionally cannot be parsed
 by older binaries, which prevents an old writer from renewing the new lease.
 
 Legacy provider-backed cloud databases require offline logical export and
@@ -198,6 +215,6 @@ new database, an older binary must not open it.
 ## Fixture Coverage
 
 Repository gates reject the checked-in populated FORMAT 3/SST V4 fixture, a
-prior FORMAT 2 fixture and a synthetic future FORMAT 8 fixture with
+prior FORMAT 2 fixture and a synthetic future FORMAT 9 fixture with
 `CompatibilityError`, without rewriting their markers. Format changes must
 update these fixtures and their CI assertions together.

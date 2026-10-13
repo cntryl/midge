@@ -344,7 +344,7 @@ fn real_contender_is_denied(path: &Path) -> bool {
             bucket: "bucket".into(),
             prefix: "streaming-recovery".into(),
         },
-        path,
+        crate::storage::simulated::simulated_cloud_root(path),
     ));
     let contention = contender.try_acquire();
     let denied = matches!(
@@ -522,11 +522,13 @@ fn should_exercise_checkpoint_deadline_scenario_in_child() {
 fn run_child(mode: &str) -> (tempfile::TempDir, std::process::Output, bool) {
     use std::process::{Command, Stdio};
     let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("db");
+    std::fs::create_dir(&db_path).unwrap();
     let stdout_path = directory.path().join("child.stdout");
     let stderr_path = directory.path().join("child.stderr");
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
-        .env(CHILD, directory.path())
+        .env(CHILD, &db_path)
         .env(MODE, mode)
         .stdout(Stdio::from(std::fs::File::create(&stdout_path).unwrap()))
         .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
@@ -565,7 +567,7 @@ fn assert_child_passes(mode: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        std::fs::read(directory.path().join("checkpoint-deadline-proof")).unwrap(),
+        std::fs::read(directory.path().join("db/checkpoint-deadline-proof")).unwrap(),
         mode.as_bytes()
     );
 }
@@ -618,6 +620,9 @@ fn should_reject_ownership_claim_when_upload_or_expiry_signal_is_missing() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!directory.path().join("checkpoint-deadline-proof").exists());
+        assert!(!directory
+            .path()
+            .join("db/checkpoint-deadline-proof")
+            .exists());
     }
 }

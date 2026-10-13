@@ -575,10 +575,13 @@ mod tests {
                 .expect("a sealed segment");
             assert_eq!(link.id, *segment_id);
             let entry = crate::wal::cloud_catalog::CatalogEntry::describing(
-                crate::wal::format::SegmentIdentity {
-                    epoch: 7,
+                &crate::wal::cloud_segment::SegmentValidation {
+                    writer_epoch: 7,
                     prev: catalog.head(),
-                    link,
+                    facts: crate::wal::format::segment::sealed_footer(bytes)
+                        .unwrap()
+                        .unwrap()
+                        .sealed_facts(),
                 },
                 bytes,
             );
@@ -748,19 +751,17 @@ mod tests {
         let sst_path = db_path.join("sst").join(&sst_name);
         std::fs::write(&sst_path, &bytes).expect("write SST fixture");
 
-        let manifest = Manifest {
-            edit_checkpoint_id: 7,
-            files: vec![FileMeta {
-                name: sst_name,
-                level: 0,
-                size_bytes: u64::try_from(bytes.len()).expect("fixture size fits in u64"),
-                content_crc32c: Some(crc32c::crc32c(&bytes)),
-                cf_id: 0,
-                sst_seq: 1,
-                ..FileMeta::default()
-            }],
-            ..Manifest::default()
-        };
+        let mut manifest = Manifest::default();
+        manifest.edit_checkpoint_id = 7;
+        manifest.files = vec![FileMeta {
+            name: sst_name,
+            level: 0,
+            size_bytes: u64::try_from(bytes.len()).expect("fixture size fits in u64"),
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            sst_seq: 1,
+            ..FileMeta::default()
+        }];
         ManifestPersistence::save(&db_path, &manifest).expect("save manifest fixture");
 
         VerificationFixture {

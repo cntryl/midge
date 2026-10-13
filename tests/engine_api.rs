@@ -2748,35 +2748,42 @@ mod engine_delete_range {
     }
 
     #[test]
-    fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
+    fn should_reject_equal_delete_range_before_staging_when_transaction_remains_usable() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
-
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            tx.put(b"key".to_vec(), b"val".to_vec(), None).expect("put");
+            tx.put(b"key".to_vec(), b"val".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
 
             // Act
             let mut delete_tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            delete_tx
-                .delete_range(b"key".to_vec(), b"key".to_vec())
-                .expect("delete_range");
-            delete_tx
-                .commit(buffered_write_options(mode))
-                .expect("commit delete_range");
+            let result = delete_tx.delete_range(b"key".to_vec(), b"key".to_vec());
 
             // Assert
+            assert!(
+                matches!(result, Err(cntryl_midge::MidgeError::InvalidArgument(_))),
+                "mode: {mode}"
+            );
+            delete_tx
+                .put(b"after".to_vec(), b"valid".to_vec(), None)
+                .unwrap();
+            delete_tx.commit(buffered_write_options(mode)).unwrap();
             let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             assert_eq!(
-                tx.get(b"key").expect("get"),
+                tx.get(b"key").unwrap(),
                 Some(Bytes::from_static(b"val")),
-                "key should exist (empty range) in mode: {mode}"
+                "mode: {mode}"
+            );
+            assert_eq!(
+                tx.get(b"after").unwrap(),
+                Some(Bytes::from_static(b"valid")),
+                "mode: {mode}"
             );
         });
     }
@@ -5099,10 +5106,25 @@ mod consistent_cut_backup {
             .objects
             .iter()
             .any(|object| object.path.starts_with("cloud_store/sst/")));
+        let lease_object = "cloud_store/midge_primary_lease.json";
         assert!(inventory
             .objects
             .iter()
-            .all(|object| !object.path.contains("lease")));
+            .any(|object| object.path == lease_object));
+        let lease_document = std::fs::read_to_string(artifact.join("objects").join(lease_object))
+            .expect("backup retains the shared metadata pointer");
+        assert!(
+            lease_document
+                .lines()
+                .any(|line| line == "expires: 1970-01-01T00:00:00Z"),
+            "backup must not transfer the source writer lease: {lease_document}"
+        );
+        assert!(
+            lease_document
+                .lines()
+                .any(|line| line.starts_with("metadata: {")),
+            "backup must retain the committed shared metadata pointer: {lease_document}"
+        );
         drop(engine);
 
         // Act

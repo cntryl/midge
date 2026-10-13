@@ -2905,3 +2905,184 @@ mod sequence_reservation {
         );
     }
 }
+
+#[cfg(feature = "internal-testing")]
+mod fresh_cache_sequence_floor {
+    //! A host that takes a provider database over with an empty cache has no
+    //! WAL ledger, so no reservation, to start its sequences from. Replay
+    //! skips every record at or below its family's flush frontier, and a
+    //! flush on an earlier host can record that frontier inside a reservation
+    //! block above every SST and WAL record. The new host's sequences must
+    //! still start above it.
+
+    use cntryl_midge::__internal::io::Fs;
+    use cntryl_midge::__internal::simulation::{CrashDevice, SimulatedClock, SimulatedObjectStore};
+    use cntryl_midge::{
+        CloudProviderConfig, CloudStorageLocation, Engine, OpenOptions, TransactionMode,
+        WriteOptions,
+    };
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Long enough that no lease expires while a test runs; two thirds of a
+    /// provider lease must exceed the provider write margin.
+    const LEASE_TTL: Duration = Duration::from_secs(30);
+
+    /// One host: its cache device and its view of the shared store.
+    struct Host {
+        device: CrashDevice,
+        store: SimulatedObjectStore,
+    }
+
+    impl Host {
+        fn new(device: CrashDevice, store: &SimulatedObjectStore) -> Self {
+            Self {
+                device,
+                store: store.process(),
+            }
+        }
+
+        fn open(&self, named: &Path, clock: &SimulatedClock) -> Engine {
+            let root: Arc<dyn Fs> = Arc::new(self.device.fs());
+            let options = OpenOptions::cloud(
+                named,
+                CloudStorageLocation::new(
+                    CloudProviderConfig::aws_s3_static("bucket", "us-east-1", "access", "secret"),
+                    "takeover/",
+                ),
+            )
+            .object_store_for_testing(Arc::new(self.store.clone()))
+            .background_compaction(false)
+            .lease_ttl(LEASE_TTL)
+            .lease_clock_skew_tolerance(Duration::ZERO)
+            .lease_clock_for_testing(Arc::new(clock.clone()))
+            .filesystem_for_testing(root)
+            .build()
+            .expect("open options");
+            Engine::open(options).expect("open")
+        }
+
+        /// The process dies; the next open on `clock` takes its lease over.
+        fn crash(&self, engine: Engine, clock: &SimulatedClock) {
+            self.device.process_crash();
+            self.store.process_crash();
+            drop(engine);
+            clock.advance(LEASE_TTL * 2);
+        }
+    }
+
+    /// Commit `key` with cloud-strict durability and return the sequence the
+    /// engine reached.
+    fn commit(engine: &Engine, key: &[u8]) -> u64 {
+        let default = engine.get_column_family("default").expect("default");
+        let mut tx = engine
+            .begin_tx(default.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+        tx.commit(WriteOptions::cloud_strict()).expect("commit");
+        sequence(engine)
+    }
+
+    fn sequence(engine: &Engine) -> u64 {
+        engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics")
+            .current_sequence
+    }
+
+    fn get(engine: &Engine, key: &[u8]) -> Option<Vec<u8>> {
+        let default = engine.get_column_family("default").expect("default");
+        engine
+            .begin_tx(default.id(), TransactionMode::ReadOnly)
+            .expect("read")
+            .get(key)
+            .expect("get")
+            .map(|value| value.to_vec())
+    }
+
+    /// A first host writes and crashes; its restart starts past its
+    /// predecessor's reservation and flushes, recording the frontier there,
+    /// and shuts down. Returns the sequence the flush reached and the open
+    /// engine of a second host with an empty cache.
+    fn take_over_after_flush(
+        named: &Path,
+        store: &SimulatedObjectStore,
+        clock: &SimulatedClock,
+    ) -> (u64, Host, Engine) {
+        let first = Host::new(CrashDevice::new(), store);
+        let engine = first.open(named, clock);
+        commit(&engine, b"flushed");
+        first.crash(engine, clock);
+        let restarted = Host::new(first.device.clone(), store);
+        let mut engine = restarted.open(named, clock);
+        let default = engine.get_column_family("default").expect("default");
+        engine.flush_cf(&default).expect("flush");
+        let flushed_through = sequence(&engine);
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("first host shuts down");
+        drop(engine);
+        let fresh = Host::new(CrashDevice::new(), store);
+        let engine = fresh.open(named, clock);
+        (flushed_through, fresh, engine)
+    }
+
+    #[test]
+    fn should_keep_strict_put_when_a_fresh_cache_takes_over_after_a_flush() {
+        // Arrange
+        let named = tempfile::TempDir::new().expect("named directory");
+        let store = SimulatedObjectStore::eager();
+        let clock = SimulatedClock::new();
+        let (flushed_through, host, engine) = take_over_after_flush(named.path(), &store, &clock);
+        let written = commit(&engine, b"after");
+
+        // Act: the host that wrote the put crashes and recovers it.
+        host.crash(engine, &clock);
+        let restarted = Host::new(host.device.clone(), &store);
+        let mut reopened = restarted.open(named.path(), &clock);
+        let recovered = get(&reopened, b"after");
+        let flushed = get(&reopened, b"flushed");
+        reopened
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown");
+
+        // Assert
+        assert_eq!(
+            recovered,
+            Some(b"value".to_vec()),
+            "the strict put was lost"
+        );
+        assert_eq!(flushed, Some(b"value".to_vec()));
+        assert!(
+            written > flushed_through,
+            "the put took sequence {written}, at or below the flushed frontier {flushed_through}"
+        );
+    }
+
+    #[test]
+    fn should_flush_strict_put_when_a_fresh_cache_takes_over_after_a_flush() {
+        // Arrange
+        let named = tempfile::TempDir::new().expect("named directory");
+        let store = SimulatedObjectStore::eager();
+        let clock = SimulatedClock::new();
+        let (_, host, mut engine) = take_over_after_flush(named.path(), &store, &clock);
+        commit(&engine, b"after");
+        let default = engine.get_column_family("default").expect("default");
+
+        // Act: the flush must not move the family's frontier backwards.
+        let flushed = engine.flush_cf(&default);
+        let shut_down = engine.shutdown(Duration::from_secs(10));
+        drop(engine);
+
+        // Assert
+        assert!(flushed.is_ok(), "flush after the takeover: {flushed:?}");
+        assert!(
+            shut_down.is_ok(),
+            "shutdown after the takeover: {shut_down:?}"
+        );
+        let reopened = Host::new(host.device.clone(), &store).open(named.path(), &clock);
+        assert_eq!(get(&reopened, b"after"), Some(b"value".to_vec()));
+    }
+}

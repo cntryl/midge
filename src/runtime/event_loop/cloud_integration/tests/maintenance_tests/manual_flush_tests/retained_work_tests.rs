@@ -60,7 +60,7 @@ fn receive_build_after_owned_work(
 fn should_wait_for_owned_retirement_before_starting_manual_cloud_flush() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     el.state.set_compaction_enabled(false);
     let (_, mut release, reached) = controlled_storage::install(&mut el, true, false)?;
     let sequence = acknowledge_put(&mut el, 0, 91_321)?;
@@ -69,7 +69,7 @@ fn should_wait_for_owned_retirement_before_starting_manual_cloud_flush() -> Midg
     el.schedule_cloud_maintenance();
     reached
         .recv_timeout(TEST_WAIT)
-        .expect("actual owned preflight WAL range");
+        .expect("actual owned retirement WAL identity request");
     let journal_before = journal_len(&el)?;
     let cursor_before = el.state.sst_names.cursor.clone();
 
@@ -110,7 +110,7 @@ fn should_wait_for_owned_retirement_before_starting_manual_cloud_flush() -> Midg
 fn should_preserve_reserved_flush_identity_when_actual_build_retries() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     el.state.set_compaction_enabled(false);
     replace_flush_worker(&mut el, 1)?;
     let sequence = acknowledge_put(&mut el, 0, 91_331)?;
@@ -167,7 +167,7 @@ fn should_preserve_reserved_flush_identity_when_actual_build_retries() -> MidgeR
 fn should_preserve_built_flush_identity_when_actual_upload_retries() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     el.state.set_compaction_enabled(false);
     let (cloud, _release, _) = controlled_storage::install(&mut el, false, true)?;
     let sequence = acknowledge_put(&mut el, 0, 91_341)?;

@@ -182,9 +182,4 @@ impl LeaderStore for StartupLeaderStore {
     fn write_test_coordination_document(&self, content: &str) -> Result<(), LeaseError> {
         self.inner.write_test_coordination_document(content)
     }
-
-    #[cfg(test)]
-    fn remove_test_coordination_document(&self) -> Result<(), LeaseError> {
-        self.inner.remove_test_coordination_document()
-    }
 }

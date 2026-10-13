@@ -61,18 +61,6 @@ impl EventLoop {
         let memory_limit = self.available_compaction_memory()?;
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
-        if self.wal_actor.is_cloud_async() {
-            // Capture before launch: later writes/rotations cannot make this
-            // plan collect proof needed by an older authoritative generation.
-            let cutoff = self
-                .wal_transition
-                .tombstone_gc_cutoff(self.state.wal.open_segment());
-            plan.snapshot_horizon = Some(plan.snapshot_horizon.map_or(cutoff, |h| h.min(cutoff)));
-            if cutoff == 0 {
-                plan.point_tombstone_gc_eligible = false;
-                plan.range_tombstone_gc_eligible = false;
-            }
-        }
         plan.target_sst_size = self.compaction_actor.target_sst_size();
         plan.compaction_memory_limit = memory_limit;
 
@@ -93,26 +81,7 @@ impl EventLoop {
                 "compaction memory is owned by an active publication turn".into(),
             ));
         }
-        let retained = self
-            .cloud_coordinator
-            .cloud_wal_prune_progress
-            .retained_bytes()
-            .ok_or_else(|| {
-                crate::common::MidgeError::Busy("WAL retirement proof is still active".into())
-            })?;
-        // Paused checksum/cursor proofs outlive their worker. Execution and
-        // publication share the remaining configured allowance without
-        // discarding the proof work that the next retirement turn will resume.
-        let available = self
-            .compaction_actor
-            .compaction_memory_limit()
-            .saturating_sub(retained);
-        if available == 0 {
-            return Err(crate::common::MidgeError::ResourceLimit(
-                "retained WAL retirement proofs leave no memory for compaction".into(),
-            ));
-        }
-        Ok(available)
+        Ok(self.compaction_actor.compaction_memory_limit())
     }
 
     pub(super) fn launch_compaction(
@@ -1146,7 +1115,6 @@ impl CompactionCoordinator {
             lease_healthy: event_loop.fencing.lease_healthy.clone(),
             leader_store: event_loop.fencing.leader_store.clone(),
             leader_holder_id: event_loop.fencing.leader_holder_id.clone(),
-            metadata_sequence: event_loop.state.manifest.last_persisted_sequence,
             publication_memory_limit: event_loop.compaction_actor.compaction_memory_limit(),
             runtime_response_timeout: event_loop.runtime_response_timeout,
         };

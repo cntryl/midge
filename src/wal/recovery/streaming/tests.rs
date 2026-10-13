@@ -180,7 +180,6 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         limits(),
         &mut |tables, _| {
             assert!(
@@ -236,7 +235,6 @@ fn should_read_many_local_wal_frames_with_one_window_per_file_pass() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         StreamingReplayLimits::local(),
         &mut |_, _| Ok(()),
     )
@@ -283,7 +281,6 @@ fn should_read_large_frame_directly_when_payload_exceeds_read_ahead_window() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         replay_limits,
         &mut |_, _| Ok(()),
     )
@@ -327,7 +324,6 @@ fn should_checkpoint_only_complete_split_transactions() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         config,
         &mut |tables, stats| {
             let entries = tables[&0].iter_all();
@@ -337,7 +333,7 @@ fn should_checkpoint_only_complete_split_transactions() {
                     .filter(|(key, _, _)| key.starts_with(b"txn-"))
                     .count(),
             );
-            checkpoint_sequences.push(stats.max_sequence);
+            checkpoint_sequences.push(stats.through_sequence);
             tables.clear();
             Ok(())
         },
@@ -346,7 +342,7 @@ fn should_checkpoint_only_complete_split_transactions() {
 
     // Assert
     assert_eq!(txn_counts, vec![0, 3]);
-    assert_eq!(checkpoint_sequences, vec![Some(2), Some(7)]);
+    assert_eq!(checkpoint_sequences, vec![2, 7]);
     assert_eq!(memtables[&0].get(b"after").unwrap(), Some(vec![b'x'; 128]));
 }
 
@@ -383,7 +379,6 @@ fn should_reject_atomic_batch_before_checkpoint_when_transaction_exceeds_encoded
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         config,
         &mut |_, _| {
             checkpoints += 1;
@@ -421,7 +416,6 @@ fn should_bound_uncommitted_split_transaction_buffers() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         config,
         &mut |_, _| panic!("open transaction cannot checkpoint"),
     );
@@ -451,7 +445,6 @@ fn should_fail_closed_when_corrupt_length_hides_verified_active_suffix() {
         &segments(&storage, &[], Some(1)),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         limits(),
         &mut |_, _| {
             checkpoints += 1;
@@ -482,7 +475,6 @@ fn should_tolerate_only_verified_active_prefix_when_final_frame_is_torn() {
         &segments(&storage, &[], Some(1)),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         limits(),
         &mut |_, _| Ok(()),
     )
@@ -511,7 +503,6 @@ fn should_reject_compressed_record_before_expanding_beyond_replay_budget() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         limits(),
         &mut |_, _| Ok(()),
     );
@@ -567,7 +558,6 @@ fn should_reject_conflicting_point_after_its_memtable_was_checkpointed() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         config,
         &mut |tables, _| {
             checkpoints += 1;
@@ -617,7 +607,6 @@ fn should_reject_conflicting_transaction_batch_after_checkpoint() {
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         config,
         &mut |tables, _| {
             checkpoints += 1;
@@ -666,11 +655,10 @@ fn should_recover_atomic_batch_above_soft_checkpoint_target_within_hard_capacity
         &segments(&storage, &[1], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         config,
         &mut |tables, stats| {
             assert!(tables[&0].get(b"large-atomic").unwrap().is_none());
-            checkpoints.push(stats.max_sequence);
+            checkpoints.push(stats.through_sequence);
             tables.clear();
             Ok(())
         },
@@ -678,7 +666,7 @@ fn should_recover_atomic_batch_above_soft_checkpoint_target_within_hard_capacity
     .unwrap();
 
     // Assert
-    assert_eq!(checkpoints, vec![Some(1)]);
+    assert_eq!(checkpoints, vec![1]);
     assert_eq!(
         memtables[&0].get(b"large-atomic").unwrap(),
         Some(vec![b'v'; 12 * 1024])
@@ -789,7 +777,6 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
         &segments(&storage, &[1, 2], None),
         &mut memtables,
         ReplayPolicy::Strict,
-        None,
         limits(),
         &mut |tables, _| {
             checkpoints += 1;
@@ -821,65 +808,6 @@ fn should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_
 fn segments(storage: &BoundedFs, sealed: &[u64], open: Option<u64>) -> ReplaySegments {
     let segments = crate::wal::recovery::fixture::segments(&FsPath::new("wal"), sealed, open);
     crate::wal::recovery::fixture::wrap_chain(&storage.inner, &segments, 1)
-}
-
-#[test]
-fn should_resume_sealed_inspection_when_visitor_stops_mid_segment() {
-    // Arrange: a sealed segment of three records whose visitor stops at the
-    // second one the first time, as a prune deadline does.
-    let bytes = (1..=3)
-        .flat_map(|sequence| encode(&put("key", sequence)))
-        .collect();
-    let storage = fixture(&[(1, bytes)], limits().max_frame_bytes);
-    segments(&storage, &[1], None);
-    let path = crate::wal::segment_key(1);
-    let file = storage
-        .open(
-            &path,
-            OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .unwrap();
-    let mut progress = crate::wal::recovery::VerifiedWalPrefix::default();
-    let stopped = visit_sealed_wal_records_from(
-        file.as_ref(),
-        &path,
-        limits(),
-        &mut progress,
-        &mut |record| {
-            if record.seq == 2 {
-                Err(MidgeError::Timeout("visitor deadline".into()))
-            } else {
-                Ok(())
-            }
-        },
-        &mut || Ok(()),
-    );
-    let mut visited = Vec::new();
-
-    // Act
-    let resumed = visit_sealed_wal_records_from(
-        file.as_ref(),
-        &path,
-        limits(),
-        &mut progress,
-        &mut |record| {
-            visited.push(record.seq);
-            Ok(())
-        },
-        &mut || Ok(()),
-    );
-
-    // Assert
-    assert!(matches!(stopped, Err(MidgeError::Timeout(_))));
-    assert!(resumed.is_ok(), "{resumed:?}");
-    assert_eq!(visited, vec![2, 3]);
-    assert!(progress.sealed());
-    assert_eq!(progress.record_count(), 3);
 }
 
 #[test]
@@ -916,4 +844,378 @@ fn should_reject_segment_scan_when_bytes_follow_its_footer() {
         matches!(&result, Err(MidgeError::Corruption(message)) if message.contains("follow the footer")),
         "{result:?}"
     );
+}
+
+#[test]
+fn should_replay_complete_batch_when_frontier_precedes_commit() {
+    // Arrange
+    let mut members = vec![put("first-member", 2), put("second-member", 3)];
+    for member in &mut members {
+        member.txn_id = Some(1);
+    }
+    let payload = encoding::encode_txn_batch_payload(1, 1, 4, 0, &members).unwrap();
+    let mut batch = WalRecord::new(WalOpKind::TxnBatch, Bytes::new(), Some(payload), 4);
+    batch.txn_id = Some(1);
+    let storage = fixture(&[(1, encode(&batch))], 1024);
+    let mut tables = HashMap::new();
+    let frontiers = replay_frontiers(2);
+
+    // Act
+    replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut tables,
+        ReplayPolicy::Strict,
+        limits(),
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
+        &mut |_, _| Ok(()),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        tables[&0].iter_all().len(),
+        2,
+        "a frontier below commit must replay every member"
+    );
+}
+
+#[test]
+fn should_replay_complete_spooled_transaction_when_frontier_precedes_commit() {
+    // Arrange
+    let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::new(), None, 1);
+    begin.txn_id = Some(1);
+    let mut first = put("first-member", 2);
+    first.txn_id = Some(1);
+    let mut second = put("second-member", 3);
+    second.txn_id = Some(1);
+    let mut commit = WalRecord::new(WalOpKind::TxnCommit, Bytes::new(), None, 4);
+    commit.txn_id = Some(1);
+    let bytes = [begin, first, second, commit]
+        .iter()
+        .flat_map(encode)
+        .collect();
+    let storage = fixture(&[(1, bytes)], 1024);
+    let mut tables = HashMap::new();
+    let frontiers = replay_frontiers(2);
+
+    // Act
+    replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut tables,
+        ReplayPolicy::Strict,
+        StreamingReplayLimits::local(),
+        ReplayOptions {
+            spill_pending_txns: true,
+            ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
+        },
+        &mut |_, _| Ok(()),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        tables[&0].iter_all().len(),
+        2,
+        "a frontier below commit must replay every spooled member"
+    );
+}
+
+fn replay_frontiers(sequence: u64) -> crate::metadata::frontiers::FlushFrontiers {
+    serde_json::from_value(serde_json::json!([
+        {"cf_id": 0, "through_sequence": sequence}
+    ]))
+    .unwrap()
+}
+
+#[test]
+fn should_skip_complete_transaction_when_commit_is_already_flushed() {
+    // Arrange
+    let mut members = vec![put("first", 2), put("second", 3)];
+    for member in &mut members {
+        member.txn_id = Some(1);
+    }
+    let payload = encoding::encode_txn_batch_payload(1, 1, 4, 0, &members).unwrap();
+    let mut batch = WalRecord::new(WalOpKind::TxnBatch, Bytes::new(), Some(payload), 4);
+    batch.txn_id = Some(1);
+    let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::new(), None, 1);
+    begin.txn_id = Some(1);
+    let mut commit = WalRecord::new(WalOpKind::TxnCommit, Bytes::new(), None, 4);
+    commit.txn_id = Some(1);
+    let split = [vec![begin], members, vec![commit]].concat();
+    let frontiers = replay_frontiers(4);
+
+    for (records, spool) in [(vec![batch], false), (split.clone(), false), (split, true)] {
+        let bytes = records.iter().flat_map(encode).collect();
+        let storage = fixture(&[(1, bytes)], 1024);
+        let mut tables = HashMap::new();
+
+        // Act
+        let stats = replay_wal_with_options(
+            &storage,
+            &segments(&storage, &[1], None),
+            &mut tables,
+            ReplayPolicy::Strict,
+            StreamingReplayLimits::local(),
+            ReplayOptions {
+                spill_pending_txns: spool,
+                ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
+            },
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
+
+        // Assert
+        assert!(tables.is_empty());
+        assert_eq!(stats.max_sequence, Some(4));
+    }
+}
+
+#[test]
+fn should_validate_transaction_shape_when_its_family_is_already_flushed() {
+    // Arrange
+    let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::new(), None, 1);
+    begin.txn_id = Some(1);
+    let mut member = put("wrong-family", 2);
+    member.txn_id = Some(1);
+    member.cf_id = 7;
+    let bytes = [begin, member].iter().flat_map(encode).collect();
+    let storage = fixture(&[(1, bytes)], 1024);
+    let frontiers = replay_frontiers(9);
+
+    // Act
+    let result = replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut HashMap::new(),
+        ReplayPolicy::Strict,
+        StreamingReplayLimits::local(),
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
+        &mut |_, _| Ok(()),
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn should_refuse_missing_family_authority_when_replaying_under_salvage_policy() {
+    // Arrange
+    let mut record = put("unknown-family", 1);
+    record.cf_id = 7;
+    let storage = fixture(&[(1, encode(&record))], 1024);
+    let frontiers = replay_frontiers(0);
+    let mut tables = HashMap::new();
+
+    // Act
+    let result = replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut tables,
+        ReplayPolicy::SalvageValidPrefix,
+        StreamingReplayLimits::local(),
+        ReplayOptions {
+            salvage_record_errors: true,
+            ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
+        },
+        &mut |_, _| Ok(()),
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "{result:?}"
+    );
+    assert!(tables.is_empty());
+}
+
+fn overlapping_transaction_batch() -> WalRecord {
+    let mut members = vec![put("uncommitted-member", 2), put("prior-member", 3)];
+    for member in &mut members {
+        member.txn_id = Some(1);
+    }
+    let payload = encoding::encode_txn_batch_payload(1, 1, 4, 0, &members).unwrap();
+    let mut batch = WalRecord::new(WalOpKind::TxnBatch, Bytes::new(), Some(payload), 4);
+    batch.txn_id = Some(1);
+    batch
+}
+
+#[test]
+fn should_preserve_complete_units_when_a_batch_overlaps_prior_frames_under_strict_replay() {
+    // Arrange
+    let bytes = [put("prior-member", 3), overlapping_transaction_batch()]
+        .iter()
+        .flat_map(encode)
+        .collect();
+    let storage = fixture(&[(1, bytes)], 1024);
+    let mut tables = HashMap::new();
+    let mut checkpoints = 0;
+
+    // Act
+    let result = replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut tables,
+        ReplayPolicy::Strict,
+        StreamingReplayLimits {
+            target_memtable_encoded_bytes: 1,
+            ..limits()
+        },
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::All),
+        &mut |tables, _| {
+            checkpoints += 1;
+            tables.clear();
+            Ok(())
+        },
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        checkpoints, 0,
+        "a rejected unit must not start a checkpoint"
+    );
+    assert!(tables[&0].get(b"prior-member").unwrap().is_some());
+    assert!(
+        tables[&0].get(b"uncommitted-member").unwrap().is_none(),
+        "a rejected batch must not expose any member"
+    );
+}
+
+#[test]
+fn should_preserve_complete_units_when_a_batch_overlaps_prior_frames_under_salvage_replay() {
+    // Arrange
+    let bytes = [put("prior-member", 3), overlapping_transaction_batch()]
+        .iter()
+        .flat_map(encode)
+        .collect();
+    let storage = fixture(&[(1, bytes)], 1024);
+    let mut tables = HashMap::new();
+    let mut checkpoints = 0;
+
+    // Act
+    let stats = replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut tables,
+        ReplayPolicy::SalvageValidPrefix,
+        limits(),
+        ReplayOptions {
+            salvage_record_errors: true,
+            ..ReplayOptions::new(crate::wal::replay::ReplaySelection::All)
+        },
+        &mut |_, _| {
+            checkpoints += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    // Assert
+    assert!(stats.had_corruption);
+    assert_eq!(
+        checkpoints, 0,
+        "a rejected unit must not start a checkpoint"
+    );
+    assert!(tables[&0].get(b"prior-member").unwrap().is_some());
+    assert!(
+        tables[&0].get(b"uncommitted-member").unwrap().is_none(),
+        "salvage must return only complete accepted units"
+    );
+}
+
+#[test]
+fn should_validate_overlapping_batch_sequences_when_its_family_is_already_flushed() {
+    // Arrange
+    let bytes = [put("prior-member", 3), overlapping_transaction_batch()]
+        .iter()
+        .flat_map(encode)
+        .collect();
+    let storage = fixture(&[(1, bytes)], 1024);
+    let mut tables = HashMap::new();
+    let frontiers = replay_frontiers(4);
+
+    // Act
+    let result = replay_wal_with_options(
+        &storage,
+        &segments(&storage, &[1], None),
+        &mut tables,
+        ReplayPolicy::Strict,
+        limits(),
+        ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers)),
+        &mut |_, _| Ok(()),
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "{result:?}"
+    );
+    assert!(tables.is_empty());
+}
+
+#[test]
+fn should_reject_batch_spans_before_the_segment_first_sequence() {
+    // Arrange
+    for (begin_sequence, accepted) in [(9, false), (10, true)] {
+        let mut members = vec![
+            put("first", begin_sequence + 1),
+            put("second", begin_sequence + 2),
+        ];
+        for member in &mut members {
+            member.txn_id = Some(1);
+        }
+        let commit_sequence = begin_sequence + 3;
+        let payload =
+            encoding::encode_txn_batch_payload(1, begin_sequence, commit_sequence, 0, &members)
+                .unwrap();
+        let mut batch = WalRecord::new(
+            WalOpKind::TxnBatch,
+            Bytes::new(),
+            Some(payload),
+            commit_sequence,
+        );
+        batch.txn_id = Some(1);
+        let bytes = crate::wal::format::segment::SegmentBuilder::new(
+            1,
+            1,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .first_seq(10)
+        .record(&batch)
+        .seal()
+        .0;
+        let storage = fixture(&[(1, bytes)], 1024);
+        let mut tables = HashMap::new();
+
+        // Act
+        let result = replay_wal_with_options(
+            &storage,
+            &segments(&storage, &[1], None),
+            &mut tables,
+            ReplayPolicy::Strict,
+            limits(),
+            ReplayOptions::new(crate::wal::replay::ReplaySelection::All),
+            &mut |_, _| Ok(()),
+        );
+
+        // Assert
+        if accepted {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(tables[&0].iter_all().len(), 2);
+        } else {
+            assert!(
+                matches!(result, Err(MidgeError::Corruption(_))),
+                "{result:?}"
+            );
+            assert!(tables.is_empty());
+        }
+    }
 }

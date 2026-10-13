@@ -3,13 +3,14 @@ use crate::io::{staging, Fs, FsError, FsPath};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Version 7 chains the cloud WAL publication catalog (catalog v2) and drops
+/// Version 8 persists per-family flush frontiers and shared cloud retirement
+/// generations. Version 7 chains the cloud WAL publication catalog (catalog v2) and drops
 /// the metadata fields and encodings older databases carried (#844). Version
 /// 6 links WAL segments with headers and sealed footers, writes records
 /// without a per-record writer epoch, and reserves sequences in the LEDGER v2
 /// (#843). Version 5 named WAL history by the segment ledger (`wal/LEDGER`,
 /// #842) instead of a directory listing.
-pub const CURRENT_FORMAT_VERSION: u32 = 7;
+pub const CURRENT_FORMAT_VERSION: u32 = 8;
 /// Oldest on-disk format this build opens. Older databases are rejected, not
 /// upgraded: their cloud catalogs are unchained.
 const MIN_SUPPORTED_FORMAT_VERSION: u32 = CURRENT_FORMAT_VERSION;
@@ -245,8 +246,8 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_open_given_format_version_older_than_seven() {
-        for version in [5, 6] {
+    fn should_reject_open_given_format_version_older_than_eight() {
+        for version in [5, 6, 7] {
             // Arrange
             let temp_dir = tempfile::tempdir().expect("temp dir");
             std::fs::write(

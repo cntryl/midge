@@ -100,8 +100,9 @@ pub enum ManifestEdit {
         #[serde(default)]
         names: Vec<String>,
     },
-    BumpWalSeq {
-        seq: u64,
+    AdvanceFlushFrontier {
+        cf_id: u32,
+        freeze_sequence: u64,
     },
     BumpNextSstSeq {
         cf_id: u32,
@@ -137,7 +138,7 @@ impl ManifestEdit {
             ManifestEdit::AddSst(_) => 1,
             ManifestEdit::RemoveSst { .. } => 2,
             ManifestEdit::CreateColumnFamily { .. } => 3,
-            ManifestEdit::BumpWalSeq { .. } => 5,
+            ManifestEdit::AdvanceFlushFrontier { .. } => 12,
             ManifestEdit::BumpNextSstSeq { .. } => 6,
             ManifestEdit::Batch(_) => 8,
             ManifestEdit::DropColumnFamilyAt { .. } => 10,
@@ -172,7 +173,7 @@ impl ManifestEdit {
                 Ok(())
             }
             ManifestEdit::CreateColumnFamily { .. }
-            | ManifestEdit::BumpWalSeq { .. }
+            | ManifestEdit::AdvanceFlushFrontier { .. }
             | ManifestEdit::BumpNextSstSeq { .. } => Ok(()),
         }
     }
@@ -190,6 +191,7 @@ const BATCH_RECORD_TYPE: u8 = 8;
 const FSYNC_MARKER_TYPE: u8 = 9;
 const DROP_COLUMN_FAMILY_AT_RECORD_TYPE: u8 = 10;
 const RECLAIM_COLUMN_FAMILY_RECORD_TYPE: u8 = 11;
+const ADVANCE_FLUSH_FRONTIER_RECORD_TYPE: u8 = 12;
 
 const JOURNAL_FILE: &str = super::files::JOURNAL;
 const JOURNAL_REPAIR_TEMP_FILE: &str = "manifest.journal.repair.tmp";
@@ -244,7 +246,22 @@ pub(crate) fn checkpoint_edit_id_with_fs(
     Ok(manifest.edit_checkpoint_id)
 }
 
+#[cfg(test)]
 pub(crate) fn next_edit_id_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<u64> {
+    next_edit_id_after(highest_edit_id_with_repair_with_fs_unlocked(fs)?)
+}
+
+pub(crate) fn next_edit_id_after(highest: u64) -> MidgeResult<u64> {
+    highest.checked_add(1).ok_or_else(|| {
+        crate::common::MidgeError::ResourceLimit("manifest journal edit IDs exhausted".into())
+    })
+}
+
+/// Read the current position and repair a genuine partial tail. Reading or
+/// checkpointing the last valid identity remains legal after allocation ends.
+pub(crate) fn highest_edit_id_with_repair_with_fs_unlocked(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<u64> {
     let checkpoint = checkpoint_edit_id_with_fs(fs)?;
@@ -265,7 +282,7 @@ pub(crate) fn next_edit_id_with_fs(
         repair_partial_journal_tail(fs, last_valid_offset)?;
     }
     let journal_max = replay.max_edit_id;
-    Ok(checkpoint.max(journal_max).saturating_add(1).max(1))
+    Ok(checkpoint.max(journal_max))
 }
 
 pub(crate) fn highest_edit_id_with_fs(
@@ -394,7 +411,7 @@ pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
 ) -> MidgeResult<u64> {
-    edit.validate_persisted_sst_names()?;
+    edit.validate_for_append()?;
     with_manifest_writer_lock(fs, || append_validated_edit_with_fs(fs, edit))
 }
 
@@ -424,6 +441,11 @@ pub(crate) fn append_validated_edit_with_id_observed(
     edit_id: u64,
     observation: Option<&crate::metadata::accounting::Operation>,
 ) -> MidgeResult<u64> {
+    // A batch writes the same record either way; route it through the batch
+    // path so its storage-fault boundaries stay reachable.
+    if let ManifestEdit::Batch(batch) = edit {
+        return append_validated_edit_batch_with_id_observed(fs, batch, edit_id, observation);
+    }
     let record = encode_journal_record(
         edit.record_type(),
         &JournalEditEnvelope {
@@ -618,8 +640,17 @@ fn replay_journal_with_mode(
         return Ok(JournalReplay::empty());
     };
 
+    replay_journal_file(&*file, mode, scope)
+}
+
+fn replay_journal_file(
+    file: &dyn crate::io::ReadFile,
+    mode: JournalReplayMode,
+    scope: Option<&crate::common::DeadlineScope>,
+) -> MidgeResult<JournalReplay> {
     let file_len = file.len().map_err(FsError::into_midge)?;
     let mut state = JournalReplayState::default();
+
     let mut offset: u64 = 0;
     let mut tail = JournalReplayTail::Clean;
     let mut corruption = None;
@@ -627,7 +658,7 @@ fn replay_journal_with_mode(
 
     while offset < file_len {
         check_replay_scope(scope)?;
-        let status = match read_journal_record(&*file, offset, file_len) {
+        let status = match read_journal_record(file, offset, file_len) {
             Ok(status) => status,
             // A read error is not evidence of corruption: salvaging past it
             // would drop durable edits whose bytes are fine.
@@ -675,11 +706,6 @@ fn replay_journal_with_mode(
         }
     }
 
-    // Windows does not permit replacing a file while a read handle is still
-    // open. Release the replay handle before a caller repairs a partial tail
-    // with an atomic replacement.
-    drop(file);
-
     let durable_edit_count = state.last_marker_edit_idx.unwrap_or(0);
     if matches!(tail, JournalReplayTail::Clean) && state.edits.len() > durable_edit_count {
         tail = JournalReplayTail::PartialEof {
@@ -694,6 +720,9 @@ fn replay_journal_with_mode(
     let mut max_edit_id = 0;
     for edit in &state.edits {
         check_replay_scope(scope)?;
+        // Semantic invalidity is not a salvageable byte-tail error. Validate
+        // only durable edits, outside the prefix decoder's salvage boundary.
+        edit.edit.validate_for_append()?;
         max_edit_id = max_edit_id.max(edit.edit_id);
     }
     check_replay_scope(scope)?;
@@ -706,6 +735,40 @@ fn replay_journal_with_mode(
         tail,
         corruption,
     })
+}
+
+/// Decode immutable journal bytes with the same framing and durability rules.
+pub(crate) fn replay_identified_edits_from_bytes(
+    bytes: &[u8],
+    checkpoint: u64,
+    scope: &crate::common::DeadlineScope,
+) -> MidgeResult<Vec<(u64, ManifestEdit)>> {
+    struct SliceFile<'a>(&'a [u8]);
+    impl crate::io::ReadFile for SliceFile<'_> {
+        fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
+            let start = usize::try_from(offset)
+                .map_err(|_| FsError::Corruption("journal offset overflow".into()))?;
+            let length = usize::try_from(len)
+                .map_err(|_| FsError::Corruption("journal length overflow".into()))?;
+            let end = start
+                .checked_add(length)
+                .ok_or_else(|| FsError::Corruption("journal extent overflow".into()))?;
+            let data = self.0.get(start..end).ok_or_else(|| {
+                FsError::Corruption("journal extent exceeds immutable body".into())
+            })?;
+            Ok(bytes::Bytes::copy_from_slice(data))
+        }
+        fn len(&self) -> crate::io::FsResult<u64> {
+            Ok(self.0.len() as u64)
+        }
+    }
+    let replay = replay_journal_file(&SliceFile(bytes), JournalReplayMode::Strict, Some(scope))?;
+    Ok(replay
+        .edits
+        .into_iter()
+        .filter(|edit| edit.edit_id > checkpoint)
+        .map(|edit| (edit.edit_id, edit.edit))
+        .collect())
 }
 
 fn check_replay_scope(scope: Option<&crate::common::DeadlineScope>) -> MidgeResult<()> {
@@ -785,7 +848,7 @@ fn open_journal_for_replay(
 }
 
 fn read_journal_record(
-    file: &dyn crate::io::traits::File,
+    file: &dyn crate::io::ReadFile,
     offset: u64,
     file_len: u64,
 ) -> MidgeResult<JournalRecordStatus> {
@@ -883,7 +946,7 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
-    if (1..=RECLAIM_COLUMN_FAMILY_RECORD_TYPE).contains(&record_type) {
+    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12) {
         return Ok(());
     }
 
@@ -945,23 +1008,23 @@ fn handle_batch_record(record: &JournalRecord, state: &mut JournalReplayState) -
     if !matches!(envelope.edit, ManifestEdit::Batch(_)) {
         return Err(journal_record_type_mismatch(record, &envelope.edit));
     }
-    push_journal_edit(
-        state,
-        JournalEdit {
-            edit_id: envelope.edit_id,
-            edit: envelope.edit,
-        },
-    )
+    state.edits.push(JournalEdit {
+        edit_id: envelope.edit_id,
+        edit: envelope.edit,
+    });
+    Ok(())
 }
 
 fn handle_manifest_edit_record(
     record: &JournalRecord,
     state: &mut JournalReplayState,
 ) -> MidgeResult<()> {
-    let is_single_edit_record = (1..BATCH_RECORD_TYPE).contains(&record.typ)
+    let is_single_edit_record = matches!(record.typ, 1 | 2 | 3 | 6)
         || matches!(
             record.typ,
-            DROP_COLUMN_FAMILY_AT_RECORD_TYPE | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
+            DROP_COLUMN_FAMILY_AT_RECORD_TYPE
+                | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
+                | ADVANCE_FLUSH_FRONTIER_RECORD_TYPE
         );
     if !is_single_edit_record {
         return Err(crate::common::MidgeError::Corruption(format!(
@@ -974,13 +1037,11 @@ fn handle_manifest_edit_record(
     if envelope.edit.record_type() != record.typ {
         return Err(journal_record_type_mismatch(record, &envelope.edit));
     }
-    push_journal_edit(
-        state,
-        JournalEdit {
-            edit_id: envelope.edit_id,
-            edit: envelope.edit,
-        },
-    )
+    state.edits.push(JournalEdit {
+        edit_id: envelope.edit_id,
+        edit: envelope.edit,
+    });
+    Ok(())
 }
 
 /// Decode an edit record's payload, which must carry the edit envelope.
@@ -1005,12 +1066,6 @@ fn journal_record_type_mismatch(
     ))
 }
 
-fn push_journal_edit(state: &mut JournalReplayState, edit: JournalEdit) -> MidgeResult<()> {
-    edit.edit.validate_persisted_sst_names()?;
-    state.edits.push(edit);
-    Ok(())
-}
-
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
 /// Returns the journal edit id assigned to the record.
 #[cfg(test)]
@@ -1018,9 +1073,7 @@ pub fn append_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
 ) -> MidgeResult<u64> {
-    for edit in batch {
-        edit.validate_persisted_sst_names()?;
-    }
+    ManifestEdit::Batch(batch.to_vec()).validate_for_append()?;
     with_manifest_writer_lock(fs, || append_validated_edit_batch_with_fs(fs, batch))
 }
 
@@ -1295,6 +1348,50 @@ mod tests {
     }
 
     #[test]
+    fn should_refuse_journal_append_when_manifest_edit_ids_are_exhausted() {
+        // Arrange: a valid snapshot has consumed the last available identity.
+        let directory = tempdir().unwrap();
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.edit_checkpoint_id = u64::MAX;
+        let snapshot = directory
+            .path()
+            .join(crate::metadata::files::MANIFEST_SNAPSHOT);
+        let journal = directory.path().join(JOURNAL_FILE);
+        std::fs::write(&snapshot, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(&journal, []).unwrap();
+        let before_snapshot = std::fs::read(&snapshot).unwrap();
+        let before_journal = std::fs::read(&journal).unwrap();
+        let edits = [
+            ManifestEdit::AddSst(FileMeta {
+                name: crate::cloud_layout::file_name(0, 0, 7),
+                size_bytes: 10,
+                largest_seq: Some(7),
+                ..Default::default()
+            }),
+            ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 7,
+            },
+        ];
+
+        // Act
+        let appended = append_edit_batch_with_fs(&fs, &edits);
+
+        // Assert
+        assert!(
+            matches!(appended, Err(crate::common::MidgeError::ResourceLimit(_))),
+            "{appended:?}"
+        );
+        assert_eq!(std::fs::read(&snapshot).unwrap(), before_snapshot);
+        assert_eq!(std::fs::read(&journal).unwrap(), before_journal);
+        let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+        assert!(recovered.files.is_empty());
+        assert_eq!(recovered.edit_checkpoint_id, u64::MAX);
+        assert_eq!(recovered.flush_frontiers(), manifest.flush_frontiers());
+    }
+
+    #[test]
     fn should_fail_salvage_not_drop_edits_when_journal_read_returns_transient_io_error() {
         // Arrange: two durable edits; reads past the first record fail.
         let td = tempdir().unwrap();
@@ -1373,7 +1470,13 @@ mod tests {
             open_gate: Arc::clone(&open_gate),
         });
         let first = std::thread::spawn(move || {
-            append_edit_with_fs(&first_fs, &ManifestEdit::BumpWalSeq { seq: 1 })
+            append_edit_with_fs(
+                &first_fs,
+                &ManifestEdit::BumpNextSstSeq {
+                    cf_id: 0,
+                    next_seq: 1,
+                },
+            )
         });
         assert!(
             open_gate.wait_for_arrivals(1, std::time::Duration::from_secs(1)),
@@ -1382,7 +1485,13 @@ mod tests {
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let second = std::thread::spawn(move || {
             started_tx.send(()).expect("signal second writer start");
-            append_edit_with_fs(&second_fs, &ManifestEdit::BumpWalSeq { seq: 2 })
+            append_edit_with_fs(
+                &second_fs,
+                &ManifestEdit::BumpNextSstSeq {
+                    cf_id: 0,
+                    next_seq: 2,
+                },
+            )
         });
         started_rx.recv().expect("observe second writer start");
 
@@ -1468,7 +1577,10 @@ mod tests {
     fn should_reject_journal_record_without_edit_envelope() {
         // Arrange: durable edit and batch records whose payloads have no
         // edit envelope.
-        let edit = ManifestEdit::BumpWalSeq { seq: 7 };
+        let edit = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 7,
+        };
         let marker = FsyncMarker {
             last_persisted_sequence: 7,
             ts_millis: 0,
@@ -1501,7 +1613,10 @@ mod tests {
     fn should_fail_when_corrupt_record_precedes_valid_record() {
         // Arrange
         let td = tempdir().expect("create temp directory");
-        let first = ManifestEdit::BumpWalSeq { seq: 7 };
+        let first = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 7,
+        };
         append_edit(td.path(), &first).expect("append durable first edit");
 
         let corrupted_middle = ManifestEdit::RemoveSst {
@@ -1510,7 +1625,10 @@ mod tests {
         let stale_crc_source = ManifestEdit::RemoveSst {
             name: "apply.sst".to_string(),
         };
-        let valid_later = ManifestEdit::BumpWalSeq { seq: 9 };
+        let valid_later = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 9,
+        };
         let mut suffix = encode_test_record(2, &corrupted_middle, &stale_crc_source);
         suffix.extend_from_slice(&encode_test_record(3, &valid_later, &valid_later));
         let mut journal = std::fs::OpenOptions::new()
@@ -1549,12 +1667,33 @@ mod tests {
     fn should_fail_replay_when_corrupt_length_hides_durable_later_records() {
         // Arrange
         let td = tempdir().expect("create temp directory");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("append first");
         let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
             .expect("journal metadata")
             .len();
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append third");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+        )
+        .expect("append second");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3,
+            },
+        )
+        .expect("append third");
         corrupt_journal_record_length(td.path(), second_start, u32::MAX);
 
         // Act
@@ -1577,19 +1716,46 @@ mod tests {
     fn should_not_truncate_journal_when_corrupt_length_hides_durable_later_records() {
         // Arrange
         let td = tempdir().expect("create temp directory");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("append first");
         let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
             .expect("journal metadata")
             .len();
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append third");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+        )
+        .expect("append second");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3,
+            },
+        )
+        .expect("append third");
         corrupt_journal_record_length(td.path(), second_start, u32::MAX);
         let corrupted_len = std::fs::metadata(td.path().join(JOURNAL_FILE))
             .expect("journal metadata")
             .len();
 
         // Act
-        let result = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 4 });
+        let result = append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 4,
+            },
+        );
 
         // Assert
         assert!(
@@ -1610,8 +1776,22 @@ mod tests {
         // Arrange: file size reached disk but the appended bytes did not, a
         // common shape of an unsynced append after power loss.
         let td = tempdir().expect("create temp directory");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("append first");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+        )
+        .expect("append second");
         let mut journal = std::fs::OpenOptions::new()
             .append(true)
             .open(td.path().join(JOURNAL_FILE))
@@ -1622,7 +1802,14 @@ mod tests {
 
         // Act
         let edits = replay_journal(td.path()).expect("a zero-filled tail is a torn append");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append after repair");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3,
+            },
+        )
+        .expect("append after repair");
         let repaired = replay_journal(td.path()).expect("replay repaired journal");
 
         // Assert
@@ -1634,7 +1821,14 @@ mod tests {
     fn should_reject_zero_region_followed_by_data_as_corruption() {
         // Arrange
         let td = tempdir().expect("create temp directory");
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("append first");
         let mut journal = std::fs::OpenOptions::new()
             .append(true)
             .open(td.path().join(JOURNAL_FILE))
@@ -1669,9 +1863,23 @@ mod tests {
         };
 
         // Act
-        append_edit_with_fs(&fs, &ManifestEdit::BumpWalSeq { seq: 1 }).expect("create journal");
+        append_edit_with_fs(
+            &fs,
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("create journal");
         let after_create = root_syncs(&mock);
-        append_edit_with_fs(&fs, &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append again");
+        append_edit_with_fs(
+            &fs,
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+        )
+        .expect("append again");
 
         // Assert
         assert_eq!(
@@ -1705,10 +1913,16 @@ mod tests {
     fn should_truncate_partial_eof_tail_before_next_append() {
         // Arrange
         let td = tempdir().expect("create temp directory");
-        let first = ManifestEdit::BumpWalSeq { seq: 1 };
+        let first = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 1,
+        };
         append_edit(td.path(), &first).expect("append first edit");
 
-        let partial = ManifestEdit::BumpWalSeq { seq: 2 };
+        let partial = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 2,
+        };
         let encoded = encode_test_record(2, &partial, &partial);
         let mut journal = std::fs::OpenOptions::new()
             .append(true)
@@ -1720,7 +1934,10 @@ mod tests {
         journal.sync_all().expect("sync partial EOF record");
         drop(journal);
 
-        let after_repair = ManifestEdit::BumpWalSeq { seq: 3 };
+        let after_repair = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 3,
+        };
 
         // Act
         append_edit(td.path(), &after_repair).expect("repair tail and append next edit");
@@ -1728,8 +1945,20 @@ mod tests {
 
         // Assert
         assert_eq!(edits.len(), 2);
-        assert!(matches!(edits[0], ManifestEdit::BumpWalSeq { seq: 1 }));
-        assert!(matches!(edits[1], ManifestEdit::BumpWalSeq { seq: 3 }));
+        assert!(matches!(
+            edits[0],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1
+            }
+        ));
+        assert!(matches!(
+            edits[1],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3
+            }
+        ));
     }
 
     #[cfg(feature = "failpoints")]
@@ -1738,8 +1967,14 @@ mod tests {
         // Arrange
         let td = tempdir().expect("create temp directory");
         let _test_guard = crate::failpoints::test_failpoint_guard();
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 })
-            .expect("append durable prefix");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("append durable prefix");
         let marker_failure = fail::FailGuard::new(
             "midge::manifest::inject_fsync_marker_write_failure",
             "return",
@@ -1747,18 +1982,42 @@ mod tests {
         .expect("configure marker-write failpoint");
 
         // Act
-        let error = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 })
-            .expect_err("marker write failure must be returned");
+        let error = append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+        )
+        .expect_err("marker write failure must be returned");
         drop(marker_failure);
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 })
-            .expect("repair incomplete append and write next edit");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3,
+            },
+        )
+        .expect("repair incomplete append and write next edit");
         let replayed = replay_journal(td.path()).expect("replay repaired journal");
 
         // Assert
         assert!(error.to_string().contains("marker"));
         assert_eq!(replayed.len(), 2);
-        assert!(matches!(replayed[0], ManifestEdit::BumpWalSeq { seq: 1 }));
-        assert!(matches!(replayed[1], ManifestEdit::BumpWalSeq { seq: 3 }));
+        assert!(matches!(
+            replayed[0],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1
+            }
+        ));
+        assert!(matches!(
+            replayed[1],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3
+            }
+        ));
     }
 
     #[cfg(feature = "failpoints")]
@@ -1772,8 +2031,14 @@ mod tests {
                 .expect("configure sync failpoint");
 
         // Act
-        let error = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 })
-            .expect_err("required sync failure must be returned");
+        let error = append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect_err("required sync failure must be returned");
 
         // Assert
         assert!(error.to_string().contains("sync"));
@@ -1799,7 +2064,14 @@ mod tests {
 
         // Act
         OBSERVE_REQUIRED_MANIFEST_SYNC.with(|observe| observe.set(true));
-        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append manifest edit");
+        append_edit(
+            td.path(),
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("append manifest edit");
         OBSERVE_REQUIRED_MANIFEST_SYNC.with(|observe| observe.set(false));
 
         // Assert
@@ -1961,7 +2233,10 @@ mod tests {
         let db = td.path();
 
         // Act
-        let e = ManifestEdit::BumpWalSeq { seq: 1 };
+        let e = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 1,
+        };
         append_edit_batch(db, std::slice::from_ref(&e)).expect("append batch failed");
 
         // Assert: the journal contains exactly two structurally valid
@@ -2013,7 +2288,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn should_preserve_batch_order_when_replaying_bump_wal_seq_edits(
+        fn should_preserve_batch_order_when_replaying_allocation_edits(
             seqs in proptest::collection::vec(0u64..10_000, 1..32)
         ) {
             // Arrange
@@ -2022,7 +2297,7 @@ mod tests {
             let batch: Vec<ManifestEdit> = seqs
                 .iter()
                 .copied()
-                .map(|seq| ManifestEdit::BumpWalSeq { seq })
+                .map(|seq| ManifestEdit::BumpNextSstSeq { cf_id: 0, next_seq: seq })
                 .collect();
 
             // Act
@@ -2038,8 +2313,8 @@ mod tests {
                     for (observed, expected) in inner.iter().zip(batch.iter()) {
                         match (observed, expected) {
                             (
-                                ManifestEdit::BumpWalSeq { seq: observed_seq },
-                                ManifestEdit::BumpWalSeq { seq: expected_seq },
+                                ManifestEdit::BumpNextSstSeq { cf_id: 0, next_seq: observed_seq },
+                                ManifestEdit::BumpNextSstSeq { cf_id: 0, next_seq: expected_seq },
                             ) => prop_assert_eq!(observed_seq, expected_seq),
                             other => prop_assert!(false, "unexpected replayed edit pair: {:?}", other),
                         }
@@ -2049,13 +2324,13 @@ mod tests {
             }
 
             let mut direct_manifest = Manifest::default();
-            direct_manifest.apply_edit(&ManifestEdit::Batch(batch.clone()));
+            direct_manifest.apply_edit(&ManifestEdit::Batch(batch.clone())).expect("valid manifest fixture edit");
             let mut replayed_manifest = Manifest::default();
-            replayed_manifest.apply_edit(&replayed[0]);
+            replayed_manifest.apply_edit(&replayed[0]).expect("valid manifest fixture edit");
 
             prop_assert_eq!(
-                replayed_manifest.last_persisted_sequence,
-                direct_manifest.last_persisted_sequence
+                replayed_manifest.next_sst_seqs.get(&0).copied().unwrap_or(0),
+                direct_manifest.next_sst_seqs.get(&0).copied().unwrap_or(0)
             );
         }
     }

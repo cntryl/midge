@@ -115,6 +115,7 @@ impl CloudStartupRecovery {
         Ok(cleaned)
     }
 
+    #[cfg(test)]
     pub(crate) fn hydrate_cloud_metadata(
         cloud: &crate::storage::cloud::CloudStorage,
         leader_store: &dyn crate::lease::LeaderStore,
@@ -128,8 +129,39 @@ impl CloudStartupRecovery {
             root,
             db_path,
             recovery_policy,
+            crate::lease::SharedGenerationId::NONE,
             &DeadlineScope::new(OperationDeadline::unbounded()),
         )
+        .map(|_| ())
+    }
+
+    fn validate_uncommitted_cloud_metadata(
+        cloud: &crate::storage::cloud::CloudStorage,
+        staging_fs: &dyn crate::io::Fs,
+        retired_by: crate::lease::SharedGenerationId,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<()> {
+        Self::reject_legacy_cloud_metadata_without_generation_within(cloud, scope)?;
+        for file_name in crate::metadata::files::CLOUD_MIRRORED
+            .iter()
+            .copied()
+            .chain(std::iter::once(crate::metadata::files::MANIFEST))
+        {
+            if staging_fs
+                .exists(&crate::io::traits::FsPath::new(file_name))
+                .map_err(FsError::into_midge)?
+            {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "local metadata '{file_name}' exists without a committed cloud generation"
+                )));
+            }
+        }
+        if retired_by != crate::lease::SharedGenerationId::NONE {
+            return Err(MidgeError::RecoveryFailed(
+                "retired cloud WAL has no committed shared metadata generation".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Stage the committed cloud metadata generation into `root`. `db_path`
@@ -140,8 +172,9 @@ impl CloudStartupRecovery {
         root: &Arc<dyn crate::io::Fs>,
         db_path: &Path,
         _recovery_policy: RecoveryPolicy,
+        retired_by: crate::lease::SharedGenerationId,
         scope: &DeadlineScope,
-    ) -> MidgeResult<()> {
+    ) -> MidgeResult<Option<crate::lease::SharedGenerationId>> {
         scope.check("cloud metadata hydration")?;
         let staging_fs = crate::io::scope_fs(Arc::clone(root), scope.clone());
         let head = leader_store
@@ -159,25 +192,24 @@ impl CloudStartupRecovery {
                 ));
             }
             crate::lease::CloudMetadataHead::Uncommitted => {
-                Self::reject_legacy_cloud_metadata_without_generation_within(cloud, scope)?;
-                for file_name in crate::metadata::files::CLOUD_MIRRORED
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(crate::metadata::files::MANIFEST))
-                {
-                    if staging_fs
-                        .exists(&crate::io::traits::FsPath::new(file_name))
-                        .map_err(FsError::into_midge)?
-                    {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "local metadata '{file_name}' exists without a committed cloud generation"
-                        )));
-                    }
-                }
-                return Ok(());
+                Self::validate_uncommitted_cloud_metadata(
+                    cloud,
+                    staging_fs.as_ref(),
+                    retired_by,
+                    scope,
+                )?;
+                return Ok(None);
             }
             crate::lease::CloudMetadataHead::Committed(generation) => generation,
         };
+        if generation.id < retired_by {
+            return Err(MidgeError::RecoveryFailed(format!(
+                "hydrated shared metadata generation {} is older than WAL retirement generation {}",
+                generation.id.get(),
+                retired_by.get()
+            )));
+        }
+        let hydrated_id = generation.id;
         let metadata_objects =
             Self::read_committed_cloud_metadata_within(cloud, &generation, scope)?;
 
@@ -239,7 +271,8 @@ impl CloudStartupRecovery {
             ));
         }
 
-        scope.check("cloud metadata hydration completion")
+        scope.check("cloud metadata hydration completion")?;
+        Ok(Some(hydrated_id))
     }
 
     #[cfg(test)]
@@ -287,7 +320,7 @@ impl CloudStartupRecovery {
             }
             Err(error) => return Err(error),
         };
-        let local_manifest_sequence = local_manifest.last_persisted_sequence;
+        local_manifest.validate_persisted()?;
         let fs: Arc<dyn crate::io::Fs> = crate::io::scope_fs(Arc::clone(root), scope.clone());
         let deadline = scope.deadline();
         // Untimed startup retains the ordinary finite mirror attempt budget.
@@ -302,7 +335,6 @@ impl CloudStartupRecovery {
                 fs: fs.as_ref(),
                 publication_lock,
                 lock_wait_budget: scope.clamp(cloud.callback_timeout()),
-                local_manifest_sequence,
                 deadline: &deadline,
                 authority,
             },

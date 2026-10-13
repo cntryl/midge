@@ -2,6 +2,8 @@ use super::*;
 use crate::types::EntryType;
 use std::path::PathBuf;
 
+mod frontier_authority;
+
 struct RecoveryRangeBudgetBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
     ranges: std::sync::atomic::AtomicUsize,
@@ -37,6 +39,68 @@ impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {
         self.inner
             .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
     }
+}
+
+fn live_frontier(manifest: &Manifest, cf_id: u32) -> u64 {
+    match manifest.flush_frontiers().get(cf_id).unwrap() {
+        crate::metadata::FamilyFrontier::Live { through_sequence } => through_sequence,
+        crate::metadata::FamilyFrontier::Dropped => panic!("expected live family {cf_id}"),
+    }
+}
+
+#[test]
+fn should_report_family_frontiers_when_one_family_is_dropped() {
+    // Arrange
+    let mut state = RuntimeState::new(PathBuf::from("metrics-frontiers"), true);
+    let family = state.create_cf("flushed".into()).unwrap();
+    let idle = state.create_cf("idle".into()).unwrap();
+    let output = crate::runtime::FileMeta {
+        name: "metrics.sst".into(),
+        level: 0,
+        size_bytes: 1,
+        content_crc32c: None,
+        cf_id: family,
+        smallest_key: None,
+        largest_key: None,
+        smallest_seq: None,
+        largest_seq: Some(3),
+        key_bounds_complete: false,
+    };
+    state
+        .commit_flush_publication(family, 4, &output, 2, false)
+        .unwrap();
+
+    // Act
+    let before_drop = state.runtime_metrics_snapshot();
+    state
+        .manifest
+        .apply_edit(&crate::metadata::ManifestEdit::DropColumnFamilyAt {
+            id: family,
+            drop_sequence: 5,
+            dropped_sst_names: Vec::new(),
+        })
+        .unwrap();
+    let after_drop = state.runtime_metrics_snapshot();
+
+    // Assert
+    assert_eq!(before_drop.manifest_flush_frontiers.get(&0), Some(&Some(0)));
+    assert_eq!(
+        before_drop.manifest_flush_frontiers.get(&idle),
+        Some(&Some(0))
+    );
+    assert_eq!(
+        before_drop.manifest_flush_frontiers.get(&family),
+        Some(&Some(4))
+    );
+    assert_eq!(
+        after_drop.manifest_flush_frontiers.get(&family),
+        Some(&None)
+    );
+    assert_eq!(
+        after_drop.manifest_flush_frontiers.get(&idle),
+        Some(&Some(0))
+    );
+    assert!(!after_drop.manifest_flush_frontiers.contains_key(&99));
 }
 
 fn isolated_test_db_path() -> PathBuf {
@@ -77,7 +141,7 @@ fn should_reuse_manifest_read_view_when_only_sequence_metadata_changes() {
     assert!(owner.take_rebuilt_live_names().is_some());
 
     // Act
-    owner.advance_persisted_sequence(42);
+
     owner.set_next_sst_seq(0, 7);
     owner.advance_next_sst_seq(0, 8);
     owner.note_applied_journal_edit(9);
@@ -85,16 +149,18 @@ fn should_reuse_manifest_read_view_when_only_sequence_metadata_changes() {
         edit_checkpoint_id: 9,
         caller_was_current: true,
     });
-    owner.apply_edit(&crate::metadata::ManifestEdit::BumpNextSstSeq {
-        cf_id: 0,
-        next_seq: 10,
-    });
+    owner
+        .apply_edit(&crate::metadata::ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 10,
+        })
+        .unwrap();
     let after_sequence = owner.read_view_for(0);
 
     // Assert
     assert!(Arc::ptr_eq(&initial, &after_sequence));
     assert!(owner.take_rebuilt_live_names().is_none());
-    assert_eq!(owner.last_persisted_sequence, 42);
+    assert_eq!(live_frontier(&owner, 0), 0);
     assert_eq!(owner.next_sst_seqs.get(&0), Some(&10));
     assert_eq!(owner.edit_checkpoint_id, 9);
 }
@@ -112,10 +178,12 @@ fn should_rebuild_one_read_view_after_manifest_file_batch() {
     };
 
     // Act
-    owner.apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
-        crate::metadata::ManifestEdit::AddSst(file("first.sst")),
-        crate::metadata::ManifestEdit::AddSst(file("second.sst")),
-    ]));
+    owner
+        .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::AddSst(file("first.sst")),
+            crate::metadata::ManifestEdit::AddSst(file("second.sst")),
+        ]))
+        .unwrap();
     let updated = owner.read_view_for(0);
 
     // Assert
@@ -2111,70 +2179,7 @@ fn should_handle_multiple_column_families() {
 }
 
 #[test]
-fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
-    // Arrange
-    let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
-    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
-        .expect("rotate the WAL ledger");
-    let secondary = state.create_cf("floor-secondary".into()).unwrap();
-    for (cf_id, segment) in [(0, 5), (secondary, 7)] {
-        let cf = state.get_cf_mut(cf_id).unwrap();
-        cf.active_memtable_started_in_segment = segment;
-        cf.memtable
-            .put_with_seq(b"key".to_vec(), b"value".to_vec(), segment, None)
-            .unwrap();
-    }
-    let frozen = state.get_cf(0).unwrap().memtable.clone();
-    let generation = state
-        .track_new_immutable_flush(0, frozen.clone(), 11)
-        .unwrap();
-    let cf = state.get_cf_mut(0).unwrap();
-    cf.memtable = Arc::new(SkipListMemtable::new());
-    cf.active_memtable_started_in_segment = 11;
-    cf.memtable
-        .put_with_seq(b"new".to_vec(), b"value".to_vec(), 12, None)
-        .unwrap();
-
-    // Act
-    let initial = state.wal_recovery_floor_segment();
-    let (_, queued) = state
-        .immutable_flush_by_id_mut(generation.flush_id)
-        .unwrap();
-    queued.phase = ImmutableFlushPhase::RetryPending;
-    queued.retry.defer_for(Duration::from_mins(1));
-    let retrying = state.wal_recovery_floor_segment();
-    state.complete_immutable_flush(0, &frozen).unwrap();
-    let after_publication = state.wal_recovery_floor_segment();
-
-    // Assert
-    assert_eq!(initial, Some(5));
-    assert_eq!(retrying, Some(5));
-    assert_eq!(after_publication, Some(7));
-}
-
-#[test]
-fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
-    // Arrange
-    let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
-    crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 20)
-        .expect("rotate the WAL ledger");
-    state
-        .get_cf_mut(0)
-        .unwrap()
-        .immutable_memtables
-        .push(Arc::new(SkipListMemtable::new()));
-
-    // Act
-    let floor = state.wal_recovery_floor_segment();
-
-    // Assert
-    assert_eq!(floor, None);
-}
-
-#[test]
-fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
+fn should_preserve_active_memtable_when_freeze_identity_is_exhausted() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
@@ -2193,27 +2198,18 @@ fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
 
     // Assert
     assert!(generation.is_none());
-    assert_eq!(state.wal_recovery_floor_segment(), Some(3));
+    assert_eq!(live_frontier(&state.manifest, 0), 0);
+    assert_eq!(
+        state
+            .get_cf(0)
+            .unwrap()
+            .memtable
+            .get(b"key")
+            .unwrap()
+            .as_deref(),
+        Some(b"value".as_slice())
+    );
     assert!(state.get_cf(0).unwrap().immutable_memtables.is_empty());
-}
-
-#[test]
-fn should_retain_all_wal_when_tracked_generation_provenance_is_unknown() {
-    // Arrange
-    let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    let table = state.get_cf(0).unwrap().memtable.clone();
-    let flush = state.track_new_immutable_flush(0, table, 1).unwrap();
-    state
-        .immutable_flush_by_id_mut(flush.flush_id)
-        .unwrap()
-        .1
-        .first_wal_segment = None;
-
-    // Act
-    let floor = state.wal_recovery_floor_segment();
-
-    // Assert
-    assert_eq!(floor, None);
 }
 
 /// The flush worker publishes by writing the manifest journal and the intent
@@ -2696,7 +2692,7 @@ fn measure_flush_publication_io_with_sst_size(
             smallest_key: None,
             largest_key: None,
             smallest_seq: None,
-            largest_seq: None,
+            largest_seq: Some(n),
             key_bounds_complete: false,
         };
         state
@@ -2716,7 +2712,7 @@ fn measure_flush_publication_io_with_sst_size(
             crate::config::RecoveryPolicy::Strict,
         )
         .expect("reconstruct published authority");
-        assert_eq!(recovered.last_persisted_sequence, n);
+        assert_eq!(live_frontier(&recovered, 0), n);
         if sst_bytes == 2 * 1024 * 1024 {
             let snapshot: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(
@@ -2728,7 +2724,7 @@ fn measure_flush_publication_io_with_sst_size(
             )
             .unwrap();
             assert_eq!(
-                snapshot["last_persisted_sequence"], n,
+                snapshot["flushed_through"][0]["through_sequence"], n,
                 "cheap checkpoint must remain forced at each publication"
             );
         }
@@ -2804,7 +2800,7 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
                 smallest_key: None,
                 largest_key: None,
                 smallest_seq: None,
-                largest_seq: None,
+                largest_seq: Some(n),
                 key_bounds_complete: false,
             };
             state.commit_flush_publication_for(super::manifest::FlushManifestPublication {
@@ -2841,10 +2837,10 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
 
         // Assert
         assert_eq!(recovered.files.len(), 16);
-        assert_eq!(recovered.last_persisted_sequence, 16);
+        assert_eq!(live_frontier(&recovered, 0), 16);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&17));
         assert_eq!(successor.files.len(), 17);
-        assert_eq!(successor.last_persisted_sequence, 17);
+        assert_eq!(live_frontier(&successor, 0), 17);
         assert_eq!(successor.next_sst_seqs.get(&0), Some(&18));
     }
     scenario.teardown();
@@ -2900,7 +2896,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
         smallest_key: None,
         largest_key: None,
         smallest_seq: None,
-        largest_seq: None,
+        largest_seq: Some(17),
         key_bounds_complete: false,
     };
     let checkpoint = state
@@ -2931,7 +2927,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
     assert_eq!(recovered.files.len(), 1);
     assert_eq!(recovered.files[0].name, file_meta.name);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&18));
-    assert_eq!(recovered.last_persisted_sequence, 123);
+    assert_eq!(live_frontier(&recovered, 0), 123);
     scenario.teardown();
 }
 
@@ -2946,14 +2942,14 @@ fn cheap_flush_file(n: u64) -> crate::runtime::FileMeta {
         smallest_key: None,
         largest_key: None,
         smallest_seq: None,
-        largest_seq: None,
+        largest_seq: Some(n),
         key_bounds_complete: false,
     }
 }
 
 #[test]
 #[cfg(feature = "failpoints")]
-fn should_reject_flush_ack_when_failed_snapshot_frontier_fallback_cannot_sync() {
+fn should_reject_flush_ack_when_the_complete_publication_batch_cannot_sync() {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
@@ -2986,8 +2982,8 @@ fn should_reject_flush_ack_when_failed_snapshot_frontier_fallback_cannot_sync() 
             require_snapshot: false,
         };
         fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
-        // The SST identity batch syncs; only the frontier fallback fails.
-        fail::cfg(failure, "1*off->return").unwrap();
+        // Identity, allocation, and frontier are one durable batch.
+        fail::cfg(failure, "return").unwrap();
 
         // Act
         let failed = state.commit_flush_publication_for(publication);
@@ -3005,19 +3001,35 @@ fn should_reject_flush_ack_when_failed_snapshot_frontier_fallback_cannot_sync() 
         let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
         // Assert: no false ACK or deletion; a retry publishes exact authority.
-        assert!(failed.is_err(), "fallback must be durable before flush ACK");
-        assert_eq!(before_retry.files.len(), 1);
-        assert_eq!(before_retry.files[0].name, file.name);
+        assert!(
+            failed.is_err(),
+            "the whole batch must be durable before flush ACK"
+        );
+        // A failed sync may leave readable bytes; recovery must observe the
+        // whole batch or none of it, never an identity without its frontier.
+        assert!(before_retry.files.len() <= 1);
+        assert_eq!(
+            live_frontier(&before_retry, 0),
+            if before_retry.files.is_empty() {
+                0
+            } else {
+                123
+            }
+        );
+        if let Some(output) = before_retry.files.first() {
+            assert_eq!(output.name, file.name);
+            assert_eq!(before_retry.next_sst_seqs.get(&0), Some(&18));
+        }
         assert_eq!(recovered.files.len(), 1);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&18));
-        assert_eq!(recovered.last_persisted_sequence, 123);
+        assert_eq!(live_frontier(&recovered, 0), 123);
     }
     scenario.teardown();
 }
 
 #[test]
 #[cfg(feature = "failpoints")]
-fn should_recover_duplicate_flush_frontiers_when_optional_checkpoint_fails() {
+fn should_refuse_duplicate_output_when_a_retry_claims_a_higher_flush_frontier() {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
@@ -3042,11 +3054,12 @@ fn should_recover_duplicate_flush_frontiers_when_optional_checkpoint_fails() {
     publication.next_sst_seq = 45;
     fail::cfg("midge::manifest::inject_snapshot_write_failure", "return").unwrap();
 
-    // Act: the identity already exists; only counter/frontier progress is new.
-    state.commit_flush_publication_for(publication).unwrap();
-    let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
     let journal = directory.path().join(crate::metadata::files::JOURNAL);
     let retained = std::fs::read(&journal).unwrap();
+
+    // Act: an existing output cannot prove a newly claimed freeze boundary.
+    assert!(state.commit_flush_publication_for(publication).is_err());
+    let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
     assert!(state.commit_flush_publication_for(publication).is_err());
     fail::remove("midge::manifest::inject_snapshot_write_failure");
 
@@ -3054,8 +3067,8 @@ fn should_recover_duplicate_flush_frontiers_when_optional_checkpoint_fails() {
     assert_eq!(std::fs::read(&journal).unwrap(), retained);
     assert_eq!(recovered.files.len(), 1);
     assert_eq!(recovered.files[0].name, file.name);
-    assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
-    assert_eq!(recovered.last_persisted_sequence, 123);
+    assert_eq!(recovered.next_sst_seqs.get(&0), Some(&18));
+    assert_eq!(live_frontier(&recovered, 0), 17);
     scenario.teardown();
 }
 
@@ -3087,7 +3100,7 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
                 smallest_key: None,
                 largest_key: None,
                 smallest_seq: None,
-                largest_seq: None,
+                largest_seq: Some(n),
                 key_bounds_complete: false,
             };
             // Prime one forced checkpoint before counting either path.
@@ -3109,7 +3122,7 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
         }
         let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
         assert_eq!(recovered.files.len(), 65);
-        assert_eq!(recovered.last_persisted_sequence, 65);
+        assert_eq!(live_frontier(&recovered, 0), 65);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&66));
         counters
             .manifest_stats
@@ -3126,7 +3139,7 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
 }
 
 #[test]
-fn should_preserve_original_journal_cost_when_healthy_cheap_flush_is_checkpointed() {
+fn should_preserve_complete_batch_journal_cost_when_healthy_cheap_flush_is_checkpointed() {
     // Arrange
     let measure = |original: bool| {
         let directory = tempfile::tempdir().unwrap();
@@ -3161,30 +3174,33 @@ fn should_preserve_original_journal_cost_when_healthy_cheap_flush_is_checkpointe
                 smallest_key: None,
                 largest_key: None,
                 smallest_seq: None,
-                largest_seq: None,
+                largest_seq: Some(n),
                 key_bounds_complete: false,
             };
             if original {
-                // The original successful forced path needs two edits: the
-                // following durable snapshot publishes the WAL frontier.
+                // Compare the public flush path with the explicit complete
+                // durable batch required by the current format.
                 let meta: crate::metadata::FileMeta = (&file).into();
+                let batch = crate::metadata::ManifestEdit::Batch(vec![
+                    crate::metadata::ManifestEdit::BumpNextSstSeq {
+                        cf_id: 0,
+                        next_seq: n + 1,
+                    },
+                    crate::metadata::ManifestEdit::AddSst(meta),
+                    crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                        cf_id: 0,
+                        freeze_sequence: n,
+                    },
+                ]);
                 let id = state
                     .manifest_store
-                    .append_batch_for(
+                    .append_for(
                         crate::metadata::accounting::Origin::OrdinaryLocalFlush,
-                        &[
-                            crate::metadata::ManifestEdit::BumpNextSstSeq {
-                                cf_id: 0,
-                                next_seq: n + 1,
-                            },
-                            crate::metadata::ManifestEdit::AddSst(meta.clone()),
-                        ],
+                        &batch,
                     )
                     .unwrap();
-                state.manifest.add_file(meta);
+                state.manifest.apply_edit(&batch).unwrap();
                 state.manifest.note_applied_journal_edit(id);
-                state.manifest.advance_next_sst_seq(0, n + 1);
-                state.manifest.advance_persisted_sequence(n);
                 let checkpoint = state
                     .manifest_store
                     .save_snapshot_for(
@@ -3209,7 +3225,7 @@ fn should_preserve_original_journal_cost_when_healthy_cheap_flush_is_checkpointe
         let recovered = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
         assert_eq!(recovered.files.len(), 8);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&9));
-        assert_eq!(recovered.last_persisted_sequence, 8);
+        assert_eq!(live_frontier(&recovered, 0), 8);
         counters
             .journal_bytes
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -3251,7 +3267,7 @@ fn should_stop_journal_growth_when_cheap_flush_checkpoint_cannot_be_saved() {
                 smallest_key: None,
                 largest_key: None,
                 smallest_seq: None,
-                largest_seq: None,
+                largest_seq: Some(n),
                 key_bounds_complete: false,
             };
             state.commit_flush_publication_for(super::manifest::FlushManifestPublication {
@@ -3282,10 +3298,10 @@ fn should_stop_journal_growth_when_cheap_flush_checkpoint_cannot_be_saved() {
 
         // Assert
         assert_eq!(recovered.files.len(), 2);
-        assert_eq!(recovered.last_persisted_sequence, 2);
+        assert_eq!(live_frontier(&recovered, 0), 2);
         assert_eq!(recovered.next_sst_seqs.get(&0), Some(&3));
         assert_eq!(successor.files.len(), 3);
-        assert_eq!(successor.last_persisted_sequence, 3);
+        assert_eq!(live_frontier(&successor, 0), 3);
         assert_eq!(successor.next_sst_seqs.get(&0), Some(&4));
     }
     scenario.teardown();
@@ -3310,7 +3326,7 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
         smallest_key: None,
         largest_key: None,
         smallest_seq: None,
-        largest_seq: None,
+        largest_seq: Some(n),
         key_bounds_complete: false,
     };
     let publish = |state: &mut RuntimeState, n: u64| {
@@ -3334,7 +3350,10 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
                     cf_id: 0,
                     next_seq: 45,
                 },
-                crate::metadata::ManifestEdit::BumpWalSeq { seq: 77 },
+                crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: 0,
+                    freeze_sequence: 77,
+                },
             ],
         )
         .unwrap();
@@ -3358,19 +3377,28 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
     assert_eq!(std::fs::read(&journal).unwrap(), retained);
     let blocked_recovery = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
     state.reload_persisted_metadata().unwrap();
-    publish(&mut state, 45).unwrap();
+    state
+        .commit_flush_publication_for(super::manifest::FlushManifestPublication {
+            origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+            cf_id: 0,
+            sequence: 124,
+            file_meta: &file(45),
+            next_sst_seq: 46,
+            require_snapshot: false,
+        })
+        .unwrap();
     let successor = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
 
     // Assert
     assert_eq!(recovered.files.len(), 3);
-    assert_eq!(recovered.last_persisted_sequence, 123);
+    assert_eq!(live_frontier(&recovered, 0), 123);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
     assert!(matches!(blocked, Err(crate::common::MidgeError::Fenced(_))));
     assert_eq!(retained, Vec::<u8>::new());
     assert_eq!(blocked_recovery.files.len(), 3);
     assert_eq!(blocked_recovery.next_sst_seqs.get(&0), Some(&45));
     assert_eq!(successor.files.len(), 4);
-    assert_eq!(successor.last_persisted_sequence, 123);
+    assert_eq!(live_frontier(&successor, 0), 124);
     assert_eq!(successor.next_sst_seqs.get(&0), Some(&46));
 }
 
@@ -3406,7 +3434,10 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
                         cf_id: 0,
                         next_seq: 45,
                     },
-                    crate::metadata::ManifestEdit::BumpWalSeq { seq: 77 },
+                    crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                        cf_id: 0,
+                        freeze_sequence: 145,
+                    },
                 ],
             )
             .unwrap();
@@ -3431,7 +3462,15 @@ fn should_preserve_flush_progress_when_foreign_edit_arrives_after_cheap_journal_
 
     // Assert
     assert_eq!(recovered.files.len(), 2);
-    assert_eq!(recovered.last_persisted_sequence, 123);
+    assert!(recovered
+        .files
+        .iter()
+        .any(|output| output.name == file.name));
+    assert!(recovered
+        .files
+        .iter()
+        .any(|output| output.name == cheap_flush_file(44).name));
+    assert_eq!(live_frontier(&recovered, 0), 145);
     assert_eq!(recovered.next_sst_seqs.get(&0), Some(&45));
     assert_eq!(
         std::fs::read(directory.path().join(crate::metadata::files::JOURNAL)).unwrap(),

@@ -213,10 +213,25 @@ impl WalActor {
             }
         }
 
+        self.persist_sync_boundary(state)?;
         Ok(WalSyncReceipt {
             durable_sequence: state.sequence,
             pending_writes: state.wal.pending_writes,
         })
+    }
+
+    fn persist_sync_boundary(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        if let Some(writer) = self.writer() {
+            let bytes = writer.current_pos();
+            if let Err(error) = state.wal.history.record_sync(bytes) {
+                self.fence_transition(
+                    state,
+                    format!("failed to persist WAL sync boundary: {error}"),
+                );
+                return Err(Self::appended_unit_error(error));
+            }
+        }
+        Ok(())
     }
 
     fn commit_sync_io(

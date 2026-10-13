@@ -320,25 +320,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_classify_value_writes_from_entry_type() {
-        // Arrange
-        let cases = [
-            (EntryType::Put, true),
-            (EntryType::Insert, true),
-            (EntryType::Delete, false),
-            (EntryType::Merge, false),
-        ];
-
-        for (entry_type, expected) in cases {
-            // Act
-            let is_value_write = entry_type.is_value_write();
-
-            // Assert
-            assert_eq!(is_value_write, expected, "{entry_type:?}");
-        }
-    }
-
-    #[test]
     fn should_reject_merge_entry_when_decoding_sst_entry() {
         // Arrange
         let encoded = encode_v4(b"key", 0, Some(b"operand"), 1, EntryType::Merge, None)

@@ -2,7 +2,6 @@
 
 use super::cloud_maintenance::CloudMaintenance;
 use super::coordination::CloudWalUploadTracker;
-use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
 use std::sync::Arc;
 
 pub(in crate::runtime) struct CloudCoordinator {
@@ -13,7 +12,6 @@ pub(in crate::runtime) struct CloudCoordinator {
     pub(super) provider_ddl_fencing: bool,
     pub(super) cloud_wal: CloudWalUploadTracker,
     pub(super) cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
-    pub(super) cloud_wal_prune_progress: CloudWalPruneProgress,
     pub(super) cloud_maintenance: CloudMaintenance,
 }
 
@@ -24,9 +22,8 @@ impl CloudCoordinator {
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
             provider_ddl_fencing: config.provider_ddl_fencing,
-            cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_segments.clone()),
+            cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_entries.clone()),
             cloud_wal_prune_worker: None,
-            cloud_wal_prune_progress: CloudWalPruneProgress::default(),
             cloud_maintenance: CloudMaintenance::default(),
         }
     }
@@ -60,7 +57,6 @@ impl CloudCoordinator {
         &self,
         fs: &dyn crate::io::Fs,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        last_persisted_sequence: u64,
         deadline: &crate::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: impl FnMut(&crate::common::OperationDeadline) -> crate::common::MidgeResult<()>,
@@ -77,7 +73,6 @@ impl CloudCoordinator {
                 fs,
                 publication_lock,
                 lock_wait_budget: std::time::Duration::ZERO,
-                local_manifest_sequence: last_persisted_sequence,
                 deadline,
                 authority,
             },

@@ -173,7 +173,7 @@ pub struct HybridStorage {
 
     /// Remote WAL prune workers are tracked so shutdown can join them before
     /// releasing the lease that fenced their conditional deletes.
-    prune_workers: Mutex<PruneWorkerRegistry>,
+    prune_workers: Arc<Mutex<PruneWorkerRegistry>>,
 }
 
 impl HybridStorage {
@@ -337,10 +337,10 @@ impl HybridStorage {
             wal_catalog_mutation: Mutex::new(()),
             maintenance_memory: std::sync::OnceLock::new(),
             write_authority: std::sync::OnceLock::new(),
-            prune_workers: Mutex::new(PruneWorkerRegistry::new(
+            prune_workers: Arc::new(Mutex::new(PruneWorkerRegistry::new(
                 limits.prune_workers,
                 limits.prune_requests,
-            )),
+            ))),
         }
     }
 

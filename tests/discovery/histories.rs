@@ -192,13 +192,6 @@ fn prefix(template: Template) -> Vec<Action> {
                 ),
                 put(0, b"a".to_vec(), 95),
                 Action::Write(0, Intent::Delete { key: b"b".to_vec() }),
-                Action::Write(
-                    0,
-                    Intent::DeleteRange {
-                        start: b"a".to_vec(),
-                        end: b"a".to_vec(),
-                    },
-                ),
                 Action::Read(0, b"a".to_vec()),
                 Action::Read(0, b"padding/00".to_vec()),
                 scan(0, false),
@@ -271,7 +264,7 @@ pub fn generate(count: usize, max_operations: usize) -> Vec<History> {
                     0 if !active => Action::Begin(id),
                     1..=3 if active => put(id, key, byte),
                     4 if active => Action::Write(id, Intent::Delete { key }),
-                    5 if active => {
+                    5 if active && key != other => {
                         let (start, end) = if key <= other {
                             (key, other)
                         } else {

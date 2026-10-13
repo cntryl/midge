@@ -1,4 +1,4 @@
-//! Lease-fenced authority for remotely published WAL segments (catalog v2,
+//! Lease-fenced authority for remotely published WAL segments (catalog v3,
 //! #844).
 //!
 //! Immutable WAL objects are not authoritative merely because they exist.
@@ -14,12 +14,13 @@
 //! everything before it changes anything and leaves a valid catalog, or
 //! refuses and leaves it as it was.
 
-use crate::wal::format::{ChainLink, SegmentId, SegmentIdentity};
+use crate::types::SharedGenerationId;
+use crate::wal::format::{ChainLink, SealedFacts, SegmentId, SegmentIdentity};
 use serde::{Deserialize, Serialize};
 
 /// The catalog format this build reads and writes. Any other version is a
 /// compatibility error; nothing migrates it.
-pub(crate) const FORMAT_VERSION: u32 = 2;
+pub(crate) const FORMAT_VERSION: u32 = 3;
 pub(crate) const OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::WAL_CATALOG_OBJECT_KEY;
 pub(crate) const MIRROR_OBJECT_KEY: &str =
     crate::cloud_layout::CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY;
@@ -31,7 +32,7 @@ pub(crate) const MIRROR_OBJECT_KEY: &str =
 pub struct CatalogEntry {
     epoch: u64,
     prev: ChainLink,
-    link: ChainLink,
+    facts: SealedFacts,
     size_bytes: u64,
     crc32c: u32,
 }
@@ -47,15 +48,19 @@ impl CatalogEntry {
     pub fn from_sealed_bytes(bytes: &[u8]) -> Result<Self, String> {
         let validation =
             crate::wal::cloud_segment::validate_segment_bytes("sealed segment", bytes)?;
-        Ok(Self::describing(validation.identity(), bytes))
+        Ok(Self::describing(&validation, bytes))
     }
 
     /// The entry for `bytes`, a segment that says it is `identity`.
-    pub(crate) fn describing(identity: SegmentIdentity, bytes: &[u8]) -> Self {
+    pub(crate) fn describing(
+        validation: &crate::wal::cloud_segment::SegmentValidation,
+        bytes: &[u8],
+    ) -> Self {
+        let identity = validation.identity();
         Self {
             epoch: identity.epoch,
             prev: identity.prev,
-            link: identity.link,
+            facts: validation.facts.clone(),
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             crc32c: crc32c::crc32c(bytes),
         }
@@ -64,13 +69,13 @@ impl CatalogEntry {
     /// The segment's id.
     #[must_use]
     pub fn id(&self) -> SegmentId {
-        self.link.id
+        self.facts.link.id
     }
 
     /// The last sequence the segment holds.
     #[must_use]
     pub fn max_sequence(&self) -> u64 {
-        self.link.last_seq
+        self.facts.link.last_seq
     }
 
     /// The epoch of the writer that wrote the segment.
@@ -88,7 +93,23 @@ impl CatalogEntry {
     /// The link the segment's footer seals.
     #[must_use]
     pub fn link(&self) -> ChainLink {
-        self.link
+        self.facts.link
+    }
+
+    /// Verified sealing facts retained after local cache retirement.
+    #[must_use]
+    pub fn facts(&self) -> &SealedFacts {
+        &self.facts
+    }
+
+    pub(crate) fn check_facts(&self, facts: &SealedFacts) -> Result<(), String> {
+        if &self.facts != facts {
+            return Err(format!(
+                "cloud WAL segment '{}' footer facts differ from catalog",
+                self.object_key()
+            ));
+        }
+        Ok(())
     }
 
     /// The size of the segment's object.
@@ -135,7 +156,8 @@ impl CatalogEntry {
         }
         let validation =
             crate::wal::cloud_segment::validate_segment_bytes(&self.object_key(), bytes)?;
-        self.check(&validation.identity())
+        self.check(&validation.identity())?;
+        self.check_facts(&validation.facts)
     }
 
     /// Whether a segment that says it is `identity` is the one this entry
@@ -167,10 +189,10 @@ impl CatalogEntry {
                 identity.prev.id, identity.prev.last_seq, self.prev.id, self.prev.last_seq
             ));
         }
-        if identity.link != self.link {
+        if identity.link != self.facts.link {
             return Err(format!(
                 "cloud WAL segment '{key}' seals sequences through {} with another digest than the catalog's, through {}",
-                identity.link.last_seq, self.link.last_seq
+                identity.link.last_seq, self.facts.link.last_seq
             ));
         }
         Ok(())
@@ -190,6 +212,10 @@ pub(crate) enum CatalogRefusal {
     /// The catalog publishes something else for this segment than the
     /// caller expected.
     Changed { segment_id: SegmentId },
+    GenerationRegression {
+        retired_by: SharedGenerationId,
+        proposed: SharedGenerationId,
+    },
     /// Only a suffix of the catalog may be set aside, as the caller saw it.
     NotSuffix { from: SegmentId },
 }
@@ -210,6 +236,7 @@ impl std::fmt::Display for CatalogRefusal {
                 f,
                 "cloud WAL catalog segment {segment_id} changed before the mutation"
             ),
+            Self::GenerationRegression { retired_by, proposed } => write!(f, "shared retirement generation {} is below required {}", proposed.get(), retired_by.get()),
             Self::NotSuffix { from } => write!(
                 f,
                 "cloud WAL catalog segments from {from} changed before they were set aside"
@@ -255,6 +282,7 @@ pub struct WalPublicationCatalog {
     /// Every sequence at or below this may belong to WAL salvage set aside
     /// unreplayed, so a later open must not assign it again (#529).
     seq_floor: u64,
+    retired_by: SharedGenerationId,
     /// Oldest first; each links the one before it.
     segments: Vec<CatalogEntry>,
 }
@@ -279,6 +307,7 @@ impl WalPublicationCatalog {
             anchor: ChainLink::GENESIS,
             next_segment_id: 1,
             seq_floor: 0,
+            retired_by: SharedGenerationId::NONE,
             segments: Vec::new(),
         };
         catalog.validate()?;
@@ -338,7 +367,9 @@ impl WalPublicationCatalog {
     /// catalog publishes none.
     #[must_use]
     pub fn head(&self) -> ChainLink {
-        self.segments.last().map_or(self.anchor, |entry| entry.link)
+        self.segments
+            .last()
+            .map_or(self.anchor, |entry| entry.facts.link)
     }
 
     /// The least id a new segment may take: past every published id.
@@ -353,10 +384,37 @@ impl WalPublicationCatalog {
         self.seq_floor
     }
 
+    /// Shared metadata generation that authorized the retired prefix.
+    #[must_use]
+    pub fn retired_by(&self) -> SharedGenerationId {
+        self.retired_by
+    }
+
     /// The published segments, oldest first.
     #[must_use]
     pub fn entries(&self) -> &[CatalogEntry] {
         &self.segments
+    }
+
+    /// Leading published segments whose verified family maxima are all covered.
+    #[must_use]
+    pub(crate) fn retirable_prefix(
+        &self,
+        mut covered: impl FnMut(u32, u64) -> bool,
+    ) -> &[CatalogEntry] {
+        let count = self
+            .segments
+            .iter()
+            .take_while(|entry| {
+                !entry.facts.max_seq_per_cf.is_empty()
+                    && entry
+                        .facts
+                        .max_seq_per_cf
+                        .iter()
+                        .all(|(cf, maximum)| covered(*cf, *maximum))
+            })
+            .count();
+        &self.segments[..count]
     }
 
     /// The entry publishing segment `id`, if any.
@@ -376,6 +434,7 @@ impl WalPublicationCatalog {
             && self.anchor == ChainLink::GENESIS
             && self.next_segment_id == 1
             && self.seq_floor == 0
+            && self.retired_by == SharedGenerationId::NONE
     }
 
     /// Hand the catalog to `writer_epoch`. Returns whether it changed.
@@ -457,8 +516,15 @@ impl WalPublicationCatalog {
         &mut self,
         fencing_epoch: u64,
         expected: &[CatalogEntry],
+        generation: SharedGenerationId,
     ) -> Result<Vec<SegmentId>, CatalogRefusal> {
         self.require_epoch(fencing_epoch)?;
+        if generation == SharedGenerationId::NONE || generation < self.retired_by {
+            return Err(CatalogRefusal::GenerationRegression {
+                retired_by: self.retired_by,
+                proposed: generation,
+            });
+        }
         let pending = self.oldest_prefix(expected.iter().map(CatalogEntry::id))?;
         for (actual, entry) in self.segments.iter().zip(
             expected
@@ -473,7 +539,8 @@ impl WalPublicationCatalog {
         }
         let retired: Vec<CatalogEntry> = self.segments.drain(..pending.len()).collect();
         if let Some(last) = retired.last() {
-            self.anchor = last.link;
+            self.anchor = last.facts.link;
+            self.retired_by = generation;
         }
         Ok(pending)
     }
@@ -567,6 +634,9 @@ impl WalPublicationCatalog {
         if self.fencing_epoch == 0 {
             return Err("cloud WAL catalog fencing epoch must be non-zero".to_string());
         }
+        if (self.anchor == ChainLink::GENESIS) != (self.retired_by == SharedGenerationId::NONE) {
+            return Err("cloud WAL catalog retired anchor and shared generation disagree".into());
+        }
         let mut prev = self.anchor;
         let mut epoch = 0;
         for entry in &self.segments {
@@ -577,7 +647,7 @@ impl WalPublicationCatalog {
                     entry.prev.id, entry.prev.last_seq, prev.id, prev.last_seq
                 ));
             }
-            if id <= prev.id || entry.link.last_seq <= prev.last_seq {
+            if id <= prev.id || entry.facts.link.last_seq <= prev.last_seq {
                 return Err(format!(
                     "cloud WAL catalog segment {id} does not follow segment {}",
                     prev.id
@@ -595,10 +665,35 @@ impl WalPublicationCatalog {
                     entry.epoch, self.fencing_epoch
                 ));
             }
+            let facts = &entry.facts;
+            if facts.record_count == 0
+                || facts.max_seq_per_cf.is_empty()
+                || facts.data_len < crate::wal::format::HEADER_LEN as u64
+                || facts.data_len >= entry.size_bytes
+                || facts
+                    .max_seq_per_cf
+                    .windows(2)
+                    .any(|pair| pair[0].0 >= pair[1].0)
+                || facts
+                    .max_seq_per_cf
+                    .iter()
+                    .any(|(_, sequence)| *sequence == 0 || *sequence > facts.link.last_seq)
+                || facts
+                    .max_seq_per_cf
+                    .iter()
+                    .map(|(_, sequence)| *sequence)
+                    .max()
+                    != Some(facts.link.last_seq)
+                || facts.record_count < facts.max_seq_per_cf.len() as u64
+            {
+                return Err(format!(
+                    "cloud WAL catalog segment {id} has invalid sealing facts"
+                ));
+            }
             if entry.size_bytes == 0 {
                 return Err(format!("cloud WAL catalog segment {id} has invalid size"));
             }
-            prev = entry.link;
+            prev = entry.facts.link;
             epoch = entry.epoch;
         }
         if self.next_segment_id <= self.head().id {
@@ -616,6 +711,83 @@ impl WalPublicationCatalog {
 mod tests {
     use super::*;
     use crate::wal::format::segment::SegmentBuilder;
+
+    #[test]
+    fn should_preserve_retirement_generation_when_every_catalog_entry_retires() {
+        // Arrange
+        let (mut catalog, entries) = published(8, 2);
+        let generation = SharedGenerationId::new(7).unwrap();
+        // Act
+        catalog.retire_prefix(8, &entries, generation).unwrap();
+        let reopened = WalPublicationCatalog::decode(&catalog.encode().unwrap()).unwrap();
+        // Assert
+        assert_eq!(reopened.entries(), []);
+        assert_eq!(reopened.retired_by(), generation);
+        assert_eq!(reopened.next_segment_id(), 3);
+    }
+
+    #[test]
+    fn should_refuse_older_generation_without_changing_catalog_authority() {
+        // Arrange
+        let (mut catalog, entries) = published(8, 2);
+        catalog
+            .retire_prefix(8, &entries[..1], SharedGenerationId::new(7).unwrap())
+            .unwrap();
+        let previous = catalog.clone();
+        // Act
+        let result = catalog.retire_prefix(8, &entries[1..], SharedGenerationId::new(6).unwrap());
+        // Assert
+        assert!(matches!(
+            result,
+            Err(CatalogRefusal::GenerationRegression { .. })
+        ));
+        assert_eq!(catalog, previous);
+    }
+
+    #[test]
+    fn should_stop_retirable_prefix_at_the_first_uncovered_segment() {
+        // Arrange
+        let (catalog, entries) = published(8, 3);
+        // Act
+        let prefix = catalog.retirable_prefix(|_, maximum| maximum != 2);
+        // Assert
+        assert_eq!(prefix, &entries[..1]);
+    }
+
+    #[test]
+    fn should_persist_verified_family_summary_when_publishing_a_segment() {
+        // Arrange
+        let (catalog, _) = published(8, 1);
+
+        // Act
+        let body: serde_json::Value = serde_json::from_slice(&catalog.encode().unwrap()).unwrap();
+
+        // Assert: a cold cache can select retention without rereading WAL payloads.
+        assert_eq!(
+            body["segments"][0]["facts"]["max_seq_per_cf"],
+            serde_json::json!([[0, 1]])
+        );
+        assert_eq!(body["segments"][0]["facts"]["record_count"], 1);
+    }
+
+    #[test]
+    fn should_reject_changed_family_summary_when_validating_published_bytes() {
+        // Arrange
+        let bytes = sealed(ChainLink::GENESIS, 1..=1, 8).remove(0);
+        let entry = CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+        let mut encoded = serde_json::to_value(entry).unwrap();
+        encoded["facts"]["max_seq_per_cf"] = serde_json::json!([[0, 0]]);
+
+        // Act
+        let altered: Result<CatalogEntry, _> = serde_json::from_value(encoded);
+
+        // Assert: either malformed shape or verified-byte mismatch must refuse it.
+        assert!(
+            altered.is_ok(),
+            "the persisted summary must be part of the current format"
+        );
+        assert!(altered.unwrap().validate_bytes(&bytes).is_err());
+    }
 
     fn put(seq: u64) -> crate::wal::WalRecord {
         crate::wal::WalRecord::new(
@@ -721,7 +893,7 @@ mod tests {
 
         // Act
         let result = edited(&catalog, |json| {
-            json["anchor"]["last_seq"] = serde_json::json!(9);
+            json["segments"][0]["prev"]["last_seq"] = serde_json::json!(9);
         });
 
         // Assert
@@ -828,7 +1000,7 @@ mod tests {
         stale.crc32c ^= 1;
 
         // Act
-        let result = catalog.retire_prefix(8, &[stale]);
+        let result = catalog.retire_prefix(8, &[stale], SharedGenerationId::FIRST);
 
         // Assert
         assert_eq!(result, Err(CatalogRefusal::Changed { segment_id: 1 }));
@@ -841,7 +1013,7 @@ mod tests {
         let (mut catalog, entries) = published(8, 2);
 
         // Act
-        let result = catalog.retire_prefix(8, &entries[1..]);
+        let result = catalog.retire_prefix(8, &entries[1..], SharedGenerationId::FIRST);
 
         // Assert
         assert_eq!(
@@ -860,7 +1032,9 @@ mod tests {
         let (mut catalog, entries) = published(8, 2);
 
         // Act
-        let retired = catalog.retire_prefix(8, &entries).unwrap();
+        let retired = catalog
+            .retire_prefix(8, &entries, SharedGenerationId::FIRST)
+            .unwrap();
 
         // Assert: the chain and the ids outlive the entries.
         assert_eq!(retired, vec![1, 2]);
@@ -877,10 +1051,12 @@ mod tests {
     fn should_skip_segments_the_catalog_already_retired_when_retiring_a_prefix() {
         // Arrange
         let (mut catalog, entries) = published(8, 2);
-        catalog.retire_prefix(8, &entries[..1]).unwrap();
+        catalog
+            .retire_prefix(8, &entries[..1], SharedGenerationId::FIRST)
+            .unwrap();
 
         // Act
-        let retired = catalog.retire_prefix(8, &entries);
+        let retired = catalog.retire_prefix(8, &entries, SharedGenerationId::FIRST);
 
         // Assert
         assert_eq!(retired, Ok(vec![2]));

@@ -8,7 +8,7 @@
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_best_effort_deleted_key_when_reopening_after_clean_shutdown",
-      "baseline": "red",
+      "baseline": "green",
       "failure_marker": "best_effort delete resurrected after"
     },
     {
@@ -17,7 +17,7 @@
       "target": "lifecycle",
       "source": "tests/lifecycle.rs",
       "test": "should_not_resurrect_best_effort_deleted_key_when_recovering_a_crash_image",
-      "baseline": "red",
+      "baseline": "green",
       "failure_marker": "best_effort delete resurrected after"
     },
     {
@@ -50,7 +50,7 @@
       "target": "wal_retention_regressions",
       "source": "tests/wal_retention_regressions.rs",
       "test": "should_retire_cloud_wal_when_empty_range_has_no_replayable_effect",
-      "baseline": "red",
+      "baseline": "green",
       "failure_marker": "empty range pinned"
     },
     {
@@ -59,7 +59,7 @@
       "target": "wal_retention_regressions",
       "source": "tests/wal_retention_regressions.rs",
       "test": "should_retire_cloud_wal_when_flushed_family_is_dropped",
-      "baseline": "red",
+      "baseline": "green",
       "failure_marker": "family pinned"
     },
     {
@@ -68,7 +68,7 @@
       "target": "wal_retention_regressions",
       "source": "tests/wal_retention_regressions.rs",
       "test": "should_retire_cloud_wal_when_unflushed_family_is_discarded",
-      "baseline": "red",
+      "baseline": "green",
       "failure_marker": "family pinned"
     },
     {
@@ -191,7 +191,7 @@
       "target": "wal_campaigns",
       "source": "tests/wal_campaigns.rs",
       "test": "should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record",
-      "baseline": "red",
+      "baseline": "green",
       "failure_marker": "flushed delete resurrected after compaction"
     }
   ]

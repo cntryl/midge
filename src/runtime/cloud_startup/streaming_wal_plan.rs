@@ -5,9 +5,8 @@
 //! The cataloged objects are probed (HEAD, checksum, inspection), then the
 //! cache's ledger members the lineage needs: its tail, and under salvage the
 //! local copy of a shared member whose object is unusable. The planner
-//! decides; this module only cuts the open member back to the prefix replay
-//! applies (keeping a copy first when that drops anything salvage or a crash
-//! cannot explain) and assembles the sources.
+//! decides; this module exposes the verified open prefix without changing
+//! its backing file. Startup commits the sequence floor before cutting it.
 
 use super::streaming_wal_fs::{validate_wal_source, StreamingWalFs};
 use super::CloudStartupRecovery;
@@ -121,15 +120,12 @@ impl StreamingCloudWalRecovery {
                 let probe = if member.sealed.is_some() {
                     probe_sealed_member(local.as_ref(), id, policy, limits)?
                 } else {
-                    probe_open_member(local.as_ref(), id, policy, limits)?
+                    probe_open_member(local.as_ref(), id, member.durable_bytes, policy, limits)?
                 };
                 probes.local.insert(id, probe);
             }
         }
         let plan = crate::wal::planner::plan(policy, catalog, ledger, &probes)?;
-        if let Some(cut) = plan.open_cut {
-            apply_open_cut(local.as_ref(), cut)?;
-        }
         let (fs, segments) =
             assemble_planned_sources(&plan, remote_sources, local, read_window, scope)?;
         scope.check("cloud WAL planning completion")?;
@@ -267,7 +263,16 @@ impl PublishedObject<'_> {
             fs,
             scope.clone(),
         ));
-        let path = FsPath::new(key.clone());
+        self.inspect(entry, &key, fs)
+    }
+
+    fn inspect(
+        &self,
+        entry: &CatalogEntry,
+        key: &str,
+        fs: Arc<dyn Fs>,
+    ) -> MidgeResult<(RemoteSource, Probe)> {
+        let path = FsPath::new(key);
         validate_wal_source(
             fs.as_ref(),
             &path,
@@ -294,6 +299,12 @@ impl PublishedObject<'_> {
             )));
         };
         entry.check(&identity).map_err(MidgeError::Corruption)?;
+        let footer = scan.footer().ok_or_else(|| {
+            MidgeError::Corruption(format!("cloud WAL {key} has no sealed footer"))
+        })?;
+        entry
+            .check_facts(&footer.sealed_facts())
+            .map_err(MidgeError::Corruption)?;
         Ok((
             (fs as Arc<dyn ReadFs>, path),
             Probe::Sealed {
@@ -374,6 +385,7 @@ fn verified_maximum(
 fn probe_open_member(
     local: &dyn Fs,
     id: SegmentId,
+    durable_bytes: Option<u64>,
     policy: RecoveryPolicy,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<Probe> {
@@ -393,7 +405,20 @@ fn probe_open_member(
         {
             return Err(failure.error().replay())
         }
-        Err(failure) if failure.is_incomplete_tail() => (failure.verified_prefix(), OpenEnd::Torn),
+        Err(failure)
+            if failure.is_incomplete_tail()
+                && durable_bytes
+                    .is_none_or(|bytes| failure.verified_prefix().valid_bytes as u64 >= bytes) =>
+        {
+            (failure.verified_prefix(), OpenEnd::Torn)
+        }
+        Err(failure)
+            if failure.error().is_salvageable()
+                && durable_bytes
+                    .is_some_and(|bytes| failure.verified_prefix().valid_bytes as u64 >= bytes) =>
+        {
+            (failure.verified_prefix(), OpenEnd::Torn)
+        }
         Err(failure) if failure.error().is_salvageable() => {
             let prefix = failure.verified_prefix();
             let suffix_max = if policy == RecoveryPolicy::Salvage {
@@ -459,18 +484,14 @@ fn open_member<'a>(
 /// Cut the open member back to the prefix replay applies, keeping a durable
 /// copy of the original first when the cut drops what salvage or a crash
 /// cannot explain.
-fn apply_open_cut(local: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {
-    let path = crate::wal::segment_key(cut.id);
+pub(super) fn apply_open_cut(wal: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {
+    let path = FsPath::new(crate::wal::segment_file_name(cut.id));
     if cut.retain {
-        CloudStartupRecovery::retain_local_wal_copy(local, &path)?;
-        local
-            .sync_dir(
-                &FsPath::new(crate::wal::WAL_DIR),
-                crate::io::Durability::Durable,
-            )
+        CloudStartupRecovery::retain_local_wal_copy(wal, &path)?;
+        wal.sync_dir(&FsPath::new(""), crate::io::Durability::Durable)
             .map_err(FsError::into_midge)?;
     }
-    crate::io::truncate_durably(local, &path, cut.valid_bytes)
+    crate::io::truncate_durably(wal, &path, cut.valid_bytes)
         .map(drop)
         .map_err(FsError::into_midge)
 }
@@ -500,6 +521,9 @@ fn assemble_planned_sources(
             ),
         };
         replay_fs.insert(crate::wal::segment_file_name(planned.id), fs, path)?;
+        if let Some(cut) = plan.open_cut.filter(|cut| cut.id == planned.id) {
+            replay_fs.limit_prefix(&crate::wal::segment_file_name(planned.id), cut.valid_bytes)?;
+        }
     }
     let segments = ReplaySegments::from_plan(plan.anchor, &plan.replay, |id| {
         FsPath::new(format!(

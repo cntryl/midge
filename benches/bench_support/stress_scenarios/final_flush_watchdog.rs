@@ -371,7 +371,8 @@ pub(crate) fn run_final_flush_terminal_policy_fixture(ctx: &mut StressContext) {
         .get_runtime_metrics()
         .expect("prepared policy state");
     assert_eq!(
-        prepared.manifest_last_persisted_sequence, prepared.current_sequence,
+        prepared.manifest_flush_frontiers[&family.id()].expect("prepared family remains live"),
+        prepared.current_sequence,
         "terminal policy fixture must not defer seed publication to timed cleanup"
     );
     let progress = ctx.progress_handle();

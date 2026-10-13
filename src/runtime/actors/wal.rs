@@ -77,6 +77,15 @@ impl TxnSequencePlan {
     }
 }
 
+/// What reached the WAL and the memtables of units that failed to apply.
+#[derive(Clone, Copy)]
+struct UnappliedOutcome {
+    /// The units' records are appended to the WAL.
+    logged: bool,
+    /// Some, but not all, of a unit's ops reached the memtables.
+    partly_applied: bool,
+}
+
 struct TxnWalBatch {
     wal_record: Option<WalRecord>,
     total_wal_bytes: usize,
@@ -119,6 +128,13 @@ pub(crate) struct TransactionAppendResult {
     pub last_sequence: u64,
     pub op_count: usize,
     pub deferred: bool,
+}
+
+/// Outcome of a prepared group: the units applied, in order, and the error
+/// that stopped the remaining units, if any.
+pub(crate) struct PreparedGroupOutcome {
+    pub applied: Vec<TransactionAppendResult>,
+    pub failure: Option<MidgeError>,
 }
 
 enum TransactionIntent<'a> {
@@ -791,6 +807,107 @@ impl WalActor {
         self.ensure_filesystem_wal_available(state)
     }
 
+    /// Refuse a write, under any durability policy, to a family whose active
+    /// memtable holds a partly applied unit. That memtable cannot freeze
+    /// until restart, so the family could never persist the write it would
+    /// acknowledge; refusing it before it reaches the memtable keeps the
+    /// write unacknowledged instead of acknowledged and unflushable.
+    fn ensure_family_accepts_writes(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> MidgeResult<()> {
+        match state
+            .get_cf(cf_id)
+            .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit)
+        {
+            Some(commit_seq) => Err(MidgeError::RecoveryFailed(format!(
+                "column family {cf_id} holds a partly applied transaction committed at \
+                 sequence {commit_seq}; restart before writing to it"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Stop a writer whose units in `plans`, with sequences allocated and WAL
+    /// records (if `outcome.logged`) appended, did not reach the memtables
+    /// whole.
+    ///
+    /// Replay keeps a unit iff its commit is above the family's flush
+    /// frontier, so a unit none of whose ops reached the memtables is kept or
+    /// dropped whole whatever frontier a later flush publishes: the WAL is
+    /// only fenced. A partly applied unit would reach a flushed SST in part,
+    /// so its family is marked and refuses to freeze, and to take writes,
+    /// until restart. Restart then replays a logged unit whole (#537) and
+    /// discards an unlogged `BestEffort` one whole.
+    ///
+    /// The caller learns `OutcomeUnknown` for a logged unit,
+    /// which replay may apply; `Fenced` only when nothing was logged or
+    /// applied; and `RecoveryFailed` otherwise.
+    fn fail_unapplied_transactions(
+        &mut self,
+        state: &mut RuntimeState,
+        plans: &[&TxnSequencePlan],
+        outcome: UnappliedOutcome,
+        error: MidgeError,
+    ) -> MidgeError {
+        if outcome.partly_applied {
+            for plan in plans {
+                if let Some(cf) = state.get_cf_mut(plan.cf_id) {
+                    cf.mark_partially_applied(plan.commit_seq);
+                }
+            }
+        }
+        let txn_ids = plans
+            .iter()
+            .map(|plan| plan.txn_id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = match (outcome.logged, outcome.partly_applied) {
+            (true, true) => format!(
+                "transaction {txn_ids} is logged in the WAL but only part of it reached the \
+                 memtables; it may be applied on restart, and then whole: {error}"
+            ),
+            (false, true) => format!(
+                "transaction {txn_ids} has no WAL record and only part of it reached the \
+                 memtables; restart discards all of it: {error}"
+            ),
+            (true, false) => format!(
+                "transaction {txn_ids} is logged in the WAL but none of it reached the \
+                 memtables; it may be applied on restart: {error}"
+            ),
+            (false, false) => format!(
+                "transaction {txn_ids} has no WAL record and none of it reached the \
+                 memtables; it is not applied: {error}"
+            ),
+        };
+        self.fence_transition(state, message.clone());
+        state.mark_persistence_anomaly();
+        if outcome.logged {
+            // Replay may apply a logged unit, so its outcome is unknown.
+            MidgeError::OutcomeUnknown(message)
+        } else if !outcome.partly_applied && matches!(error, MidgeError::Fenced(_)) {
+            // Nothing logged and nothing applied: definitely not applied.
+            error
+        } else {
+            MidgeError::RecoveryFailed(message)
+        }
+    }
+
+    /// The caller's error for units whose WAL frames may be in the file when
+    /// a later step fails before any of them is applied. Replay may still
+    /// apply them. A lease or authority error reads as "not applied" or
+    /// "retry", either of which could apply the unit twice, so it becomes
+    /// `OutcomeUnknown`, including a failed fsync or an ambiguous append.
+    fn appended_unit_error(error: MidgeError) -> MidgeError {
+        match error {
+            MidgeError::OutcomeUnknown(_) => error,
+            other => MidgeError::OutcomeUnknown(format!(
+                "the transaction is in the WAL but not applied; it may be applied on \
+                 restart: {other}"
+            )),
+        }
+    }
+
     pub(crate) fn can_coalesce_transaction_append(
         &self,
         durability_policy: Option<DurabilityPolicy>,
@@ -881,6 +998,17 @@ impl Default for WalActor {
 mod tests;
 
 impl WalActor {
+    /// Replace the open writer's authority check, as a lease would.
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) fn set_write_authority_for_test(
+        &self,
+        authority: crate::wal::traits::WriteAuthority,
+    ) {
+        if let Some(writer) = self.writer() {
+            writer.set_write_authority(Some(authority));
+        }
+    }
+
     pub(crate) fn set_lease_validity(
         &mut self,
         validity: Option<Arc<crate::lease::LeaseValidity>>,

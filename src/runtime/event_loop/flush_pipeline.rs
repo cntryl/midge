@@ -55,18 +55,21 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         origin: Origin,
     ) -> crate::common::MidgeResult<Option<u64>> {
-        let active_size = self
-            .state
-            .get_cf(cf_id)
-            .ok_or_else(|| {
-                crate::common::MidgeError::InvalidArgument(format!(
-                    "column family {cf_id} does not exist"
-                ))
-            })?
-            .memtable
-            .size_bytes();
-        if active_size == 0 {
+        let cf = self.state.get_cf(cf_id).ok_or_else(|| {
+            crate::common::MidgeError::InvalidArgument(format!(
+                "column family {cf_id} does not exist"
+            ))
+        })?;
+        if cf.memtable.size_bytes() == 0 {
             return Ok(None);
+        }
+        // A flush frontier at or past a partly applied unit's commit would
+        // make restart skip the unit; only replay can apply it whole.
+        if let Some(commit_seq) = cf.partially_applied_commit() {
+            return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                "column family {cf_id} holds a partly applied transaction committed at \
+                 sequence {commit_seq}; restart before flushing it"
+            )));
         }
         if self.state.is_immutable_memtable_queue_full(cf_id) {
             self.state.diagnostics.record(|m| {
@@ -653,7 +656,6 @@ impl EventLoop {
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),
-            manifest_sequence: self.state.manifest.last_persisted_sequence,
             runtime_response_timeout: self.runtime_response_timeout,
         };
         self.flush_actor.submit_mirror(task)
@@ -1042,10 +1044,11 @@ impl EventLoop {
         } else {
             crate::runtime::state::EventualFlush::WalBytes
         };
-        while let Some(candidate) = self
-            .state
-            .next_flush_candidate_skipping(rule, &attempted_cfs)
-        {
+        while let Some(candidate) = self.state.next_flush_candidate_skipping(
+            rule,
+            &attempted_cfs,
+            self.cloud_coordinator.cloud_wal.oldest_published_facts(),
+        ) {
             attempted_cfs.insert(candidate.cf_id);
             if candidate.reason != crate::runtime::state::FlushReason::PendingImmutable {
                 match self.freeze_active_memtable(candidate.cf_id) {
@@ -1087,7 +1090,6 @@ impl EventLoop {
 
 #[cfg(test)]
 mod tests {
-    use super::super::wal_retention::{LOCAL_WAL_PROOF_BYTE_BUDGET, RUNTIME_FILE_READS};
     use super::*;
     use std::sync::atomic::AtomicBool;
 
@@ -2325,279 +2327,107 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn should_mark_anomaly_when_invalid_wal_segment_follows_a_retirable_one(
-    ) -> crate::common::MidgeResult<()> {
-        // Arrange: segment 1 lies below the recovery floor; segment 2, where
-        // the unflushed memtable started, is corrupt.
-        let directory = tempfile::tempdir()?;
-        let mut state =
-            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
-            bytes::Bytes::from_static(b"key"),
-            Some(bytes::Bytes::from_static(b"value")),
-            1,
-        );
-        let mut frame = Vec::new();
-        crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
-        let wal_dir = state.host_wal_dir().clone();
-        std::fs::write(wal_dir.join(crate::wal::segment_file_name(1)), frame)?;
-        std::fs::write(
-            wal_dir.join(crate::wal::segment_file_name(2)),
-            b"not a WAL segment",
-        )?;
-        crate::runtime::event_loop::tests::record_wal_history(
-            &mut state,
-            directory.path(),
-            &[1, 2],
-            3,
-        );
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
-        let cf = event_loop.state.get_cf_mut(0).expect("default family");
-        cf.memtable
-            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
-        cf.active_memtable_started_in_segment = 2;
-
-        // Act
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-
-        // Assert: the leading retirable segment goes, the invalid one stays.
-        assert!(event_loop.state.persistence_anomaly_detected());
-        assert!(!wal_dir.join(crate::wal::segment_file_name(1)).exists());
-        assert!(wal_dir.join(crate::wal::segment_file_name(2)).exists());
-        Ok(())
-    }
-
-    #[test]
-    fn should_reprove_wal_segment_when_its_covering_sst_could_not_be_read(
-    ) -> crate::common::MidgeResult<()> {
-        // Arrange: the manifest lists an SST covering the record, but it
-        // cannot be read. That says nothing about coverage, so the failed
-        // proof must not be remembered.
-        let directory = tempfile::tempdir()?;
-        let mut state =
-            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
-            bytes::Bytes::from_static(b"key"),
-            Some(bytes::Bytes::from_static(b"value")),
-            5,
-        );
-        let mut frame = Vec::new();
-        crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
-        std::fs::write(
-            state.host_wal_dir().join(crate::wal::segment_file_name(1)),
-            frame,
-        )?;
-        crate::runtime::event_loop::tests::record_wal_history(
-            &mut state,
-            directory.path(),
-            &[1],
-            2,
-        );
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
-            state,
-            false,
-            router,
-            crate::runtime::RuntimeConfig::default(),
-            crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
-        event_loop
-            .state
-            .manifest
-            .add_file(crate::metadata::FileMeta {
-                name: crate::cloud_layout::file_name(0, 0, 9),
-                cf_id: 0,
-                size_bytes: 1,
-                content_crc32c: Some(1),
-                smallest_seq: Some(1),
-                largest_seq: Some(10),
-                smallest_key: Some(b"a".to_vec()),
-                largest_key: Some(b"z".to_vec()),
-                key_bounds_complete: true,
-                ..Default::default()
-            });
-        let cf = event_loop.state.get_cf_mut(0).expect("default family");
-        cf.memtable
-            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 6, None)?;
-        cf.active_memtable_started_in_segment = 1;
-        RUNTIME_FILE_READS.with(|reads| reads.set(0));
-
-        // Act
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-
-        // Assert: re-read on the second pass, and retained.
-        assert_eq!(RUNTIME_FILE_READS.with(std::cell::Cell::get), 2);
-        assert!(event_loop
-            .state
-            .host_wal_dir()
-            .join(crate::wal::segment_file_name(1))
-            .exists());
-        Ok(())
-    }
-
-    /// A local event loop whose ledger holds sealed segments 1 to 3, each
-    /// with one put of `key-{id}` at sequence `id`, and an unflushed memtable
-    /// that started in segment 1, so every sealed segment needs a proof.
-    fn local_event_loop_with_unflushed_sealed_segments(
+    fn local_event_loop_with_sealed_segments(
         directory: &std::path::Path,
     ) -> crate::common::MidgeResult<EventLoop> {
         let mut state = crate::runtime::state::RuntimeState::new(directory.to_path_buf(), false);
-        for segment_id in 1..=3 {
+        for sequence in 1..=3 {
             let record = crate::wal::WalRecord::new(
                 crate::wal::WalOpKind::Put,
-                bytes::Bytes::from(format!("key-{segment_id}")),
+                bytes::Bytes::from(format!("key-{sequence}")),
                 Some(bytes::Bytes::from_static(b"value")),
-                segment_id,
+                sequence,
             );
             let mut frame = Vec::new();
             crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
             std::fs::write(
                 state
                     .host_wal_dir()
-                    .join(crate::wal::segment_file_name(segment_id)),
+                    .join(crate::wal::segment_file_name(sequence)),
                 frame,
             )?;
         }
         crate::runtime::event_loop::tests::record_wal_history(&mut state, directory, &[1, 2, 3], 4);
-        let router = Arc::new(crate::runtime::ResponseRouter::new());
-        let mut event_loop = EventLoop::new(
+        EventLoop::new(
             state,
             false,
-            router,
+            Arc::new(crate::runtime::ResponseRouter::new()),
             crate::runtime::RuntimeConfig::default(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
-        )?;
-        let cf = event_loop.state.get_cf_mut(0).expect("default family");
-        cf.memtable
-            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
-        cf.active_memtable_started_in_segment = 1;
-        Ok(event_loop)
-    }
-
-    /// Publish a family-0 SST holding `key-{n}` at sequence `n` for each `n`
-    /// in `sequences`, which covers those segments' records exactly.
-    fn publish_covering_sst(
-        event_loop: &mut EventLoop,
-        sequences: std::ops::RangeInclusive<u64>,
-    ) -> crate::common::MidgeResult<()> {
-        use crate::sst::SstFactory;
-
-        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
-        let mut writer = factory.create()?;
-        for sequence in sequences.clone() {
-            writer.add_with_meta(
-                format!("key-{sequence}").as_bytes(),
-                Some(b"value"),
-                sequence,
-                crate::types::EntryType::Put,
-                None,
-            )?;
-        }
-        let bytes = writer.finish_bytes()?;
-        let name = crate::cloud_layout::file_name(0, 0, 1);
-        std::fs::create_dir_all(event_loop.state.host_sst_dir())?;
-        std::fs::write(event_loop.state.host_sst_dir().join(&name), &bytes)?;
-        event_loop
-            .state
-            .manifest
-            .add_file(crate::metadata::FileMeta {
-                name,
-                cf_id: 0,
-                size_bytes: bytes.len() as u64,
-                content_crc32c: Some(crc32c::crc32c(&bytes)),
-                smallest_key: Some(format!("key-{}", sequences.start()).into_bytes()),
-                largest_key: Some(format!("key-{}", sequences.end()).into_bytes()),
-                smallest_seq: Some(*sequences.start()),
-                largest_seq: Some(*sequences.end()),
-                key_bounds_complete: true,
-                ..Default::default()
-            });
-        Ok(())
+        )
     }
 
     #[test]
-    fn should_not_reprove_uncovered_wal_segments_until_their_column_family_changes(
+    fn should_retain_local_wal_when_sst_metadata_has_no_flush_frontier(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: sealed segments above the recovery floor, none covered by
-        // an SST of their column family (0). Only a prefix retires, so the
-        // uncovered head segment holds the others back.
+        // Arrange: file membership alone never grants retirement authority.
         let directory = tempfile::tempdir()?;
-        let mut event_loop = local_event_loop_with_unflushed_sealed_segments(directory.path())?;
-        RUNTIME_FILE_READS.with(|reads| reads.set(0));
-
-        // Act
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-        let first_pass = RUNTIME_FILE_READS.with(|reads| reads.replace(0));
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-        let unchanged_pass = RUNTIME_FILE_READS.with(|reads| reads.replace(0));
+        let mut event_loop = local_event_loop_with_sealed_segments(directory.path())?;
         event_loop
             .state
             .manifest
             .add_file(crate::metadata::FileMeta {
                 name: crate::cloud_layout::file_name(0, 0, 1),
                 cf_id: 0,
-                size_bytes: 1,
+                smallest_seq: Some(1),
+                largest_seq: Some(3),
                 ..Default::default()
             });
-        event_loop.prune_local_wal_segments_covered_by_manifest();
-        let changed_pass = RUNTIME_FILE_READS.with(std::cell::Cell::get);
 
-        // Assert: the head segment is proven once, not re-read until family
-        // 0's SSTs change, and nothing uncovered is removed.
-        assert_eq!((first_pass, unchanged_pass, changed_pass), (1, 0, 1));
-        for segment_id in 1..=3 {
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert_eq!(event_loop.state.wal.history.ledger().log_start(), 1);
+        for id in 1..=3 {
             assert!(event_loop
                 .state
                 .host_wal_dir()
-                .join(crate::wal::segment_file_name(segment_id))
+                .join(crate::wal::segment_file_name(id))
                 .exists());
         }
         Ok(())
     }
 
     #[test]
-    fn should_bound_local_wal_proof_reads_per_prune_pass() -> crate::common::MidgeResult<()> {
-        // Arrange: three sealed segments above the recovery floor, each
-        // covered by an SST, and a proof budget smaller than one segment.
+    fn should_retire_local_wal_from_durable_frontiers_without_opening_sst_payloads(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a durable flush publication grants prefix authority. The SST
+        // path is deliberately absent; retention must use the persisted summary.
         let directory = tempfile::tempdir()?;
-        let mut event_loop = local_event_loop_with_unflushed_sealed_segments(directory.path())?;
-        publish_covering_sst(&mut event_loop, 1..=3)?;
-        LOCAL_WAL_PROOF_BYTE_BUDGET.with(|budget| budget.set(Some(1)));
-        RUNTIME_FILE_READS.with(|reads| reads.set(0));
+        let mut event_loop = local_event_loop_with_sealed_segments(directory.path())?;
+        let file: crate::runtime::FileMeta = (&crate::metadata::FileMeta {
+            name: crate::cloud_layout::file_name(0, 0, 1),
+            cf_id: 0,
+            smallest_seq: Some(1),
+            largest_seq: Some(3),
+            ..Default::default()
+        })
+            .into();
+        event_loop.state.commit_flush_publication_for(
+            crate::runtime::state::FlushManifestPublication {
+                origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                cf_id: 0,
+                sequence: 3,
+                file_meta: &file,
+                next_sst_seq: 2,
+                require_snapshot: false,
+            },
+        )?;
 
         // Act
-        let mut reads_per_pass = Vec::new();
-        for _ in 0..4 {
-            event_loop.prune_local_wal_segments_covered_by_manifest();
-            reads_per_pass.push(RUNTIME_FILE_READS.with(|reads| reads.replace(0)));
-        }
-        LOCAL_WAL_PROOF_BYTE_BUDGET.with(|budget| budget.set(None));
+        event_loop.prune_local_wal_segments_covered_by_manifest();
 
-        // Assert: each pass proves one segment and retires it, so the next
-        // pass starts at the following one and every segment is read once.
-        assert_eq!(reads_per_pass, vec![1, 1, 1, 0]);
-        assert_eq!(
-            Some(event_loop.state.wal.history.ledger().log_start()),
-            Some(4)
-        );
-        for segment_id in 1..=3 {
+        // Assert
+        assert_eq!(event_loop.state.wal.history.ledger().log_start(), 4);
+        for id in 1..=3 {
             assert!(!event_loop
                 .state
                 .host_wal_dir()
-                .join(crate::wal::segment_file_name(segment_id))
+                .join(crate::wal::segment_file_name(id))
                 .exists());
         }
+        assert!(!event_loop.state.host_sst_dir().join(&file.name).exists());
         Ok(())
     }
 

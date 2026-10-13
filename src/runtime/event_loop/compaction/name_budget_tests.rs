@@ -169,7 +169,7 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
     writer.finish_to_path(&path)?;
     let bytes = std::fs::read(path)?;
     let manifest = el.state.manifest.test_mut();
-    manifest.files.push(crate::metadata::FileMeta {
+    let file = crate::metadata::FileMeta {
         name: name.clone(),
         level: 0,
         cf_id: 0,
@@ -181,9 +181,20 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
         largest_seq: Some(7),
         key_bounds_complete: true,
         ..Default::default()
-    });
-    manifest.next_sst_seqs.insert(0, 2);
-    manifest.last_persisted_sequence = 7;
+    };
+    manifest
+        .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+            crate::metadata::ManifestEdit::AddSst(file),
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 7,
+            },
+        ]))
+        .unwrap();
     el.state.sequence = 7;
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(MidgeError::Internal)?;

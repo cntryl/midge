@@ -383,10 +383,6 @@ impl EventLoop {
             storage.configure_maintenance_memory(compaction_memory_limit);
             self.set_hybrid_storage(storage);
         }
-        if self.wal_actor.is_cloud_async() {
-            self.wal_transition
-                .initialize_gc_pins(self.state.wal.open_segment(), self.state.sequence);
-        }
         self.initialize_recovered_cloud_wal(recovered_cloud_wal, startup_scope)?;
         if self.cloud_coordinator.hybrid_storage.is_some() {
             // Nothing owed may already cover every record below the open
@@ -662,14 +658,27 @@ impl EventLoop {
         let Some(file_meta) = file_meta else {
             return Ok(());
         };
-        if !self.state.manifest_has_file(sst_name) {
-            self.manifest_actor.add_sst(&mut self.state, &file_meta)?;
-        }
+        self.state.commit_flush_publication_for(
+            crate::runtime::state::FlushManifestPublication {
+                origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
+                cf_id,
+                sequence,
+                file_meta: &file_meta,
+                next_sst_seq: self
+                    .state
+                    .manifest
+                    .next_sst_seqs
+                    .get(&cf_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1),
+                require_snapshot: false,
+            },
+        )?;
         self.state.transition_flush_publication_intent(
             sst_name,
             crate::runtime::PublicationPhase::ManifestPublished,
         )?;
-        self.state.manifest.advance_persisted_sequence(sequence);
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.state.clear_flush_publication_intent(sst_name)?;
         let deadline = self.event_loop_cloud_deadline();

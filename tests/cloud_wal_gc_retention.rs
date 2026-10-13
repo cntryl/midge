@@ -157,9 +157,9 @@ fn retention_control(range: bool) {
     // Act: compact while the unrelated family pins every generation.
     engine.compact_all().unwrap();
     #[cfg(feature = "internal-testing")]
-    assert_ne!(
-        raw::tombstone_sequences(root, &engine, data.id()),
-        Vec::<u64>::new()
+    assert!(
+        raw::tombstone_sequences(root, &engine, data.id()).is_empty(),
+        "WAL retention must not pin tombstones after a complete compaction"
     );
     assert_value(&engine, data.id(), b"deleted-a", None);
     assert_value(&engine, data.id(), b"deleted-b", None);
@@ -184,12 +184,12 @@ fn retention_control(range: bool) {
 }
 
 #[test]
-fn should_preserve_point_delete_proof_until_idle_family_allows_wal_retirement() {
+fn should_preserve_point_deletion_when_compacted_wal_history_is_retired() {
     retention_control(false);
 }
 
 #[test]
-fn should_preserve_range_delete_proof_until_idle_family_allows_wal_retirement() {
+fn should_preserve_range_deletion_when_compacted_wal_history_is_retired() {
     retention_control(true);
 }
 
@@ -248,14 +248,13 @@ mod raw;
 
 #[cfg(feature = "internal-testing")]
 #[test]
-fn should_collect_older_tombstones_while_newer_wal_remains_pinned() {
+fn should_collect_tombstones_while_unrelated_family_keeps_wal_pinned() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let mut engine = Engine::open(options(root)).unwrap();
     let idle = engine.create_column_family("idle").unwrap();
     let data = engine.create_column_family("data").unwrap();
-    let mut older = Vec::new();
 
     // Act: each cycle retires its WAL, then the next cycle compacts its proof.
     for cycle in 0..4 {
@@ -282,12 +281,11 @@ fn should_collect_older_tombstones_while_newer_wal_remains_pinned() {
         let original = catalog(root, false);
         engine.compact_all().unwrap();
 
-        // Assert: older proof is collected even though recent WAL is still authoritative.
+        // Assert: tombstones are collected while unrelated WAL remains authoritative.
         let recent = raw::tombstone_sequences(root, &engine, data.id());
-        assert_ne!(recent, Vec::<u64>::new());
         assert!(
-            older.iter().all(|seq| !recent.contains(seq)),
-            "old proof was retained: {older:?} -> {recent:?}"
+            recent.is_empty(),
+            "WAL still pinned collected tombstones: {recent:?}"
         );
         assert_ne!(catalog(root, false).entries().len(), 0);
         for prior in 0..=cycle {
@@ -308,7 +306,6 @@ fn should_collect_older_tombstones_while_newer_wal_remains_pinned() {
         assert_value(&engine, data.id(), b"z-survivor", Some(b"alive"));
         engine.flush_cf(&idle).unwrap();
         wait_for_retirement(root, &original);
-        older = recent;
     }
     engine.shutdown(Duration::from_secs(30)).unwrap();
     drop(engine);

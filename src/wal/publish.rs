@@ -21,17 +21,15 @@ use std::collections::BTreeMap;
 pub(crate) enum Ack {
     /// A verified upload the catalog does not publish yet.
     Uploaded(CatalogEntry),
-    /// A segment the catalog publishes, holding sequences through
-    /// `max_sequence`.
-    Published { max_sequence: u64 },
+    /// The verified sealed summary the catalog publishes.
+    Published(CatalogEntry),
 }
 
 impl Ack {
     /// The last sequence the acknowledged segment holds.
     fn max_sequence(&self) -> u64 {
         match self {
-            Self::Uploaded(entry) => entry.max_sequence(),
-            Self::Published { max_sequence } => *max_sequence,
+            Self::Uploaded(entry) | Self::Published(entry) => entry.max_sequence(),
         }
     }
 }
@@ -50,11 +48,11 @@ pub(crate) struct AckSet {
 impl AckSet {
     /// The segments recovery found published, each with the last sequence
     /// it holds.
-    pub(crate) fn recovered(published: BTreeMap<SegmentId, u64>) -> Self {
+    pub(crate) fn recovered(published: BTreeMap<SegmentId, CatalogEntry>) -> Self {
         Self {
             acks: published
                 .into_iter()
-                .map(|(segment_id, max_sequence)| (segment_id, Ack::Published { max_sequence }))
+                .map(|(segment_id, entry)| (segment_id, Ack::Published(entry)))
                 .collect(),
         }
     }
@@ -63,14 +61,28 @@ impl AckSet {
     /// recovery would.
     #[cfg(test)]
     pub(crate) fn acknowledge(&mut self, segment_id: SegmentId, max_sequence: u64) {
-        self.acks
-            .insert(segment_id, Ack::Published { max_sequence });
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            max_sequence,
+        );
+        let (bytes, _) =
+            crate::wal::format::segment::SegmentBuilder::new(segment_id, 1, ChainLink::GENESIS)
+                .record(&record)
+                .seal();
+        self.acks.insert(
+            segment_id,
+            Ack::Published(
+                CatalogEntry::from_sealed_bytes(&bytes).expect("fixture segment validates"),
+            ),
+        );
     }
 
     /// Acknowledge a verified upload. A segment the catalog already
     /// publishes stays published.
     pub(crate) fn record_upload(&mut self, entry: CatalogEntry) {
-        if !matches!(self.acks.get(&entry.id()), Some(Ack::Published { .. })) {
+        if !matches!(self.acks.get(&entry.id()), Some(Ack::Published(_))) {
             self.acks.insert(entry.id(), Ack::Uploaded(entry));
         }
     }
@@ -91,9 +103,7 @@ impl AckSet {
         for segment in run {
             if let Some(ack) = self.acks.get_mut(&segment.segment_id) {
                 if let Ack::Uploaded(entry) = ack {
-                    *ack = Ack::Published {
-                        max_sequence: entry.max_sequence(),
-                    };
+                    *ack = Ack::Published(entry.clone());
                 }
             }
         }
@@ -108,7 +118,15 @@ impl AckSet {
     /// holds.
     pub(crate) fn published(&self) -> impl Iterator<Item = (SegmentId, u64)> + '_ {
         self.acks.iter().filter_map(|(segment_id, ack)| match ack {
-            Ack::Published { max_sequence } => Some((*segment_id, *max_sequence)),
+            Ack::Published(entry) => Some((*segment_id, entry.max_sequence())),
+            Ack::Uploaded(_) => None,
+        })
+    }
+
+    /// The verified summary of the oldest still-authoritative remote segment.
+    pub(crate) fn oldest_published_facts(&self) -> Option<&crate::wal::format::SealedFacts> {
+        self.acks.values().find_map(|ack| match ack {
+            Ack::Published(entry) => Some(entry.facts()),
             Ack::Uploaded(_) => None,
         })
     }
@@ -119,7 +137,7 @@ impl AckSet {
         run.iter()
             .filter_map(|segment| match self.acks.get(&segment.segment_id) {
                 Some(Ack::Uploaded(entry)) => Some(entry.clone()),
-                Some(Ack::Published { .. }) | None => None,
+                Some(Ack::Published(_)) | None => None,
             })
             .collect()
     }
@@ -131,7 +149,7 @@ impl AckSet {
             .values()
             .filter_map(|ack| match ack {
                 Ack::Uploaded(entry) => Some(entry.size_bytes()),
-                Ack::Published { .. } => None,
+                Ack::Published(_) => None,
             })
             .fold((0, 0), |(count, bytes), size| {
                 (count + 1, bytes.saturating_add(size))
@@ -404,6 +422,21 @@ mod tests {
     }
 
     #[test]
+    fn should_preserve_verified_family_maxima_after_publication_retires_the_local_copy() {
+        // Arrange
+        let entry = segment(1);
+        let expected = entry.facts().clone();
+        let mut acks = AckSet::default();
+        acks.record_upload(entry);
+        // Act
+        acks.mark_published(&owed(&[(1, 10)]));
+        // Assert
+        assert_eq!(acks.oldest_published_facts(), Some(&expected));
+        acks.retire_pruned(1);
+        assert_eq!(acks.oldest_published_facts(), None);
+    }
+
+    #[test]
     fn should_select_nothing_when_oldest_owed_segment_is_not_uploaded() {
         // Arrange
         let owed = owed(&[(1, 10), (2, 20), (3, 30)]);
@@ -446,7 +479,7 @@ mod tests {
     fn should_join_published_segments_to_the_run_when_recovery_found_them_published() {
         // Arrange
         let owed = owed(&[(1, 10), (2, 20), (3, 30)]);
-        let mut acks = AckSet::recovered(BTreeMap::from([(1, 10)]));
+        let mut acks = AckSet::recovered(BTreeMap::from([(1, segment(1))]));
         acks.record_upload(segment(2));
 
         // Act
@@ -460,7 +493,9 @@ mod tests {
     fn should_refuse_run_when_upload_sequence_differs_from_sealed_segment() {
         // Arrange
         let owed = owed(&[(1, 10), (2, 20)]);
-        let acks = AckSet::recovered(BTreeMap::from([(1, 10), (2, 21)]));
+        let mut acks = AckSet::default();
+        acks.acknowledge(1, 10);
+        acks.acknowledge(2, 21);
 
         // Act
         let run = uploaded_run(&owed, &acks);

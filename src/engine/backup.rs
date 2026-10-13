@@ -305,9 +305,39 @@ fn pin_durable_files(
                     path.display()
                 )));
             }
+            let mut size = metadata.len();
+            if relative
+                == Path::new("cloud_store")
+                    .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            {
+                if metadata.len() > crate::lease::cloud::MAX_LEASE_DOCUMENT_BYTES as u64 {
+                    return Err(MidgeError::Corruption(
+                        "cloud lease document exceeds its backup size limit".to_string(),
+                    ));
+                }
+                let capacity = usize::try_from(metadata.len()).map_err(|_| {
+                    MidgeError::Corruption(
+                        "cloud lease document exceeds the host address space".to_string(),
+                    )
+                })?;
+                let mut content = Vec::with_capacity(capacity);
+                file.read_to_end(&mut content)?;
+                if content.len() as u64 != metadata.len() {
+                    return Err(MidgeError::Corruption(
+                        "cloud lease document changed during backup capture".to_string(),
+                    ));
+                }
+                let expired = crate::lease::cloud::expired_backup_lease_document(&content)?;
+                let mut frozen = tempfile::tempfile_in(scratch_dir)?;
+                frozen.write_all(&expired)?;
+                frozen.sync_all()?;
+                frozen.seek(SeekFrom::Start(0))?;
+                size = expired.len() as u64;
+                file = frozen;
+            }
             // Checkpointing truncates this inode in place. An open handle
             // alone cannot preserve its bytes after the capture barrier ends.
-            if relative == Path::new("manifest.journal") {
+            else if relative == Path::new("manifest.journal") {
                 let mut frozen = tempfile::tempfile_in(scratch_dir)?;
                 let copied = std::io::copy(&mut file, &mut frozen)?;
                 if copied != metadata.len() {
@@ -320,7 +350,7 @@ fn pin_durable_files(
             }
             Ok(PinnedFile {
                 relative: relative.to_path_buf(),
-                size: metadata.len(),
+                size,
                 file,
             })
         })

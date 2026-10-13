@@ -163,6 +163,12 @@ impl RetryFixture {
         CloudPersistence::new(Arc::clone(&storage))
             .fence_cloud_wal_catalog(created.lease.epoch())?;
         let mut config = fixture_config(&options, &created, &healthy, &storage, events);
+        config.cloud_metadata_storage = Some(fixture_metadata_storage(
+            directory.path(),
+            &state,
+            &created,
+            &storage,
+        )?);
         config.sst_read_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
             Arc::new(
                 crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?,
@@ -208,6 +214,52 @@ impl Drop for RetryFixture {
         // A failed assertion must not strand the real flush worker in Drop.
         self.gate.release();
     }
+}
+
+fn fixture_metadata_storage(
+    directory: &std::path::Path,
+    state: &RuntimeState,
+    created: &CreatedLease,
+    storage: &crate::storage::HybridStorage,
+) -> MidgeResult<Arc<crate::storage::cloud::CloudStorage>> {
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+        Arc::new(crate::storage::filesystem::FileSystem::new(
+            crate::storage::simulated::simulated_cloud_root(directory),
+        )?),
+        WORKER_WAIT,
+    ));
+    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+        .map_err(MidgeError::Internal)?;
+    let store = created
+        .lease
+        .get_leader_store()
+        .expect("simulated cloud lease has a shared leader store");
+    let authority = crate::runtime::ddl::DdlLeaseAuthority {
+        store: Arc::clone(&store),
+        holder_id: created.lease.holder_id(),
+        writer_epoch: created.lease.epoch(),
+    };
+    crate::runtime::ddl::fence_remote_registry_on_startup(
+        storage,
+        &authority,
+        &crate::common::OperationDeadline::from_budget(WORKER_WAIT),
+    )?;
+    crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+            cloud: &cloud,
+            fs: state.fs.as_ref(),
+            publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+            lock_wait_budget: WORKER_WAIT,
+            deadline: &crate::common::OperationDeadline::from_budget(WORKER_WAIT),
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: authority.store.as_ref(),
+                holder_id: &authority.holder_id,
+                writer_epoch: authority.writer_epoch,
+            },
+        },
+        |_| Ok(()),
+    )?;
+    Ok(cloud)
 }
 
 fn fixture_storage(

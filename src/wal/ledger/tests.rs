@@ -108,6 +108,44 @@ fn members(ledger: &WalLedger) -> Vec<SegmentId> {
     ledger.members().collect()
 }
 
+#[test]
+fn should_stop_retirement_at_the_first_unflushed_family() {
+    // Arrange: segment 1 belongs to the idle family; segment 2 is covered.
+    let mut ledger = ledger_spanning(1, 3);
+    ledger.members[0].sealed.as_mut().unwrap().max_seq_per_cf = vec![(7, 2)];
+    ledger.members[1].sealed.as_mut().unwrap().max_seq_per_cf = vec![(0, 4)];
+
+    // Act
+    let prefix = ledger.retirable_prefix(|cf, sequence| cf == 0 && sequence <= 4);
+
+    // Assert
+    assert_eq!(prefix, None);
+}
+
+#[test]
+fn should_retire_only_sealed_members_whose_family_maxima_are_flushed() {
+    // Arrange
+    let ledger = ledger_spanning(1, 3);
+
+    // Act
+    let prefix = ledger.retirable_prefix(|cf, sequence| cf == 0 && sequence <= 4);
+
+    // Assert: the open segment remains authoritative.
+    assert_eq!(prefix, Some(3));
+}
+
+#[test]
+fn should_retain_a_sealed_member_when_its_family_is_unknown() {
+    // Arrange
+    let ledger = ledger_spanning(1, 2);
+
+    // Act
+    let prefix = ledger.retirable_prefix(|_, _| false);
+
+    // Assert
+    assert_eq!(prefix, None);
+}
+
 fn sealed(ledger: &WalLedger) -> Vec<SegmentId> {
     ledger.sealed().collect()
 }
@@ -133,6 +171,13 @@ fn assert_invariants(ledger: &WalLedger) {
     assert!(members.iter().all(|id| ledger.is_member(*id)));
     let mut prev = ledger.anchor();
     for member in ledger.member_facts() {
+        if let Some(bytes) = member.durable_bytes {
+            assert!(bytes >= crate::wal::format::HEADER_LEN as u64);
+            assert!(member
+                .sealed
+                .as_ref()
+                .is_none_or(|sealed| bytes <= sealed.data_len));
+        }
         assert_eq!(
             member.open.prev,
             prev,
@@ -261,7 +306,9 @@ fn modelled(ledger: &WalLedger, edit: &LedgerEdit) -> (Vec<SegmentId>, SegmentId
             (members, open.id + 1)
         }
         LedgerEdit::Rebase { open, .. } => (vec![open.id], open.id + 1),
-        LedgerEdit::Reserve { .. } => (members, ledger.next_segment_id()),
+        LedgerEdit::Reserve { .. }
+        | LedgerEdit::SyncOpen { .. }
+        | LedgerEdit::SalvageOpen { .. } => (members, ledger.next_segment_id()),
     }
 }
 
@@ -900,6 +947,135 @@ fn should_round_trip_when_ledger_is_serialized() {
 
     // Assert
     assert_eq!(decoded, ledger);
+}
+
+#[test]
+fn should_persist_monotone_open_sync_boundary() {
+    // Arrange
+    let mut ledger = ledger_at(1);
+
+    // Act
+    ledger
+        .apply(&LedgerEdit::SyncOpen {
+            id: 1,
+            through_bytes: 256,
+        })
+        .expect("sync boundary advances");
+    ledger
+        .apply(&LedgerEdit::SyncOpen {
+            id: 1,
+            through_bytes: 384,
+        })
+        .expect("sync boundary advances monotonically");
+
+    // Assert
+    let open = ledger.open_member();
+    assert_eq!(open.durable_bytes, Some(384));
+    let image = serde_json::to_vec(&ledger).expect("serialize durable boundaries");
+    let restored: WalLedger = serde_json::from_slice(&image).expect("restore ledger");
+    assert_eq!(restored, ledger);
+}
+
+#[test]
+fn should_persist_salvage_floor_with_open_cut() {
+    // Arrange
+    let mut ledger = ledger_at(1);
+    ledger
+        .apply(&LedgerEdit::SyncOpen {
+            id: 1,
+            through_bytes: 256,
+        })
+        .expect("sync boundary advances");
+
+    // Act: the salvage edit cuts the open member only after authority owns its floor.
+    ledger
+        .apply(&LedgerEdit::SalvageOpen {
+            id: 1,
+            valid_bytes: 192,
+            floor: 41,
+        })
+        .expect("salvage boundary and floor persist together");
+
+    // Assert
+    let open = ledger.open_member();
+    assert_eq!(open.durable_bytes, Some(192));
+    assert_eq!(ledger.seq_reserved_through(), 41);
+    let image = serde_json::to_vec(&ledger).expect("serialize salvage boundary");
+    let restored: WalLedger = serde_json::from_slice(&image).expect("restore ledger");
+    assert_eq!(restored, ledger);
+}
+
+#[test]
+fn should_reject_invalid_open_sync_without_mutation() {
+    // Arrange
+    let ledger = ledger_at(1);
+    let invalid = [
+        LedgerEdit::SyncOpen {
+            id: 2,
+            through_bytes: 192,
+        },
+        LedgerEdit::SyncOpen {
+            id: 1,
+            through_bytes: 127,
+        },
+    ];
+
+    // Act
+    let errors = invalid
+        .iter()
+        .map(|edit| rejected(&ledger, edit))
+        .collect::<Vec<_>>();
+
+    // Assert
+    assert!(errors
+        .iter()
+        .all(|error| matches!(error, LedgerError::BrokenChain(_))));
+}
+
+#[test]
+fn should_reject_invalid_open_salvage_without_mutation() {
+    // Arrange
+    let ledger = ledger_at(1);
+    let invalid = [
+        LedgerEdit::SalvageOpen {
+            id: 2,
+            valid_bytes: 192,
+            floor: 5,
+        },
+        LedgerEdit::SalvageOpen {
+            id: 1,
+            valid_bytes: 127,
+            floor: 5,
+        },
+    ];
+
+    // Act
+    let errors = invalid
+        .iter()
+        .map(|edit| rejected(&ledger, edit))
+        .collect::<Vec<_>>();
+
+    // Assert
+    assert!(errors
+        .iter()
+        .all(|error| matches!(error, LedgerError::BrokenChain(_))));
+}
+
+#[test]
+fn should_load_legacy_open_member_without_durable_byte_evidence() {
+    // Arrange
+    let ledger = ledger_at(1);
+    let mut image = serde_json::to_value(&ledger).expect("serialize ledger");
+    image["members"][0]
+        .as_object_mut()
+        .expect("member object")
+        .remove("durable_bytes");
+
+    // Act
+    let restored: WalLedger = serde_json::from_value(image).expect("load legacy ledger member");
+
+    // Assert: old snapshots do not invent evidence that permits salvage.
+    assert_eq!(restored.open_member().durable_bytes, None);
 }
 
 #[test]

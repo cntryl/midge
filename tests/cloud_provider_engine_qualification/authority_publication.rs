@@ -433,8 +433,8 @@ fn release_predecessor_write(
     let result = pending.join().expect("predecessor client thread");
     evidence.details["predecessor_result"] = json!(format!("{result:?}"));
     assert!(
-        matches!(result, Err(MidgeError::Fenced(_))),
-        "stale strict waiter must be fenced, got {result:?}"
+        matches!(&result, Err(MidgeError::OutcomeUnknown(_))),
+        "a stale writer fenced after applying a WAL-backed transaction must report an unknown outcome, got {result:?}"
     );
     release_index
 }

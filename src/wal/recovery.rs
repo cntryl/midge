@@ -381,7 +381,7 @@ fn replay_local(
     segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
-    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
+    selection: crate::wal::replay::ReplaySelection<'_>,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<RecoveryStats> {
     streaming::replay_wal_with_options(
@@ -389,13 +389,12 @@ fn replay_local(
         segments,
         memtables,
         replay_policy,
-        should_apply,
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions {
             deadline,
             salvage_record_errors: true,
             spill_pending_txns: true,
-            ..streaming::ReplayOptions::default()
+            ..streaming::ReplayOptions::new(selection)
         },
         &mut |_, _| Ok(()),
     )
@@ -422,17 +421,17 @@ pub(crate) fn validate_wal_with_policy(
         segments,
         &mut no_memtables,
         replay_policy,
-        Some(&|_| false),
+        crate::wal::replay::ReplaySelection::ValidateOnly,
         deadline,
     )
 }
 
-pub(crate) fn replay_wal_with_manifest_filter_within(
+pub(crate) fn replay_wal_with_frontiers_within(
     storage: &dyn ReadFs,
     segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
-    should_apply: &dyn Fn(&WalRecord) -> MidgeResult<bool>,
+    frontiers: &crate::metadata::frontiers::FlushFrontiers,
     scope: Option<&crate::common::DeadlineScope>,
 ) -> MidgeResult<RecoveryStats> {
     streaming::replay_wal_with_options(
@@ -440,14 +439,14 @@ pub(crate) fn replay_wal_with_manifest_filter_within(
         segments,
         memtables,
         replay_policy,
-        None,
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions {
             scope,
-            fallible_should_apply: Some(should_apply),
             salvage_record_errors: true,
             spill_pending_txns: true,
-            ..streaming::ReplayOptions::default()
+            ..streaming::ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(
+                frontiers,
+            ))
         },
         &mut |_, _| Ok(()),
     )

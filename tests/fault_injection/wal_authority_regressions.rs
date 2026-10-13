@@ -157,8 +157,16 @@ const SUBSTITUTE_ENV: &str = "MIDGE_808_SUBSTITUTE_ROOT";
 const SUBSTITUTE_SCENARIO: &str = "substitute-upload-collision";
 /// Cloud-mode local retirement of an acknowledged segment, before the ledger
 /// records it.
-const LOCAL_RETIREMENT: &str = "midge::cloud::before_local_wal_unlink";
-const SUBSTITUTE_LEASE_TTL: Duration = Duration::from_secs(10);
+const LOCAL_RETIREMENT: &str = "midge::cloud::before_local_wal_retirement";
+const SUBSTITUTE_LEASE_TTL: Duration = Duration::from_secs(30);
+const SUBSTITUTE_REPAIR_CHILD: &str =
+    "wal_authority_regressions::should_abort_during_substitute_repair_child_when_requested";
+const SUBSTITUTE_REPAIR_ENV: &str = "MIDGE_808_SUBSTITUTE_REPAIR_TRIGGER";
+const SUBSTITUTE_REPAIR_SCENARIO: &str = "substitute-repair";
+const AFTER_SUBSTITUTE_CHECKPOINT: &str =
+    "midge::startup::substituted_wal_after_checkpoint_before_catalog_retire";
+const AFTER_SUBSTITUTE_CATALOG_RETIRE: &str =
+    "midge::startup::substituted_wal_after_catalog_retire_before_local_rebase";
 
 fn substitute_options(root: &Path, clock: SimulatedClock) -> OpenOptions {
     OpenOptions::cloud_simulated(root, "audit", "substitute")
@@ -170,6 +178,37 @@ fn substitute_options(root: &Path, clock: SimulatedClock) -> OpenOptions {
         .lease_clock_for_testing(Arc::new(clock))
         .build()
         .unwrap()
+}
+
+fn prepare_damaged_substituted_segment(root: &Path) -> (std::path::PathBuf, Vec<u8>) {
+    // Arrange: a predecessor leaves its cataloged local WAL before retiring
+    // it, then the test damages only the immutable cloud object.
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", SUBSTITUTE_CHILD, "--nocapture"])
+        .env(SUBSTITUTE_ENV, root);
+    crash::run_child_expect_abort(&mut child, SUBSTITUTE_SCENARIO, LOCAL_RETIREMENT, root);
+    let catalog = WalPublicationCatalog::decode(
+        &std::fs::read(root.join("cloud_store/wal/publication-catalog.v1.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = catalog
+        .entries()
+        .first()
+        .expect("acknowledged segment cataloged");
+    let id = entry.id();
+    let remote = root.join("cloud_store").join(entry.object_key());
+    let original = std::fs::read(&remote).unwrap();
+    let local = std::fs::read(
+        root.join("wal")
+            .join(cntryl_midge::__internal::wal::segment_file_name(id)),
+    )
+    .expect("the crash kept the acknowledged segment's local copy");
+    assert_eq!(local, original, "the local member is the cataloged bytes");
+    let mut corrupt = original;
+    corrupt[8] ^= 1;
+    std::fs::write(&remote, &corrupt).unwrap();
+    (remote, corrupt)
 }
 
 #[test]
@@ -196,46 +235,33 @@ fn should_abort_before_local_retirement_when_substitute_child_is_requested() {
 }
 
 #[test]
+fn should_abort_during_substitute_repair_child_when_requested() {
+    // Arrange
+    let Some(root) = std::env::var_os(SUBSTITUTE_ENV) else {
+        return;
+    };
+    let Some(trigger) = std::env::var_os(SUBSTITUTE_REPAIR_ENV) else {
+        return;
+    };
+    let trigger = trigger.to_string_lossy().into_owned();
+    crash::configure_abort_failpoint(&trigger, SUBSTITUTE_REPAIR_SCENARIO);
+    let clock = SimulatedClock::new();
+    clock.advance(SUBSTITUTE_LEASE_TTL * 2);
+
+    // Act: startup must reach the selected repair boundary.
+    let _engine = Engine::open(substitute_options(Path::new(&root), clock)).unwrap();
+
+    // Assert: the parent requires an exact abort marker from the selected boundary.
+    panic!("substitute repair did not reach failpoint {trigger}");
+}
+
+#[test]
 fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
     // Arrange: a process dies after segment 1 is cataloged and acknowledged
     // but before its local copy retires, so the WAL ledger still names an
     // intact local member. Then the cataloged remote object is damaged.
     let dir = tempfile::tempdir().unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-    child
-        .args(["--exact", SUBSTITUTE_CHILD, "--nocapture"])
-        .env(SUBSTITUTE_ENV, dir.path());
-    crash::run_child_expect_abort(
-        &mut child,
-        SUBSTITUTE_SCENARIO,
-        LOCAL_RETIREMENT,
-        dir.path(),
-    );
-    let catalog = WalPublicationCatalog::decode(
-        &std::fs::read(
-            dir.path()
-                .join("cloud_store/wal/publication-catalog.v1.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let entry = catalog
-        .entries()
-        .first()
-        .expect("acknowledged segment cataloged");
-    let id = entry.id();
-    let remote = dir.path().join("cloud_store").join(entry.object_key());
-    let original = std::fs::read(&remote).unwrap();
-    let local = std::fs::read(
-        dir.path()
-            .join("wal")
-            .join(cntryl_midge::__internal::wal::segment_file_name(id)),
-    )
-    .expect("the crash kept the acknowledged segment's local copy");
-    assert_eq!(local, original, "the local member is the cataloged bytes");
-    let mut corrupt = original;
-    corrupt[8] ^= 1;
-    std::fs::write(remote, corrupt).unwrap();
+    let (remote, corrupt) = prepare_damaged_substituted_segment(dir.path());
     // The restarted process's clock runs past the dead one's lease.
     let clock = SimulatedClock::new();
     clock.advance(SUBSTITUTE_LEASE_TTL * 2);
@@ -250,11 +276,61 @@ fn should_allow_strict_writes_when_salvage_substitutes_intact_local_segment() {
     tx.put(b"after-salvage".to_vec(), b"new".to_vec(), None)
         .unwrap();
     let commit = tx.commit(WriteOptions::cloud_strict());
-    let _ = recovered.shutdown(Duration::from_secs(10));
+    let shutdown = recovered.shutdown(Duration::from_secs(10));
 
-    // Assert: recovered bytes must be resealed under a fresh immutable identity.
+    // Assert: the damaged immutable key is not overwritten by the substitute.
     assert!(
         commit.is_ok(),
         "substituted old identity blocks new strict writes: {commit:?}"
     );
+    assert!(
+        shutdown.is_ok(),
+        "recovered engine shutdown failed: {shutdown:?}"
+    );
+    assert_eq!(std::fs::read(&remote).unwrap(), corrupt);
+
+    // Arrange: reopen after the repair's SST and catalog authority are durable.
+    let reopen_clock = SimulatedClock::new();
+    reopen_clock.advance(SUBSTITUTE_LEASE_TTL * 2);
+
+    // Act
+    let mut reopened = Engine::open(substitute_options(dir.path(), reopen_clock)).unwrap();
+
+    // Assert: both the substituted row and successor commit survive the reopen.
+    assert_eq!(get(&reopened, b"seed"), Some(b"value".to_vec()));
+    assert_eq!(get(&reopened, b"after-salvage"), Some(b"new".to_vec()));
+    assert!(reopened.shutdown(Duration::from_secs(10)).is_ok());
+}
+
+#[test]
+fn should_recover_substitute_repair_when_crash_precedes_catalog_retirement() {
+    recover_substitute_repair_after_crash_at(AFTER_SUBSTITUTE_CHECKPOINT);
+}
+
+#[test]
+fn should_recover_substitute_repair_when_crash_follows_catalog_retirement() {
+    recover_substitute_repair_after_crash_at(AFTER_SUBSTITUTE_CATALOG_RETIRE);
+}
+
+fn recover_substitute_repair_after_crash_at(trigger: &str) {
+    // Arrange: preserve the acknowledged cache and damage the remote copy.
+    let dir = tempfile::tempdir().unwrap();
+    let (remote, corrupt) = prepare_damaged_substituted_segment(dir.path());
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", SUBSTITUTE_REPAIR_CHILD, "--nocapture"])
+        .env(SUBSTITUTE_ENV, dir.path())
+        .env(SUBSTITUTE_REPAIR_ENV, trigger);
+
+    // Act: crash at the selected durable authority boundary, then recover normally.
+    crash::run_child_expect_abort(&mut child, SUBSTITUTE_REPAIR_SCENARIO, trigger, dir.path());
+    let clock = SimulatedClock::new();
+    clock.advance(SUBSTITUTE_LEASE_TTL * 4);
+    let mut recovered = Engine::open(substitute_options(dir.path(), clock)).unwrap();
+
+    // Assert: acknowledged data remains available, the damaged key is not
+    // overwritten, and the interrupted repair can finish on the next open.
+    assert_eq!(get(&recovered, b"seed"), Some(b"value".to_vec()));
+    assert_eq!(std::fs::read(&remote).unwrap(), corrupt);
+    assert!(recovered.shutdown(Duration::from_secs(10)).is_ok());
 }

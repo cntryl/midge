@@ -6,15 +6,13 @@ extends the narrower [storage invariants](storage-invariants.md) page. It does
 not attempt to list every local helper precondition or Rust type invariant.
 
 The initial inventory was recorded during the #707/#708 work. This update
-refreshes its row-level references against the delivered startup/flush and
-compaction deadline fixes, #723 native scratch-capacity repair, #724 version
-documentation, and #715 accounting/benchmark/reader source measured at
-c8f0de80. References now bind recovery seek-index source commit
-c1e5709e376d29090bb331d37f27fa941d763b96 before this documentation commit.
-The changed replay-coverage locations and source hash are refreshed;
-existing invariant claims and historical qualification objects are retained.
-The measured c8 campaign and its original report stay unchanged; the new
-coverage index controls do not claim fresh native/full-hour qualification.
+refreshes its row-level references for the #819 per-family flush frontier
+cutover. Required canonical manifest rows, complete replay-unit selection,
+and committed shared metadata generations replace SST recovery coverage
+proofs. The source references and SHA256 postimages identify the working
+tree described by the accompanying inventory. Historical qualification
+objects retain their recorded source and outcomes; they do not qualify this
+cutover.
 The retained nine-cell outcome, original readback digest and #730/#731
 helper/reader limits are mapped below. Full-hour acceptance is separate and
 uses the final merged catalog source; its run identities and artifact
@@ -75,7 +73,7 @@ and [`transactions-and-mvcc.md`](../transactions-and-mvcc.md).
 | WAL-4 | Strict recovery fails closed on corrupt or ambiguous durable state. Salvage may retain only a validated prefix and must report degraded recovery; it must not silently skip a replay hole and apply later state as if history were contiguous. | [Exact evidence](invariant-evidence.md#wal-4) |
 | WAL-5 | Writer epochs and recovered sequence floors prevent a stale writer or set-aside WAL record from becoming current history or having its sequence reused. Epoch-regressed sources participate in the salvage-hole and floor plan before quarantine. | [Exact evidence](invariant-evidence.md#wal-5) |
 | WAL-6 | Local and cloud durability frontiers only advance. Recovery may reset a frontier only through its explicit recovery path, then re-prove the prefix from manifest or validated WAL authority. | [Exact evidence](invariant-evidence.md#wal-6) |
-| WAL-7 | Pruning a WAL record requires proof that authoritative SST state covers its exact logical effect, including tombstones and TTL representation. If coverage or identity is uncertain, retain the WAL. | [Exact evidence](invariant-evidence.md#wal-7) |
+| WAL-7 | WAL retirement requires each sealed segment family maximum to be covered by its durable family flush frontier. Flush publication pairs the frozen commit boundary with its SST; dropped families retain a permanent tombstone. Unknown family authority retains WAL. Replay selects whole validated transactions by commit sequence. | [Exact evidence](invariant-evidence.md#wal-7) |
 
 Owners: `src/wal/recovery.rs`, `src/wal/encoding.rs`,
 `src/runtime/actors/wal/`, `src/runtime/frontiers.rs`,
@@ -115,9 +113,9 @@ publication crash matrix in
 | CLOUD-1 | Cloud WAL segments are immutable, epoch-scoped objects. Object existence alone grants no replay or durability authority; startup replays only entries in a validated publication catalog. Late uploads from a fenced writer remain ignored orphans. | [Exact evidence](invariant-evidence.md#cloud-1) |
 | CLOUD-2 | `CloudAck` is emitted only after immutable upload and exact byte readback. The runtime validates the active lease and publishes the WAL catalog before advancing the cloud durability frontier or completing strict durability waiters. | [Exact evidence](invariant-evidence.md#cloud-2) |
 | CLOUD-3 | The committed cloud metadata generation is the authority for mirrored local control files. Mutable metadata copies and unreferenced uploads do not override the committed descriptor. Primary and recovery mirror repair must preserve conditional publication ordering. | [Exact evidence](invariant-evidence.md#cloud-3) |
-| CLOUD-4 | Cloud startup inventories each manifest-authoritative SST by its exact object key and recorded size. Required recovery proofs and subsequent SST readers validate content, identity and format when those paths consume it; metadata-only inventory does not eagerly verify every body or block. Definitive missing/size-mismatched objects fail closed or enter the explicitly supported salvage path; unrelated objects are not substituted. | [Exact evidence](invariant-evidence.md#cloud-4) |
+| CLOUD-4 | Cloud startup inventories each manifest-authoritative SST by its exact object key and recorded size. SST readers validate content, identity and format when those paths consume it; metadata-only inventory does not eagerly verify every body or block. Definitive missing/size-mismatched objects fail closed or enter the explicitly supported salvage path; unrelated objects are not substituted. | [Exact evidence](invariant-evidence.md#cloud-4) |
 | CLOUD-5 | Cloud recovery combines intact local WAL with validated remote catalog history and preserves sequence/epoch holes. A `cloud_strict()` acknowledgment remains recoverable after local-cache loss from uploaded WAL or later published SST state. | [Exact evidence](invariant-evidence.md#cloud-5) |
-| CLOUD-6 | Cloud WAL deletion is conditional on exact coverage and identity proofs, current lease/metadata authority, and a final proof check immediately before provider deletion. Unknown, changed, or ambiguously covered bytes are retained. | [Exact evidence](invariant-evidence.md#cloud-6) |
+| CLOUD-6 | Cloud WAL retirement uses only a validated committed shared metadata generation whose family frontiers cover every sealed segment family maximum. The catalog records that generation before deletion; deletion is conditional on exact object identity and successor-safe retirement authority. Unknown or changed authority retains WAL. | [Exact evidence](invariant-evidence.md#cloud-6) |
 | CLOUD-7 | Provider failures, deadlines, and conditional-write conflicts remain typed outcomes. Provider adapters must preserve range, pagination, precondition, and timeout semantics rather than silently falling back to weaker operations. | [Exact evidence](invariant-evidence.md#cloud-7) |
 
 Owners: `src/wal/cloud_catalog.rs`, `src/wal/cloud_segment.rs`,
@@ -172,7 +170,7 @@ work-bound evidence in
 
 | ID | Invariant | Evidence |
 |---|---|---|
-| PROG-1 | Startup recovery progress advances only when bounded work completes: verified bytes, frames, coverage decisions, or successful non-empty remote ranges. Request submission, a held callback, an error, or an empty response is not progress. Cached verification counts as progress even when it performs no new I/O. | [Exact evidence](invariant-evidence.md#prog-1) |
+| PROG-1 | Startup recovery progress advances only when bounded work completes: decoded manifest records and family frontiers, verified WAL bytes and frames, or successful non-empty remote ranges. Request submission, a held callback, an error, or an empty response is not progress. | [Exact evidence](invariant-evidence.md#prog-1) |
 | PROG-2 | Progress is credited only to the active recovery caller and phase generation. A phase transition, completed scope, unrelated workload event, or background thread cannot keep an old recovery watchdog alive. | [Exact evidence](invariant-evidence.md#prog-2) |
 
 Owners are `src/telemetry/recovery_progress.rs`, WAL frame/replay, metadata

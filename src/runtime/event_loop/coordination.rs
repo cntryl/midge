@@ -9,7 +9,7 @@ const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
 
-/// Owns cloud WAL admission, acknowledgement, pruning, and cleanup proof state.
+/// Owns cloud WAL admission, acknowledgement, retirement, and local cleanup.
 pub(crate) struct CloudWalUploadTracker {
     /// Acknowledged segments: verified uploads, and segments the catalog
     /// publishes. An upload waits there until every earlier segment is
@@ -217,24 +217,16 @@ impl LocalRetirementQueue {
 pub(crate) struct LocalRetirement {
     /// Its cloud-durable obligation in the transition protocol.
     pub(crate) cloud_durable: bool,
-    /// Its tombstone GC pin, once the catalog pruned it.
-    pub(crate) gc_pin: bool,
 }
 
 impl LocalRetirement {
     pub(crate) const CLOUD_DURABLE: Self = Self {
         cloud_durable: true,
-        gc_pin: false,
-    };
-    pub(crate) const GC_PIN: Self = Self {
-        cloud_durable: false,
-        gc_pin: true,
     };
 
     fn merge(self, other: Self) -> Self {
         Self {
             cloud_durable: self.cloud_durable || other.cloud_durable,
-            gc_pin: self.gc_pin || other.gc_pin,
         }
     }
 }
@@ -242,7 +234,7 @@ impl LocalRetirement {
 impl CloudWalUploadTracker {
     /// A tracker acknowledging the segments recovery found published, each
     /// with the last sequence it holds.
-    pub(super) fn new(recovered: BTreeMap<u64, u64>) -> Self {
+    pub(super) fn new(recovered: BTreeMap<u64, CatalogEntry>) -> Self {
         Self {
             acks: AckSet::recovered(recovered),
             backlog: UploadBacklog::new(),
@@ -254,6 +246,10 @@ impl CloudWalUploadTracker {
     /// The acknowledged segments.
     pub(super) fn acks(&self) -> &AckSet {
         &self.acks
+    }
+
+    pub(super) fn oldest_published_facts(&self) -> Option<&crate::wal::format::SealedFacts> {
+        self.acks.oldest_published_facts()
     }
 
     /// The sealed segments the runtime owes the upload queue.
@@ -642,7 +638,21 @@ mod tests {
     #[test]
     fn should_retain_cloud_wal_state_when_constructed() {
         // Arrange
-        let recovered = BTreeMap::from([(3, 41)]);
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            41,
+        );
+        let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+            3,
+            1,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .record(&record)
+        .seal();
+        let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+        let recovered = BTreeMap::from([(3, entry)]);
 
         // Act
         let mut tracker = CloudWalUploadTracker::new(recovered);

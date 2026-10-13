@@ -253,6 +253,44 @@ fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted()
     Ok(())
 }
 
+#[test]
+fn should_reject_transaction_without_mutation_when_commit_would_use_the_dropped_sentinel(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut state = RuntimeState::new("/tmp/test_midge_dropped_sequence_sentinel".into(), true);
+    state.sequence = u64::MAX - 3;
+    let reserved = state.wal.history.ledger().seq_reserved_through();
+    let frontiers = state.manifest.flush_frontiers().clone();
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::BestEffort,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+
+    // Act
+    let result = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        99,
+        b"reserved-sentinel",
+        b"value",
+        DurabilityPolicy::BestEffort,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert_eq!(state.sequence, u64::MAX - 3);
+    assert_eq!(state.transaction_id_cursor_for_test(), 0);
+    assert_eq!(state.wal.history.ledger().seq_reserved_through(), reserved);
+    assert_eq!(state.manifest.flush_frontiers(), &frontiers);
+    assert_eq!(state.wal.pending_writes, 0);
+    assert_eq!(actor.append_calls(), 0);
+    assert_eq!(state.get_cf(0).unwrap().memtable.iter_all(), []);
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
@@ -789,7 +827,7 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     );
 
     // Assert
-    assert!(matches!(error, MidgeError::Io(_)));
+    assert!(matches!(error, MidgeError::OutcomeUnknown(_)));
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.frontiers.local_durable(), 0);
@@ -1296,7 +1334,7 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
     let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(wal_actor.sync_calls(), 0);
     assert_eq!(
@@ -1758,7 +1796,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
         let sequence_after_failure = state.sequence;
 
         // Assert
-        assert!(matches!(error, MidgeError::Internal(_)));
+        assert!(matches!(error, MidgeError::OutcomeUnknown(_)), "{error:?}");
         assert!(actor.is_fenced());
         assert!(state.persistence_anomaly_detected());
         assert_eq!(state.wal.pending_writes, 0);
@@ -2137,6 +2175,80 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     Ok(())
 }
 
+/// Whether `result` reports a logged unit whose outcome is unknown because
+/// restart may apply it.
+#[cfg(feature = "failpoints")]
+fn may_be_applied_on_restart<T>(result: &MidgeResult<T>) -> bool {
+    matches!(
+        result,
+        Err(MidgeError::OutcomeUnknown(message))
+            if message.contains("is logged in the WAL")
+                && message.contains("may be applied on restart")
+    )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_fenced_when_lease_lapses_before_unlogged_unit_applies() -> MidgeResult<()> {
+    // Arrange: a BestEffort unit has no WAL record. The lease lapses after
+    // its sequences are allocated, at the apply of the group of one.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity.activate(1, Instant::now() + Duration::from_mins(1))?;
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let sequence_before = state.sequence;
+    let observed = Arc::clone(&validity);
+    fail::cfg_callback("midge::wal::before_prepared_transaction_apply", move || {
+        observed.expire_for_test();
+    })
+    .expect("lapse the lease before the apply");
+
+    // Act
+    let result = actor.append_transaction(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 343,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"unlogged"),
+                value: Bytes::from_static(b"value"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+
+    // Assert: sequences were allocated, yet nothing was logged or applied,
+    // so the caller is told the unit is not applied.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(state.sequence > sequence_before);
+    assert_eq!(state.get_cf(0).map(|cf| cf.memtable.size_bytes()), Some(0));
+    assert!(state
+        .get_cf(0)
+        .is_some_and(|cf| cf.partially_applied_commit().is_none()));
+    assert!(actor.is_fenced());
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResult<()> {
@@ -2192,13 +2304,470 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 
     // Assert: the WAL already holds the whole transaction, so a partial
     // memtable apply must stop the writer instead of serving it silently.
-    assert!(
-        matches!(result, Err(MidgeError::RecoveryFailed(_))),
-        "{result:?}"
-    );
+    assert!(may_be_applied_on_restart(&result), "{result:?}");
     assert!(actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
+    for key in [b"first".as_slice(), b"second".as_slice()] {
+        write_set.push(crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::from_static(b"spilled-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+    }
+    let source = write_set.take_source();
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return").expect("fail the second apply");
+
+    // Act
+    let result = actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 340,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::spilled_apply_op");
+
+    // Assert: a BestEffort unit has no WAL record, so restart cannot apply
+    // it; the error must not promise that it will.
+    let Err(MidgeError::RecoveryFailed(message)) = result else {
+        panic!("expected RecoveryFailed, got {result:?}");
+    };
+    assert!(message.contains("restart discards all of it"), "{message}");
+    assert!(!message.contains("fully applied on restart"), "{message}");
+    assert!(state
+        .get_cf(0)
+        .is_some_and(|cf| cf.partially_applied_commit().is_some()));
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_CHILD: &str = "MIDGE_PARTIAL_SPILL_FLUSH_CHILD";
+
+#[cfg(feature = "failpoints")]
+fn partial_spill_options(path: &std::path::Path) -> crate::OpenOptions {
+    crate::OpenOptions::local(path)
+        .transaction_memory_pool_size(1024)
+        .background_compaction(false)
+        .build()
+        .expect("partial spill options")
+}
+
+#[cfg(feature = "failpoints")]
+fn partial_spill_value() -> Vec<u8> {
+    vec![7_u8; 4 * 1024]
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_flushing_partly_applied_spilled_transaction_in_child() {
+    // Arrange: runs only as the child of the restart test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(PARTIAL_SPILL_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open spill writer");
+    let family = engine.get_column_family("default").expect("default family");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("spilled transaction");
+    tx.put(b"first".to_vec(), partial_spill_value(), None)
+        .expect("spill first");
+    tx.put(b"second".to_vec(), partial_spill_value(), None)
+        .expect("spill second");
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return")
+        .expect("fail the second post-commit apply");
+
+    // Act: the strict commit is durably logged, but only `first` reaches the
+    // memtable; a manual flush then persists that partial memtable before restart.
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(may_be_applied_on_restart(&commit), "{commit:?}");
+    let flushed = engine.flush_cf(&family);
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+
+    // Assert
+    std::fs::write(path.join("partial-spill-flushed"), format!("{flushed:?}"))
+        .expect("flush marker");
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_apply_whole_spilled_transaction_on_restart_when_flushed_after_partial_apply() {
+    // Arrange: a child process logs a spilled transaction, applies only its
+    // first op, requests a manual flush of the family, and shuts down.
+    let directory = tempfile::tempdir().expect("database directory");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_flushing_partly_applied_spilled_transaction_in_child",
+            "--nocapture",
+        ])
+        .env(PARTIAL_SPILL_CHILD, directory.path())
+        .output()
+        .expect("run partial spill child");
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        directory.path().join("partial-spill-flushed").exists(),
+        "the child must reach its manual flush"
+    );
+
+    // Act
+    let mut reopened =
+        crate::Engine::open(partial_spill_options(directory.path())).expect("restart");
+
+    // Assert: the durably logged transaction is visible whole, never in part.
+    {
+        let tx = reopened
+            .begin_tx(0, crate::TransactionMode::ReadOnly)
+            .expect("read transaction");
+        assert_eq!(
+            tx.get(b"first").expect("read first").as_deref(),
+            Some(partial_spill_value().as_slice())
+        );
+        assert_eq!(
+            tx.get(b"second").expect("read second").as_deref(),
+            Some(partial_spill_value().as_slice())
+        );
+    }
+    reopened
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shutdown restarted engine");
+}
+
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_WRITE_CHILD: &str = "MIDGE_PARTIAL_SPILL_WRITE_CHILD";
+
+#[cfg(feature = "failpoints")]
+fn put_one(
+    engine: &crate::Engine,
+    family: &crate::ColumnFamilyHandle,
+    key: &[u8],
+    options: crate::WriteOptions,
+) -> MidgeResult<()> {
+    let mut tx = engine.begin_tx(family.id(), crate::TransactionMode::ReadWrite)?;
+    tx.put(key.to_vec(), b"after-partial-apply".to_vec(), None)?;
+    tx.commit(options)
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_writing_to_partly_applied_family_in_child() {
+    // Arrange: runs only as the child of the rejection test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(PARTIAL_SPILL_WRITE_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open spill writer");
+    let family = engine.get_column_family("default").expect("default family");
+    let other = engine.create_column_family("other").expect("other family");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("spilled transaction");
+    tx.put(b"first".to_vec(), partial_spill_value(), None)
+        .expect("spill first");
+    tx.put(b"second".to_vec(), partial_spill_value(), None)
+        .expect("spill second");
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return")
+        .expect("fail the second post-commit apply");
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(may_be_applied_on_restart(&commit), "{commit:?}");
+
+    // Act: the other family's write goes first, because a write refused
+    // while the WAL is fenced may stop the whole runtime from writing.
+    let best_effort_other = put_one(
+        &engine,
+        &other,
+        b"best-effort",
+        crate::WriteOptions::best_effort(),
+    );
+    let best_effort_same = put_one(
+        &engine,
+        &family,
+        b"best-effort",
+        crate::WriteOptions::best_effort(),
+    );
+    let sync_same = put_one(&engine, &family, b"sync", crate::WriteOptions::sync());
+    let flushed = engine.flush_cf(&family);
+
+    // Assert: the marked family cannot freeze until restart, so it must not
+    // acknowledge a write it could never persist; the other family, which
+    // holds no partly applied unit, still takes the writes the fenced WAL
+    // allows.
+    assert!(best_effort_other.is_ok(), "{best_effort_other:?}");
+    assert!(
+        matches!(best_effort_same, Err(MidgeError::RecoveryFailed(_))),
+        "{best_effort_same:?}"
+    );
+    assert!(
+        matches!(
+            sync_same,
+            Err(MidgeError::RecoveryFailed(_) | MidgeError::Fenced(_))
+        ),
+        "{sync_same:?}"
+    );
+    assert!(flushed.is_err(), "{flushed:?}");
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_reject_best_effort_write_when_family_holds_partly_applied_spilled_transaction() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("database directory");
+
+    // Act: a child process partly applies a durably logged spilled
+    // transaction, then writes to the marked family and to another one.
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_writing_to_partly_applied_family_in_child",
+            "--nocapture",
+        ])
+        .env(PARTIAL_SPILL_WRITE_CHILD, directory.path())
+        .output()
+        .expect("run partial spill write child");
+
+    // Assert
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_STALL_CHILD: &str = "MIDGE_PARTIAL_SPILL_STALL_CHILD";
+
+#[cfg(feature = "failpoints")]
+const PARTIAL_SPILL_STALL_THRESHOLD: usize = 16 * 1024;
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
+    // Arrange: runs only as the child of the stall test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(PARTIAL_SPILL_STALL_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let options = crate::OpenOptions::local(&path)
+        .transaction_memory_pool_size(1024)
+        .with_memtable_flush_threshold(PARTIAL_SPILL_STALL_THRESHOLD)
+        .background_compaction(false)
+        .build()
+        .expect("stall options");
+    let mut engine = crate::Engine::open(options).expect("open spill writer");
+    let family = engine.get_column_family("default").expect("default family");
+    let other = engine.create_column_family("other").expect("other family");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("spilled transaction");
+    for key in [b"first".as_slice(), b"second", b"third", b"fourth"] {
+        tx.put(
+            key.to_vec(),
+            vec![7_u8; PARTIAL_SPILL_STALL_THRESHOLD],
+            None,
+        )
+        .expect("spill op");
+    }
+    fail::cfg("midge::wal::spilled_apply_op", "3*off->return")
+        .expect("fail the fourth post-commit apply");
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(may_be_applied_on_restart(&commit), "{commit:?}");
+
+    // Act: a stall hint on the first reply makes the second check the stall.
+    let written = [b"best-effort-1".as_slice(), b"best-effort-2"]
+        .map(|key| put_one(&engine, &other, key, crate::WriteOptions::best_effort()));
+    let cleared = engine.wait_for_write_stall_clear(other.id(), std::time::Duration::from_secs(1));
+
+    // Assert: the marked family holds more than twice the flush threshold
+    // but takes no writes and cannot flush until restart; it must not stall
+    // a family that can.
+    assert!(written.iter().all(Result::is_ok), "{written:?}");
+    assert!(matches!(cleared, Ok(true)), "{cleared:?}");
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_accept_write_beside_family_holding_large_partly_applied_spilled_transaction() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("database directory");
+
+    // Act: a child process partly applies a spilled transaction larger than
+    // twice the flush threshold, then writes to another family.
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_writing_beside_large_partly_applied_family_in_child",
+            "--nocapture",
+        ])
+        .env(PARTIAL_SPILL_STALL_CHILD, directory.path())
+        .output()
+        .expect("run partial spill stall child");
+
+    // Assert
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "failpoints")]
+const FAILED_SYNC_CHILD: &str = "MIDGE_FAILED_SYNC_FLUSH_CHILD";
+
+#[cfg(feature = "failpoints")]
+const FAILED_SYNC_KEYS: [&[u8]; 2] = [b"failed-first", b"failed-second"];
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_flushing_past_failed_strict_sync_in_child() {
+    // Arrange: runs only as the child of the flush test below, so the
+    // process-global failpoint cannot reach another test.
+    let Some(path) = std::env::var_os(FAILED_SYNC_CHILD) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open writer");
+    let family = engine.get_column_family("default").expect("default family");
+    put_one(
+        &engine,
+        &family,
+        b"best-effort",
+        crate::WriteOptions::best_effort(),
+    )
+    .expect("best-effort put");
+    let mut tx = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("strict transaction");
+    for key in FAILED_SYNC_KEYS {
+        tx.put(key.to_vec(), partial_spill_value(), None)
+            .expect("stage failed key");
+    }
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("fail the strict sync");
+    let commit = tx.commit(crate::WriteOptions::sync());
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    assert!(
+        matches!(commit, Err(MidgeError::OutcomeUnknown(_))),
+        "{commit:?}"
+    );
+
+    // Act
+    let flushed = engine.flush_cf(&family);
+    let _ = engine.shutdown(std::time::Duration::from_secs(30));
+
+    // Assert
+    std::fs::write(path.join("failed-sync-flushed"), format!("{flushed:?}")).expect("flush marker");
+    std::process::exit(76);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_publish_best_effort_write_when_flushed_after_failed_strict_sync() {
+    // Arrange: a child process writes a best-effort key, has a strict
+    // spilled commit fail on its sync after the WAL append, flushes the
+    // family and shuts down.
+    let directory = tempfile::tempdir().expect("database directory");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::actors::wal::tests::should_exit_after_flushing_past_failed_strict_sync_in_child",
+            "--nocapture",
+        ])
+        .env(FAILED_SYNC_CHILD, directory.path())
+        .output()
+        .expect("run failed sync child");
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let flushed = std::fs::read_to_string(directory.path().join("failed-sync-flushed"))
+        .expect("flush marker");
+
+    // Act
+    let mut reopened =
+        crate::Engine::open(partial_spill_options(directory.path())).expect("restart");
+
+    // Assert: none of the failed unit reached the memtable, so a flush past
+    // its commit drops it whole on replay; the best-effort write the flush
+    // published survives.
+    assert_eq!(flushed, "Ok(())");
+    {
+        let tx = reopened
+            .begin_tx(0, crate::TransactionMode::ReadOnly)
+            .expect("read transaction");
+        assert_eq!(
+            tx.get(b"best-effort").expect("read best-effort").as_deref(),
+            Some(b"after-partial-apply".as_slice())
+        );
+        let present = FAILED_SYNC_KEYS
+            .iter()
+            .map(|key| tx.get(key).expect("read failed key").is_some())
+            .collect::<Vec<_>>();
+        assert!(
+            present.iter().all(|found| *found) || present.iter().all(|found| !found),
+            "{present:?}"
+        );
+    }
+    reopened
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shutdown restarted engine");
 }
 
 #[test]

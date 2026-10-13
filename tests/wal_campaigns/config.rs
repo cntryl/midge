@@ -21,9 +21,10 @@ use std::time::Duration;
 const LEASE_TTL_MILLIS: u64 = 1_000;
 /// A TTL short enough that lease renewals interleave with crashes.
 pub(crate) const RENEWING_LEASE_TTL_MILLIS: u64 = 60;
-/// The shortest provider lease TTL the engine accepts, about: two thirds of it
-/// must exceed the provider write margin.
-const PROVIDER_LEASE_TTL_MILLIS: u64 = 18_000;
+/// The shortest cloud lease TTL the engine accepts, about: two thirds of it
+/// must exceed the provider write margin. Both cloud modes hold the cloud
+/// lease.
+const CLOUD_LEASE_TTL_MILLIS: u64 = 18_000;
 /// Every cloud campaign names its objects below this prefix.
 const PREFIX: &str = "campaign";
 /// Cloud campaigns seal an asynchronous WAL segment every few writes, so
@@ -103,8 +104,8 @@ impl Mode {
     /// The lease TTL campaigns use here.
     fn lease_ttl_millis(self) -> u64 {
         match self {
-            Self::Local | Self::SimulatedCloud => LEASE_TTL_MILLIS,
-            Self::ProviderCloud => PROVIDER_LEASE_TTL_MILLIS,
+            Self::Local => LEASE_TTL_MILLIS,
+            Self::SimulatedCloud | Self::ProviderCloud => CLOUD_LEASE_TTL_MILLIS,
         }
     }
 

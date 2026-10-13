@@ -415,9 +415,5 @@ name = "checkpoint_campaign_readback"
 path = "examples/checkpoint_campaign_readback.rs"
 required-features = ["internal-testing"]
 
-[[example]]
-name = "recovery_attribution"
-required-features = ["internal-testing", "failpoints"]
-
 [lints.clippy]
 too_many_lines = "forbid"

@@ -1,5 +1,11 @@
 # Checkpoint cost isolation (#752)
 
+This is a historical investigation record. Its global frontier and fallback
+protocol were superseded by #819: every flush now journals allocation,
+`AddSst`, and `AdvanceFlushFrontier` in one validated atomic batch. The
+recorded measurements retain their original source and do not qualify the
+current format or publication protocol.
+
 This branch is experimental until correctness and the original matched performance gates pass. Neither rejected policy in #780 is accepted. Baseline is develop d5bcb607b75b1fa5cf5e4f4f910d7e49f9ebe12b, preserving every ordinary checkpoint.
 
 The first source variant changes only the durable flush batch: include BumpWalSeq alongside AddSst and BumpNextSstSeq. It retains the original forced cadence and adds no preflight filesystem stats or locks. A new deterministic optional-snapshot-failure test first recovered frontier 0 instead of 123, then recovered all three published identities/frontiers with the complete batch. This isolates the durability prerequisite's cost from checkpoint-policy checks. It is not an optimization acceptance claim or an assertion that baseline loses acknowledged data.

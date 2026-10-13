@@ -56,12 +56,12 @@ fn ledgered_wal() -> (Arc<dyn Fs>, WalHistory) {
 fn replay_members(wal: &dyn Fs, history: &WalHistory) -> MidgeResult<RecoveryStats> {
     let segments = ReplaySegments::from_ledger(history.ledger(), segment_path);
     let mut memtables = HashMap::new();
-    replay_wal_with_manifest_filter_within(
+    replay_wal_with_frontiers_within(
         wal,
         &segments,
         &mut memtables,
         ReplayPolicy::Strict,
-        &|_| Ok(true),
+        &crate::metadata::frontiers::FlushFrontiers::default(),
         None,
     )
 }

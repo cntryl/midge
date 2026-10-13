@@ -44,7 +44,10 @@ fn retire_history(pin: Pin) -> usize {
         .unwrap();
     tx.put(b"seed".to_vec(), b"value".to_vec(), None).unwrap();
     if matches!(pin, Pin::EmptyRange) {
-        tx.delete_range(b"r".to_vec(), b"r".to_vec()).unwrap();
+        assert!(matches!(
+            tx.delete_range(b"r".to_vec(), b"r".to_vec()),
+            Err(cntryl_midge::MidgeError::InvalidArgument(_))
+        ));
     }
     tx.commit(WriteOptions::cloud_strict()).unwrap();
     match pin {

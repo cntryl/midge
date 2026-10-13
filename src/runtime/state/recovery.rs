@@ -22,6 +22,8 @@ fn preserve_timeout(error: MidgeError, context: &str) -> MidgeError {
 }
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod timeout_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,14 +51,27 @@ struct RecoveredStartup {
 }
 
 impl RuntimeState {
+    /// The highest sequence the manifest proves was handed out: every SST's,
+    /// and every live family's flush frontier. Replay skips each record at or
+    /// below its family's frontier, so a new write must start above it. A
+    /// frontier is a freeze sequence, which a WAL reservation can lift above
+    /// every SST and WAL record; a host with a fresh cache never saw that
+    /// reservation.
     pub(super) fn manifest_visible_sequence_floor(manifest: &Manifest) -> u64 {
-        let file_max_sequence = manifest
+        use crate::metadata::frontiers::FamilyFrontier;
+        let file_sequences = manifest
             .files
             .iter()
-            .filter_map(|file| file.largest_seq.or(file.smallest_seq))
-            .max()
-            .unwrap_or(0);
-        manifest.last_persisted_sequence.max(file_max_sequence)
+            .filter_map(|file| file.largest_seq.or(file.smallest_seq));
+        let frontiers =
+            manifest
+                .flush_frontiers()
+                .iter()
+                .filter_map(|(_, frontier)| match frontier {
+                    FamilyFrontier::Live { through_sequence } => Some(through_sequence),
+                    FamilyFrontier::Dropped => None,
+                });
+        file_sequences.chain(frontiers).max().unwrap_or(0)
     }
 
     pub(super) fn manifest_compaction_output_generation_floor(manifest: &Manifest) -> u64 {
@@ -425,22 +440,7 @@ impl RuntimeState {
                     "failed to load manifest strictly, retrying in salvage mode: {}",
                     error
                 );
-                // A manifest salvage cannot read at all opens empty; the
-                // salvage-mode orphan sweep then quarantines every SST rather
-                // than deleting it. Telling a transient read error apart
-                // from corruption here needs a typed load error (#494).
-                Ok(
-                    load(crate::config::RecoveryPolicy::Salvage).or_else(|salvage_error| {
-                        if matches!(salvage_error, MidgeError::Timeout(_)) {
-                            return Err(salvage_error);
-                        }
-                        tracing::warn!(
-                            "failed to load manifest in salvage mode, using default: {}",
-                            salvage_error
-                        );
-                        Ok(Manifest::default())
-                    })?,
-                )
+                load(crate::config::RecoveryPolicy::Salvage)
             }
         }
     }
@@ -544,28 +544,10 @@ impl RuntimeState {
         Ok(wal_recovery)
     }
 
-    /// The prover recovery uses to skip WAL records the manifest's SSTs
-    /// already hold. Without a readable SST directory nothing is proven
-    /// covered, so every record replays.
-    fn recovery_wal_coverage(
-        root: &Arc<dyn Fs>,
-        manifest: &Manifest,
-        scope: Option<&DeadlineScope>,
-    ) -> MidgeResult<crate::runtime::cloud_startup::replay_coverage::ReplayCoverage> {
-        check_scope(scope, "local SST coverage filesystem")?;
-        Ok(
-            crate::runtime::cloud_startup::replay_coverage::ReplayCoverage::new(
-                manifest.clone(),
-                Arc::clone(root),
-                usize::MAX,
-            ),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)] // One recovery, its inputs and its ledger.
     fn replay_wal_storage_within(
         replay_dir: &std::path::Path,
-        root: &Arc<dyn Fs>,
+        _root: &Arc<dyn Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         mut column_families: HashMap<u32, ColumnFamilyState>,
@@ -581,51 +563,18 @@ impl RuntimeState {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let coverage = scope
-            .map(|scope| Self::recovery_wal_coverage(root, manifest, Some(scope)))
-            .transpose()?;
-        let mut proven = crate::runtime::hybrid_persistence::ProvenSstIdentities::default();
-        let legacy_fs = scope
-            .is_none()
-            .then(|| crate::io::subdirectory(Arc::clone(root), "sst"));
-        let legacy_coverage = legacy_fs.map(|fs| {
-            crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
-                fs,
-                "",
-                manifest,
-                &mut proven,
-            )
-        });
-        let should_apply = |record: &crate::wal::WalRecord| match (scope, &coverage) {
-            (Some(scope), Some(coverage)) => coverage
-                .contains_within(record, scope)
-                .map(|covered| !covered),
-            _ => Ok(!legacy_coverage
-                .as_ref()
-                .is_some_and(|coverage| coverage.covers_wal_record(record))),
-        };
         // The local plan replays every ledger member (#844).
         let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
             crate::io::FsPath::new(crate::wal::segment_file_name(id))
         });
-        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter_within(
+        let stats = crate::wal::recovery::replay_wal_with_frontiers_within(
             storage,
             &segments,
             &mut recovery_memtables,
             replay_policy,
-            &should_apply,
+            manifest.flush_frontiers(),
             scope,
-        ) {
-            Ok(stats) => stats,
-            Err(error) => {
-                return Self::handle_local_wal_replay_failure(
-                    history,
-                    recovery_policy,
-                    error,
-                    column_families,
-                );
-            }
-        };
+        )?;
 
         if let Some(tail) = &stats.tolerated_active_tail {
             // Fail the open under either policy: appending past a torn tail
@@ -674,39 +623,6 @@ impl RuntimeState {
         })
     }
 
-    fn handle_local_wal_replay_failure(
-        mut history: crate::runtime::wal_history::WalHistory,
-        recovery_policy: crate::config::RecoveryPolicy,
-        error: MidgeError,
-        column_families: HashMap<u32, ColumnFamilyState>,
-    ) -> MidgeResult<WalRecoveryState> {
-        if matches!(error, MidgeError::Timeout(_)) {
-            return Err(error);
-        }
-        if recovery_policy == crate::config::RecoveryPolicy::Salvage {
-            // Salvage continues without the WAL's state, so set every
-            // member aside first: new records must not land behind them or
-            // reuse the sequences they hold.
-            let log_start = history.ledger().log_start();
-            if let Err(quarantine_error) =
-                history.set_aside(crate::runtime::wal_history::SetAside::From(log_start), 0)
-            {
-                if matches!(quarantine_error, MidgeError::Timeout(_)) {
-                    return Err(quarantine_error);
-                }
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "WAL recovery failed ({error}) and the WAL could not be set aside: {quarantine_error}"
-                )));
-            }
-        }
-        Self::handle_wal_recovery_failure(
-            recovery_policy,
-            format!("WAL recovery failed: {error}"),
-            column_families,
-            history,
-        )
-    }
-
     /// Cut the active WAL back to its verified prefix before the writer
     /// reopens it for append. Otherwise new frames land after the torn bytes,
     /// and the next recovery sees mid-file corruption instead of a tail.
@@ -725,26 +641,6 @@ impl RuntimeState {
             );
         }
         Ok(())
-    }
-
-    fn handle_wal_recovery_failure(
-        recovery_policy: crate::config::RecoveryPolicy,
-        message: String,
-        column_families: HashMap<u32, ColumnFamilyState>,
-        history: crate::runtime::wal_history::WalHistory,
-    ) -> MidgeResult<WalRecoveryState> {
-        if recovery_policy == crate::config::RecoveryPolicy::Strict {
-            return Err(MidgeError::RecoveryFailed(message));
-        }
-        tracing::error!("{message}, continuing without recovered state in salvage mode");
-        Ok(WalRecoveryState {
-            column_families,
-            recovered_sequence: 0,
-            history,
-            records_replayed: 0,
-            bytes_replayed: 0,
-            opened_in_salvage_mode: true,
-        })
     }
 
     fn record_wal_recovery_stats(

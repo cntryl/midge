@@ -579,11 +579,17 @@ impl Planner {
             });
         }
         if open.record_count > 0 {
+            let mut expected = member.clone();
+            if self.open_cut.is_some() {
+                expected.durable_bytes = expected
+                    .durable_bytes
+                    .map(|bytes| bytes.min(open.valid_bytes));
+            }
             self.replay.push(PlannedSegment {
                 id,
                 source: Source::Local,
                 sealed: false,
-                expect: Expectation::member(ledger, member),
+                expect: Expectation::member(ledger, &expected),
             });
         }
         Ok(None)

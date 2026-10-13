@@ -1,4 +1,10 @@
-# Cold Engine recovery attribution (#754)
+# Historical cold Engine recovery attribution (#754)
+
+This document records the pre-frontier experiment. Its SST coverage variants,
+internal options, example, runner and workflow were removed by #819. It is not a
+current execution protocol or evidence for the frontier replay implementation.
+Current progressing and held recovery controls are described in
+[benchmark investigation](benchmark-investigation.md#recovery-progress-controls).
 
 The experiment was declared at merged
 `897c833c46c20533f0a0f9ea7a7c5f036644f2b0`, after #753's diagnostic-only

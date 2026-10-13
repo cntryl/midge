@@ -305,7 +305,11 @@ impl Fixture {
                 .cloned()
                 .collect();
             catalog
-                .retire_prefix(catalog.fencing_epoch(), &retired)
+                .retire_prefix(
+                    catalog.fencing_epoch(),
+                    &retired,
+                    crate::lease::SharedGenerationId::new(1).unwrap(),
+                )
                 .expect("retire the catalog's oldest segments");
         });
     }
@@ -475,9 +479,12 @@ fn should_truncate_only_incomplete_active_wal_tail_before_virtual_replay() -> Mi
     // Arrange
     let mut fixture = Fixture::new()?;
     let valid = framed_wal(4, b"value");
-    let mut torn = valid.clone();
-    torn.extend_from_slice(&[0xFF; 3]);
-    let path = fixture.active(&torn)?;
+    let path = fixture.active(&valid)?;
+    let history = fixture.history()?;
+    drop(history);
+    let mut active = std::fs::OpenOptions::new().append(true).open(&path)?;
+    std::io::Write::write_all(&mut active, &[0xFF; 3])?;
+    drop(active);
 
     // Act
     let recovered = fixture.build(RecoveryPolicy::Strict)?;
@@ -1000,9 +1007,12 @@ fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeRes
     // Arrange
     let mut fixture = Fixture::new()?;
     let valid = framed_wal(3, b"value");
-    let mut padded = valid.clone();
-    padded.extend_from_slice(&[0; 64]);
-    let path = fixture.active(&padded)?;
+    let path = fixture.active(&valid)?;
+    let history = fixture.history()?;
+    drop(history);
+    let mut active = std::fs::OpenOptions::new().append(true).open(&path)?;
+    std::io::Write::write_all(&mut active, &[0; 64])?;
+    drop(active);
 
     // Act
     let recovered = fixture.build(RecoveryPolicy::Strict)?;
@@ -1013,6 +1023,26 @@ fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeRes
         std::fs::metadata(path)?.len(),
         (crate::wal::format::HEADER_LEN + valid.len()) as u64
     );
+    Ok(())
+}
+
+#[test]
+fn should_reject_strict_recovery_when_incomplete_active_tail_crosses_durable_boundary(
+) -> MidgeResult<()> {
+    // Arrange: the ledger records the complete file length as synced.
+    let mut fixture = Fixture::new()?;
+    let valid = framed_wal(5, b"acknowledged");
+    let mut torn = valid;
+    torn.extend_from_slice(&[0xFF; 3]);
+    let path = fixture.active(&torn)?;
+    let before = std::fs::metadata(&path)?.len();
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert: synced bytes are never discarded as an interrupted tail.
+    assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+    assert_eq!(std::fs::metadata(path)?.len(), before);
     Ok(())
 }
 
@@ -1184,7 +1214,22 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
     });
 
     // Act
-    let result = fixture.plan_with_fs(RecoveryPolicy::Salvage, &local);
+    let recovered = fixture.plan_with_fs(RecoveryPolicy::Salvage, &local)?;
+    assert_eq!(
+        std::fs::read(&active)?,
+        written,
+        "planning must be read-only"
+    );
+    let history = crate::runtime::wal_history::WalHistory::load(
+        crate::io::subdirectory(Arc::clone(&local), "wal"),
+        fixture.current_epoch(),
+    )?
+    .expect("fixture history");
+    let result = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(history),
+    );
 
     // Assert
     assert!(
@@ -1483,12 +1528,19 @@ fn should_preserve_sequence_floor_when_salvage_is_interrupted_before_authority_c
     corrupt[8] ^= 1;
     bytes.extend(corrupt);
     bytes.extend(framed_wal(3, b"three"));
-    fixture.active(&bytes)?;
+    let active = fixture.active(&bytes)?;
+    let original = std::fs::read(&active)?;
 
     // Act: the planner runs, but the process loses the response/state before
     // the authority commit. A later open must retain the allocation floor.
     let first = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
     assert!(first.plan.max_unreplayed_sequence >= 3);
+    assert_eq!(open_tail_sequence(&first), Some(1));
+    assert_eq!(
+        std::fs::read(&active)?,
+        original,
+        "planning destroyed durable sequence evidence"
+    );
     drop(first);
     let reopened = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
 
@@ -2079,8 +2131,8 @@ fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<
         crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
     )?;
 
-    // Assert: segment 1 is neither replayed nor owed again, and startup
-    // retires its local copy.
+    // Assert: segment 1 is neither replayed nor owed again. Durable ledger
+    // retirement leaves its physical cleanup to GC or the next orphan sweep.
     assert!(recovered.plan.local_segments.is_empty());
     assert_eq!(
         recovered
@@ -2092,6 +2144,10 @@ fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<
         vec![2]
     );
     assert_eq!(history.ledger().log_start(), 2);
+    assert!(fixture.segment(1).exists());
+    drop(history);
+    let reopened = fixture.history()?;
+    assert_eq!(reopened.ledger().log_start(), 2);
     assert!(!fixture.segment(1).exists());
     Ok(())
 }
@@ -2177,14 +2233,17 @@ fn should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry()
         last_seq: 0,
         digest: [0x5a; 16],
     };
-    let (bytes, link) = crate::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
+    let (bytes, _link) = crate::wal::format::segment::SegmentBuilder::new(1, 7, stranger)
         .bytes(&framed_wal(1, b"one"))
         .seal();
     let entry = CatalogEntry::describing(
-        crate::wal::format::SegmentIdentity {
-            epoch: 7,
+        &crate::wal::cloud_segment::SegmentValidation {
+            writer_epoch: 7,
             prev: ChainLink::GENESIS,
-            link,
+            facts: crate::wal::format::segment::sealed_footer(&bytes)
+                .unwrap()
+                .unwrap()
+                .sealed_facts(),
         },
         &bytes,
     );
@@ -2199,5 +2258,31 @@ fn should_fail_strict_recovery_when_a_cataloged_object_does_not_link_its_entry()
         "unexpected result: {:?}",
         result.as_ref().err()
     );
+    Ok(())
+}
+
+#[test]
+fn should_reject_catalog_family_summary_when_payload_has_different_families() -> MidgeResult<()> {
+    // Arrange: the link, digest, length and CRC still match. Only the
+    // persisted family maximum is forged, which could authorize unsafe GC.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, b"one"))?;
+    let catalog = fixture.catalog();
+    let mut encoded = serde_json::to_value(&catalog).unwrap();
+    encoded["segments"][0]["facts"]["max_seq_per_cf"] = serde_json::json!([[7, 1]]);
+    let forged = WalPublicationCatalog::decode(&serde_json::to_vec(&encoded).unwrap())
+        .map_err(|error| MidgeError::Corruption(error.to_string()))?;
+    fixture.save_catalog(&forged)?;
+    let before = std::fs::read(fixture.catalog_path())?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        result.is_err(),
+        "payload and catalog family maxima must agree before planning"
+    );
+    assert_eq!(std::fs::read(fixture.catalog_path())?, before);
     Ok(())
 }

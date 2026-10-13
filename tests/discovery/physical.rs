@@ -202,16 +202,16 @@ fn expire_aborted_local_owner(path: &Path) {
         let checksum = crc32c::crc32c(body.as_bytes());
         std::fs::write(local, format!("{body}checksum: {checksum}\n")).unwrap();
     }
-    let lease = path.join("midge_primary_lease.json");
+    let lease = path.join("cloud_store").join("midge_primary_lease.json");
     if lease.exists() {
         let text = std::fs::read_to_string(&lease).unwrap();
         let mut expired = text
             .lines()
             .map(|line| {
-                if line.starts_with("acquired_at: ") {
-                    "acquired_at: 1970-01-01T00:00:00Z"
-                } else if line.starts_with("expires_at: ") {
-                    "expires_at: 1970-01-01T00:00:00Z"
+                if line.starts_with("acquired: ") {
+                    "acquired: 1970-01-01T00:00:00Z"
+                } else if line.starts_with("expires: ") {
+                    "expires: 1970-01-01T00:00:00Z"
                 } else {
                     line
                 }

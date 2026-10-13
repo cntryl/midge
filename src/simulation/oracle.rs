@@ -13,7 +13,9 @@
 //! - a completed flush makes its own family's commits durable in an SST. It
 //!   promises nothing about other families, so it does not raise the prefix:
 //!   the engine does not promise cross-family ordering for unsynced writes;
-//! - a clean shutdown makes every acknowledged commit durable.
+//! - a clean shutdown makes every acknowledged WAL commit durable. A
+//!   best-effort commit bypassed the WAL and shutdown does not flush
+//!   memtables, so it survives only if a completed flush promised it.
 //!
 //! A recovered state is consistent when one prefix length explains every key
 //! at once: each key holds the value of its last required write, or of an
@@ -194,14 +196,14 @@ impl History {
         }
     }
 
-    /// The engine shut down cleanly: every acknowledged commit must survive.
+    /// The engine shut down cleanly: every acknowledged WAL commit must
+    /// survive. Shutdown does not flush memtables, so a best-effort commit
+    /// stays optional unless [`Self::flushed`] already required it.
     pub fn shut_down(&mut self) {
         for (position, commit) in self.commits.iter().enumerate() {
-            if commit.acknowledged {
+            if commit.acknowledged && commit.logging == Logging::Wal {
                 self.required.insert(position);
-                if commit.logging == Logging::Wal {
-                    self.prefix_floor.insert(position);
-                }
+                self.prefix_floor.insert(position);
             }
         }
     }

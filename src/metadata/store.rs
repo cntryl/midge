@@ -182,9 +182,8 @@ impl ManifestStore {
             .accounting
             .begin(OperationKind::JournalAppend, origin, self.medium);
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
-        let result = edits
-            .iter()
-            .try_for_each(ManifestEdit::validate_for_append)
+        let result = ManifestEdit::Batch(edits.to_vec())
+            .validate_for_append()
             .and_then(|()| {
                 self.write_next_with_fs(&fs, |fs, edit_id| {
                     journal::append_validated_edit_batch_with_id_observed(
@@ -244,7 +243,7 @@ impl ManifestStore {
         journal::with_manifest_writer_lock(fs, || {
             let mut known = self.known.lock();
             let position = Self::position_with_fs(fs, &mut known)?;
-            let edit_id = position.highest_edit_id.saturating_add(1).max(1);
+            let edit_id = journal::next_edit_id_after(position.highest_edit_id)?;
             let result = write(fs, edit_id);
             *known = match result {
                 Ok(_) => Self::remember_with_fs(
@@ -275,9 +274,10 @@ impl ManifestStore {
             tracing::warn!(expected = ?cached.lengths, actual = ?lengths,
                 "manifest files changed outside the store; re-reading the journal position");
         }
-        // next_edit_id_with_fs also stages a genuine partial-EOF repair. The same
-        // observed Fs keeps that payload within the active operation's ledger.
-        let highest_edit_id = journal::next_edit_id_with_fs(fs)?.saturating_sub(1);
+        // Positioning also stages a genuine partial-EOF repair. Reading the
+        // highest identity does not allocate a successor, so a saturated
+        // journal remains readable and checkpointable.
+        let highest_edit_id = journal::highest_edit_id_with_repair_with_fs_unlocked(fs)?;
         let position = JournalPosition {
             checkpoint_edit_id: journal::checkpoint_edit_id_with_fs(fs)?,
             highest_edit_id,

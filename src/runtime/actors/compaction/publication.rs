@@ -48,7 +48,6 @@ pub(crate) struct CompactionPublishTask {
     pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub metadata_sequence: u64,
     pub publication_memory_limit: usize,
     pub runtime_response_timeout: std::time::Duration,
     pub manual_deadline: Option<OperationDeadline>,
@@ -351,7 +350,6 @@ fn mirror_control_metadata(
             fs: task.fs.as_ref(),
             publication_lock: &task.metadata_publication_lock,
             lock_wait_budget: cloud.callback_timeout(),
-            local_manifest_sequence: task.metadata_sequence,
             deadline,
             authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: leader_store,
@@ -419,7 +417,6 @@ mod tests {
             lease_validity: Some(Arc::clone(&validity)),
             leader_store: None,
             leader_holder_id: None,
-            metadata_sequence: 1,
             publication_memory_limit: 4096,
             runtime_response_timeout: std::time::Duration::from_secs(5),
             manual_deadline: None,

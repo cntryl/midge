@@ -37,8 +37,6 @@ impl RuntimeState {
             flush_id,
             accounting: super::FlushPublicationAccounting::new(origin),
             writer_epoch: self.writer_epoch,
-            first_wal_segment: Some(cf_state.active_memtable_started_in_segment)
-                .filter(|segment| *segment > 0 && *segment <= self.wal.open_segment()),
             memtable,
             sst_name: None,
             sst_seq: None,
@@ -199,8 +197,20 @@ impl RuntimeState {
         })
     }
 
+    /// Whether the memtable bytes a flush can relieve reach the global hard
+    /// limit. The active memtable of a family holding a partly applied unit
+    /// is left out: that family rejects every new write, so the memtable no
+    /// longer grows, and it cannot freeze until restart, so counting it would
+    /// stall every other family for bytes no flush can release.
     pub fn is_total_memtable_hard_limit_exceeded(&self) -> bool {
-        self.total_memtable_bytes >= self.limits.memtable_flush_threshold.saturating_mul(2)
+        let held = self
+            .column_families
+            .values()
+            .filter(|cf| cf.partially_applied_commit().is_some())
+            .map(|cf| cf.memtable.size_bytes())
+            .fold(0_usize, usize::saturating_add);
+        self.total_memtable_bytes.saturating_sub(held)
+            >= self.limits.memtable_flush_threshold.saturating_mul(2)
     }
 
     /// Maximum number of published or reserved L0 generations for one column
@@ -397,50 +407,16 @@ impl RuntimeState {
             .unwrap_or(0)
     }
 
-    /// Lowest WAL segment that may still hold unflushed data. Every sealed
-    /// segment below it is covered by published SSTs. `None` when memtable
-    /// provenance is incomplete, so callers must then retain everything.
-    pub(crate) fn wal_recovery_floor_segment(&self) -> Option<u64> {
-        let mut floor = self.wal.open_segment();
-        if floor == 0 {
-            return None;
-        }
-        for cf in self.column_families.values() {
-            // Recovery/legacy callers may expose an immutable without tracked
-            // provenance. A partial or mismatched ledger cannot advance the floor.
-            if cf.immutable_memtables.len() != cf.immutable_flushes.len() {
-                return None;
-            }
-            for (table, flush) in cf.immutable_memtables.iter().zip(&cf.immutable_flushes) {
-                if !Arc::ptr_eq(table, &flush.memtable) {
-                    return None;
-                }
-                let first = flush.first_wal_segment?;
-                if first == 0 || first > self.wal.open_segment() {
-                    return None;
-                }
-                floor = floor.min(first);
-            }
-            if cf.memtable.size_bytes() > 0 {
-                let started = cf.active_memtable_started_in_segment;
-                if started == 0 || started > self.wal.open_segment() {
-                    return None;
-                }
-                floor = floor.min(started);
-            }
-        }
-        Some(floor)
-    }
-
     #[cfg(test)]
     pub(crate) fn next_flush_candidate(&self, rule: EventualFlush) -> Option<FlushCandidate> {
-        self.next_flush_candidate_skipping(rule, &HashSet::new())
+        self.next_flush_candidate_skipping(rule, &HashSet::new(), None)
     }
 
     pub(crate) fn next_flush_candidate_skipping(
         &self,
         rule: EventualFlush,
         attempted_cfs: &HashSet<crate::types::ColumnFamilyId>,
+        oldest_shared: Option<&crate::wal::format::SealedFacts>,
     ) -> Option<FlushCandidate> {
         let retry_candidate = self
             .column_families
@@ -509,6 +485,21 @@ impl RuntimeState {
                     },
                 ),
             };
+        // Force the family preventing the oldest sealed member from retiring.
+        // A newer family's larger gap cannot help advance this prefix.
+        let pressured = self
+            .column_families
+            .values()
+            .any(|cf| cf.memtable.size_bytes() > 0 && gap_of(self, cf) >= limit);
+        if pressured {
+            if let Some(cf_id) = self.oldest_wal_blocking_family(oldest_shared) {
+                return self
+                    .column_families
+                    .get(&cf_id)
+                    .filter(|cf| cf.memtable.size_bytes() > 0 && !attempted_cfs.contains(&cf_id))
+                    .map(|_| FlushCandidate { cf_id, reason });
+            }
+        }
         self.column_families
             .iter()
             .filter(|(cf_id, _cf_state)| !attempted_cfs.contains(cf_id))
@@ -523,6 +514,33 @@ impl RuntimeState {
             .map(|(cf_id, _)| FlushCandidate { cf_id, reason })
     }
 
+    /// A family the local manifest has not flushed through the oldest WAL
+    /// segment: the oldest published one when given, else the oldest sealed
+    /// local member.
+    pub(crate) fn oldest_wal_blocking_family(
+        &self,
+        oldest_shared: Option<&crate::wal::format::SealedFacts>,
+    ) -> Option<crate::types::ColumnFamilyId> {
+        let facts = oldest_shared.or_else(|| {
+            self.wal
+                .history
+                .ledger()
+                .member_facts()
+                .next()
+                .and_then(|member| member.sealed.as_ref())
+        })?;
+        facts.max_seq_per_cf.iter().find_map(|&(cf, sequence)| {
+            let needs_flush = match self.manifest.flush_frontiers().get(cf) {
+                Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) => {
+                    sequence > through_sequence
+                }
+                Ok(crate::metadata::FamilyFrontier::Dropped) => false,
+                Err(_) => true,
+            };
+            needs_flush.then_some(cf)
+        })
+    }
+
     pub(crate) fn reinitialize_active_memtable_segment_tracking(&mut self) {
         for cf_state in self.column_families.values_mut() {
             if cf_state.memtable.size_bytes() > 0 {
@@ -534,5 +552,121 @@ impl RuntimeState {
                 cf_state.active_memtable_started_in_segment = 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    #[test]
+    fn should_not_stall_for_active_memtable_held_by_partly_applied_family() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::new(directory.path().to_path_buf(), true);
+        state.limits.memtable_flush_threshold = 1024;
+        let other = state.create_cf("other".into()).unwrap();
+        let cf = state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 4096], 1, None)
+            .unwrap();
+        cf.mark_partially_applied(2);
+        state.recompute_total_memtable_bytes();
+
+        // Act
+        let stalled = state.should_hard_stall_writes(other);
+
+        // Assert
+        assert!(state.total_memtable_bytes >= 2048);
+        assert!(!stalled);
+    }
+
+    #[test]
+    fn should_stall_when_flushable_bytes_reach_hard_limit_beside_partly_applied_family() {
+        // Arrange: the exemption covers only the marked family's bytes; an
+        // unmarked family at twice the flush threshold still stalls.
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::new(directory.path().to_path_buf(), true);
+        state.limits.memtable_flush_threshold = 1024;
+        let other = state.create_cf("other".into()).unwrap();
+        let cf = state.get_cf_mut(0).unwrap();
+        cf.memtable
+            .put_with_seq(b"partial".to_vec(), vec![1; 4096], 1, None)
+            .unwrap();
+        cf.mark_partially_applied(2);
+        state
+            .get_cf_mut(other)
+            .unwrap()
+            .memtable
+            .put_with_seq(b"flushable".to_vec(), vec![2; 2048], 3, None)
+            .unwrap();
+        state.recompute_total_memtable_bytes();
+
+        // Act
+        let stalled = state.should_hard_stall_writes(other);
+
+        // Assert
+        assert!(stalled);
+    }
+
+    #[test]
+    fn should_force_the_family_blocking_the_oldest_segment_before_a_larger_gap() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = RuntimeState::new(directory.path().to_path_buf(), true);
+        state.limits.memtable_flush_threshold = 1024 * 1024;
+        state.limits.eventual_flush_segment_gap = 1;
+        let blocker = state.create_cf("blocker".into()).unwrap();
+        state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+        let facts = crate::wal::format::SealedFacts {
+            link: crate::wal::format::ChainLink {
+                id: 1,
+                last_seq: 3,
+                digest: [1; 16],
+            },
+            record_count: 1,
+            data_len: 160,
+            max_seq_per_cf: vec![(blocker, 3)],
+        };
+        let rotation = state
+            .wal
+            .history
+            .prepare_rotation(facts.clone(), 4)
+            .unwrap();
+        state.wal.history.record_rotation(rotation).unwrap();
+        crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 10).unwrap();
+        for id in [0, blocker] {
+            state
+                .get_cf(id)
+                .unwrap()
+                .memtable
+                .put_with_seq(b"key".to_vec(), b"value".to_vec(), 3, None)
+                .unwrap();
+        }
+        state
+            .get_cf_mut(0)
+            .unwrap()
+            .active_memtable_started_in_segment = 1;
+        state
+            .get_cf_mut(blocker)
+            .unwrap()
+            .active_memtable_started_in_segment = 9;
+
+        // Act
+        let candidate = state
+            .next_flush_candidate(EventualFlush::SegmentGap)
+            .unwrap();
+
+        // Assert
+        assert_eq!(candidate.cf_id, blocker);
+        assert_eq!(candidate.reason, FlushReason::WalSegmentGap);
+        // Act: cloud acknowledgement has already retired the local cache.
+        state.wal.history.retire_below(10).unwrap();
+        let cloud_candidate = state
+            .next_flush_candidate_skipping(EventualFlush::SegmentGap, &HashSet::new(), Some(&facts))
+            .unwrap();
+
+        // Assert: the persisted remote summary still targets the same blocker.
+        assert_eq!(cloud_candidate.cf_id, blocker);
     }
 }

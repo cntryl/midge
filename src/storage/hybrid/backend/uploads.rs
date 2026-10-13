@@ -71,7 +71,9 @@ impl HybridStorage {
     /// keeps failing does not keep its caller polling. `None` when nothing
     /// is queued.
     pub(crate) fn next_upload_turn(&self, poll: Duration) -> Option<Duration> {
-        self.upload_queue.lock().next_turn(Instant::now(), poll)
+        let upload = self.upload_queue.lock().next_turn(Instant::now(), poll);
+        let cleanup = self.next_remote_delete_turn(poll);
+        upload.into_iter().chain(cleanup).min()
     }
 
     /// Queue a local file for bounded remote publication under an explicit
@@ -146,6 +148,8 @@ impl HybridStorage {
             let mut events = self.event_queue.lock();
             events.drain()
         };
+
+        self.process_pending_remote_deletes();
 
         let mut queue = self.upload_queue.lock();
         let now = Instant::now();

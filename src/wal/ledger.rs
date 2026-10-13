@@ -75,6 +75,10 @@ impl TryFrom<String> for HolderId {
 pub(crate) struct Member {
     pub(crate) open: OpenFacts,
     pub(crate) sealed: Option<SealedFacts>,
+    /// Prefix fsynced before acknowledgement. Missing legacy evidence never
+    /// licenses dropping corruption in an open segment.
+    #[serde(default)]
+    pub(crate) durable_bytes: Option<u64>,
 }
 
 impl Member {
@@ -83,7 +87,11 @@ impl Member {
     }
 
     fn opened(open: OpenFacts) -> Self {
-        Self { open, sealed: None }
+        Self {
+            open,
+            sealed: None,
+            durable_bytes: Some(crate::wal::format::HEADER_LEN as u64),
+        }
     }
 }
 
@@ -121,6 +129,16 @@ pub(crate) enum LedgerEdit {
     /// Raise the sequence reservation to `through` (#843): sequences up to
     /// it may be handed out. It must exceed the current reservation.
     Reserve { through: u64 },
+    /// Record an open-segment byte boundary only after its fsync completed.
+    SyncOpen { id: SegmentId, through_bytes: u64 },
+    /// After salvage authority commits `floor`, permit cutting the open file
+    /// to its verified prefix. The allocation floor survives a crash before
+    /// the physical cut, and the byte boundary no longer claims discarded data.
+    SalvageOpen {
+        id: SegmentId,
+        valid_bytes: u64,
+        floor: u64,
+    },
 }
 
 /// The WAL segment ledger. See the module documentation.
@@ -265,6 +283,12 @@ impl WalLedger {
             LedgerEdit::SetAside { from, cut, open } => self.set_aside(*from, cut.as_ref(), *open),
             LedgerEdit::Rebase { anchor, open } => self.rebase(*anchor, *open),
             LedgerEdit::Reserve { through } => self.reserve(*through),
+            LedgerEdit::SyncOpen { id, through_bytes } => self.sync_open(*id, *through_bytes),
+            LedgerEdit::SalvageOpen {
+                id,
+                valid_bytes,
+                floor,
+            } => self.salvage_open(*id, *valid_bytes, *floor),
         }
     }
 
@@ -374,6 +398,7 @@ impl WalLedger {
         self.members.truncate(kept);
         if let (Some(cut), Some(last)) = (cut, self.members.back_mut()) {
             last.sealed = Some(cut.clone());
+            last.durable_bytes = last.durable_bytes.map(|bytes| bytes.min(cut.data_len));
         }
         self.members.push_back(Member::opened(open));
         self.next_segment_id = next;
@@ -392,6 +417,46 @@ impl WalLedger {
         self.members = VecDeque::from([Member::opened(open)]);
         self.anchor = anchor;
         self.next_segment_id = next;
+        Ok(())
+    }
+
+    fn salvage_open(
+        &mut self,
+        id: SegmentId,
+        valid_bytes: u64,
+        floor: u64,
+    ) -> Result<(), LedgerError> {
+        if id != self.open_segment() || valid_bytes < crate::wal::format::HEADER_LEN as u64 {
+            return Err(LedgerError::BrokenChain(
+                "invalid open WAL salvage boundary".into(),
+            ));
+        }
+        let member = self.members.back_mut().expect("ledger has an open member");
+        member.durable_bytes = Some(
+            member
+                .durable_bytes
+                .map_or(valid_bytes, |bytes| bytes.min(valid_bytes)),
+        );
+        self.seq_reserved_through = self.seq_reserved_through.max(floor);
+        Ok(())
+    }
+
+    fn sync_open(&mut self, id: SegmentId, through_bytes: u64) -> Result<(), LedgerError> {
+        let open = self.open_member();
+        if id != open.id()
+            || through_bytes
+                < open
+                    .durable_bytes
+                    .unwrap_or(crate::wal::format::HEADER_LEN as u64)
+        {
+            return Err(LedgerError::BrokenChain(
+                "WAL sync boundary must advance the open member".into(),
+            ));
+        }
+        self.members
+            .back_mut()
+            .expect("ledger has an open member")
+            .durable_bytes = Some(through_bytes);
         Ok(())
     }
 
@@ -476,6 +541,29 @@ impl WalLedger {
             .iter()
             .take(self.members.len().saturating_sub(1))
             .map(Member::id)
+    }
+
+    /// One past the sealed leading run whose persisted family maxima are
+    /// covered. Unknown families must return false; a missing summary or an
+    /// open member stops retirement. This never reads segment payloads.
+    pub(crate) fn retirable_prefix(
+        &self,
+        mut covered: impl FnMut(u32, u64) -> bool,
+    ) -> Option<SegmentId> {
+        let mut below = None;
+        for member in &self.members {
+            let Some(facts) = &member.sealed else { break };
+            if (facts.record_count > 0 && facts.max_seq_per_cf.is_empty())
+                || !facts
+                    .max_seq_per_cf
+                    .iter()
+                    .all(|&(cf, sequence)| covered(cf, sequence))
+            {
+                break;
+            }
+            below = member.id().checked_add(1);
+        }
+        below
     }
 
     /// The facts the ledger expects of member `id`.
@@ -591,6 +679,17 @@ impl TryFrom<LedgerImage> for WalLedger {
         let mut prev = anchor;
         let mut epoch = None;
         for member in &members {
+            if member.durable_bytes.is_some_and(|bytes| {
+                bytes < crate::wal::format::HEADER_LEN as u64
+                    || member
+                        .sealed
+                        .as_ref()
+                        .is_some_and(|sealed| bytes > sealed.data_len)
+            }) {
+                return Err(LedgerError::UnreachableState(
+                    "invalid durable WAL byte boundary",
+                ));
+            }
             opens_after(&member.open, prev, epoch)
                 .map_err(|_| LedgerError::UnreachableState("the members do not chain"))?;
             epoch = Some(member.open.epoch);

@@ -47,13 +47,18 @@ impl Fixture {
     }
 
     fn seed_manifest(&self) -> Manifest {
-        let edit = ManifestEdit::BumpWalSeq { seq: 7 };
+        let edit = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 7,
+        };
         let edit_id = self
             .store
             .append_for(Origin::Ddl, &edit)
             .expect("genuine durable baseline journal");
         let mut manifest = Manifest::default();
-        manifest.apply_edit(&edit);
+        manifest
+            .apply_edit(&edit)
+            .expect("valid manifest fixture edit");
         manifest.note_applied_journal_edit(edit_id);
         manifest
     }
@@ -75,7 +80,10 @@ fn should_account_exact_frames_when_actual_single_and_batch_edits_commit() {
             .store
             .append_for(
                 Origin::OrdinaryLocalFlush,
-                &ManifestEdit::BumpWalSeq { seq: 1 },
+                &ManifestEdit::BumpNextSstSeq {
+                    cf_id: 0,
+                    next_seq: 1,
+                },
             )
             .expect("actual single append");
         let second = fixture
@@ -83,8 +91,14 @@ fn should_account_exact_frames_when_actual_single_and_batch_edits_commit() {
             .append_batch_for(
                 Origin::OrdinaryLocalFlush,
                 &[
-                    ManifestEdit::BumpWalSeq { seq: 2 },
-                    ManifestEdit::BumpWalSeq { seq: 3 },
+                    ManifestEdit::BumpNextSstSeq {
+                        cf_id: 0,
+                        next_seq: 2,
+                    },
+                    ManifestEdit::BumpNextSstSeq {
+                        cf_id: 0,
+                        next_seq: 3,
+                    },
                 ],
             )
             .expect("actual batch append");
@@ -102,13 +116,21 @@ fn should_account_exact_frames_when_actual_single_and_batch_edits_commit() {
         // Assert: prove framing/data first, then compare the producer to the oracle.
         assert_eq!((first, second), (1, 2));
         assert_eq!(replayed.len(), 2, "single edit and one atomic batch record");
-        assert!(matches!(replayed[0], ManifestEdit::BumpWalSeq { seq: 1 }));
+        assert!(matches!(
+            replayed[0],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1
+            }
+        ));
         let ManifestEdit::Batch(batch) = &replayed[1] else {
             panic!("the second record must retain its atomic batch");
         };
         assert_eq!(batch.len(), 2);
         for (edit, sequence) in batch.iter().zip(2..=3) {
-            assert!(matches!(edit, ManifestEdit::BumpWalSeq { seq } if *seq == sequence));
+            assert!(
+                matches!(edit, ManifestEdit::BumpNextSstSeq { cf_id: 0, next_seq: seq } if *seq == sequence)
+            );
         }
         assert_eq!(
             fixture.oracle.writes().len(),
@@ -276,7 +298,10 @@ fn should_preserve_returned_frames_when_actual_journal_sync_fails() {
         // Act: both real frames return successfully, then required sync fails.
         let result = fixture.store.append_for(
             Origin::OrdinaryLocalFlush,
-            &ManifestEdit::BumpWalSeq { seq: 9 },
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 9,
+            },
         );
         let offered = fixture
             .oracle
@@ -310,8 +335,14 @@ fn should_preserve_returned_frames_when_actual_journal_sync_fails() {
 
 fn append_actual_partial_frame(fixture: &Fixture) {
     let source = Fixture::new();
-    journal::append_edit_with_fs(&source.fs, &ManifestEdit::BumpWalSeq { seq: 2 })
-        .expect("generate a genuine encoded edit and marker");
+    journal::append_edit_with_fs(
+        &source.fs,
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 2,
+        },
+    )
+    .expect("generate a genuine encoded edit and marker");
     let frames = source.oracle.writes();
     assert_eq!(frames.len(), 2);
     let frame_length = usize::try_from(frames[0].bytes).unwrap();
@@ -335,8 +366,14 @@ fn should_account_position_repair_when_actual_partial_eof_precedes_append() {
     crate::failpoints::with_read_gate(|| {
         // Arrange: real durable prefix plus a real truncated encoded next frame.
         let fixture = Fixture::new();
-        journal::append_edit_with_fs(&fixture.fs, &ManifestEdit::BumpWalSeq { seq: 1 })
-            .expect("actual durable baseline prefix");
+        journal::append_edit_with_fs(
+            &fixture.fs,
+            &ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1,
+            },
+        )
+        .expect("actual durable baseline prefix");
         let retained = fixture.bytes(crate::metadata::files::JOURNAL);
         append_actual_partial_frame(&fixture);
         fixture.oracle.clear_writes();
@@ -345,7 +382,13 @@ fn should_account_position_repair_when_actual_partial_eof_precedes_append() {
         // Act: the fresh store reconstructs position, repairs, then appends.
         let assigned = fixture
             .store
-            .append_for(Origin::Recovery, &ManifestEdit::BumpWalSeq { seq: 3 })
+            .append_for(
+                Origin::Recovery,
+                &ManifestEdit::BumpNextSstSeq {
+                    cf_id: 0,
+                    next_seq: 3,
+                },
+            )
             .expect("actual partial EOF repair and next append");
         let replayed =
             journal::replay_journal_with_fs(&fixture.fs).expect("actual strict repaired replay");
@@ -363,8 +406,20 @@ fn should_account_position_repair_when_actual_partial_eof_precedes_append() {
         // Assert: genuine positive rewrite and exact data precede metric checks.
         assert_eq!(assigned, 2);
         assert_eq!(replayed.len(), 2);
-        assert!(matches!(replayed[0], ManifestEdit::BumpWalSeq { seq: 1 }));
-        assert!(matches!(replayed[1], ManifestEdit::BumpWalSeq { seq: 3 }));
+        assert!(matches!(
+            replayed[0],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 1
+            }
+        ));
+        assert!(matches!(
+            replayed[1],
+            ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 3
+            }
+        ));
         assert!(fixture
             .bytes(crate::metadata::files::JOURNAL)
             .starts_with(&retained));

@@ -24,15 +24,50 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-mod gc_pin_tests;
 mod maintenance_tests;
+mod retirement_tests;
 
-fn install_prune_gc_pins_for_test(el: &mut EventLoop, segment: u64, max_sequence: u64) {
-    el.wal_transition = crate::runtime::wal_transition::WalTransitionProtocol::new();
-    el.wal_transition
-        .initialize_gc_pins(el.state.wal.open_segment(), max_sequence);
-    el.wal_transition
-        .register_recovered(segment, max_sequence, true);
+fn test_flush_frontier(manifest: &crate::metadata::Manifest, cf_id: u32) -> u64 {
+    match manifest
+        .flush_frontiers()
+        .get(cf_id)
+        .expect("known fixture family")
+    {
+        crate::metadata::FamilyFrontier::Live { through_sequence } => through_sequence,
+        crate::metadata::FamilyFrontier::Dropped => u64::MAX,
+    }
+}
+
+fn manifest_with_frontier_for_test(sequence: u64) -> crate::metadata::Manifest {
+    let mut manifest = serde_json::to_value(crate::metadata::Manifest::default()).unwrap();
+    manifest["flushed_through"][0]["through_sequence"] = sequence.into();
+    let manifest: crate::metadata::Manifest = serde_json::from_value(manifest).unwrap();
+    manifest.validate_persisted().unwrap();
+    manifest
+}
+
+fn set_test_flush_frontier(el: &mut EventLoop, cf_id: u32, sequence: u64) {
+    // A compacted persisted checkpoint may retain its frontier without any SST.
+    let sequence = sequence.max(test_flush_frontier(&el.state.manifest, cf_id));
+    let mut value = serde_json::to_value(&*el.state.manifest).unwrap();
+    let row = value["flushed_through"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|row| row["cf_id"] == cf_id)
+        .expect("fixture family exists");
+    row["through_sequence"] = sequence.into();
+    let manifest: crate::metadata::Manifest = serde_json::from_value(value).unwrap();
+    manifest.validate_persisted().unwrap();
+    *el.state.manifest.test_mut() = manifest;
+}
+
+fn publish_test_flush_frontier(el: &mut EventLoop, cf_id: u32, sequence: u64) {
+    set_test_flush_frontier(el, cf_id, sequence);
+    crate::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
+        .expect("save durable fixture frontier");
+    el.mirror_metadata_to_authoritative_cloud()
+        .expect("commit shared fixture frontier");
 }
 
 #[cfg(feature = "failpoints")]
@@ -58,67 +93,6 @@ fn queue_generation_for_maintenance_test(
         None,
     )?;
     el.freeze_active_memtable(0)?;
-    Ok(())
-}
-
-#[test]
-fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    el.cloud_coordinator
-        .hybrid_storage
-        .as_ref()
-        .unwrap()
-        .enable_ephemeral_sst_cache(64 * 1024 * 1024);
-    seed_cloud_prune_candidate(&mut el, 81, 81);
-    el.state.wal.frontiers.set_cloud_durable_for_test(81);
-    let bytes = add_valid_manifest_sst_for_test(&mut el, "outage-covered.sst", 81);
-    std::fs::remove_file(remote_sst_path_for_test(&el, "outage-covered.sst"))?;
-    queue_generation_for_maintenance_test(&mut el, 82)?;
-    el.cloud_coordinator.cloud_maintenance.next =
-        super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
-
-    // Act: one failed cloud proof gives the next ready flush its turn.
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
-    el.schedule_next_flush_worker();
-    assert!(
-        el.flush_actor.is_inflight(),
-        "a failing retirement attempt must not monopolize maintenance"
-    );
-    write_test_file(remote_sst_path_for_test(&el, "outage-covered.sst"), &bytes);
-    let built = el
-        .flush_worker_result_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("flush build");
-    el.handle_flush_worker_result(built);
-    queue_generation_for_maintenance_test(&mut el, 83)?;
-    let published = el
-        .flush_worker_result_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("flush publish");
-    el.handle_flush_worker_result(published);
-    let mirrored = el
-        .flush_worker_result_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("flush metadata mirror");
-    el.handle_flush_worker_result(mirrored);
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert: an immutable remains ready throughout the second proof attempt.
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
-    assert!(!remote_wal_path_for_test(&el, 81).exists());
-    assert!(el.state.has_due_immutable_flush());
-    assert_eq!(el.state.flush_metrics.publish_count, 1);
-    el.schedule_next_flush_worker();
-    assert!(
-        el.flush_actor.is_inflight(),
-        "flush progress resumes after retirement"
-    );
     Ok(())
 }
 
@@ -264,11 +238,59 @@ fn should_schedule_wal_retirement_before_another_ready_flush() -> crate::common:
     assert!(!el.flush_actor.is_inflight());
     drain_prune_completion_for_test(&mut el);
     assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(82),
-        "the immutable generation's first segment remains authoritative"
-    );
-    assert!(remote_wal_path_for_test(&el, 82).exists());
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(82));
+    assert!(!remote_wal_path_for_test(&el, 82).exists());
+    Ok(())
+}
+
+#[test]
+fn should_not_spawn_retirement_worker_when_oldest_published_segment_is_unflushed(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: two cloud-acknowledged segments, and no flush covers either.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    seed_cloud_prune_candidate(&mut el, 82, 82);
+    el.state.wal.frontiers.set_cloud_durable_for_test(82);
+    el.cloud_coordinator.cloud_maintenance.next =
+        super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+
+    // Assert: the committed generation cannot cover what the local
+    // frontiers do not, so no worker takes the gate only to answer Busy.
+    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    assert!(!el.publication_gate.is_active());
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(82));
+    Ok(())
+}
+
+#[test]
+fn should_retire_flushed_oldest_segment_when_a_later_published_segment_is_unflushed(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a flush covers segment 81 only.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    seed_cloud_prune_candidate(&mut el, 82, 82);
+    el.state.wal.frontiers.set_cloud_durable_for_test(82);
+    add_valid_manifest_sst_for_test(&mut el, "covered.sst", 81);
+    el.cloud_coordinator.cloud_maintenance.next =
+        super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    let spawned = el.cloud_coordinator.cloud_wal_prune_worker.is_some();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(spawned, "a flushed oldest segment must still retire");
+    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(el.cloud_coordinator.cloud_wal.acks().contains(82));
     Ok(())
 }
 
@@ -680,107 +702,11 @@ struct BlockingDeleteStorageBackend {
     release_delete: Arc<AtomicBool>,
 }
 
-struct PostRetirementDependencyChangeBackend {
-    inner: Arc<crate::storage::filesystem::FileSystem>,
-    armed: AtomicBool,
-    catalog_retired: AtomicBool,
-    post_retirement_sst_heads: AtomicUsize,
-}
-
 struct BlockedDeleteReleaseGuard(Arc<AtomicBool>);
 
 impl Drop for BlockedDeleteReleaseGuard {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
-    }
-}
-
-impl PostRetirementDependencyChangeBackend {
-    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
-        Self {
-            inner,
-            armed: AtomicBool::new(false),
-            catalog_retired: AtomicBool::new(false),
-            post_retirement_sst_heads: AtomicUsize::new(0),
-        }
-    }
-
-    fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
-    }
-
-    fn post_retirement_sst_heads(&self) -> usize {
-        self.post_retirement_sst_heads.load(Ordering::SeqCst)
-    }
-}
-
-impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
-    fn submit_range_read_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        range: std::ops::Range<u64>,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.inner
-            .submit_range_read_request(request, range, callback);
-    }
-
-    fn submit_range_head_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
-    ) {
-        self.inner.submit_range_head_request(request, callback);
-    }
-
-    fn submit_metadata_read_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        self.inner.submit_metadata_read_request(request, callback);
-    }
-
-    fn submit_head_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if self.catalog_retired.load(Ordering::SeqCst) && request.key.starts_with("sst/") {
-            self.post_retirement_sst_heads
-                .fetch_add(1, Ordering::SeqCst);
-            let _ = callback.send(crate::storage::StorageEvent::HeadComplete {
-                key: request.key,
-                result: crate::storage::StorageOutcome::Err(
-                    "injected post-retirement SST identity change"
-                        .to_string()
-                        .into(),
-                ),
-            });
-            return;
-        }
-        self.inner.submit_head_request(request, callback);
-    }
-
-    fn submit_delete_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        callback: crate::storage::StorageCallback,
-    ) {
-        self.inner.submit_delete_request(request, callback);
-    }
-
-    fn submit_write_request(
-        &self,
-        request: crate::storage::StorageRequest,
-        data: Vec<u8>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        if self.armed.load(Ordering::SeqCst) && request.key == crate::wal::cloud_catalog::OBJECT_KEY
-        {
-            self.catalog_retired.store(true, Ordering::SeqCst);
-        }
-        self.inner.submit_write_request(request, data, callback);
     }
 }
 
@@ -1509,7 +1435,7 @@ fn seal_and_publish_for_test(el: &mut EventLoop, segment_id: u64, max_sequence: 
         let prev = crate::wal::format::SegmentHeader::decode(&sealed)
             .expect("the sealed candidate's header")
             .prev;
-        anchor_catalog_for_test(storage, prev);
+        anchor_catalog_for_test(el, prev);
         cloud_persistence(storage)
             .publish_remote_wal_segment(
                 segment_id,
@@ -1526,10 +1452,23 @@ fn seal_and_publish_for_test(el: &mut EventLoop, segment_id: u64, max_sequence: 
 /// a writer had published and retired every segment through it (#844):
 /// ledger fixtures seal empty segments, which no writer publishes, so a
 /// candidate's predecessor never reaches the catalog.
-fn anchor_catalog_for_test(
-    storage: &crate::storage::HybridStorage,
-    prev: crate::wal::format::ChainLink,
-) {
+fn anchor_catalog_for_test(el: &EventLoop, prev: crate::wal::format::ChainLink) {
+    let storage = el.cloud_coordinator.hybrid_storage.as_ref().unwrap();
+    let retired_by = if prev == crate::wal::format::ChainLink::GENESIS {
+        crate::lease::SharedGenerationId::NONE
+    } else {
+        match el
+            .fencing
+            .leader_store
+            .as_ref()
+            .expect("shared fixture authority")
+            .read_committed_metadata(Duration::from_secs(5))
+            .expect("read the committed fixture generation")
+        {
+            crate::lease::CloudMetadataHead::Committed(generation) => generation.id,
+            head => panic!("retired fixture prefix requires committed metadata, got {head:?}"),
+        }
+    };
     for key in [
         crate::wal::cloud_catalog::OBJECT_KEY,
         crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
@@ -1553,6 +1492,8 @@ fn anchor_catalog_for_test(
             .unwrap_or(1)
             .max(prev.id + 1);
         json["anchor"] = serde_json::to_value(prev).expect("encode the anchor");
+        json["retired_by"] =
+            serde_json::to_value(retired_by).expect("encode retirement generation");
         json["next_segment_id"] = serde_json::json!(next);
         let catalog: crate::wal::cloud_catalog::WalPublicationCatalog =
             serde_json::from_value(json).expect("an anchored catalog");
@@ -1582,7 +1523,6 @@ fn seed_cloud_prune_candidate_with_records(
     max_sequence: u64,
     records: Vec<crate::wal::WalRecord>,
 ) {
-    el.state.manifest.test_mut().last_persisted_sequence = max_sequence;
     el.cloud_coordinator
         .cloud_wal
         .acknowledge_for_test(segment_id, max_sequence);
@@ -1592,24 +1532,6 @@ fn seed_cloud_prune_candidate_with_records(
         crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
     }
     seal_and_publish_for_test(el, segment_id, max_sequence, &bytes);
-}
-
-fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
-    el.state
-        .manifest
-        .test_mut()
-        .files
-        .push(crate::metadata::FileMeta {
-            name: sst_name.to_string(),
-            level: 0,
-            size_bytes: 128,
-            cf_id: 0,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"z".to_vec()),
-            smallest_seq: Some(1),
-            largest_seq: Some(max_sequence),
-            ..Default::default()
-        });
 }
 
 fn add_manifest_sst_meta_for_test(
@@ -1651,42 +1573,6 @@ fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     writer.finish_bytes().expect("finish test SST bytes")
 }
 
-fn valid_value_sst_bytes_with_expiration_for_test(
-    key: &[u8],
-    value: &[u8],
-    seq: u64,
-    expiration: u64,
-) -> Vec<u8> {
-    use crate::sst::SstFactory;
-
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
-    let mut writer = factory.create().expect("create test SST writer");
-    writer
-        .add_with_meta(
-            key,
-            Some(value),
-            seq,
-            crate::types::EntryType::Put,
-            Some(expiration),
-        )
-        .expect("add expiring test SST entry");
-    writer.finish_bytes().expect("finish test SST bytes")
-}
-
-fn valid_sst_bytes_without_key_for_test(seq: u64) -> Vec<u8> {
-    use crate::sst::SstFactory;
-
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
-    let mut writer = factory.create().expect("create test SST writer");
-    writer
-        .add_with_meta(b"a", Some(b"first"), seq, EntryType::Put, None)
-        .expect("add first test SST entry");
-    writer
-        .add_with_meta(b"z", Some(b"last"), seq, EntryType::Put, None)
-        .expect("add last test SST entry");
-    writer.finish_bytes().expect("finish test SST bytes")
-}
-
 fn valid_point_tombstone_sst_bytes_for_test(key: &[u8], seq: u64) -> Vec<u8> {
     use crate::sst::SstFactory;
 
@@ -1696,19 +1582,6 @@ fn valid_point_tombstone_sst_bytes_for_test(key: &[u8], seq: u64) -> Vec<u8> {
         .add_with_meta(key, None, seq, crate::types::EntryType::Delete, None)
         .expect("add point tombstone test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
-}
-
-fn valid_range_tombstone_sst_bytes_for_test(start: &[u8], end: &[u8], seq: u64) -> Vec<u8> {
-    use crate::sst::SstFactory;
-
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
-    let mut writer = factory.create().expect("create test SST writer");
-    writer
-        .add_range_tombstone(start, end, seq)
-        .expect("add test range tombstone");
-    writer
-        .finish_bytes()
-        .expect("finish range tombstone test SST bytes")
 }
 
 /// Add an SST holding every version of `prune-candidate` in `sequences`.
@@ -1777,35 +1650,7 @@ fn add_valid_manifest_sst_for_test(
             ..Default::default()
         });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
-    bytes
-}
-
-fn add_valid_value_manifest_sst_with_expiration_for_test(
-    el: &mut EventLoop,
-    sst_name: &str,
-    key: &[u8],
-    value: &[u8],
-    seq: u64,
-    expiration: u64,
-) -> Vec<u8> {
-    let bytes = valid_value_sst_bytes_with_expiration_for_test(key, value, seq, expiration);
-    el.state
-        .manifest
-        .test_mut()
-        .files
-        .push(crate::metadata::FileMeta {
-            name: sst_name.to_string(),
-            level: 0,
-            size_bytes: bytes.len() as u64,
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: 0,
-            smallest_key: Some(key.to_vec()),
-            largest_key: Some(key.to_vec()),
-            smallest_seq: Some(seq),
-            largest_seq: Some(seq),
-            ..Default::default()
-        });
-    write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+    publish_test_flush_frontier(el, 0, max_sequence);
     bytes
 }
 
@@ -1828,34 +1673,6 @@ fn add_valid_point_tombstone_manifest_sst_for_test(
             cf_id: 0,
             smallest_key: Some(key.to_vec()),
             largest_key: Some(key.to_vec()),
-            smallest_seq: Some(seq),
-            largest_seq: Some(seq),
-            ..Default::default()
-        });
-    write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
-    bytes
-}
-
-fn add_valid_range_tombstone_manifest_sst_for_test(
-    el: &mut EventLoop,
-    sst_name: &str,
-    start: &[u8],
-    end: &[u8],
-    seq: u64,
-) -> Vec<u8> {
-    let bytes = valid_range_tombstone_sst_bytes_for_test(start, end, seq);
-    el.state
-        .manifest
-        .test_mut()
-        .files
-        .push(crate::metadata::FileMeta {
-            name: sst_name.to_string(),
-            level: 0,
-            size_bytes: bytes.len() as u64,
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: 0,
-            smallest_key: Some(start.to_vec()),
-            largest_key: Some(end.to_vec()),
             smallest_seq: Some(seq),
             largest_seq: Some(seq),
             ..Default::default()
@@ -2005,19 +1822,6 @@ fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, 
         }
         let data = std::fs::read(&local_path).expect("read local metadata");
         put_cloud_metadata_for_test(cloud, file_name, data);
-    }
-}
-
-fn delete_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, file_name: &str) {
-    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_delete(&key, tx);
-    match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(crate::storage::cloud::CloudEvent::Delete {
-            result: crate::storage::cloud::CloudOutcome::Ok(()),
-            ..
-        }) => {}
-        other => panic!("metadata delete for '{key}' failed: {other:?}"),
     }
 }
 
@@ -2627,17 +2431,14 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.state.manifest.test_mut().last_persisted_sequence = 10;
+    set_test_flush_frontier(&mut el, 0, 10);
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(crate::common::MidgeError::Internal)?;
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
         "metadata-fencing".to_string(),
     ));
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 5,
-        ..Default::default()
-    };
+    let remote_manifest = manifest_with_frontier_for_test(5);
     put_cloud_metadata_for_test(
         &metadata_storage,
         "manifest.snapshot.json",
@@ -2664,7 +2465,8 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
     ))
     .expect("parse retained remote manifest");
     assert_eq!(
-        retained.last_persisted_sequence, 5,
+        test_flush_frontier(&retained, 0),
+        5,
         "a stale writer must not overwrite the authoritative remote manifest"
     );
     Ok(())
@@ -2677,48 +2479,50 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.state.manifest.test_mut().last_persisted_sequence = 10;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+    publish_test_flush_frontier(&mut el, 0, 11);
+    let store = Arc::clone(
+        el.fencing
+            .leader_store
+            .as_ref()
+            .expect("shared leader store"),
+    );
+    let previous = store.read_committed_metadata(Duration::from_secs(5))?;
+    *el.state.manifest.test_mut() = manifest_with_frontier_for_test(10);
+    crate::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
         .map_err(crate::common::MidgeError::Internal)?;
 
-    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
-        metadata_backend,
-        "metadata-test".to_string(),
-    ));
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 11,
-        ..Default::default()
-    };
-    put_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
-    );
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
-
-    let error = el
-        .mirror_metadata_to_authoritative_cloud()
-        .expect_err("newer remote manifest metadata must reject stale local mirror");
-
     // Act
+    let result = el.mirror_metadata_to_authoritative_cloud();
+
     // Assert
     assert!(
-        error.to_string().contains("newer")
-            || error.to_string().contains("ahead")
-            || error.to_string().contains("stale"),
-        "unexpected stale metadata mirror error: {error}"
+        matches!(result, Err(crate::common::MidgeError::Fenced(_))),
+        "{result:?}"
     );
-    let retained: crate::metadata::Manifest = serde_json::from_slice(&get_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-    ))
-    .expect("parse retained remote manifest");
     assert_eq!(
-        retained.last_persisted_sequence, 11,
-        "stale metadata mirror must not overwrite newer remote manifest"
+        store.read_committed_metadata(Duration::from_secs(5))?,
+        previous
     );
-
+    let loader = crate::runtime::hybrid_persistence::SharedMetadataSnapshot::new(
+        el.cloud_coordinator
+            .cloud_metadata_storage
+            .as_ref()
+            .unwrap()
+            .clone(),
+        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        Arc::clone(&store),
+        el.fencing.leader_holder_id.as_ref().unwrap().clone(),
+        el.state.writer_epoch,
+    );
+    let authority = loader.committed_retirement_authority_within(
+        &crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+    )?;
+    assert_eq!(
+        authority.frontiers().get(0)?,
+        crate::metadata::FamilyFrontier::Live {
+            through_sequence: 11
+        }
+    );
     Ok(())
 }
 
@@ -2776,14 +2580,11 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.state.manifest.test_mut().last_persisted_sequence = 30;
+    set_test_flush_frontier(&mut el, 0, 30);
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(crate::common::MidgeError::Internal)?;
 
-    let advanced_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 31,
-        ..Default::default()
-    };
+    let advanced_manifest = manifest_with_frontier_for_test(31);
     let metadata_backend = Arc::new(AdvanceCommittedPointerBeforeCasBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::clone(&metadata_backend) as Arc<dyn crate::storage::cloud::CloudBackend>,
@@ -2824,7 +2625,11 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
             ..
         })
     ));
-    advanced_generation.manifest_sequence = 31;
+    advanced_generation.id = advanced_generation
+        .id
+        .checked_next()
+        .expect("generation space");
+    advanced_generation.manifest_horizon = advanced_manifest.edit_checkpoint_id;
 
     // A local sequence-30 edit requires another pointer commit. The backend
     // installs the newer complete generation after preflight, just before CAS.
@@ -2849,7 +2654,8 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     )
     .expect("parse retained committed race manifest");
     assert_eq!(
-        retained.last_persisted_sequence, 31,
+        test_flush_frontier(&retained, 0),
+        31,
         "metadata mirror must not overwrite a manifest that advanced after preflight"
     );
 
@@ -2895,35 +2701,6 @@ fn should_set_hybrid_storage() {
 }
 
 #[test]
-fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    add_manifest_sst_for_test(&mut el, "missing.sst", max_sequence);
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must be retained when a manifest-referenced cloud SST is missing"
-    );
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
-        "retained WAL should remain eligible for a future conservative retry"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recovers(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: seed a valid prune candidate while the backend is responsive,
@@ -2931,7 +2708,6 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(100);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open delayed prune cloud backend"),
@@ -2954,6 +2730,9 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
     add_valid_manifest_sst_for_test(&mut el, "deadline-prune.sst", max_sequence);
+    // Apply the attempt budget after publishing the fixture's authority.
+    // Setup is not a maintenance attempt and must not consume its deadline.
+    el.runtime_response_timeout = Duration::from_millis(100);
     delayed_cloud.arm();
 
     // Act: submission remains asynchronous, but joining the attempt must also
@@ -3098,7 +2877,6 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     let segment_id = 63;
     let max_sequence = 63;
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    install_prune_gc_pins_for_test(&mut el, segment_id, max_sequence);
     el.state
         .wal
         .frontiers
@@ -3118,12 +2896,6 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
         Some(max_sequence),
         "ambiguous completion should remain retryable until readback"
     );
-    assert_eq!(
-        el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.open_segment()),
-        0,
-        "uncertain commit retains the pin until confirmed readback"
-    );
     let catalog_proof = el
         .cloud_coordinator
         .hybrid_storage
@@ -3141,11 +2913,6 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     drain_prune_completion_for_test(&mut el);
 
     // Assert
-    assert_eq!(
-        el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.open_segment()),
-        max_sequence
-    );
     assert!(
         !el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
         "a confirmed-absent catalog entry must settle the prior ambiguous retirement"
@@ -3398,37 +3165,6 @@ fn should_retry_reclamation_discovery_after_journal_append_failure(
 }
 
 #[test]
-fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let sst_name = "corrupt.sst";
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    add_manifest_sst_for_test(&mut el, sst_name, max_sequence);
-    write_test_file(remote_sst_path_for_test(&el, sst_name), b"not a valid sst");
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must be retained when a manifest-referenced cloud SST is unreadable"
-    );
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
-        "retained WAL should remain eligible for a future conservative retry"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -3516,133 +3252,6 @@ fn should_not_retire_wal_authority_without_cloud_manifest_base() -> crate::commo
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode WAL catalog after refused cleanup");
     assert!(catalog.entry(segment_id).is_some());
-    Ok(())
-}
-
-#[test]
-fn should_retain_remote_wal_when_intent_metadata_needs_convergence(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
-
-    el.state
-        .append_intent(crate::runtime::IntentLogEntry::WalSynced {
-            segment_id: 1,
-            seqno: 1,
-        })?;
-
-    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
-        metadata_backend.clone(),
-        "metadata-test".to_string(),
-    ));
-    put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
-    el.verify_cloud_metadata_for_wal_cleanup()
-        .expect("initial cloud metadata validation should cache proofs");
-
-    el.state
-        .append_intent(crate::runtime::IntentLogEntry::WalSynced {
-            segment_id: 2,
-            seqno: max_sequence,
-        })?;
-    let remote_intent_before = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
-    metadata_backend.clear_history();
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must remain while intent metadata needs normal publisher convergence"
-    );
-    assert_eq!(
-        get_cloud_metadata_for_test(&metadata_storage, "intent_log.json"),
-        remote_intent_before,
-        "cleanup must never overwrite cloud metadata from a potentially stale snapshot"
-    );
-    assert!(
-        !metadata_backend
-            .get_uploads()
-            .iter()
-            .any(|(key, _)| key.ends_with("metadata/intent_log.json")),
-        "cleanup verification must remain read-only"
-    );
-    assert_eq!(
-        el.cloud_coordinator
-            .cloud_wal
-            .acks()
-            .max_sequence(segment_id),
-        Some(max_sequence)
-    );
-    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
-
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
-
-    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
-        metadata_backend,
-        "metadata-test".to_string(),
-    ));
-    put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: max_sequence + 1,
-        ..Default::default()
-    };
-    put_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
-    );
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must be retained when cloud manifest metadata is ahead of local state"
-    );
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
-        "retained WAL should remain eligible for a future conservative retry"
-    );
-
     Ok(())
 }
 
@@ -4311,7 +3920,7 @@ fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable() -> crate::com
 }
 
 #[test]
-fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_coverage(
+fn should_retain_remote_wal_when_segment_family_maximum_exceeds_shared_frontier(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -4324,202 +3933,7 @@ fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_cover
         .wal
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
-    // Act
-    // Assert
-    assert!(
-        el.state.manifest.files.is_empty(),
-        "test requires no manifest SSTs to prove sequence-only metadata is insufficient"
-    );
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must be retained when manifest sequence is advanced but no SST covers it"
-    );
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
-        "retained WAL should remain eligible for a future conservative retry"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_cf(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    seed_cloud_prune_candidate_with_records(
-        &mut el,
-        segment_id,
-        max_sequence,
-        vec![
-            crate::wal::WalRecord::new_cf(
-                0,
-                crate::wal::WalOpKind::Put,
-                Bytes::from_static(b"default-only-in-wal"),
-                Some(Bytes::from_static(b"default-value")),
-                5,
-            ),
-            crate::wal::WalRecord::new_cf(
-                1,
-                crate::wal::WalOpKind::Put,
-                Bytes::from_static(b"other-covered"),
-                Some(Bytes::from_static(b"other-value")),
-                max_sequence,
-            ),
-        ],
-    );
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_manifest_sst_meta_for_test(
-        &mut el,
-        "other-high-seq.sst",
-        1,
-        b"other-covered",
-        max_sequence,
-        max_sequence,
-    );
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must be retained when manifest SST coverage is only for a different CF"
-    );
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
-        "retained WAL should remain eligible for a future conservative retry"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_sst(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let sst_name = "lying-summary.sst";
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-
-    let bytes = valid_sst_bytes_for_test(b"other-key", b"value", max_sequence);
-    el.state
-        .manifest
-        .test_mut()
-        .files
-        .push(crate::metadata::FileMeta {
-            name: sst_name.to_string(),
-            level: 0,
-            size_bytes: bytes.len() as u64,
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: 0,
-            smallest_key: Some(b"prune-candidate".to_vec()),
-            largest_key: Some(b"prune-candidate".to_vec()),
-            smallest_seq: Some(max_sequence),
-            largest_seq: Some(max_sequence),
-            ..Default::default()
-        });
-    write_test_file(remote_sst_path_for_test(&el, sst_name), &bytes);
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL must be retained when manifest SST metadata does not match actual SST contents"
-    );
-    assert!(
-        el.cloud_coordinator.cloud_wal.acks().contains(segment_id),
-        "retained WAL should remain eligible for a future conservative retry"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_manifest_bounds_cover_absent_value(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let sst_name = "bounds-with-gap.sst";
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    let bytes = valid_sst_bytes_without_key_for_test(max_sequence);
-    el.state
-        .manifest
-        .test_mut()
-        .files
-        .push(crate::metadata::FileMeta {
-            name: sst_name.to_string(),
-            level: 0,
-            size_bytes: bytes.len() as u64,
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: 0,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"z".to_vec()),
-            smallest_seq: Some(max_sequence),
-            largest_seq: Some(max_sequence),
-            ..Default::default()
-        });
-    write_test_file(remote_sst_path_for_test(&el, sst_name), &bytes);
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "manifest bounds must not substitute for exact WAL value coverage"
-    );
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_coverage(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    el.state.manifest.test_mut().last_persisted_sequence = max_sequence - 1;
+    publish_test_flush_frontier(&mut el, 0, max_sequence - 1);
 
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
@@ -4535,7 +3949,7 @@ fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_covera
 }
 
 #[test]
-fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
+fn should_retire_remote_wal_when_segment_family_maximum_equals_shared_frontier(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -4564,415 +3978,6 @@ fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
 }
 
 #[test]
-fn should_prune_remote_wal_when_insert_is_canonically_persisted_as_put(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let sequence = 10;
-    let insert = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Insert,
-        Bytes::from_static(b"prune-candidate"),
-        Some(Bytes::from_static(b"value")),
-        sequence,
-    );
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![insert]);
-    el.state.wal.frontiers.set_cloud_durable_for_test(sequence);
-    add_valid_manifest_sst_for_test(&mut el, "insert-coverage.sst", sequence);
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        !remote_wal_path_for_test(&el, segment_id).exists(),
-        "a committed Insert is canonically persisted as the same Put value state"
-    );
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_prune_remote_wal_when_point_delete_is_exactly_covered_by_manifest_sst(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let key = b"deleted-key";
-    let delete = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Delete,
-        Bytes::copy_from_slice(key),
-        None,
-        max_sequence,
-    );
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete]);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_point_tombstone_manifest_sst_for_test(
-        &mut el,
-        "covered-delete.sst",
-        key,
-        max_sequence,
-    );
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        !remote_wal_path_for_test(&el, segment_id).exists(),
-        "an exact committed point tombstone should retire redundant WAL authority"
-    );
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_point_delete_has_same_sequence_value(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let key = b"prune-candidate";
-    let delete = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Delete,
-        Bytes::copy_from_slice(key),
-        None,
-        max_sequence,
-    );
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete]);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_manifest_sst_for_test(&mut el, "same-sequence-value.sst", max_sequence);
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "a same-sequence value must not be accepted as proof of a point delete"
-    );
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_expired_value_masquerades_as_same_sequence_point_delete(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let sequence = 10;
-    let key = b"expired-value";
-    let expired_at = 1;
-    let delete = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Delete,
-        Bytes::copy_from_slice(key),
-        None,
-        sequence,
-    );
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![delete]);
-    el.state.wal.frontiers.set_cloud_durable_for_test(sequence);
-    add_valid_value_manifest_sst_with_expiration_for_test(
-        &mut el,
-        "expired-value.sst",
-        key,
-        b"not-a-delete",
-        sequence,
-        expired_at,
-    );
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "an expired value must not masquerade as an exact point tombstone"
-    );
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_prune_remote_wal_when_expired_value_is_exactly_covered_by_manifest_sst(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let sequence = 10;
-    let key = b"expired-value";
-    let value = b"durable-value";
-    let expired_at = 1;
-    let mut put = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
-        Bytes::copy_from_slice(key),
-        Some(Bytes::copy_from_slice(value)),
-        sequence,
-    );
-    put.expiration = Some(expired_at);
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![put]);
-    el.state.wal.frontiers.set_cloud_durable_for_test(sequence);
-    add_valid_value_manifest_sst_with_expiration_for_test(
-        &mut el,
-        "exact-expired-value.sst",
-        key,
-        value,
-        sequence,
-        expired_at,
-    );
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        !remote_wal_path_for_test(&el, segment_id).exists(),
-        "exact persisted value coverage must not change when its TTL expires"
-    );
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_manifest_ssts_conflict_at_same_sequence(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let sequence = 10;
-    let key = b"prune-candidate";
-    seed_cloud_prune_candidate(&mut el, segment_id, sequence);
-    el.state.wal.frontiers.set_cloud_durable_for_test(sequence);
-    add_valid_manifest_sst_for_test(&mut el, "matching-value.sst", sequence);
-    add_valid_point_tombstone_manifest_sst_for_test(
-        &mut el,
-        "conflicting-tombstone.sst",
-        key,
-        sequence,
-    );
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "conflicting same-sequence SST states must make exact coverage ambiguous"
-    );
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    Ok(())
-}
-
-#[test]
-fn should_prove_prune_coverage_through_streaming_validation_without_the_ephemeral_cache(
-) -> crate::common::MidgeResult<()> {
-    // Arrange: prune once had a second, non-streaming coverage implementation
-    // for this configuration. Production always enables the ephemeral cache,
-    // so only tests ran it; one owner now serves both.
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    assert!(
-        !el.cloud_coordinator
-            .hybrid_storage
-            .as_ref()
-            .expect("cloud storage")
-            .ephemeral_sst_cache_enabled(),
-        "this fixture exercises the configuration that took the removed path"
-    );
-    let segment_id = 1;
-    let max_sequence = 7;
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_manifest_sst_for_test(&mut el, "streaming-covered.sst", max_sequence);
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert!(
-        !remote_wal_path_for_test(&el, segment_id).exists(),
-        "a covered segment retires through the single streaming coverage owner"
-    );
-    Ok(())
-}
-
-#[test]
-fn should_retain_remote_wal_when_delete_range_record_has_only_manifest_bounds(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let mut delete_range = crate::wal::WalRecord::new_cf(
-        0,
-        crate::wal::WalOpKind::DeleteRange,
-        Bytes::from_static(b"k10"),
-        None,
-        max_sequence,
-    );
-    delete_range.range_end = Some(Bytes::from_static(b"k20"));
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete_range]);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    // An SST whose manifest bounds span the deleted range but which carries
-    // no range tombstone: the bounds alone prove nothing about the delete.
-    add_manifest_sst_meta_for_test(
-        &mut el,
-        "delete-range-bounds-only.sst",
-        0,
-        b"k10",
-        max_sequence,
-        max_sequence,
-    );
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        remote_wal_path_for_test(&el, segment_id).exists(),
-        "manifest key and sequence bounds must not prove that a delete-range tombstone was flushed"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn should_not_prune_remote_wal_when_delete_range_record_exceeds_manifest_range(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    let mut delete_range = crate::wal::WalRecord::new_cf(
-        0,
-        crate::wal::WalOpKind::DeleteRange,
-        Bytes::from_static(b"k10"),
-        None,
-        max_sequence,
-    );
-    delete_range.range_end = Some(Bytes::from_static(b"k20"));
-    seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete_range]);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_range_tombstone_manifest_sst_for_test(
-        &mut el,
-        "delete-range-partial.sst",
-        b"k10",
-        b"k19",
-        max_sequence,
-    );
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-            remote_wal_path_for_test(&el, segment_id).exists(),
-            "remote WAL must be retained when manifest range tombstone coverage is narrower than the WAL record"
-        );
-
-    Ok(())
-}
-
-#[test]
-fn should_prune_remote_wal_when_only_transaction_marker_exceeds_data_coverage(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 1;
-    let max_sequence = 10;
-    seed_cloud_prune_candidate_with_records(
-        &mut el,
-        segment_id,
-        max_sequence,
-        vec![
-            crate::wal::WalRecord::new_cf(
-                0,
-                crate::wal::WalOpKind::TxnBegin,
-                Bytes::from_static(b"txn"),
-                None,
-                8,
-            ),
-            crate::wal::WalRecord::new_cf(
-                0,
-                crate::wal::WalOpKind::Put,
-                Bytes::from_static(b"txn-data"),
-                Some(Bytes::from_static(b"value")),
-                9,
-            ),
-            crate::wal::WalRecord::new_cf(
-                0,
-                crate::wal::WalOpKind::TxnCommit,
-                Bytes::from_static(b"txn"),
-                None,
-                max_sequence,
-            ),
-        ],
-    );
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_manifest_sst_meta_for_test(&mut el, "txn-data.sst", 0, b"txn-data", 9, 9);
-
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Act
-    // Assert
-    assert!(
-        !remote_wal_path_for_test(&el, segment_id).exists(),
-        "transaction marker records must not force retention when all data records are covered"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -4986,9 +3991,24 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
         .wal
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
-    let sst_bytes = add_valid_manifest_sst_for_test(&mut el, sst_name, max_sequence);
-    std::fs::remove_file(remote_sst_path_for_test(&el, sst_name))
-        .expect("delete remote SST after initial validation");
+    add_valid_manifest_sst_for_test(&mut el, sst_name, max_sequence);
+    let crate::lease::CloudMetadataHead::Committed(generation) = el
+        .fencing
+        .leader_store
+        .as_ref()
+        .unwrap()
+        .read_committed_metadata(Duration::from_secs(5))?
+    else {
+        panic!("committed fixture")
+    };
+    let body = generation
+        .objects
+        .iter()
+        .find(|object| object.file_name == crate::metadata::files::MANIFEST_SNAPSHOT)
+        .unwrap();
+    let body_path = el.state.db_path.join("cloud_store").join(&body.object_key);
+    let body_bytes = std::fs::read(&body_path)?;
+    std::fs::remove_file(&body_path).expect("remove exact committed immutable manifest body");
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
 
@@ -5007,13 +4027,13 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
         "failed guarded prune must retain the remote WAL"
     );
 
-    write_test_file(remote_sst_path_for_test(&el, sst_name), &sst_bytes);
+    write_test_file(body_path, &body_bytes);
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
 
     assert!(
         !remote_wal_path_for_test(&el, segment_id).exists(),
-        "restored manifest SST should allow a later guarded prune"
+        "restored committed manifest body should allow a later prune"
     );
 
     Ok(())
@@ -5027,6 +4047,7 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
+    let blocked_family = el.state.create_cf("blocked".into())?;
     let blocked_segment = 71;
     let covered_segment = 72;
     seed_cloud_prune_candidate_with_records(
@@ -5034,7 +4055,7 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
         blocked_segment,
         blocked_segment,
         vec![crate::wal::WalRecord::new_cf(
-            1,
+            blocked_family,
             crate::wal::WalOpKind::Put,
             Bytes::from_static(b"uncovered-earlier-segment"),
             Some(Bytes::from_static(b"value")),
@@ -5074,6 +4095,7 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
         blocked_segment,
         blocked_segment,
     );
+    publish_test_flush_frontier(&mut el, blocked_family, blocked_segment);
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
 
@@ -5231,58 +4253,6 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
 }
 
 #[test]
-fn should_delete_retired_wal_when_coverage_dependency_changes_after_catalog_cas(
-) -> crate::common::MidgeResult<()> {
-    // Arrange: catalog retirement is the authority switch. Once it commits,
-    // changing an SST dependency must not turn safe physical cleanup into a
-    // persistence anomaly; the target's conditional identity is sufficient.
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let segment_id = 84;
-    let max_sequence = 84;
-    let cloud_backend_inner = Arc::new(
-        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
-            .expect("create post-retirement dependency cloud backend"),
-    );
-    let changing_cloud = Arc::new(PostRetirementDependencyChangeBackend::new(
-        cloud_backend_inner,
-    ));
-    let cloud_backend: Arc<dyn crate::storage::StorageBackend> = changing_cloud.clone();
-    el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
-        cloud_backend,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )));
-    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    el.state
-        .wal
-        .frontiers
-        .set_cloud_durable_for_test(max_sequence);
-    add_valid_manifest_sst_for_test(
-        &mut el,
-        "changed-after-catalog-retirement.sst",
-        max_sequence,
-    );
-    changing_cloud.arm();
-
-    // Act
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
-
-    // Assert
-    assert_eq!(
-        changing_cloud.post_retirement_sst_heads(),
-        0,
-        "post-CAS physical cleanup must not re-read retired coverage dependencies"
-    );
-    assert!(!remote_wal_path_for_test(&el, segment_id).exists());
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(segment_id));
-    assert!(!el.cloud_coordinator.cloud_wal.prunes().contains(segment_id));
-    assert!(!el.state.persistence_anomaly_detected());
-    Ok(())
-}
-
-#[test]
 fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -5307,7 +4277,6 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    install_prune_gc_pins_for_test(&mut el, segment_id, max_sequence);
     el.state
         .wal
         .frontiers
@@ -5329,11 +4298,6 @@ fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
         .expect("decode catalog after failed physical WAL delete");
 
     // Assert
-    assert_eq!(
-        el.wal_transition
-            .tombstone_gc_cutoff(el.state.wal.open_segment()),
-        max_sequence
-    );
     assert_eq!(failing_cloud.delete_attempts(), 1);
     assert!(
         catalog.entry(segment_id).is_none(),
@@ -5398,20 +4362,23 @@ fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
+    let blocked_family = el.state.create_cf("older-unflushed".into())?;
     let key = Bytes::from_static(b"authority-gap-key");
-    let put = crate::wal::WalRecord::new(
+    let put = crate::wal::WalRecord::new_cf(
+        blocked_family,
         crate::wal::WalOpKind::Put,
         key.clone(),
         Some(Bytes::from_static(b"older-value")),
         1,
     );
-    let mut uncovered_range_delete = crate::wal::WalRecord::new(
+    let mut uncovered_range_delete = crate::wal::WalRecord::new_cf(
+        blocked_family,
         crate::wal::WalOpKind::DeleteRange,
-        Bytes::from_static(b"uncovered-range-start"),
+        Bytes::from_static(b"a-uncovered-range-start"),
         None,
         2,
     );
-    uncovered_range_delete.range_end = Some(Bytes::from_static(b"uncovered-range-end"));
+    uncovered_range_delete.range_end = Some(Bytes::from_static(b"z-uncovered-range-end"));
     seed_cloud_prune_candidate_with_records(&mut el, 1, 2, vec![put, uncovered_range_delete]);
     let delete = crate::wal::WalRecord::new(crate::wal::WalOpKind::Delete, key.clone(), None, 3);
     seed_cloud_prune_candidate_with_records(&mut el, 2, 3, vec![delete]);
@@ -5424,6 +4391,7 @@ fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
     );
 
     // Act
+    publish_test_flush_frontier(&mut el, 0, 3);
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
 
@@ -5503,7 +4471,7 @@ fn should_ignore_listing_only_ssts_when_deciding_remote_wal_cleanup(
         .wal
         .frontiers
         .set_cloud_durable_for_test(max_sequence);
-    el.state.manifest.test_mut().last_persisted_sequence = 0;
+    assert_eq!(test_flush_frontier(&el.state.manifest, 0), 0);
     write_test_file(
         remote_sst_path_for_test(&el, "uploaded-but-uncommitted.sst"),
         b"listing-only object",
@@ -5937,88 +4905,6 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     assert!(
         local_wal.exists(),
         "local WAL must be retained when cached remote proof becomes stale before CloudAck"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn should_revalidate_verified_cloud_metadata_on_repeated_wal_cleanup_check(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
-
-    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
-        metadata_backend.clone(),
-        "metadata-test".to_string(),
-    ));
-    put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
-    el.cloud_coordinator.cloud_metadata_storage = Some(metadata_storage);
-
-    metadata_backend.clear_history();
-    el.verify_cloud_metadata_for_wal_cleanup()
-        .expect("first cloud metadata validation");
-    let first_downloads = metadata_backend.get_range_downloads();
-    // Act
-    // Assert
-    assert!(
-        !first_downloads.is_empty(),
-        "first validation should read cloud metadata"
-    );
-
-    el.verify_cloud_metadata_for_wal_cleanup()
-        .expect("second cloud metadata validation");
-
-    let second_downloads = metadata_backend.get_range_downloads();
-    assert_eq!(
-        second_downloads.len(),
-        first_downloads.len() * 2,
-        "unchanged metadata proof should revalidate object bytes and identity"
-    );
-    assert_eq!(&second_downloads[..first_downloads.len()], &first_downloads);
-    assert_eq!(&second_downloads[first_downloads.len()..], &first_downloads);
-
-    Ok(())
-}
-
-#[test]
-fn should_reject_cached_cloud_metadata_proof_when_remote_metadata_is_deleted(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
-
-    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
-        metadata_backend,
-        "metadata-test".to_string(),
-    ));
-    put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
-    el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
-
-    el.verify_cloud_metadata_for_wal_cleanup()
-        .expect("initial cloud metadata validation");
-    delete_cloud_metadata_for_test(&metadata_storage, "manifest.snapshot.json");
-
-    let error = el
-        .verify_cloud_metadata_for_wal_cleanup()
-        .expect_err("deleted metadata must invalidate cached cleanup proof");
-    // Act
-    // Assert
-    assert!(
-        error.contains("changed since validation")
-            || error.contains("unreadable")
-            || error.contains("disappeared")
-            || error.contains("is missing"),
-        "unexpected stale metadata proof error: {error}"
     );
 
     Ok(())
@@ -8327,7 +7213,7 @@ fn should_checkpoint_active_cloud_memtable_before_shutdown_succeeds(
         ),
         "unexpected shutdown response: {response:?}"
     );
-    assert!(el.state.manifest.last_persisted_sequence >= sequence);
+    assert!(test_flush_frontier(&el.state.manifest, 0) >= sequence);
     assert_eq!(el.state.manifest.files.len(), 1);
     let cf = el.state.get_cf(0).expect("default CF");
     assert_eq!(cf.memtable.size_bytes(), 0);
@@ -8692,45 +7578,47 @@ fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
 }
 
 #[test]
-fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exhausted(
+fn should_defer_metadata_cleanup_before_body_reads_when_shared_budget_is_exhausted(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
-    let el = create_test_cloud_event_loop(
+    use crate::lease::PrimaryLease as _;
+    let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
     let provider = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
         provider.clone(),
         String::new(),
     ));
-    put_all_cloud_metadata_for_test(&cloud, &el.state.db_path);
+    let lease = attach_provider_metadata_lease(&mut el, cloud.clone(), "budgeted-retirement");
+    el.mirror_metadata_to_authoritative_cloud()?;
     provider.clear_history();
     let budget = crate::common::resource_budget::ResourceBudget::new(512);
-    let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
+    let reservation = budget.reserve(512, "competing maintenance")?;
+    let snapshot = crate::runtime::hybrid_persistence::SharedMetadataSnapshot::new(
         cloud,
-        el.state.fs.clone(),
         budget.clone(),
-        el.metadata_publication_lock.clone(),
+        lease.get_leader_store().expect("shared authority"),
+        lease.holder_id(),
+        lease.epoch(),
     );
-    let invoked = AtomicBool::new(false);
 
     // Act
-    let result =
-        snapshot.verify_exact_then(&crate::common::OperationDeadline::unbounded(), |_, _| {
-            invoked.store(true, Ordering::SeqCst);
-            Ok(())
-        });
+    let result = snapshot.committed_retirement_authority_within(
+        &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+    );
 
     // Assert
-    assert!(
-        matches!(result, Err(crate::common::MidgeError::ResourceLimit(_))),
-        "{result:?}"
-    );
-    assert!(!invoked.load(Ordering::SeqCst));
-    assert_eq!(provider.get_downloads().len(), 0);
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::ResourceLimit(_))
+    ));
+    assert!(provider
+        .get_downloads()
+        .iter()
+        .all(|key| !key.contains("metadata/generations/")));
     assert_eq!(provider.get_range_downloads().len(), 0);
+    drop(reservation);
     assert_eq!(budget.used(), 0);
     Ok(())
 }
@@ -8875,34 +7763,6 @@ fn assert_cloud_waiter_survives_admission_pressure(
             .len(),
         0
     );
-    Ok(())
-}
-
-#[test]
-fn should_defer_metadata_cleanup_when_publication_lock_outlives_deadline(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-    let held = el.metadata_publication_lock.lock();
-    let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
-        cloud.clone(),
-        el.state.fs.clone(),
-        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
-        el.metadata_publication_lock.clone(),
-    );
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(200));
-
-    // Act
-    let result: crate::common::MidgeResult<()> = snapshot.verify_exact_then(&deadline, |_, _| {
-        panic!("blocked proof cannot authorize cleanup")
-    });
-    drop(held);
-
-    // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
     Ok(())
 }
 

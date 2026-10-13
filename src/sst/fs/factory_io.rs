@@ -86,6 +86,7 @@ impl FsSstFactoryIo {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or parsed as an SST reader.
+    #[cfg(test)]
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         self.open_internal(path, None)
     }
@@ -535,6 +536,7 @@ impl SstFactory for FsSstFactoryIo {
     }
 
     /// Open an existing SST file
+    #[cfg(test)]
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         FsSstFactoryIo::open(self, path)
     }

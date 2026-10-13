@@ -25,6 +25,7 @@ pub struct JournalRecoveryProgressFixtureResult {
     pub max_edit_id: u64,
     pub manifest_edit_checkpoint_id: u64,
     pub restored_cf_count: u64,
+    pub restored_frontier_count: u64,
     pub mismatches: u64,
     pub completed_local_reads: u64,
     pub completed_local_read_bytes: u64,
@@ -114,6 +115,7 @@ pub fn run_journal_recovery_progress_fixture(
                 max_edit_id,
                 manifest_edit_checkpoint_id: 0,
                 restored_cf_count: 0,
+                restored_frontier_count: 0,
                 mismatches: 0,
                 completed_local_reads: 0,
                 completed_local_read_bytes: 0,
@@ -142,9 +144,12 @@ pub fn run_journal_recovery_progress_fixture(
     snapshot.result.manifest_edit_checkpoint_id = manifest.edit_checkpoint_id;
     snapshot.result.restored_cf_count =
         u64::try_from(manifest.column_families.len()).unwrap_or(u64::MAX);
+    snapshot.result.restored_frontier_count =
+        u64::try_from(manifest.flush_frontiers().iter().count()).unwrap_or(u64::MAX);
     snapshot.result.mismatches = u64::from(EDIT_COUNT).saturating_sub(verified_edits)
         + u64::from(manifest.edit_checkpoint_id != max_edit_id)
         + u64::from(snapshot.result.restored_cf_count != u64::from(EDIT_COUNT))
+        + u64::from(snapshot.result.restored_frontier_count != u64::from(EDIT_COUNT) + 1)
         + u64::from(!manifest.files.is_empty());
     snapshot.result.local_wal_bytes = local_wal_bytes;
     snapshot.result.staged_wal_count = staged_wal_count;
@@ -184,6 +189,12 @@ fn verified_edits(manifest: &Manifest) -> u64 {
                     && family.drop_sequence.is_none()
                     && family.dropped_sst_names.is_empty()
                     && !family.reclaimed
+                    && matches!(
+                        manifest.flush_frontiers().get(id),
+                        Ok(super::frontiers::FamilyFrontier::Live {
+                            through_sequence: 0
+                        })
+                    )
             })
         })
         .count() as u64

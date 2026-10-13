@@ -1268,22 +1268,12 @@ fn should_match_summary_bounds_across_reader_modes() -> MidgeResult<()> {
     writer.add_with_meta(b"middle", Some(b"new"), 9, EntryType::Put, None)?;
     writer.add_range_tombstone(b"alpha", b"zulu", 5)?;
     crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("summary-parity.sst"))?;
-    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
-    let mut progress = super::SstSummaryProgress::default();
 
     // Act
     let streaming = SstFileIo::summarize_with_fs("summary-parity.sst", Arc::clone(&fs))?;
     let verified = SstFileIo::open("summary-parity.sst", Arc::clone(&fs))?.verify_all_blocks()?;
-    let resumable = SstFileIo::summarize_with_fs_progress(
-        "summary-parity.sst",
-        fs,
-        &budget,
-        &mut progress,
-        &mut || Ok(()),
-    )?;
 
     // Assert
-    assert_eq!(&streaming, resumable);
     assert_eq!(streaming, verified.summary);
     assert_eq!(streaming.smallest_key, b"alpha");
     assert_eq!(streaming.largest_key, b"zulu");

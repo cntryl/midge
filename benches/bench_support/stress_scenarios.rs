@@ -2703,7 +2703,6 @@ pub(super) fn prepare_recovery_watchdog_fixture(
     let benchmark = match mode {
         RecoveryProgressFixtureMode::DelayedRanges => "delayed_recovery_with_flat_cache",
         RecoveryProgressFixtureMode::HeldFirstRange => "held_recovery_with_flat_cache",
-        RecoveryProgressFixtureMode::CachedCoverage => "cached_recovery_with_flat_cache",
         RecoveryProgressFixtureMode::MetadataInventory => {
             "metadata_inventory_recovery_with_flat_cache"
         }
@@ -2810,7 +2809,6 @@ pub(super) fn run_recovery_watchdog_fixture(
             "local_wal_bytes": result.local_wal_bytes,
             "staged_wal_count": result.staged_wal_count,
             "elapsed_ms": result.elapsed_ms,
-            "coverage_checks": result.coverage_checks,
             "replay_completed_range_reads": result.replay_completed_range_reads,
             "expected_inventory_entries": result.expected_inventory_entries,
             "retained_inventory_entries": result.retained_inventory_entries,
@@ -2873,6 +2871,7 @@ pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
             "max_edit_id": result.max_edit_id,
             "manifest_edit_checkpoint_id": result.manifest_edit_checkpoint_id,
             "restored_cf_count": result.restored_cf_count,
+            "restored_frontier_count": result.restored_frontier_count,
             "mismatches": result.mismatches,
             "completed_local_reads": result.completed_local_reads,
             "completed_local_read_bytes": result.completed_local_read_bytes,

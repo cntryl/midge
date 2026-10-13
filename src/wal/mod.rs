@@ -49,6 +49,7 @@ pub(crate) mod planner;
 pub mod policy;
 pub(crate) mod publish;
 pub(crate) mod recovery;
+pub(crate) mod replay;
 pub(crate) mod sequence;
 pub(crate) mod traits;
 pub mod types;

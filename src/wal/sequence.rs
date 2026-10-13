@@ -24,10 +24,14 @@ pub(crate) enum Allocation {
 
 /// Allocate `count` (at least one) sequences after `last` under the
 /// reservation `reserved_through`. `None` when the sequence space is
-/// exhausted.
+/// exhausted. `u64::MAX` is the persisted dropped-family sentinel, so
+/// `u64::MAX - 1` is the last sequence a live family may use.
 pub(crate) fn allocate(last: u64, reserved_through: u64, count: u64) -> Option<Allocation> {
     let first = last.checked_add(1)?;
     let end = last.checked_add(count.max(1))?;
+    if end == u64::MAX {
+        return None;
+    }
     Some(if end <= reserved_through {
         Allocation::Ready(first..=end)
     } else {
@@ -125,5 +129,32 @@ mod tests {
 
         // Assert
         assert_eq!(allocation, None);
+    }
+
+    #[test]
+    fn should_refuse_allocation_when_it_would_use_the_dropped_family_sentinel() {
+        // Arrange
+        let last = u64::MAX - 1;
+
+        // Act
+        let allocation = allocate(last, u64::MAX, 1);
+
+        // Assert
+        assert_eq!(allocation, None);
+    }
+
+    #[test]
+    fn should_allocate_the_last_live_sequence_when_it_precedes_the_dropped_sentinel() {
+        // Arrange
+        let last = u64::MAX - 2;
+
+        // Act
+        let allocation = allocate(last, u64::MAX, 1);
+
+        // Assert
+        assert_eq!(
+            allocation,
+            Some(Allocation::Ready((u64::MAX - 1)..=(u64::MAX - 1)))
+        );
     }
 }

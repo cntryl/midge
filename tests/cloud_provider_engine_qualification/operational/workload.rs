@@ -75,7 +75,8 @@ impl WorkloadProgress {
         self.observe(
             MaintenanceProgress {
                 sequence: metrics.current_sequence,
-                persisted_sequence: metrics.manifest_last_persisted_sequence,
+                persisted_sequence: metrics.manifest_flush_frontiers[&0]
+                    .expect("default family remains live"),
                 sst_count: metrics.sst_count,
                 compactions: metrics.compactions_run,
                 rewritten_bytes: metrics.compaction_bytes_rewritten,
@@ -107,7 +108,7 @@ impl WorkloadProgress {
                 "write_stalled": metrics.write_stalled,
                 "write_stall_active_ns": metrics.write_stall_active_ns,
                 "sequence": metrics.current_sequence,
-                "persisted_sequence": metrics.manifest_last_persisted_sequence,
+                "persisted_sequence": metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
                 "cloud_durable_sequence": metrics.wal_cloud_durable_seq,
                 "pending_cloud_uploads": metrics.pending_cloud_uploads,
                 "local_storage": metrics.local_storage,

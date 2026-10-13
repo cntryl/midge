@@ -15,6 +15,27 @@ use std::sync::Arc;
 struct WalSource {
     fs: Arc<dyn ReadFs>,
     path: FsPath,
+    prefix_len: Option<u64>,
+}
+
+/// A planned verified prefix; planning never truncates its backing WAL.
+struct WalPrefixFile<'a> {
+    inner: Box<dyn crate::io::ReadFile + 'a>,
+    len: u64,
+}
+
+impl crate::io::ReadFile for WalPrefixFile<'_> {
+    fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        let len = len.min(self.len.saturating_sub(offset));
+        if len == 0 {
+            return Ok(Bytes::new());
+        }
+        self.inner.read_at(offset, len)
+    }
+
+    fn len(&self) -> FsResult<u64> {
+        Ok(self.len)
+    }
 }
 
 pub(crate) struct StreamingWalFs {
@@ -47,6 +68,7 @@ impl StreamingWalFs {
                 entry.insert(WalSource {
                     fs,
                     path: backing_path,
+                    prefix_len: None,
                 });
                 Ok(())
             }
@@ -65,6 +87,14 @@ impl StreamingWalFs {
             .get(name)
             .ok_or_else(|| FsError::NotFound(path.0.clone()))
     }
+
+    pub(crate) fn limit_prefix(&mut self, name: &str, len: u64) -> MidgeResult<()> {
+        let source = self.sources.get_mut(name).ok_or_else(|| {
+            MidgeError::Internal(format!("planned WAL prefix has no source: {name}"))
+        })?;
+        source.prefix_len = Some(len);
+        Ok(())
+    }
 }
 
 fn canonical_wal_name(name: &str) -> bool {
@@ -78,8 +108,17 @@ fn replay_directory(path: &FsPath) -> bool {
 impl ReadFs for StreamingWalFs {
     fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
         let source = self.source(path)?;
+        let mut file = source.fs.open_read(&source.path)?;
+        if let Some(len) = source.prefix_len {
+            if file.len()? < len {
+                return Err(FsError::Corruption(
+                    "planned WAL prefix was shortened".into(),
+                ));
+            }
+            file = Box::new(WalPrefixFile { inner: file, len });
+        }
         Ok(Box::new(BufferedReadFile::new(
-            source.fs.open_read(&source.path)?,
+            file,
             self.range_buffer_bytes,
         )?))
     }
@@ -92,7 +131,16 @@ impl ReadFs for StreamingWalFs {
             });
         }
         let source = self.source(path)?;
-        source.fs.metadata(&source.path)
+        let mut metadata = source.fs.metadata(&source.path)?;
+        if let Some(len) = source.prefix_len {
+            if metadata.len < len {
+                return Err(FsError::Corruption(
+                    "planned WAL prefix was shortened".into(),
+                ));
+            }
+            metadata.len = len;
+        }
+        Ok(metadata)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -324,6 +372,48 @@ mod tests {
                 .map_err(FsError::into_midge)?[0]
                 .name,
             name
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_expose_only_planned_prefix_when_backing_wal_retains_damaged_suffix() -> MidgeResult<()>
+    {
+        // Arrange
+        let fixture = Fixture::new()?;
+        let mut fs = StreamingWalFs::new(127)?;
+        let name = crate::wal::segment_file_name(41);
+        fs.insert(
+            name.clone(),
+            Arc::clone(&fixture.source),
+            fixture.path.clone(),
+        )?;
+        fs.limit_prefix(&name, 200)?;
+        let path = FsPath::new(format!("wal/{name}"));
+
+        // Act
+        let file = fs.open_read(&path).map_err(FsError::into_midge)?;
+        let tail = file.read_at(190, 100).map_err(FsError::into_midge)?;
+        let beyond = file.read_at(300, 100).map_err(FsError::into_midge)?;
+
+        // Assert
+        assert_eq!(file.len().map_err(FsError::into_midge)?, 200);
+        assert_eq!(fs.metadata(&path).map_err(FsError::into_midge)?.len, 200);
+        assert_eq!(tail.as_ref(), &fixture.bytes[190..200]);
+        assert!(beyond.is_empty());
+        assert!(fixture
+            .backend
+            .ranges
+            .lock()
+            .iter()
+            .all(|(_, end)| *end <= 200));
+        assert_eq!(
+            fixture
+                .source
+                .metadata(&fixture.path)
+                .map_err(FsError::into_midge)?
+                .len,
+            fixture.bytes.len() as u64
         );
         Ok(())
     }

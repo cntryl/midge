@@ -458,28 +458,53 @@ impl EventLoop {
             deferred_error,
         } = batch;
 
-        let append_result = self
+        let (applied, failure) = match self
             .wal_actor
-            .append_prepared_transactions(&mut self.state, prepared);
+            .append_prepared_transaction_group(&mut self.state, prepared)
+        {
+            Ok(outcome) => (outcome.applied, outcome.failure),
+            Err(error) => (Vec::new(), Some(error)),
+        };
 
-        match append_result {
-            Ok(results) => {
-                if !results.is_empty() {
-                    self.publish_snapshot();
-                }
-                for result in results {
-                    let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
-                    self.finish_drained_write_after_publish(
-                        result.request_id,
-                        Ok(WriteResult {
-                            last_sequence: result.last_sequence,
-                            op_count: result.op_count,
-                            deferred: result.deferred,
-                            touched_cfs,
-                        }),
-                    );
-                }
+        // Units applied before a failure are visible. A synced one is durable
+        // and replay keeps it whole, so it is acknowledged like any other. A
+        // deferred (`Batched`) one is written but not synced when the failure
+        // fences the WAL, and no later sync will run, so its durability is
+        // unknown and its caller gets `Timeout`, not an acknowledgement.
+        if !applied.is_empty() {
+            self.publish_snapshot();
+        }
+        let applied_ids = applied
+            .iter()
+            .map(|result| result.request_id)
+            .collect::<std::collections::HashSet<_>>();
+        for result in applied {
+            if failure.is_some() && result.deferred {
+                self.settle_applied_write(result.request_id, true);
+                self.handle_write_error(
+                    result.request_id,
+                    MidgeError::OutcomeUnknown(
+                        "the transaction is applied but the WAL was fenced before its \
+                         frame was synced; it may be lost in a crash"
+                            .to_string(),
+                    ),
+                );
+                continue;
+            }
+            let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
+            self.finish_drained_write_after_publish(
+                result.request_id,
+                Ok(WriteResult {
+                    last_sequence: result.last_sequence,
+                    op_count: result.op_count,
+                    deferred: result.deferred,
+                    touched_cfs,
+                }),
+            );
+        }
 
+        match failure {
+            None => {
                 if let Some((request_id, error)) = deferred_error {
                     self.finish_drained_write(request_id, Err(error));
                     handled += 1;
@@ -490,9 +515,11 @@ impl EventLoop {
                     handled += 1;
                 }
             }
-            Err(error) => {
+            Some(error) => {
                 for request_id in request_ids {
-                    self.finish_drained_write(request_id, Err(error.replay()));
+                    if !applied_ids.contains(&request_id) {
+                        self.finish_drained_write(request_id, Err(error.replay()));
+                    }
                 }
 
                 if let Some((request_id, error)) = deferred_error {
@@ -501,7 +528,7 @@ impl EventLoop {
                 }
 
                 if let Some(request) = fallback_request {
-                    self.finish_drained_write(request.request_id, Err(error));
+                    self.finish_drained_write(request.request_id, Err(not_attempted(error)));
                     handled += 1;
                 }
             }
@@ -642,8 +669,10 @@ impl EventLoop {
         // A WAL append failure fences the actor itself, so ask it rather than
         // looking for "wal writer" in the message: a NoSpace raised elsewhere
         // (storage admission) is backpressure, not lost durability.
-        let must_fence =
-            matches!(error, crate::common::MidgeError::Timeout(_)) || self.wal_actor.is_fenced();
+        let must_fence = matches!(
+            error,
+            crate::common::MidgeError::Timeout(_) | crate::common::MidgeError::OutcomeUnknown(_)
+        ) || self.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
             if let Some(healthy) = &self.fencing.lease_healthy {
@@ -656,6 +685,20 @@ impl EventLoop {
             );
         }
         self.respond(request_id, RuntimeResponse::Error { request_id, error });
+    }
+}
+
+/// The error for a request a failed group never prepared: it was neither
+/// logged nor applied. The group's `OutcomeUnknown` speaks only for logged units,
+/// so it becomes `Fenced`, which says the request is not applied; any other
+/// group error already makes no claim that it was.
+fn not_attempted(group_error: MidgeError) -> MidgeError {
+    match group_error {
+        MidgeError::OutcomeUnknown(reason) => MidgeError::Fenced(format!(
+            "the transaction was not logged or applied because an earlier \
+             transaction in its batch failed: {reason}"
+        )),
+        other => other,
     }
 }
 

@@ -147,9 +147,10 @@ fn replayed_sequences(device: &CrashDevice, history: &WalHistory) -> Vec<u64> {
         &segments,
         &mut memtables,
         crate::wal::recovery::ReplayPolicy::Strict,
-        None,
         crate::wal::recovery::streaming::StreamingReplayLimits::local(),
-        crate::wal::recovery::streaming::ReplayOptions::default(),
+        crate::wal::recovery::streaming::ReplayOptions::new(
+            crate::wal::replay::ReplaySelection::All,
+        ),
         &mut |_, _| Ok(()),
     )
     .expect("strict replay");
@@ -322,29 +323,28 @@ fn should_link_each_segment_to_the_footer_before_it_when_rotating() {
 }
 
 #[test]
-fn should_keep_retired_segment_out_of_history_when_its_unlink_fails() {
-    // Arrange: removing segment 1 fails after the ledger retires it.
+fn should_queue_physical_cleanup_only_after_durable_retirement() {
+    // Arrange
     let device = CrashDevice::new();
     let mut history = four_segments(&device);
     let kept = segment_bytes(&device, 3..=4);
-    let removed_bytes = segment_bytes(&device, [2])[&2].len() as u64;
-    let fault = device.inject(Fault {
-        op: FaultOp::RemoveFile,
-        path: key(1),
-        nth: 1,
-        effect: FaultEffect::Before,
-        error: FaultError::Io,
-    });
+    let before = segment_bytes(&device, 1..=2);
 
     // Act
     let retired = history.retire_below(3).expect("retire");
+
+    // Assert: advancing authority performs no physical unlink.
+    assert_eq!(members(&history), vec![3, 4]);
+    assert_eq!(
+        retired.pending,
+        before
+            .iter()
+            .map(|(&id, bytes)| (id, bytes.len() as u64))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(segment_bytes(&device, 1..=2), before);
     device.process_crash();
     let reopened = reopen_with_intact_members(&device, &kept);
-
-    // Assert
-    assert!(device.fired(fault));
-    assert_eq!(retired.left, vec![1]);
-    assert_eq!(retired.removed, vec![(2, removed_bytes)]);
     assert_eq!(members(&reopened), vec![3, 4]);
     assert!(!device.files().contains_key(&key(1)));
 }
@@ -753,7 +753,7 @@ fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
         assert!(kept.contains_key(&key(id)), "segment {id} removed");
     }
     assert_eq!(
-        retried.expect("retire after healing").removed,
+        retried.expect("retire after healing").pending,
         vec![(1, first)]
     );
     assert_eq!(members(&history), vec![2, 3, 4]);

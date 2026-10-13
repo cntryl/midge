@@ -122,7 +122,7 @@ Use this matrix when updating guarantees or reviewing whether Midge is safe enou
 | compaction crash after publish keeps data visible and cleanup idempotent | `tests/fault_injection.rs` — `should_not_delete_input_ssts_given_compaction_gc_failure_after_manifest_publish` |
 | iterators honor tombstones and latest-version resolution across SST boundaries | `tests/engine_api.rs` — `should_respect_range_tombstones_given_delete_range_when_scanning`, `should_return_latest_value_across_levels_given_overwrite_in_newer_sst_when_scanning` |
 | strict vs salvage recovery is explicit | `tests/durability.rs` — `should_fail_strict_open_when_wal_is_corrupt`, `should_open_in_salvage_mode_when_wal_is_corrupt` |
-| pre-ledger (format 3 and older) and future-format fixtures fail with `CompatibilityError` | `tests/storage_layer.rs` — `should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening`, `should_reject_future_v8_fixture_given_unsupported_version_when_reopening` |
+| pre-ledger (format 3 and older) and future-format fixtures fail with `CompatibilityError` | `tests/storage_layer.rs` — `should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening`, `should_reject_future_v9_fixture_given_unsupported_version_when_reopening` |
 
 ## External-Adopter Gate
 

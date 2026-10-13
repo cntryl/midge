@@ -735,7 +735,8 @@ mod failure_injection {
             "retry must publish the original frozen immutable under its stable SST identity"
         );
         assert!(
-            metrics.manifest_last_persisted_sequence < metrics.current_sequence,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live")
+                < metrics.current_sequence,
             "retry must not advance the persisted frontier over later active-memtable writes"
         );
         assert_visible(&engine, &cf, b"retry-flush-later", b"later-value");
@@ -967,8 +968,15 @@ mod failure_injection {
         fail::remove("midge::cloud::inject_fail_sst_upload");
         scenario.teardown();
 
-        // Act
+        // Act: the manifest lists the SST once its edit commits; the cache
+        // copy is evicted only after the shared metadata generation publishes.
         wait_for_sst_count(&engine, 1);
+        let eviction_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !sst_file_names(temp_dir.path()).is_empty()
+            && std::time::Instant::now() < eviction_deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // Assert
         let layout = engine
@@ -1036,9 +1044,9 @@ mod failure_injection {
             metrics.current_sequence
         );
         assert!(
-            metrics.manifest_last_persisted_sequence >= 8,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live") >= 8,
             "manifest durable sequence must reflect recovered SST data, got {}",
-            metrics.manifest_last_persisted_sequence
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live")
         );
 
         for index in 0..8 {
@@ -1133,8 +1141,14 @@ mod failure_injection {
     }
 
     #[derive(Serialize)]
+    struct TestFrontier {
+        cf_id: u32,
+        through_sequence: u64,
+    }
+
+    #[derive(Serialize)]
     struct TestManifestFixture {
-        last_persisted_sequence: u64,
+        flushed_through: Vec<TestFrontier>,
         ssts: Vec<String>,
         files: Vec<TestManifestFile>,
         column_families: Vec<TestColumnFamilyMeta>,
@@ -1236,7 +1250,10 @@ mod failure_injection {
         shutdown_engine(engine);
 
         let empty_manifest = TestManifestFixture {
-            last_persisted_sequence: 0,
+            flushed_through: vec![TestFrontier {
+                cf_id: 0,
+                through_sequence: 0,
+            }],
             ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
@@ -1337,7 +1354,10 @@ mod failure_injection {
         shutdown_engine(engine);
 
         let empty_manifest = TestManifestFixture {
-            last_persisted_sequence: 0,
+            flushed_through: vec![TestFrontier {
+                cf_id: 0,
+                through_sequence: 0,
+            }],
             ssts: Vec::new(),
             files: Vec::new(),
             column_families: Vec::new(),
@@ -6936,11 +6956,7 @@ mod cloud_crash_recovery {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        std::fs::write(
-            db_path.join("midge_primary_lease.json"),
-            "holder_id: crashed@host\nowner_token: lease-token\nacquired_at: 2026-07-26T11:00:00Z\nexpires_at: 2026-07-26T11:00:30Z\n",
-        )
-        .expect("write lease record");
+        write_crashed_cloud_lease(db_path);
         std::fs::write(
             db_path.join(".midge_leader.lock"),
             "holder_id=crashed@host\nowner_token=lock-token\ncreated_at=2026-07-26T11:00:10Z\n",
@@ -6960,7 +6976,7 @@ mod cloud_crash_recovery {
             WriteOptions::cloud_async(),
         );
         assert_value_visible(&reopened, b"crash-timeout-key", b"crash-timeout-value");
-        let lease_content = std::fs::read_to_string(db_path.join("midge_primary_lease.json"))
+        let lease_content = std::fs::read_to_string(db_path.join(CLOUD_LEASE))
             .expect("read refreshed lease record");
         assert!(
             !lease_content.contains("crashed@host"),
@@ -6973,11 +6989,7 @@ mod cloud_crash_recovery {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        std::fs::write(
-            db_path.join("midge_primary_lease.json"),
-            "holder_id: crashed@host\nowner_token: lease-token\nacquired_at: 2026-07-26T11:00:00Z\nexpires_at: 2026-07-26T11:00:30Z\n",
-        )
-        .expect("write lease record");
+        write_crashed_cloud_lease(db_path);
         std::fs::write(db_path.join(".midge_leader.lock"), []).expect("write incomplete lock");
 
         // Act
@@ -6993,7 +7005,7 @@ mod cloud_crash_recovery {
             WriteOptions::cloud_async(),
         );
         assert_value_visible(&reopened, b"incomplete-lock-key", b"incomplete-lock-value");
-        let lease_content = std::fs::read_to_string(db_path.join("midge_primary_lease.json"))
+        let lease_content = std::fs::read_to_string(db_path.join(CLOUD_LEASE))
             .expect("read refreshed lease record");
         assert!(
             !lease_content.contains("crashed@host"),
@@ -7156,7 +7168,7 @@ mod cloud_crash_recovery {
             "reopen should restore at least one SST from the authoritative cloud object"
         );
         assert!(
-            metrics.manifest_last_persisted_sequence > 0,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live") > 0,
             "reopen should preserve manifest persistence progress after crash"
         );
 
@@ -7327,7 +7339,8 @@ mod cloud_crash_recovery {
         );
 
         let _published = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
-            metrics.sst_count >= 1 && metrics.manifest_last_persisted_sequence > 0
+            metrics.sst_count >= 1
+                && metrics.manifest_flush_frontiers[&0].expect("default family remains live") > 0
         });
         // Add one acknowledged write after publication, below the four-segment
         // eventual-flush trigger. Recovery must reconcile an authoritative SST
@@ -7441,7 +7454,7 @@ mod cloud_crash_recovery {
                 Instant::now() < deadline,
                 "timed out waiting for cloud recovery condition; last metrics: sst_count={} persisted_seq={} wal_segment={} current_seq={} cloud_seq={} gap={}",
                 metrics.sst_count,
-                metrics.manifest_last_persisted_sequence,
+                metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
                 metrics.wal_current_segment_id,
                 metrics.current_sequence,
                 metrics.wal_cloud_durable_seq,
@@ -7487,21 +7500,40 @@ mod cloud_crash_recovery {
         }
     }
 
+    /// Simulated cloud keeps its lease document in the shared object store.
+    const CLOUD_LEASE: &str = "cloud_store/midge_primary_lease.json";
+
+    /// Seed what a holder that crashed before committing metadata leaves in
+    /// the shared store: the active authority sentinel and its lease.
+    fn write_crashed_cloud_lease(db_path: &Path) {
+        std::fs::create_dir_all(db_path.join("cloud_store/metadata")).expect("create shared store");
+        std::fs::write(
+            db_path.join("cloud_store/metadata/authority-initialized.v1"),
+            "midge cloud metadata authority v2 initialized\n",
+        )
+        .expect("write authority sentinel");
+        std::fs::write(
+            db_path.join(CLOUD_LEASE),
+            "lease_version: 3\nfencing_epoch: 1\nholder: crashed@host\nowner: lease-token\nacquired: 2026-07-26T11:00:00Z\nexpires: 2026-07-26T11:00:30Z\nmetadata: null\n",
+        )
+        .expect("write lease record");
+    }
+
     fn expire_crashed_process_lease(db_path: &Path) {
-        let lease_path = db_path.join("midge_primary_lease.json");
+        let lease_path = db_path.join(CLOUD_LEASE);
         if !lease_path.exists() {
             return;
         }
 
         let mut content = std::fs::read_to_string(&lease_path).expect("read lease record");
-        if content.contains("acquired_at: ") || content.contains("expires_at: ") {
+        if content.contains("acquired: ") || content.contains("expires: ") {
             content = content
                 .lines()
                 .map(|line| {
-                    if line.starts_with("acquired_at: ") {
-                        "acquired_at: 1970-01-01T00:00:00Z".to_string()
-                    } else if line.starts_with("expires_at: ") {
-                        "expires_at: 1970-01-01T00:00:00Z".to_string()
+                    if line.starts_with("acquired: ") {
+                        "acquired: 1970-01-01T00:00:00Z".to_string()
+                    } else if line.starts_with("expires: ") {
+                        "expires: 1970-01-01T00:00:00Z".to_string()
                     } else {
                         line.to_string()
                     }
@@ -8296,7 +8328,7 @@ mod cloud_persistence_hardening {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_finish_cloud_strict_upload_after_reporting_timeout_when_provider_recovers() {
+    fn should_finish_cloud_strict_upload_after_reporting_unknown_outcome_when_provider_recovers() {
         // Arrange: every upload attempt fails until the provider recovers.
         let _guard = failpoint_test_lock()
             .lock()
@@ -8333,7 +8365,7 @@ mod cloud_persistence_hardening {
         // Assert: an applied commit whose durability is unconfirmed has an
         // unknown outcome, never a retryable or internal failure.
         assert!(
-            matches!(&error, MidgeError::Timeout(_)),
+            matches!(&error, MidgeError::OutcomeUnknown(_)),
             "expected an unknown outcome, got: {error:?}"
         );
         assert!(durable.wal_cloud_durable_seq >= durable.current_sequence);
@@ -8418,17 +8450,18 @@ mod cloud_persistence_hardening {
     }
 
     fn expire_crashed_process_lease(db_path: &Path) {
-        let lease_path = db_path.join("midge_primary_lease.json");
+        // Simulated cloud keeps its lease document in the shared object store.
+        let lease_path = db_path.join("cloud_store").join("midge_primary_lease.json");
         if lease_path.exists() {
             let mut content = fs::read_to_string(&lease_path).expect("read crashed lease record");
-            if content.contains("acquired_at: ") || content.contains("expires_at: ") {
+            if content.contains("acquired: ") || content.contains("expires: ") {
                 content = content
                     .lines()
                     .map(|line| {
-                        if line.starts_with("acquired_at: ") {
-                            "acquired_at: 1970-01-01T00:00:00Z".to_string()
-                        } else if line.starts_with("expires_at: ") {
-                            "expires_at: 1970-01-01T00:00:00Z".to_string()
+                        if line.starts_with("acquired: ") {
+                            "acquired: 1970-01-01T00:00:00Z".to_string()
+                        } else if line.starts_with("expires: ") {
+                            "expires: 1970-01-01T00:00:00Z".to_string()
                         } else {
                             line.to_string()
                         }
@@ -9013,7 +9046,7 @@ mod cloud_ddl_two_phase_hardening {
             .expect("read authoritative DDL registry");
         let registry: serde_json::Value =
             serde_json::from_slice(&registry).expect("decode registry");
-        assert_eq!(registry["epoch"], 2);
+        assert_eq!(registry["ddl_epoch"], 2);
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(2));
         shutdown(final_open);
     }
@@ -9055,7 +9088,7 @@ mod cloud_ddl_two_phase_hardening {
             .expect("read authoritative DDL registry");
         let registry: serde_json::Value =
             serde_json::from_slice(&registry).expect("decode registry");
-        assert_eq!(registry["epoch"], 1);
+        assert_eq!(registry["ddl_epoch"], 1);
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
         shutdown(reopened);
     }
@@ -9194,7 +9227,7 @@ mod cloud_ddl_two_phase_hardening {
             .expect("read authoritative DDL registry");
         let registry: serde_json::Value =
             serde_json::from_slice(&registry).expect("decode registry");
-        assert_eq!(registry["epoch"], 1);
+        assert_eq!(registry["ddl_epoch"], 1);
         assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             engine
@@ -9415,7 +9448,8 @@ mod cloud_ddl_two_phase_hardening {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_recover_ambiguous_ddl_once_when_reopening_after_crash_before_remote_cas_submission() {
+    fn should_abort_prior_epoch_ambiguous_ddl_when_reopening_after_crash_before_remote_cas_submission(
+    ) {
         // Arrange
         let _guard = DDL_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -9458,12 +9492,14 @@ mod cloud_ddl_two_phase_hardening {
         assert!(engine.get_column_family("crash-before-cas").is_none());
         shutdown(engine);
 
-        // Act: startup must safely re-drive the same durable operation rather than
-        // fence the database forever or mint a replacement operation id.
+        // Act: the reopen holds a later lease epoch and fences the registry
+        // before reconciling, so the prior epoch's CAS can never land. Startup
+        // must abort the stale prepare rather than fence the database forever
+        // or invent the edit under the new holder.
         let reopened = open_cloud(temp.path());
 
         // Assert
-        assert!(reopened.get_column_family("crash-before-cas").is_some());
+        assert!(reopened.get_column_family("crash-before-cas").is_none());
         assert!(!temp.path().join("ddl.prepare.json").exists());
         let registry = fs::read(temp.path().join("cloud_store/metadata/ddl.registry.json"))
             .expect("read reconciled authoritative DDL registry");
@@ -9475,8 +9511,8 @@ mod cloud_ddl_two_phase_hardening {
             .iter()
             .filter(|operation| operation["op_id"].as_str() == Some(op_id.as_str()))
             .count();
-        assert_eq!(matching_operations, 1);
-        assert_eq!(registry["epoch"], 1);
+        assert_eq!(matching_operations, 0);
+        assert_eq!(registry["ddl_epoch"], 0);
         shutdown(reopened);
     }
 }
@@ -10117,7 +10153,8 @@ mod observability_api {
             "flush should publish at least one SST"
         );
         assert!(
-            metrics.manifest_last_persisted_sequence >= metrics.current_sequence,
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live")
+                >= metrics.current_sequence,
             "flush should advance manifest durability frontier"
         );
         assert_eq!(
@@ -10700,7 +10737,7 @@ mod observability_api {
             .expect("shutdown before reopen");
 
         let temp_manifest = serde_json::json!({
-            "last_persisted_sequence": 99,
+            "flushed_through": [{"cf_id": 0, "through_sequence": 99}],
             "ssts": [],
             "files": [{
                 "name": "ghost.sst",
@@ -10748,7 +10785,10 @@ mod observability_api {
         // Assert
         assert_eq!(metrics.health, EngineHealth::Healthy);
         assert_eq!(metrics.sst_count, 0);
-        assert_eq!(metrics.manifest_last_persisted_sequence, 0);
+        assert_eq!(
+            metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
+            0
+        );
         assert!(
             layout.levels.iter().all(|level| level.file_count == 0),
             "stale metadata temp files must not publish SST state on reopen"
@@ -11644,12 +11684,12 @@ mod storage_verification_hardening {
     }
 
     fn write_empty_storage_fixture(db_path: &Path) {
-        std::fs::write(db_path.join("FORMAT"), "midge-format-version=7\n")
+        std::fs::write(db_path.join("FORMAT"), "midge-format-version=8\n")
             .expect("write format marker");
         std::fs::write(
             db_path.join("manifest.json"),
             serde_json::to_vec_pretty(&json!({
-                "last_persisted_sequence": 0,
+                "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
                 "files": [],
                 "column_families": [],
                 "next_sst_seqs": {},

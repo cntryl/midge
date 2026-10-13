@@ -1,8 +1,8 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::TransactionIntent;
 use super::{
-    PreparedTransactionAppend, TransactionAppendParams, TransactionAppendResult,
-    TransactionApplyOp, TxnSequencePlan, TxnWalBatch, WalActor,
+    PreparedGroupOutcome, PreparedTransactionAppend, TransactionAppendParams,
+    TransactionAppendResult, TransactionApplyOp, TxnSequencePlan, TxnWalBatch, WalActor,
 };
 #[cfg(all(test, feature = "failpoints"))]
 use super::{
@@ -122,6 +122,7 @@ impl WalActor {
 
         let cf_id =
             Self::transaction_family(ops.iter().map(crate::runtime::transaction_spill::op_cf_id))?;
+        Self::ensure_family_accepts_writes(state, cf_id)?;
         Self::validate_transaction_preconditions(
             state,
             self.read_resources.clone(),
@@ -160,17 +161,42 @@ impl WalActor {
         })
     }
 
+    /// Append and apply `prepared_transactions` as one group, failing the
+    /// whole group unless every unit is applied.
     pub(crate) fn append_prepared_transactions(
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: Vec<PreparedTransactionAppend>,
     ) -> MidgeResult<Vec<TransactionAppendResult>> {
+        let outcome = self.append_prepared_transaction_group(state, prepared_transactions)?;
+        match outcome.failure {
+            Some(error) => Err(error),
+            None => Ok(outcome.applied),
+        }
+    }
+
+    /// Append and apply `prepared_transactions` as one group. A failure
+    /// before any unit is applied fails the group. A failure after some
+    /// units are applied reports those units in `applied`, since they are
+    /// visible, and the error that stopped the rest in `failure`. An applied
+    /// unit is durable only under its policy: a `Strict` one is synced, a
+    /// `Batched` one is written but not synced. A unit in `failure` whose frame is
+    /// appended may be applied on restart, so its error is `Timeout`.
+    pub(crate) fn append_prepared_transaction_group(
+        &mut self,
+        state: &mut RuntimeState,
+        prepared_transactions: Vec<PreparedTransactionAppend>,
+    ) -> MidgeResult<PreparedGroupOutcome> {
         if prepared_transactions.is_empty() {
-            return Ok(Vec::new());
+            return Ok(PreparedGroupOutcome {
+                applied: Vec::new(),
+                failure: None,
+            });
         }
 
         for prepared in &prepared_transactions {
             self.ensure_write_durability_available(state, prepared.effective_durability)?;
+            Self::ensure_family_accepts_writes(state, prepared.sequence_plan.cf_id)?;
         }
 
         let apply_ops = prepared_transactions
@@ -188,11 +214,47 @@ impl WalActor {
             let last_sequence = prepared_transactions
                 .last()
                 .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
-            self.apply_strict_transaction_group_durability(state, last_sequence)?;
+            // A failed sync fences the WAL. None of the group is in the
+            // memtables, so replay keeps or drops each unit whole.
+            if let Err(error) = self.apply_strict_transaction_group_durability(state, last_sequence)
+            {
+                let group = prepared_transactions.iter().collect::<Vec<_>>();
+                return Err(Self::group_durability_error(&group, error));
+            }
         }
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
-        for prepared in prepared_transactions {
+        let mut pending = prepared_transactions.into_iter();
+        while let Some(prepared) = pending.next() {
+            if !strict_group {
+                if let Err(error) = self.apply_transaction_durability(
+                    state,
+                    prepared.effective_durability,
+                    prepared.sequence_plan.commit_seq,
+                ) {
+                    let unapplied = std::iter::once(&prepared)
+                        .chain(pending.as_slice())
+                        .collect::<Vec<_>>();
+                    return Ok(PreparedGroupOutcome {
+                        applied: results,
+                        failure: Some(Self::group_durability_error(&unapplied, error)),
+                    });
+                }
+            }
+            crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
+            // Every unit in the group is in the WAL and `state.sequence` is
+            // past every commit; the earlier units are applied. A lease that
+            // lapsed since is a failed apply of this unit and the rest, none
+            // of which reached the memtables.
+            if let Err(error) = self.ensure_lease_validity() {
+                let unapplied = std::iter::once(&prepared)
+                    .chain(pending.as_slice())
+                    .collect::<Vec<_>>();
+                return Ok(PreparedGroupOutcome {
+                    applied: results,
+                    failure: Some(self.fail_unapplied_group(state, &unapplied, error)),
+                });
+            }
             let PreparedTransactionAppend {
                 request_id,
                 sequence_plan,
@@ -202,11 +264,6 @@ impl WalActor {
             } = prepared;
             let last_sequence = sequence_plan.commit_seq;
             let apply_op_count = apply_ops.len();
-
-            if !strict_group {
-                self.apply_transaction_durability(state, effective_durability, last_sequence)?;
-            }
-            self.ensure_lease_validity()?;
             Self::apply_prevalidated_transaction_ops(
                 state,
                 apply_ops,
@@ -234,7 +291,51 @@ impl WalActor {
             });
         }
 
-        Ok(results)
+        Ok(PreparedGroupOutcome {
+            applied: results,
+            failure: None,
+        })
+    }
+
+    /// Fence the WAL for group units none of whose ops reached the memtables.
+    /// The error for group units a durability step failed before any of
+    /// them was applied: outcome unknown when their frames are appended.
+    fn group_durability_error(
+        unapplied: &[&PreparedTransactionAppend],
+        error: MidgeError,
+    ) -> MidgeError {
+        if unapplied
+            .iter()
+            .any(|prepared| prepared.wal_batch.wal_record.is_some())
+        {
+            Self::appended_unit_error(error)
+        } else {
+            error
+        }
+    }
+
+    fn fail_unapplied_group(
+        &mut self,
+        state: &mut RuntimeState,
+        unapplied: &[&PreparedTransactionAppend],
+        error: MidgeError,
+    ) -> MidgeError {
+        let logged = unapplied
+            .iter()
+            .any(|prepared| prepared.wal_batch.wal_record.is_some());
+        let plans = unapplied
+            .iter()
+            .map(|prepared| &prepared.sequence_plan)
+            .collect::<Vec<_>>();
+        self.fail_unapplied_transactions(
+            state,
+            &plans,
+            super::UnappliedOutcome {
+                logged,
+                partly_applied: false,
+            },
+            error,
+        )
     }
 
     fn validate_transaction_preconditions(
@@ -532,15 +633,22 @@ impl WalActor {
             let append_start = Instant::now();
             let append_result = writer.append_batch_accounted(&records);
             if let Err(failure) = append_result {
+                let unchanged = failure.unchanged;
                 let error = self.settle_failed_wal_append(admitted, failure);
                 self.fence_transition(state, format!("WAL batch append failed: {error}"));
-                return Err(error);
+                // One write carries every unit's frames. When it may have
+                // left some of them in the file, replay may apply them.
+                return Err(if unchanged {
+                    error
+                } else {
+                    Self::appended_unit_error(error)
+                });
             }
             self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());
             if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
                 self.fence_transition(state, error.to_string());
-                return Err(error);
+                return Err(Self::appended_unit_error(error));
             }
             crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         }

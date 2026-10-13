@@ -73,6 +73,8 @@ pub struct RuntimeConfig {
     pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
+    pub(crate) recovered_cloud_wal_entries: BTreeMap<u64, crate::wal::cloud_catalog::CatalogEntry>,
+    pub(crate) recovered_cloud_wal_anchor_sequence: u64,
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_cloud_wal_segments` by segment id.
     /// Kept crate-private so the existing public runtime configuration remains
@@ -132,6 +134,8 @@ impl Default for RuntimeConfig {
             provider_ddl_fencing: false,
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             sst_read_fs: None,
+            recovered_cloud_wal_entries: BTreeMap::new(),
+            recovered_cloud_wal_anchor_sequence: 0,
             recovered_cloud_wal_segments: BTreeMap::new(),
             recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),
