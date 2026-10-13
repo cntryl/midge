@@ -582,28 +582,37 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
         conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
     };
 
-    // Act: the begin frame is admitted and written, the op frame is not.
+    let wal_len_before = fs
+        .metadata(&FsPath::new(crate::wal::segment_file_name(1)))
+        .map_err(crate::io::FsError::into_midge)?
+        .len;
+    let budget_before = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
+
+    // Act: the whole unit is rejected before its begin frame can be written.
     let first_result = actor.append_spilled_transaction(&mut state, &source, params(1));
     let wal_len_after_first = fs
         .metadata(&FsPath::new(crate::wal::segment_file_name(1)))
         .map_or(0, |m| m.len);
     let fenced_after_first = actor.is_fenced();
+    let budget_after_rejection = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
     // The budget frees up (e.g. uploads retire WAL); the caller retries.
     setup.hybrid_storage.release_local_wal_bytes(pre_admitted);
     let retry = actor.append_spilled_transaction(&mut state, &source, params(2));
 
     // Assert
-    eprintln!(
-        "free {free}, begin bound {begin_bound}, first {first_result:?}, open segment after first \
-         {wal_len_after_first} B, fenced after first {fenced_after_first}, retry {retry:?}, \
-         anomaly {}",
-        state.persistence_anomaly_detected()
-    );
     assert!(
         matches!(first_result, Err(MidgeError::NoSpace(_))),
         "{first_result:?}"
     );
     assert!(!fenced_after_first, "a budget rejection fenced the WAL");
+    assert_eq!(
+        wal_len_after_first, wal_len_before,
+        "rejected unit wrote WAL bytes"
+    );
+    assert_eq!(
+        budget_after_rejection, budget_before,
+        "rejected unit leaked its reservation"
+    );
     assert!(
         retry.is_ok(),
         "retry after the budget freed failed: {retry:?}"

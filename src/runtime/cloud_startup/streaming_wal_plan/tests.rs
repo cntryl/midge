@@ -1188,7 +1188,22 @@ fn should_preserve_wal_bytes_when_salvage_truncate_fails() -> MidgeResult<()> {
     });
 
     // Act
-    let result = fixture.plan_with_fs(RecoveryPolicy::Salvage, &local);
+    let recovered = fixture.plan_with_fs(RecoveryPolicy::Salvage, &local)?;
+    assert_eq!(
+        std::fs::read(&active)?,
+        written,
+        "planning must be read-only"
+    );
+    let history = crate::runtime::wal_history::WalHistory::load(
+        crate::io::subdirectory(Arc::clone(&local), "wal"),
+        fixture.current_epoch(),
+    )?
+    .expect("fixture history");
+    let result = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(history),
+    );
 
     // Assert
     assert!(
@@ -1487,12 +1502,19 @@ fn should_preserve_sequence_floor_when_salvage_is_interrupted_before_authority_c
     corrupt[8] ^= 1;
     bytes.extend(corrupt);
     bytes.extend(framed_wal(3, b"three"));
-    fixture.active(&bytes)?;
+    let active = fixture.active(&bytes)?;
+    let original = std::fs::read(&active)?;
 
     // Act: the planner runs, but the process loses the response/state before
     // the authority commit. A later open must retain the allocation floor.
     let first = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
     assert!(first.plan.max_unreplayed_sequence >= 3);
+    assert_eq!(open_tail_sequence(&first), Some(1));
+    assert_eq!(
+        std::fs::read(&active)?,
+        original,
+        "planning destroyed durable sequence evidence"
+    );
     drop(first);
     let reopened = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
 

@@ -121,6 +121,11 @@ impl FsLeaderStore {
             .map_err(|error| {
                 LeaseError::IoError(format!("failed to remove leader lock: {error}"))
             })?;
+        self.fs
+            .sync_dir(&FsPath::new("."), Durability::Durable)
+            .map_err(|error| {
+                LeaseError::IoError(format!("failed to persist leader lock removal: {error}"))
+            })?;
         Ok(true)
     }
 
@@ -531,7 +536,7 @@ impl FsLeaderStore {
         holder_id: &str,
         expected_epoch: u64,
     ) -> Result<bool, LeaseError> {
-        let _lock = self.acquire_lock(holder_id)?;
+        let lock = self.acquire_lock(holder_id)?;
         let Some(current) = self.read_current()? else {
             return Ok(false);
         };
@@ -552,7 +557,7 @@ impl FsLeaderStore {
             format_leader_record(&released).as_bytes(),
             LeaseError::IoError,
         )?;
-        let _ = self.fs.sync_dir(&FsPath::new("."), Durability::Durable);
+        self.remove_lock_if_owner(&lock.owner_token)?;
         Ok(true)
     }
 

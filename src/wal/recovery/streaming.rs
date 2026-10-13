@@ -664,6 +664,7 @@ fn replay_paths(
             }
         };
         let epoch = scan.header().epoch;
+        state.enter_epoch(epoch);
         // End of the last frame this file replayed: the verified prefix.
         let mut pos = HEADER_LEN as u64;
         loop {
@@ -811,6 +812,17 @@ fn expect_footer(path: &ReplayFile, scan: &SegmentScan) -> MidgeResult<()> {
 }
 
 impl ReplayState<'_> {
+    /// A successor writer cannot commit its predecessor's split unit. Drop
+    /// those incomplete units before their memory can block a checkpoint.
+    fn enter_epoch(&mut self, epoch: u64) {
+        self.open_txns
+            .retain(|(writer_epoch, _), _| *writer_epoch == epoch);
+        self.pending_bytes = self.open_txns.values().map(|pending| pending.bytes).sum();
+        if self.open_txns.is_empty() {
+            self.committed_sequence = self.stats.max_sequence;
+        }
+    }
+
     /// Finish `paths[index]`, read through `pos`: link the chain to a sealed
     /// file's footer. `Some` when replay stops here: a sealed file must end
     /// in its footer.

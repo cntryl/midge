@@ -89,15 +89,29 @@ impl WalActor {
         })?;
         crate::failpoints::fail_point!("midge::wal::after_spilled_preparation");
         self.ensure_lease_validity()?;
+        let admitted = self.admit_spilled_wal(
+            source,
+            &sequence_plan,
+            effective_durability,
+            commit_time_millis,
+        )?;
+        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
         let mut wal_may_have_changed = false;
-        let (wal_bytes, wal_records) = match self.append_spilled_wal_records(
+        let append_result = self.append_spilled_wal_records(
             request_id,
             source,
             &sequence_plan,
             effective_durability,
             commit_time_millis,
             &mut wal_may_have_changed,
-        ) {
+        );
+        // An ambiguous writer failure may still land bytes after it returns.
+        // Keep the full reservation until restart reconciles the poisoned WAL;
+        // its current position is not proof of the final physical footprint.
+        if append_result.is_ok() || !wal_may_have_changed {
+            self.settle_wal_append(admitted, previous_position);
+        }
+        let (wal_bytes, wal_records) = match append_result {
             Ok(result) => result,
             Err(error) => {
                 if wal_may_have_changed {
@@ -325,6 +339,50 @@ impl WalActor {
         Ok(())
     }
 
+    /// Reserve the entire streamed unit before writing its first frame. The
+    /// sizing pass stays bounded to one operation, just like the append pass.
+    fn admit_spilled_wal(
+        &self,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        plan: &TxnSequencePlan,
+        durability: DurabilityPolicy,
+        commit_time_millis: u64,
+    ) -> MidgeResult<u64> {
+        let Some(storage) = self.storage_budget.as_ref().filter(|storage| {
+            self.writer().is_some()
+                && storage.ephemeral_sst_cache_enabled()
+                && durability != DurabilityPolicy::BestEffort
+        }) else {
+            return Ok(0);
+        };
+        let mut bytes = 0_u64;
+        let mut add = |record: &WalRecord| -> MidgeResult<()> {
+            let frame = crate::wal::encoding::record_frame_size_bound(record)?;
+            bytes = bytes
+                .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
+                .ok_or_else(|| MidgeError::ResourceLimit("WAL transaction size overflow".into()))?;
+            Ok(())
+        };
+        for (kind, sequence) in [
+            (WalOpKind::TxnBegin, plan.begin_seq),
+            (WalOpKind::TxnCommit, plan.commit_seq),
+        ] {
+            let mut record =
+                WalRecord::new_cf(plan.cf_id, kind, Bytes::from_static(b"txn"), None, sequence);
+            record.txn_id = Some(plan.txn_id);
+            add(&record)?;
+        }
+        source.for_each(|ordinal, op| {
+            let sequence = plan.first_op_seq.checked_add(ordinal).ok_or_else(|| {
+                MidgeError::ResourceLimit("transaction spill sequence allocation overflow".into())
+            })?;
+            let op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
+            add(&op.wal_record(plan.txn_id))
+        })?;
+        storage.admit_local_wal_bytes(bytes)?;
+        Ok(bytes)
+    }
+
     fn append_spilled_wal_records(
         &mut self,
         request_id: u64,
@@ -394,26 +452,17 @@ impl WalActor {
         record: &WalRecord,
         wal_may_have_changed: &mut bool,
     ) -> MidgeResult<()> {
-        let admitted = self.admit_wal_records(std::slice::from_ref(record))?;
-        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
-        if let Err(error) = self.ensure_lease_validity() {
-            self.settle_wal_append(admitted, previous_position);
-            return Err(error);
-        }
+        self.ensure_lease_validity()?;
         let Some(writer) = self.writer_mut() else {
-            if let Some(storage) = &self.storage_budget {
-                storage.settle_local_wal_admission(admitted, 0);
-            }
             return Err(MidgeError::Internal(
                 "transaction WAL writer disappeared during append".to_string(),
             ));
         };
         if let Err(failure) = writer.append_record_accounted(record) {
             *wal_may_have_changed |= !failure.unchanged;
-            return Err(self.settle_failed_wal_append(admitted, failure));
+            return Err(self.settle_failed_wal_append(0, failure));
         }
         *wal_may_have_changed = true;
-        self.settle_wal_append(admitted, previous_position);
         Ok(())
     }
 

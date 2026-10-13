@@ -5,9 +5,8 @@
 //! The cataloged objects are probed (HEAD, checksum, inspection), then the
 //! cache's ledger members the lineage needs: its tail, and under salvage the
 //! local copy of a shared member whose object is unusable. The planner
-//! decides; this module only cuts the open member back to the prefix replay
-//! applies (keeping a copy first when that drops anything salvage or a crash
-//! cannot explain) and assembles the sources.
+//! decides; this module exposes the verified open prefix without changing
+//! its backing file. Startup commits the sequence floor before cutting it.
 
 use super::streaming_wal_fs::{validate_wal_source, StreamingWalFs};
 use super::CloudStartupRecovery;
@@ -127,9 +126,6 @@ impl StreamingCloudWalRecovery {
             }
         }
         let plan = crate::wal::planner::plan(policy, catalog, ledger, &probes)?;
-        if let Some(cut) = plan.open_cut {
-            apply_open_cut(local.as_ref(), cut)?;
-        }
         let (fs, segments) =
             assemble_planned_sources(&plan, remote_sources, local, read_window, scope)?;
         scope.check("cloud WAL planning completion")?;
@@ -474,18 +470,14 @@ fn open_member<'a>(
 /// Cut the open member back to the prefix replay applies, keeping a durable
 /// copy of the original first when the cut drops what salvage or a crash
 /// cannot explain.
-fn apply_open_cut(local: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {
-    let path = crate::wal::segment_key(cut.id);
+pub(super) fn apply_open_cut(wal: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {
+    let path = FsPath::new(crate::wal::segment_file_name(cut.id));
     if cut.retain {
-        CloudStartupRecovery::retain_local_wal_copy(local, &path)?;
-        local
-            .sync_dir(
-                &FsPath::new(crate::wal::WAL_DIR),
-                crate::io::Durability::Durable,
-            )
+        CloudStartupRecovery::retain_local_wal_copy(wal, &path)?;
+        wal.sync_dir(&FsPath::new(""), crate::io::Durability::Durable)
             .map_err(FsError::into_midge)?;
     }
-    crate::io::truncate_durably(local, &path, cut.valid_bytes)
+    crate::io::truncate_durably(wal, &path, cut.valid_bytes)
         .map(drop)
         .map_err(FsError::into_midge)
 }
@@ -515,6 +507,9 @@ fn assemble_planned_sources(
             ),
         };
         replay_fs.insert(crate::wal::segment_file_name(planned.id), fs, path)?;
+        if let Some(cut) = plan.open_cut.filter(|cut| cut.id == planned.id) {
+            replay_fs.limit_prefix(&crate::wal::segment_file_name(planned.id), cut.valid_bytes)?;
+        }
     }
     let segments = ReplaySegments::from_plan(plan.anchor, &plan.replay, |id| {
         FsPath::new(format!(

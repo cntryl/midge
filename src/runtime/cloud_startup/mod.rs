@@ -117,6 +117,17 @@ pub(crate) fn commit_recovery_plan_within(
     }
     crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
     validate()?;
+    if let Some(cut) = plan.open_cut {
+        let CacheHistory::Existing(history) = &history else {
+            return Err(crate::common::MidgeError::Internal(
+                "open WAL cut without local history".into(),
+            ));
+        };
+        let wal = history.segment_files().ok_or_else(|| {
+            crate::common::MidgeError::Internal("open WAL cut without segment files".into())
+        })?;
+        streaming_wal_plan::apply_open_cut(wal.as_ref(), cut)?;
+    }
     scope.check("local WAL history")?;
     let history = match (plan.history, history) {
         (

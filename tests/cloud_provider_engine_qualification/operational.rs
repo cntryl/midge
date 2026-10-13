@@ -79,12 +79,10 @@ fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
                         > 0
                 );
                 assert_eq!(report["costs"]["recovery_phases"]["wal_replay"]["count"], 1);
-                assert!(
-                    report["costs"]["recovery_phases"]["coverage"]["probes"]
-                        .as_u64()
-                        .expect("coverage probes")
-                        > 0
-                );
+                let plan = &report["costs"]["recovery_phases"]["wal_plan"];
+                assert_eq!(plan["started_count"], 1, "recovery must plan WAL authority");
+                assert_eq!(plan["count"], 1, "WAL planning must complete");
+                assert_eq!(plan["failed"], 0, "WAL authority planning failed");
             }
             println!("MIDGE_OPERATIONAL_EVIDENCE {report}");
         }
