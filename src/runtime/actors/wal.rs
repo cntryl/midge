@@ -1005,7 +1005,7 @@ mod tests;
 
 impl WalActor {
     /// Replace the open writer's authority check, as a lease would.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "failpoints"))]
     pub(crate) fn set_write_authority_for_test(
         &self,
         authority: crate::wal::traits::WriteAuthority,
