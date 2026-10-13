@@ -190,40 +190,26 @@ impl WalActor {
             let last_sequence = prepared_transactions
                 .last()
                 .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
-            // A failed sync leaves the group's records in the WAL file, where
-            // restart may find them; keep every frontier below them.
-            if let Err(error) = self.apply_strict_transaction_group_durability(state, last_sequence)
-            {
-                let plans = prepared_transactions
-                    .iter()
-                    .map(|prepared| &prepared.sequence_plan)
-                    .collect::<Vec<_>>();
-                Self::mark_unapplied(state, &plans);
-                return Err(error);
-            }
+            // A failed sync fences the WAL. None of the group is in the
+            // memtables, so replay keeps or drops each unit whole.
+            self.apply_strict_transaction_group_durability(state, last_sequence)?;
         }
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
         let mut pending = prepared_transactions.into_iter();
         while let Some(prepared) = pending.next() {
             if !strict_group {
-                if let Err(error) = self.apply_transaction_durability(
+                self.apply_transaction_durability(
                     state,
                     prepared.effective_durability,
                     prepared.sequence_plan.commit_seq,
-                ) {
-                    let plans = std::iter::once(&prepared)
-                        .chain(pending.as_slice())
-                        .map(|prepared| &prepared.sequence_plan)
-                        .collect::<Vec<_>>();
-                    Self::mark_unapplied(state, &plans);
-                    return Err(error);
-                }
+                )?;
             }
             crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
             // Every unit in the group is in the WAL and `state.sequence` is
             // past every commit; the earlier units are applied. A lease that
-            // lapsed since is a failed apply of this unit and the rest.
+            // lapsed since is a failed apply of this unit and the rest, none
+            // of which reached the memtables.
             if let Err(error) = self.ensure_lease_validity() {
                 let unapplied = std::iter::once(&prepared)
                     .chain(pending.as_slice())
@@ -235,7 +221,15 @@ impl WalActor {
                     .iter()
                     .map(|prepared| &prepared.sequence_plan)
                     .collect::<Vec<_>>();
-                return Err(self.fail_unapplied_transactions(state, &plans, logged, error));
+                return Err(self.fail_unapplied_transactions(
+                    state,
+                    &plans,
+                    super::UnappliedOutcome {
+                        logged,
+                        partly_applied: false,
+                    },
+                    error,
+                ));
             }
             let PreparedTransactionAppend {
                 request_id,

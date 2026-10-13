@@ -1287,8 +1287,161 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
 }
 
 #[cfg(feature = "failpoints")]
+fn memtable_keys(fixture: &EventLoopFixture, cf_id: crate::types::ColumnFamilyId) -> Vec<Vec<u8>> {
+    fixture
+        .event_loop
+        .state
+        .get_cf(cf_id)
+        .expect("column family")
+        .memtable
+        .iter_all()
+        .into_iter()
+        .map(|(key, _, _)| key)
+        .collect()
+}
+
+/// Give the fixture's WAL actor a lease that lapses at the `lapse_at`-th
+/// (zero-based) hit of `failpoint`.
+#[cfg(feature = "failpoints")]
+fn lapse_lease_at(fixture: &mut EventLoopFixture, failpoint: &str, lapse_at: usize) {
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity
+        .activate(
+            fixture.event_loop.fencing.writer_epoch,
+            std::time::Instant::now() + Duration::from_mins(1),
+        )
+        .expect("activate the lease");
+    fixture
+        .event_loop
+        .wal_actor
+        .set_lease_validity(Some(Arc::clone(&validity)));
+    let hits = std::sync::atomic::AtomicUsize::new(0);
+    fail::cfg_callback(failpoint, move || {
+        if hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == lapse_at {
+            validity.expire_for_test();
+        }
+    })
+    .expect("configure the lease lapse");
+}
+
+#[cfg(feature = "failpoints")]
 #[test]
-fn should_refuse_flush_when_strict_sync_fails_after_wal_append() -> MidgeResult<()> {
+fn should_freeze_without_spilled_unit_when_lease_lapses_before_its_apply() -> MidgeResult<()> {
+    // Arrange: a best-effort write leaves the family's memtable non-empty.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let temp = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    fixture.event_loop.wal_actor.append_transaction(
+        &mut fixture.event_loop.state,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 70,
+            ops: vec![put_op(0, b"best-effort", b"value")],
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: None,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
+    write_set.push(put_op(0, b"spilled", b"value"))?;
+    let source = write_set.take_source();
+    lapse_lease_at(&mut fixture, "midge::wal::txn_after_sync_before_ack", 0);
+    let result = fixture.event_loop.wal_actor.append_spilled_transaction(
+        &mut fixture.event_loop.state,
+        &source,
+        crate::runtime::actors::wal::SpilledTransactionAppendParams {
+            request_id: 71,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: 0,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::txn_after_sync_before_ack");
+    let keys = memtable_keys(&fixture, 0);
+
+    // Act
+    let frozen = fixture.event_loop.freeze_active_memtable(0);
+
+    // Assert: the strict unit is durable but none of it is applied, so the
+    // flush publishes none of it and replay keeps or drops it whole; the
+    // best-effort write is flushed.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(fixture.event_loop.wal_actor.is_fenced());
+    assert_eq!(keys, vec![b"best-effort".to_vec()]);
+    assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -> MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let _first_rx = fixture.register(72);
+    let _second_rx = fixture.register(73);
+    msg_tx
+        .send(txn_msg(
+            73,
+            vec![put_op(0, b"group-second", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue second strict transaction");
+    lapse_lease_at(
+        &mut fixture,
+        "midge::wal::before_prepared_transaction_apply",
+        1,
+    );
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            72,
+            vec![put_op(0, b"group-first", b"value")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+    let keys = memtable_keys(&fixture, 0);
+
+    // Act
+    let frozen = fixture.event_loop.freeze_active_memtable(0);
+
+    // Assert: both units are durable; the first is applied whole and the
+    // second not at all, so the flush publishes only the first and replay
+    // keeps or drops the second whole.
+    assert_eq!(handled, 2);
+    assert!(fixture.event_loop.wal_actor.is_fenced());
+    assert_eq!(keys, vec![b"group-first".to_vec()]);
+    assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
+
+    scenario.teardown();
+    drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_freeze_without_failed_unit_when_strict_sync_fails_after_wal_append() -> MidgeResult<()> {
     // Arrange: an earlier write leaves the family's memtable non-empty, so
     // a freeze would publish a frontier at `state.sequence`.
     let _guard = failpoint_test_lock()
@@ -1324,15 +1477,16 @@ fn should_refuse_flush_when_strict_sync_fails_after_wal_append() -> MidgeResult<
         matches!(error, MidgeError::NoSpace(_))
     });
 
+    let keys = memtable_keys(&fixture, 0);
+
     // Act
     let frozen = fixture.event_loop.freeze_active_memtable(0);
 
-    // Assert: the failed unit's records are in the WAL file and may survive
-    // restart; a frontier at or past its commit would make replay skip it.
-    assert!(
-        matches!(frozen, Err(MidgeError::RecoveryFailed(_))),
-        "{frozen:?}"
-    );
+    // Assert: replay keeps a unit iff its commit is above the family's
+    // frontier. None of the failed unit is in the frozen memtable, so the
+    // flush publishes none of it and replay keeps or drops it whole.
+    assert_eq!(keys, vec![b"strict-applied".to_vec()]);
+    assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
 
     scenario.teardown();
     drop(test_guard);

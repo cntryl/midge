@@ -114,17 +114,13 @@ impl WalActor {
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
-        if let Err(error) =
-            self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
-        {
-            // A failed sync leaves the unit's records in the WAL file, where
-            // restart may find them; keep the frontier below them.
-            Self::mark_unapplied(state, &[&sequence_plan]);
-            return Err(error);
-        }
+        // A failed sync fences the WAL. None of the unit is in the memtables,
+        // so replay keeps or drops it whole whatever frontier a later flush
+        // publishes.
+        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
         // The WAL now holds the unit and `state.sequence` is past its commit.
-        // A lease that lapsed since is a failed apply: the family must not
-        // publish a frontier past the commit before restart replays the unit.
+        // A lease that lapsed since is a failed apply.
+        let mut applied_ops = 0_usize;
         if let Err(error) = self.ensure_lease_validity().and_then(|()| {
             self.apply_spilled_transaction_ops(
                 state,
@@ -132,12 +128,16 @@ impl WalActor {
                 &sequence_plan,
                 effective_durability,
                 commit_time_millis,
+                &mut applied_ops,
             )
         }) {
             return Err(self.fail_unapplied_transactions(
                 state,
                 &[&sequence_plan],
-                wal_records > 0,
+                super::UnappliedOutcome {
+                    logged: wal_records > 0,
+                    partly_applied: applied_ops > 0,
+                },
                 error,
             ));
         }
@@ -397,6 +397,7 @@ impl WalActor {
         sequence_plan: &TxnSequencePlan,
         effective_durability: DurabilityPolicy,
         commit_time_millis: u64,
+        applied_ops: &mut usize,
     ) -> MidgeResult<()> {
         source.for_each(|ordinal, op| {
             crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
@@ -407,7 +408,9 @@ impl WalActor {
             let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
             self.ensure_lease_validity()?;
-            Self::apply_transaction_op_to_memtable(state, apply_op)
+            Self::apply_transaction_op_to_memtable(state, apply_op)?;
+            *applied_ops += 1;
+            Ok(())
         })?;
         tracing::trace!(
             commit_sequence = sequence_plan.commit_seq,

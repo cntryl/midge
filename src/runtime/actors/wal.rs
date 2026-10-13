@@ -77,6 +77,15 @@ impl TxnSequencePlan {
     }
 }
 
+/// What reached the WAL and the memtables of units that failed to apply.
+#[derive(Clone, Copy)]
+struct UnappliedOutcome {
+    /// The units' records are appended to the WAL.
+    logged: bool,
+    /// Some, but not all, of a unit's ops reached the memtables.
+    partly_applied: bool,
+}
+
 struct TxnWalBatch {
     wal_record: Option<WalRecord>,
     total_wal_bytes: usize,
@@ -812,46 +821,53 @@ impl WalActor {
         }
     }
 
-    /// Record that each unit in `plans`, whose sequences are allocated and
-    /// whose WAL records, if any, are appended, did not reach the memtables
-    /// whole. Each family then refuses to freeze, and to take writes, until
-    /// restart, so no flush frontier passes a unit restart must replay.
-    fn mark_unapplied(state: &mut RuntimeState, plans: &[&TxnSequencePlan]) {
-        for plan in plans {
-            if let Some(cf) = state.get_cf_mut(plan.cf_id) {
-                cf.mark_partially_applied(plan.commit_seq);
-            }
-        }
-    }
-
-    /// Stop a writer whose units in `plans` did not reach the memtables
-    /// whole. When the WAL holds them (`logged`), restart replays each one
-    /// whole (#537), provided no flush frontier passes its commit first. A
-    /// `BestEffort` unit has no WAL record, so restart discards all of it,
-    /// provided the partial memtable is never flushed.
+    /// Stop a writer whose units in `plans`, with sequences allocated and WAL
+    /// records (if `outcome.logged`) appended, did not reach the memtables
+    /// whole.
+    ///
+    /// Replay keeps a unit iff its commit is above the family's flush
+    /// frontier, so a unit none of whose ops reached the memtables is kept or
+    /// dropped whole whatever frontier a later flush publishes: the WAL is
+    /// only fenced. A partly applied unit would reach a flushed SST in part,
+    /// so its family is marked and refuses to freeze, and to take writes,
+    /// until restart. Restart then replays a logged unit whole (#537) and
+    /// discards an unlogged `BestEffort` one whole.
     fn fail_unapplied_transactions(
         &mut self,
         state: &mut RuntimeState,
         plans: &[&TxnSequencePlan],
-        logged: bool,
+        outcome: UnappliedOutcome,
         error: MidgeError,
     ) -> MidgeError {
-        Self::mark_unapplied(state, plans);
+        if outcome.partly_applied {
+            for plan in plans {
+                if let Some(cf) = state.get_cf_mut(plan.cf_id) {
+                    cf.mark_partially_applied(plan.commit_seq);
+                }
+            }
+        }
         let txn_ids = plans
             .iter()
             .map(|plan| plan.txn_id.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        let message = if logged {
-            format!(
-                "transaction {txn_ids} is logged in the WAL but did not fully reach the \
+        let message = match (outcome.logged, outcome.partly_applied) {
+            (true, true) => format!(
+                "transaction {txn_ids} is logged in the WAL but only part of it reached the \
                  memtables; restart applies it whole: {error}"
-            )
-        } else {
-            format!(
-                "transaction {txn_ids} has no WAL record and did not fully reach the \
+            ),
+            (false, true) => format!(
+                "transaction {txn_ids} has no WAL record and only part of it reached the \
                  memtables; restart discards all of it: {error}"
-            )
+            ),
+            (true, false) => format!(
+                "transaction {txn_ids} is logged in the WAL but none of it reached the \
+                 memtables; it may be applied on restart: {error}"
+            ),
+            (false, false) => format!(
+                "transaction {txn_ids} has no WAL record and none of it reached the \
+                 memtables; it is not applied: {error}"
+            ),
         };
         self.fence_transition(state, message.clone());
         state.mark_persistence_anomaly();
