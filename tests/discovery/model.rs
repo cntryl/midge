@@ -126,8 +126,10 @@ impl Model {
             }
             Action::Write(id, intent) => {
                 if let Intent::DeleteRange { start, end } = intent {
-                    if start > end {
-                        return Err("reversed delete range".into());
+                    // The engine rejects an empty or reversed range with
+                    // InvalidArgument, so no legal history issues one.
+                    if start >= end {
+                        return Err("empty or reversed delete range".into());
                     }
                 }
                 self.transactions
@@ -269,6 +271,34 @@ mod tests {
         assert!(!model.active(0));
         assert_eq!(model.committed.len(), 0);
         assert!(model.apply(&Action::Commit(0)).is_err());
+    }
+
+    #[test]
+    fn should_reject_equal_range_when_delete_range_is_applied() {
+        // Arrange
+        let mut model = Model::default();
+        model.apply(&Action::Begin(0)).unwrap();
+        let range = |start: &[u8], end: &[u8]| {
+            Action::Write(
+                0,
+                Intent::DeleteRange {
+                    start: start.to_vec(),
+                    end: end.to_vec(),
+                },
+            )
+        };
+
+        // Act
+        let equal = model.apply(&range(b"a", b"a"));
+        let empty_keys = model.apply(&range(b"", b""));
+        let reversed = model.apply(&range(b"b", b"a"));
+        let forward = model.apply(&range(b"a", b"b"));
+
+        // Assert
+        assert!(equal.is_err(), "{equal:?}");
+        assert!(empty_keys.is_err(), "{empty_keys:?}");
+        assert!(reversed.is_err(), "{reversed:?}");
+        assert_eq!(forward, Ok(Observation::None));
     }
 
     #[test]
