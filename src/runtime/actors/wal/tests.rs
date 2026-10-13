@@ -2175,6 +2175,80 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     Ok(())
 }
 
+/// Whether `result` reports a logged unit whose outcome is unknown because
+/// restart may apply it.
+#[cfg(feature = "failpoints")]
+fn may_be_applied_on_restart<T>(result: &MidgeResult<T>) -> bool {
+    matches!(
+        result,
+        Err(MidgeError::Timeout(message))
+            if message.contains("is logged in the WAL")
+                && message.contains("may be applied on restart")
+    )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_fenced_when_lease_lapses_before_unlogged_unit_applies() -> MidgeResult<()> {
+    // Arrange: a BestEffort unit has no WAL record. The lease lapses after
+    // its sequences are allocated, at the apply of the group of one.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity.activate(1, Instant::now() + Duration::from_mins(1))?;
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let sequence_before = state.sequence;
+    let observed = Arc::clone(&validity);
+    fail::cfg_callback("midge::wal::before_prepared_transaction_apply", move || {
+        observed.expire_for_test();
+    })
+    .expect("lapse the lease before the apply");
+
+    // Act
+    let result = actor.append_transaction(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 343,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"unlogged"),
+                value: Bytes::from_static(b"value"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::before_prepared_transaction_apply");
+
+    // Assert: sequences were allocated, yet nothing was logged or applied,
+    // so the caller is told the unit is not applied.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(state.sequence > sequence_before);
+    assert_eq!(state.get_cf(0).map(|cf| cf.memtable.size_bytes()), Some(0));
+    assert!(state
+        .get_cf(0)
+        .is_some_and(|cf| cf.partially_applied_commit().is_none()));
+    assert!(actor.is_fenced());
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResult<()> {
@@ -2230,7 +2304,7 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 
     // Assert: the WAL already holds the whole transaction, so a partial
     // memtable apply must stop the writer instead of serving it silently.
-    assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
+    assert!(may_be_applied_on_restart(&result), "{result:?}");
     assert!(actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     Ok(())
@@ -2343,7 +2417,7 @@ fn should_exit_after_flushing_partly_applied_spilled_transaction_in_child() {
     // memtable; a manual flush then persists that partial memtable before restart.
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::spilled_apply_op");
-    assert!(matches!(commit, Err(MidgeError::Timeout(_))), "{commit:?}");
+    assert!(may_be_applied_on_restart(&commit), "{commit:?}");
     let flushed = engine.flush_cf(&family);
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
 
@@ -2441,7 +2515,7 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
         .expect("fail the second post-commit apply");
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::spilled_apply_op");
-    assert!(matches!(commit, Err(MidgeError::Timeout(_))), "{commit:?}");
+    assert!(may_be_applied_on_restart(&commit), "{commit:?}");
 
     // Act: the other family's write goes first, because a write refused
     // while the WAL is fenced may stop the whole runtime from writing.
@@ -2548,7 +2622,7 @@ fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
         .expect("fail the fourth post-commit apply");
     let commit = tx.commit(crate::WriteOptions::sync());
     fail::remove("midge::wal::spilled_apply_op");
-    assert!(matches!(commit, Err(MidgeError::Timeout(_))), "{commit:?}");
+    assert!(may_be_applied_on_restart(&commit), "{commit:?}");
 
     // Act: a stall hint on the first reply makes the second check the stall.
     let written = [b"best-effort-1".as_slice(), b"best-effort-2"]
