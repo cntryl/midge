@@ -2241,6 +2241,86 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_mark_family_when_lease_lapses_after_durable_spilled_commit() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+    );
+    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    validity.activate(1, Instant::now() + Duration::from_mins(1))?;
+    actor.set_lease_validity(Some(Arc::clone(&validity)));
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(temp.path()),
+        false,
+        1,
+    );
+    for key in [b"first".as_slice(), b"second".as_slice()] {
+        write_set.push(crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::from_static(b"spilled-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+    }
+    let source = write_set.take_source();
+    let observed = Arc::clone(&validity);
+    fail::cfg_callback("midge::wal::txn_after_sync_before_ack", move || {
+        observed.expire_for_test();
+    })
+    .expect("lapse the lease once the commit is durable");
+
+    // Act
+    let result = actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 341,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::txn_after_sync_before_ack");
+
+    // Assert: the unit is durable and none of it is applied, while
+    // `state.sequence` is already at its commit. Only a family that refuses
+    // to freeze keeps a later frontier below the commit, so restart replays
+    // the unit instead of skipping it as flushed.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(state.wal.frontiers.local_durable() >= state.sequence);
+    assert_eq!(
+        state.get_cf(0).map(|cf| cf.memtable.size_bytes()),
+        Some(0),
+        "no op reached the memtable"
+    );
+    assert_eq!(
+        state
+            .get_cf(0)
+            .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit),
+        Some(state.sequence)
+    );
+    assert!(actor.is_fenced());
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();

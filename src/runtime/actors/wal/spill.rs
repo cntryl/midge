@@ -115,14 +115,18 @@ impl WalActor {
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
-        self.ensure_lease_validity()?;
-        if let Err(error) = self.apply_spilled_transaction_ops(
-            state,
-            source,
-            &sequence_plan,
-            effective_durability,
-            commit_time_millis,
-        ) {
+        // The WAL now holds the unit and `state.sequence` is past its commit.
+        // A lease that lapsed since is a failed apply: the family must not
+        // publish a frontier past the commit before restart replays the unit.
+        if let Err(error) = self.ensure_lease_validity().and_then(|()| {
+            self.apply_spilled_transaction_ops(
+                state,
+                source,
+                &sequence_plan,
+                effective_durability,
+                commit_time_millis,
+            )
+        }) {
             return Err(self.fail_partial_spilled_apply(
                 state,
                 &sequence_plan,
