@@ -39,7 +39,7 @@ jobs:
       - name: Install test validator
         run: cargo install --git https://github.com/cntryl/tools
 
-      - name: Validate test contracts
+      - name: Validate tests
         run: cntryl-tools validate-tests
 
       - name: Format
@@ -48,9 +48,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features
+
       - name: Build
-        run: cargo build --all-targets --all-features
+        run: cargo build --workspace --all-targets --all-features
 
-      - name: Unit and binary tests
-        run: cargo test --workspace --all-targets --all-features
-
+      - name: Test
+        run: cargo test --workspace --all-features
