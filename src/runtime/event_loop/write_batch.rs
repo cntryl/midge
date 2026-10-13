@@ -528,7 +528,7 @@ impl EventLoop {
                 }
 
                 if let Some(request) = fallback_request {
-                    self.finish_drained_write(request.request_id, Err(error));
+                    self.finish_drained_write(request.request_id, Err(not_attempted(error)));
                     handled += 1;
                 }
             }
@@ -683,6 +683,20 @@ impl EventLoop {
             );
         }
         self.respond(request_id, RuntimeResponse::Error { request_id, error });
+    }
+}
+
+/// The error for a request a failed group never prepared: it was neither
+/// logged nor applied. The group's `Timeout` speaks only for logged units,
+/// so it becomes `Fenced`, which says the request is not applied; any other
+/// group error already makes no claim that it was.
+fn not_attempted(group_error: MidgeError) -> MidgeError {
+    match group_error {
+        MidgeError::Timeout(reason) => MidgeError::Fenced(format!(
+            "the transaction was not logged or applied because an earlier \
+             transaction in its batch failed: {reason}"
+        )),
+        other => other,
     }
 }
 

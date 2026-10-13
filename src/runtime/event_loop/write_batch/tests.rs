@@ -1500,6 +1500,16 @@ fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -
 /// failpoint gate: the engine's workers wait on it.
 #[cfg(feature = "failpoints")]
 fn reopen_and_find(fixture: EventLoopFixture, keys: [&[u8]; 2]) -> MidgeResult<[bool; 2]> {
+    let [first, second] = reopen_and_read(fixture, keys)?;
+    Ok([first.is_some(), second.is_some()])
+}
+
+/// Like `reopen_and_find`, returning the recovered values.
+#[cfg(feature = "failpoints")]
+fn reopen_and_read(
+    fixture: EventLoopFixture,
+    keys: [&[u8]; 2],
+) -> MidgeResult<[Option<Vec<u8>>; 2]> {
     let EventLoopFixture {
         _temp_dir: directory,
         event_loop,
@@ -1512,7 +1522,10 @@ fn reopen_and_find(fixture: EventLoopFixture, keys: [&[u8]; 2]) -> MidgeResult<[
     let mut engine = crate::Engine::open(options)?;
     let found = {
         let tx = engine.begin_tx(0, crate::TransactionMode::ReadOnly)?;
-        [tx.get(keys[0])?.is_some(), tx.get(keys[1])?.is_some()]
+        [
+            tx.get(keys[0])?.map(|value| value.to_vec()),
+            tx.get(keys[1])?.map(|value| value.to_vec()),
+        ]
     };
     engine.shutdown(Duration::from_secs(30))?;
     Ok(found)
@@ -2647,5 +2660,68 @@ fn should_answer_outcome_unknown_when_lease_lapses_before_spilled_sync() -> Midg
 
     scenario.teardown();
     drop(test_guard);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_not_applied_to_fallback_request_when_its_group_fails() -> MidgeResult<()> {
+    // Arrange: request 75 writes the key request 74 already staged, so it
+    // cannot join the group and waits as the fallback, never prepared.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (fixture, grouped, fallback) = {
+        let test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let grouped_rx = fixture.register(74);
+        let fallback_rx = fixture.register(75);
+        msg_tx
+            .send(txn_msg(
+                75,
+                vec![put_op(0, b"shared", b"fallback-value")],
+                Some(DurabilityPolicy::Strict),
+            ))
+            .expect("queue fallback transaction");
+        lapse_lease_at(
+            &mut fixture,
+            "midge::wal::before_prepared_transaction_apply",
+            0,
+        );
+
+        // Act
+        fixture.event_loop.apply_transaction_with_coalescing(
+            &msg_rx,
+            txn_request(
+                74,
+                vec![put_op(0, b"shared", b"grouped-value")],
+                Some(DurabilityPolicy::Strict),
+            ),
+            1024,
+        );
+        fail::remove("midge::wal::before_prepared_transaction_apply");
+        let responses = (recv_response(&grouped_rx), recv_response(&fallback_rx));
+        scenario.teardown();
+        drop(test_guard);
+        (fixture, responses.0, responses.1)
+    };
+    let [recovered, _] = reopen_and_read(fixture, [b"shared", b"shared"])?;
+
+    // Assert: the grouped unit is synced but not applied, so its outcome is
+    // unknown. The fallback was never logged or applied, so it is told so.
+    assert!(is_outcome_unknown(&grouped, 74), "{grouped:?}");
+    assert!(
+        matches!(
+            fallback,
+            RuntimeResponse::Error {
+                request_id: 75,
+                error: MidgeError::Fenced(_),
+            }
+        ),
+        "{fallback:?}"
+    );
+    assert_eq!(recovered.as_deref(), Some(b"grouped-value".as_slice()));
     Ok(())
 }
