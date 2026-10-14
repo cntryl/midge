@@ -287,6 +287,7 @@ pub struct WalActor {
 }
 
 mod apply_op;
+mod authority;
 mod durability;
 mod rotation;
 mod spill;
@@ -1039,31 +1040,12 @@ impl WalActor {
         let holder_id = self.leader_holder_id.clone();
         let epoch = self.current_epoch;
         let timeout = self.storage_io_timeout;
-        Some(Arc::new(move |operation: &mut dyn FnMut()| {
-            crate::wal::writer_effect::with_writer_effect(
-                |run| {
-                    if let Some(store) = &leader_store {
-                        store
-                            .with_writer_epoch(&holder_id, epoch, timeout, run)
-                            .map_err(|error| {
-                                error.into_writer_effect_error("WAL writer storage effect")
-                            })
-                    } else {
-                        run();
-                        Ok(())
-                    }
-                },
-                || {
-                    if let Some(validity) = &validity {
-                        validity.remaining(epoch).map_err(|error| {
-                            error.into_validation_error("monotonic writer lease validity lost")
-                        })?;
-                    }
-                    operation();
-                    Ok(())
-                },
-            )
-            .map_err(|error| error.error)?
+        Some(Arc::new(authority::LeaseWriterAuthority {
+            validity,
+            leader_store,
+            holder_id,
+            epoch,
+            timeout,
         }))
     }
 

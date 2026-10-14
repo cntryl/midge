@@ -825,6 +825,11 @@ impl<'a> LeaderAcquisition<'a> {
 /// replacement. Filesystem stores serialize replacement with the
 /// crash-releasing locks shared by writer effects.
 pub trait LeaderStore: Send + Sync {
+    /// Optional grouping of physical writer jobs under one continuous fence.
+    fn writer_effect_groups(&self) -> Option<&dyn super::WriterEffectGroups> {
+        None
+    }
+
     /// Atomically acquire leadership by incrementing the epoch via CAS.
     ///
     /// On success returns the newly written `LeaderRecord` with a strictly

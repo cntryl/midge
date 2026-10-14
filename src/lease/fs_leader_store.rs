@@ -18,6 +18,8 @@ use super::traits::{
     format_leader_record, parse_leader_record, LeaderAcquisition, LeaderRecord, LeaderStore,
     LeaseError,
 };
+use super::writer_effect_groups::{TransitionPermit, WriterEffectCoordinator};
+use super::{ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups};
 use crate::io::{staging, Durability, Fs, FsError, FsLock, FsPath, OpenMode, OpenOptions};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +53,8 @@ pub struct FsLeaderStore {
     clock: crate::lease::clock::LeaseClock,
     storage_io_timeout: Duration,
     operation_scope: Option<crate::common::DeadlineScope>,
+    incoming_scope: Option<crate::common::DeadlineScope>,
+    writer_effects: Arc<WriterEffectCoordinator>,
 }
 
 impl FsLeaderStore {
@@ -72,10 +76,13 @@ impl FsLeaderStore {
             clock,
             storage_io_timeout,
             operation_scope: None,
+            incoming_scope: None,
+            writer_effects: Arc::default(),
         }
     }
 
     fn with_scope(&self, scope: &crate::common::DeadlineScope) -> Self {
+        let incoming_scope = self.incoming_scope.clone().or_else(|| Some(scope.clone()));
         let scope = scope.with_deadline(crate::common::OperationDeadline::from_budget(
             self.storage_io_timeout,
         ));
@@ -85,6 +92,8 @@ impl FsLeaderStore {
             clock: self.clock.clone(),
             storage_io_timeout: self.storage_io_timeout,
             operation_scope: Some(scope),
+            incoming_scope,
+            writer_effects: Arc::clone(&self.writer_effects),
         }
     }
 
@@ -95,9 +104,13 @@ impl FsLeaderStore {
                 "leader-store I/O deadline exhausted".into(),
             ));
         }
-        Ok(self.with_scope(&crate::common::DeadlineScope::new(
+        let mut scoped = self.with_scope(&crate::common::DeadlineScope::new(
             crate::common::OperationDeadline::from_budget(timeout),
-        )))
+        ));
+        // This fresh stage budget must not become a retained logical group
+        // deadline. Preserve only a scope supplied by the incoming caller.
+        scoped.incoming_scope.clone_from(&self.incoming_scope);
+        Ok(scoped)
     }
 
     fn transition_deadline(&self) -> crate::common::OperationDeadline {
@@ -226,6 +239,15 @@ impl FsLeaderStore {
     /// failing release and forcing the next opener to wait for the full TTL.
     fn acquire_effect_transition_locks(&self) -> Result<LockGuard<'_>, LeaseError> {
         let deadline = self.transition_deadline();
+        let context = self
+            .operation_scope
+            .as_ref()
+            .map_or_else(WriterEffectGroupContext::default, |scope| {
+                WriterEffectGroupContext::default().with_scope(scope.clone())
+            });
+        let transition = self
+            .writer_effects
+            .transition(deadline.remaining(), &context)?;
         let mut contended_path = FsPath::new(WRITER_EFFECT_LOCK_FILE);
         loop {
             if deadline.is_expired() {
@@ -234,7 +256,10 @@ impl FsLeaderStore {
                 )));
             }
             match self.try_acquire_effect_lock() {
-                Ok(lock) => return Ok(lock),
+                Ok(mut lock) => {
+                    lock.transition = Some(transition);
+                    return Ok(lock);
+                }
                 Err(LockAttemptError::Contended(path)) => {
                     contended_path = path;
                     std::thread::sleep(deadline.remaining().min(Duration::from_millis(1)));
@@ -255,15 +280,19 @@ impl FsLeaderStore {
     }
 
     fn try_acquire_effect_lock(&self) -> Result<LockGuard<'_>, LockAttemptError> {
+        self.try_acquire_native_effect_lock()
+            .map(LockGuard::filesystem)
+    }
+
+    fn try_acquire_native_effect_lock(&self) -> Result<Box<dyn FsLock>, LockAttemptError> {
         let path = FsPath::new(WRITER_EFFECT_LOCK_FILE);
         match self.fs.try_lock_exclusive(&path) {
             Ok(lock) => {
-                let guard = LockGuard::filesystem(lock);
                 self.ensure_native_effect_protocol()
                     .map_err(LockAttemptError::Failed)?;
                 self.check_operation_scope("writer effect lock admission")
                     .map_err(LockAttemptError::Failed)?;
-                Ok(guard)
+                Ok(lock)
             }
             Err(FsError::Unsupported(error)) => Err(LockAttemptError::Failed(
                 LeaseError::IoError(format!(
@@ -332,7 +361,7 @@ impl FsLeaderStore {
     fn acquire_writer_effect_lock_until(
         &self,
         timeout: Duration,
-    ) -> Result<LockGuard<'_>, LeaseError> {
+    ) -> Result<Box<dyn FsLock>, LeaseError> {
         let deadline = self
             .transition_deadline()
             .earlier(crate::common::OperationDeadline::from_budget(timeout));
@@ -343,7 +372,7 @@ impl FsLeaderStore {
                     format!("writer storage effect timed out waiting for same-epoch effect at {contended_path}"),
                 ));
             }
-            match self.try_acquire_effect_lock() {
+            match self.try_acquire_native_effect_lock() {
                 Ok(lock) => return Ok(lock),
                 Err(LockAttemptError::Contended(path)) => {
                     contended_path = path;
@@ -430,6 +459,9 @@ enum LockAttemptError {
 }
 
 impl LeaderStore for FsLeaderStore {
+    fn writer_effect_groups(&self) -> Option<&dyn WriterEffectGroups> {
+        Some(self)
+    }
     fn read_committed_metadata(
         &self,
         timeout: std::time::Duration,
@@ -670,16 +702,15 @@ impl LeaderStore for FsLeaderStore {
         timeout: std::time::Duration,
         operation: &mut dyn FnMut(),
     ) -> Result<(), LeaseError> {
-        if timeout.is_zero() {
-            return Err(LeaseError::Timeout(
-                "writer effect deadline exhausted".into(),
-            ));
-        }
-        let scoped = self.scoped_for_timeout(timeout)?;
-        let _effect_lock = scoped.acquire_writer_effect_lock_until(timeout)?;
-        scoped.validate_epoch(expected_holder_id, expected_epoch)?;
-        operation();
-        Ok(())
+        let group = self.begin_group(expected_holder_id, expected_epoch, timeout)?;
+        let active = group.reserve_ticket(timeout)?.activate()?;
+        self.run_active(
+            expected_holder_id,
+            expected_epoch,
+            &active,
+            timeout,
+            operation,
+        )
     }
 
     fn validate_epoch(
@@ -728,8 +759,47 @@ enum LockGuardKind<'a> {
     },
 }
 
+impl WriterEffectGroups for FsLeaderStore {
+    fn begin_group_with_context(
+        &self,
+        holder: &str,
+        epoch: u64,
+        timeout: Duration,
+        context: &WriterEffectGroupContext,
+    ) -> Result<WriterEffectGroup, LeaseError> {
+        let context = self.incoming_scope.as_ref().map_or_else(
+            || context.clone(),
+            |scope| context.with_scope(scope.clone()),
+        );
+        let timeout = context.timeout(timeout.min(self.storage_io_timeout));
+        let mut scoped = self.scoped_for_timeout(timeout)?;
+        for scope in context.scopes() {
+            scoped = scoped.with_scope(scope);
+        }
+        self.writer_effects
+            .begin(holder, epoch, timeout, context.clone(), || {
+                let native = scoped.acquire_writer_effect_lock_until(timeout)?;
+                scoped.validate_epoch(holder, epoch)?;
+                context.check("writer group admission completion")?;
+                Ok(native)
+            })
+    }
+
+    fn run_active(
+        &self,
+        holder: &str,
+        epoch: u64,
+        active: &ActiveWriterEffect,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        active.run(&self.writer_effects, holder, epoch, timeout, operation)
+    }
+}
+
 struct LockGuard<'a> {
     kind: LockGuardKind<'a>,
+    transition: Option<TransitionPermit>,
 }
 
 impl<'a> LockGuard<'a> {
@@ -746,12 +816,14 @@ impl<'a> LockGuard<'a> {
                 lock_path,
                 durability,
             },
+            transition: None,
         }
     }
 
     fn filesystem(lock: Box<dyn FsLock>) -> Self {
         Self {
             kind: LockGuardKind::Filesystem { _lock: lock },
+            transition: None,
         }
     }
 
@@ -1037,6 +1109,10 @@ impl FsLeaderStore {
 }
 
 #[cfg(test)]
+#[path = "fs_leader_store/group_tests.rs"]
+mod group_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::io::{MockFs, ReadFs};
@@ -1048,6 +1124,44 @@ mod tests {
             Arc::new(MockFs::new()),
             crate::lease::clock::LeaseClock::default(),
         )
+    }
+
+    #[test]
+    fn should_overlap_independent_effects_when_the_writer_epoch_matches() {
+        // Arrange
+        let store = Arc::new(make_store());
+        let record = store.acquire_leadership("writer").unwrap();
+        let (entered, entering) = std::sync::mpsc::sync_channel(1);
+        let (resume, resuming) = std::sync::mpsc::sync_channel(1);
+        let first_store = Arc::clone(&store);
+        let first = thread::spawn(move || {
+            first_store.with_writer_epoch(
+                "writer",
+                record.epoch,
+                Duration::from_secs(2),
+                &mut || {
+                    entered.send(()).unwrap();
+                    resuming.recv().unwrap();
+                },
+            )
+        });
+        entering.recv().unwrap();
+
+        // Act: independent storage effects need to exclude lease transitions,
+        // but may run together while one continuously held fence proves epoch.
+        let mut second_ran = false;
+        let second = store.with_writer_epoch(
+            "writer",
+            record.epoch,
+            Duration::from_millis(100),
+            &mut || second_ran = true,
+        );
+        resume.send(()).unwrap();
+        first.join().unwrap().unwrap();
+
+        // Assert
+        second.unwrap();
+        assert!(second_ran);
     }
 
     fn metadata_generation(horizon: u64) -> crate::lease::CloudMetadataGeneration {

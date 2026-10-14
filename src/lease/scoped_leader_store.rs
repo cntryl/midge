@@ -4,6 +4,7 @@ use super::traits::{
     acquire_leadership_with_minimum_epoch_within, scope_lease_error, LeaderAcquisition,
     LeaderRecord,
 };
+use super::{ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups};
 use super::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, LeaseError};
 use crate::common::DeadlineScope;
 use std::sync::Arc;
@@ -67,6 +68,11 @@ impl StartupLeaderStore {
 }
 
 impl LeaderStore for StartupLeaderStore {
+    fn writer_effect_groups(&self) -> Option<&dyn WriterEffectGroups> {
+        self.inner
+            .writer_effect_groups()
+            .map(|_| self as &dyn WriterEffectGroups)
+    }
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
         self.acquire_leadership_with_minimum_epoch(holder_id, 0)
     }
@@ -225,5 +231,37 @@ impl LeaderStore for StartupLeaderStore {
     #[cfg(test)]
     fn write_test_coordination_document(&self, content: &str) -> Result<(), LeaseError> {
         self.inner.write_test_coordination_document(content)
+    }
+}
+
+impl WriterEffectGroups for StartupLeaderStore {
+    fn begin_group_with_context(
+        &self,
+        holder: &str,
+        epoch: u64,
+        timeout: Duration,
+        context: &WriterEffectGroupContext,
+    ) -> Result<WriterEffectGroup, LeaseError> {
+        let capability = self.inner.writer_effect_groups().ok_or_else(|| {
+            LeaseError::Internal("writer effect grouping capability disappeared".into())
+        })?;
+        let context = context.with_scope(self.scope.clone());
+        capability.begin_group_with_context(holder, epoch, timeout, &context)
+    }
+
+    fn run_active(
+        &self,
+        holder: &str,
+        epoch: u64,
+        active: &ActiveWriterEffect,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        let capability = self.inner.writer_effect_groups().ok_or_else(|| {
+            LeaseError::Internal("writer effect grouping capability disappeared".into())
+        })?;
+        self.within_operation(timeout, "grouped writer storage effect", |timeout| {
+            capability.run_active(holder, epoch, active, timeout, operation)
+        })
     }
 }

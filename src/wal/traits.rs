@@ -39,12 +39,45 @@ impl WalAppendError {
 /// Implementations must provide append semantics and durability controls.
 /// A writer appends to one segment, whose header names the writer epoch
 /// (#843); records carry no epoch of their own.
-pub(crate) type WriteAuthority =
-    std::sync::Arc<dyn Fn(&mut dyn FnMut()) -> MidgeResult<()> + Send + Sync>;
+pub(crate) type WriteAuthority = std::sync::Arc<dyn crate::wal::writer_authority::WriterAuthority>;
+
+/// A writer that can explicitly attach native authority to submitted work.
+#[doc(hidden)]
+pub trait GroupedWalWriter: Send + Sync {
+    /// Admit one explicit logical operation.
+    ///
+    /// # Errors
+    /// Returns the authority or admission deadline failure before any effect.
+    fn begin_group(&self, timeout: Duration) -> MidgeResult<crate::lease::WriterEffectGroup>;
+    /// Submit a batch with an owned child of the admitted group.
+    ///
+    /// # Errors
+    /// Returns the append failure and its proof of unchanged storage.
+    fn append_batch_in_group(
+        &self,
+        records: &[WalRecord],
+        group: &crate::lease::WriterEffectGroup,
+    ) -> Result<WalPos, WalAppendError>;
+    /// Sync with a separately admitted child and the existing per-I/O budget.
+    ///
+    /// # Errors
+    /// Returns the authority, filesystem or acknowledgement failure.
+    fn sync_in_group(
+        &self,
+        timeout: Duration,
+        group: &crate::lease::WriterEffectGroup,
+    ) -> MidgeResult<()>;
+}
 
 pub trait WalWriter: Send + Sync {
     /// Install the authority fence held around each background storage effect.
     fn set_write_authority(&self, _authority: Option<WriteAuthority>) {}
+
+    /// Native request grouping is optional; legacy and provider writers retain
+    /// their normal per-effect authority path.
+    fn writer_group_capability(&self) -> Option<&dyn GroupedWalWriter> {
+        None
+    }
 
     /// Append a pre-encoded record to the log and return the position where
     /// the record was written.

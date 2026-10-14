@@ -569,6 +569,42 @@ impl WalHistory {
         self.under_writer_fence(|history| history.record_sync_inner(through_bytes))
     }
 
+    pub(crate) fn record_sync_in_group(
+        &mut self,
+        through_bytes: u64,
+        group: &crate::lease::WriterEffectGroup,
+    ) -> MidgeResult<()> {
+        let fence = self.fence.clone().ok_or_else(|| {
+            MidgeError::Internal("native writer group requires a fenced WAL history".into())
+        })?;
+        if fence.writer_epoch != self.epoch {
+            return Err(MidgeError::Fenced(
+                "WAL history epoch differs from its writer group".into(),
+            ));
+        }
+        let epoch = self.epoch;
+        let active = group
+            .reserve_ticket(fence.timeout)
+            .and_then(crate::lease::WriterEffectTicket::activate)
+            .map_err(|error| error.into_writer_effect_error("WAL history group activation"))?;
+        crate::wal::writer_effect::with_writer_effect(
+            |run| {
+                fence
+                    .store
+                    .writer_effect_groups()
+                    .ok_or_else(|| {
+                        MidgeError::Internal("WAL history authority has no native groups".into())
+                    })?
+                    .run_active(&fence.holder_id, epoch, &active, fence.timeout, run)
+                    .map_err(|error| {
+                        error.into_writer_effect_error("WAL history group storage effect")
+                    })
+            },
+            || self.record_sync_inner(through_bytes),
+        )
+        .map_err(|error| error.error)?
+    }
+
     fn record_sync_inner(&mut self, through_bytes: u64) -> MidgeResult<()> {
         if self
             .ledger()

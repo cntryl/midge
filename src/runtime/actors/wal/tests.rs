@@ -894,7 +894,7 @@ fn should_keep_unknown_lease_authority_as_authority_loss_when_sync_fails() -> Mi
     )?;
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let authority_calls = Arc::clone(&calls);
-    wal_actor.set_write_authority_for_test(Arc::new(move |operation| {
+    wal_actor.set_write_authority_for_test(Arc::new(move |operation: &mut dyn FnMut()| {
         if authority_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             operation();
             Ok(())
@@ -2124,6 +2124,8 @@ fn assert_best_effort_write_after_fencing(
 }
 
 mod admission;
+
+mod writer_groups;
 
 mod floor;
 

@@ -55,7 +55,12 @@ impl Drop for RealFsLock {
     }
 }
 
-impl FsLock for RealFsLock {}
+impl FsLock for RealFsLock {
+    fn validate_held(&self) -> FsResult<()> {
+        // The exclusively owned descriptor remains locked until this guard drops.
+        Ok(())
+    }
+}
 
 fn lock_error(path: &Path, error: &io::Error) -> FsError {
     let unsupported = error.kind() == io::ErrorKind::Unsupported || {
