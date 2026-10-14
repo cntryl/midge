@@ -15,6 +15,8 @@ use crate::wal::ledger::SegmentId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod fenced_ledger;
+
 const POWER_LOSS_SEEDS: u64 = 64;
 
 fn wal(device: &CrashDevice) -> Arc<dyn Fs> {
