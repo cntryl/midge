@@ -264,12 +264,16 @@ pub struct WalActor {
     current_epoch: u64,
     lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
 
-    /// Optional leader store for epoch validation at sync boundaries.
-    /// When set, each fsync checks that our epoch is still current.
+    /// Optional leader store for writer ownership validation. Provider stores
+    /// validate once per logical write group and at ungrouped sync boundaries;
+    /// filesystem stores validate under the physical effect lock.
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     /// This writer's own lease holder identity, checked alongside epoch at
     /// each fencing validation.
     leader_holder_id: String,
+    /// A strict transaction group was remotely validated immediately before
+    /// its WAL effects, so its following fsync does not repeat that request.
+    sync_authority_prevalidated: bool,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
 
@@ -650,6 +654,7 @@ impl WalActor {
             lease_validity: None,
             leader_store: None,
             leader_holder_id: String::new(),
+            sync_authority_prevalidated: false,
             max_replayable_txn_bytes: None,
         };
 
@@ -765,6 +770,7 @@ impl WalActor {
     ) {
         self.leader_store = Some(store);
         self.leader_holder_id = holder_id;
+        self.sync_authority_prevalidated = false;
         if let Some(writer) = self.writer() {
             writer.set_write_authority(self.write_authority());
         }
@@ -883,7 +889,7 @@ impl WalActor {
                  memtables; it is not applied: {error}"
             ),
         };
-        self.fence_transition(state, message.clone());
+        self.fence_with_cause(state, message.clone(), Self::is_authority_failure(&error));
         state.mark_persistence_anomaly();
         if outcome.logged {
             // Replay may apply a logged unit, so its outcome is unknown.
@@ -894,6 +900,17 @@ impl WalActor {
         } else {
             MidgeError::RecoveryFailed(message)
         }
+    }
+
+    fn is_authority_failure(error: &MidgeError) -> bool {
+        matches!(
+            error,
+            MidgeError::Fenced(_)
+                | MidgeError::LeaseHeld(_)
+                | MidgeError::LeaseUnavailable(_)
+                | MidgeError::LeaseIndeterminate(_)
+                | MidgeError::LeaseEpochExhausted
+        )
     }
 
     /// The caller's error for units whose WAL frames may be in the file when
@@ -1047,12 +1064,36 @@ impl WalActor {
             if let Some(store) = &leader_store {
                 store
                     .with_writer_epoch(&holder_id, epoch, timeout, &mut run)
-                    .map_err(|error| error.into_validation_error("WAL writer storage effect"))?;
+                    .map_err(|error| error.into_writer_effect_error("WAL writer storage effect"))?;
             } else {
                 run();
             }
             validity_error.map_or(Ok(()), Err)
         }))
+    }
+
+    fn validate_writer_admission(&mut self, state: &mut RuntimeState) -> MidgeResult<bool> {
+        let Some(store) = &self.leader_store else {
+            return Ok(false);
+        };
+        match store.validate_write_admission(
+            &self.leader_holder_id,
+            self.current_epoch,
+            self.storage_io_timeout,
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let error = error.into_validation_error("WAL writer admission validation");
+                if Self::is_authority_failure(&error) {
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL writer admission authority validation failed: {error}"),
+                        true,
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     fn ensure_lease_validity(&self) -> MidgeResult<()> {

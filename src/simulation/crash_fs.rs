@@ -37,7 +37,9 @@
 //! is one global choice, so any new directory operation can move it.
 
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions, ReadFs};
+use crate::io::{
+    Durability, File, Fs, FsError, FsLock, FsPath, FsResult, OpenMode, OpenOptions, ReadFs,
+};
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -533,6 +535,11 @@ struct State {
     pending: Vec<NamespaceOp>,
     /// Open handles per (process generation, inode).
     handles: BTreeMap<(u64, Inode), usize>,
+    /// Process-scoped advisory locks. These are volatile coordination state,
+    /// so process termination and power loss release them without touching
+    /// the simulated filesystem namespace.
+    active_locks: BTreeMap<String, u64>,
+    next_lock_id: u64,
     next_inode: Inode,
     generation: u64,
     faults: Vec<FaultRule>,
@@ -553,6 +560,8 @@ impl Default for State {
             nodes: BTreeMap::from([(ROOT, Node::Directory(Directory::new(root)))]),
             pending: Vec::new(),
             handles: BTreeMap::new(),
+            active_locks: BTreeMap::new(),
+            next_lock_id: 1,
             next_inode: ROOT + 1,
             generation: 0,
             faults: Vec::new(),
@@ -849,6 +858,7 @@ impl State {
     fn end_process(&mut self) {
         self.generation += 1;
         self.handles.clear();
+        self.active_locks.clear();
         self.reclaim();
     }
 
@@ -979,8 +989,12 @@ impl CrashDevice {
     /// one point.
     #[must_use]
     pub fn fork(&self) -> Self {
+        let mut state = self.lock().clone();
+        // A forked device is an independent crash image. Host locks are not
+        // part of that image and have no owner in the new device.
+        state.active_locks.clear();
         Self {
-            state: Arc::new(Mutex::new(self.lock().clone())),
+            state: Arc::new(Mutex::new(state)),
         }
     }
 
@@ -1123,6 +1137,26 @@ pub struct CrashFs {
     generation: u64,
 }
 
+struct CrashFsLock {
+    device: CrashDevice,
+    generation: u64,
+    path: String,
+    token: u64,
+}
+
+impl Drop for CrashFsLock {
+    fn drop(&mut self) {
+        let mut state = self.device.lock();
+        if state.generation == self.generation
+            && state.active_locks.get(&self.path) == Some(&self.token)
+        {
+            state.active_locks.remove(&self.path);
+        }
+    }
+}
+
+impl FsLock for CrashFsLock {}
+
 impl CrashFs {
     fn state(&self) -> FsResult<MutexGuard<'_, State>> {
         let state = self.device.lock();
@@ -1258,6 +1292,26 @@ impl ReadFs for CrashFs {
 impl Fs for CrashFs {
     fn coordination_key(&self) -> u64 {
         Arc::as_ptr(&self.device.state) as usize as u64
+    }
+
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+        let lock_path = Self::parts(path)?.join("/");
+        let mut state = self.state()?;
+        if state.active_locks.contains_key(&lock_path) {
+            return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+        let token = state.next_lock_id;
+        state.next_lock_id = state
+            .next_lock_id
+            .checked_add(1)
+            .ok_or_else(|| FsError::Io("simulated filesystem lock IDs exhausted".into()))?;
+        state.active_locks.insert(lock_path.clone(), token);
+        Ok(Box::new(CrashFsLock {
+            device: self.device.clone(),
+            generation: self.generation,
+            path: lock_path,
+            token,
+        }))
     }
 
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {

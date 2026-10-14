@@ -2473,7 +2473,9 @@ fn should_sync_batched_wal_when_fairness_slot_runs_past_batch_window() -> MidgeR
 
 /// Fail the WAL actor's sync-time epoch check with an unreachable store.
 #[cfg(feature = "failpoints")]
-struct UnreachableLeaderStore;
+struct UnreachableLeaderStore {
+    writer_effects: std::sync::atomic::AtomicUsize,
+}
 
 #[cfg(feature = "failpoints")]
 impl crate::lease::LeaderStore for UnreachableLeaderStore {
@@ -2488,6 +2490,36 @@ impl crate::lease::LeaderStore for UnreachableLeaderStore {
         Err(crate::lease::LeaseError::IoError(
             "test leader store is unreachable".to_string(),
         ))
+    }
+
+    fn validate_write_admission(
+        &self,
+        _expected_holder_id: &str,
+        _expected_epoch: u64,
+        _timeout: Duration,
+    ) -> Result<(), crate::lease::LeaseError> {
+        Ok(())
+    }
+
+    fn with_writer_epoch(
+        &self,
+        _expected_holder_id: &str,
+        _expected_epoch: u64,
+        _timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), crate::lease::LeaseError> {
+        if self
+            .writer_effects
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            operation();
+            Ok(())
+        } else {
+            Err(crate::lease::LeaseError::IoError(
+                "test leader store became unreachable at sync".to_string(),
+            ))
+        }
     }
 }
 
@@ -2538,17 +2570,19 @@ fn should_answer_outcome_unknown_when_leader_store_is_unreachable_at_group_sync(
     let test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
 
-    // Act: both frames are appended; the sync's epoch check cannot reach
-    // the leader store, which reads as a retryable lease error.
+    // Act: the grouped append is admitted, then the sync's authority check
+    // cannot reach the leader store.
     let group = run_group(
         DurabilityPolicy::Strict,
         [86, 87],
         [b"store-down-a", b"store-down-b"],
         |fixture| {
-            fixture
-                .event_loop
-                .wal_actor
-                .set_leader_store(Arc::new(UnreachableLeaderStore), "writer".to_string());
+            fixture.event_loop.wal_actor.set_leader_store(
+                Arc::new(UnreachableLeaderStore {
+                    writer_effects: std::sync::atomic::AtomicUsize::new(0),
+                }),
+                "writer".to_string(),
+            );
         },
     )?;
 

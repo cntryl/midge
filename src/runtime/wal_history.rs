@@ -87,7 +87,7 @@ fn with_writer_fence<T>(
             fence.timeout,
             &mut run,
         )
-        .map_err(MidgeError::from)?;
+        .map_err(|error| error.into_writer_effect_error("WAL history storage effect"))?;
     result.unwrap_or_else(|| {
         Err(MidgeError::Internal(
             "writer authority completed without running its storage effect".into(),
@@ -248,7 +248,12 @@ impl WalHistory {
         epoch: u64,
         fence: Option<WalHistoryFence>,
     ) -> MidgeResult<Option<Self>> {
-        let Some(store) = LedgerStore::open(Arc::clone(&wal))? else {
+        let store = if fence.is_some() {
+            LedgerStore::open_under_writer_fence(Arc::clone(&wal))?
+        } else {
+            LedgerStore::open(Arc::clone(&wal))?
+        };
+        let Some(store) = store else {
             return Ok(None);
         };
         let history = Self {
@@ -340,7 +345,11 @@ impl WalHistory {
         };
         let ledger = WalLedger::genesis(holder, anchor, open)?;
         create_segment(wal.as_ref(), &open.header(holder.bytes()))?;
-        let store = LedgerStore::create(Arc::clone(&wal), &ledger)?;
+        let store = if fence.is_some() {
+            LedgerStore::create_under_writer_fence(Arc::clone(&wal), &ledger)?
+        } else {
+            LedgerStore::create(Arc::clone(&wal), &ledger)?
+        };
         let history = Self {
             segments: Some(wal),
             journal: Box::new(store),

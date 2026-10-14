@@ -532,6 +532,28 @@ impl LeaderStore for ProviderLeaderStore {
         }
     }
 
+    fn with_writer_epoch(
+        &self,
+        _expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "cloud WAL storage effect deadline exhausted".into(),
+            ));
+        }
+
+        // Provider-backed leases already hold a conservative monotonic
+        // validity window. Checking that local deadline around a local-cache
+        // effect avoids a remote lease-object read for every WAL write and
+        // fsync. Shared cloud publications still use their conditional CAS.
+        self.validity.remaining(expected_epoch)?;
+        operation();
+        self.validity.remaining(expected_epoch).map(|_| ())
+    }
+
     fn validate_epoch(
         &self,
         expected_holder_id: &str,

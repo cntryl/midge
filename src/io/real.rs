@@ -13,12 +13,72 @@ use super::traits::{
     DirEntry, Durability, File, Fs, FsError, FsLock, FsPath, FsResult, HostAddressing, Metadata,
     OpenOptions, ReadFs,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Weak};
+
+/// NFS can implement advisory locks with process-scoped record locks, where
+/// closing any descriptor for the lock file releases the process's lock.
+/// Keep one local owner per canonical path so a contending thread never opens
+/// and closes another descriptor while an effect is in progress.
+static LOCAL_FILE_LOCKS: LazyLock<parking_lot::Mutex<HashMap<PathBuf, Weak<AtomicBool>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn local_file_lock(path: &Path) -> Arc<AtomicBool> {
+    let mut locks = LOCAL_FILE_LOCKS.lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(AtomicBool::new(false));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+struct RealFsLock {
+    file: Option<fs::File>,
+    local: Arc<AtomicBool>,
+}
+
+impl Drop for RealFsLock {
+    fn drop(&mut self) {
+        // Release the OS/NFS lock before allowing another local descriptor to
+        // open the same path.
+        self.file.take();
+        self.local.store(false, Ordering::Release);
+    }
+}
+
+impl FsLock for RealFsLock {}
+
+fn lock_error(path: &Path, error: &io::Error) -> FsError {
+    let unsupported = error.kind() == io::ErrorKind::Unsupported || {
+        #[cfg(unix)]
+        {
+            error.raw_os_error().is_some_and(|code| {
+                code == libc::EOPNOTSUPP || code == libc::ENOTSUP || code == libc::ENOSYS
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    if unsupported {
+        FsError::Unsupported(format!(
+            "exclusive file locks are unsupported for {}: {error}",
+            path.display()
+        ))
+    } else {
+        io_err("lock_exclusive", path, error)
+    }
+}
 
 /// Real filesystem backend
 pub struct RealFs {
@@ -231,18 +291,35 @@ impl Fs for RealFs {
 
     fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
         let full = self.full_path(path)?;
-        let file = fs::OpenOptions::new()
+        let local = local_file_lock(&full);
+        local
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .map_err(|_| FsError::AlreadyExists(path.0.clone()))?;
+        let file = match fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&full)
-            .map_err(|error| file_op_err("open_lock", &full, &error))?;
+        {
+            Ok(file) => file,
+            Err(error) => {
+                local.store(false, Ordering::Release);
+                return Err(file_op_err("open_lock", &full, &error));
+            }
+        };
         match file.try_lock() {
-            Ok(()) => Ok(Box::new(file)),
-            Err(std::fs::TryLockError::WouldBlock) => Err(FsError::AlreadyExists(path.0.clone())),
+            Ok(()) => Ok(Box::new(RealFsLock {
+                file: Some(file),
+                local,
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                local.store(false, Ordering::Release);
+                Err(FsError::AlreadyExists(path.0.clone()))
+            }
             Err(std::fs::TryLockError::Error(error)) => {
-                Err(io_err("lock_exclusive", &full, &error))
+                local.store(false, Ordering::Release);
+                Err(lock_error(&full, &error))
             }
         }
     }
@@ -368,9 +445,9 @@ impl Fs for RealFs {
                     // write-through fast path above for ordinary WAL sealing;
                     // staged replacements also sync their parent directory.
                     return fs::rename(&from_full, &to_full)
-                        .map_err(|error| file_op_err("rename", &to_full, &error));
+                        .map_err(|error| rename_err(&from_full, &to_full, &error));
                 }
-                return Err(file_op_err("rename", &to_full, &error));
+                return Err(rename_err(&from_full, &to_full, &error));
             }
             Ok(())
         }
@@ -378,12 +455,10 @@ impl Fs for RealFs {
         #[cfg(not(windows))]
         {
             fs::rename(&from_full, &to_full)
-                .map_err(|error| file_op_err("rename", &to_full, &error))
+                .map_err(|error| rename_err(&from_full, &to_full, &error))
         }
     }
 }
-
-impl FsLock for fs::File {}
 
 pub struct RealFile {
     file: fs::File,
@@ -508,6 +583,38 @@ fn file_op_err(op: &str, path: &Path, error: &io::Error) -> FsError {
         io::ErrorKind::NotFound => FsError::NotFound(message),
         io::ErrorKind::AlreadyExists => FsError::AlreadyExists(message),
         _ => io_error(format!("{op} {}", path.display()), error),
+    }
+}
+
+fn rename_err(from: &Path, to: &Path, error: &io::Error) -> FsError {
+    if error.kind() != io::ErrorKind::NotFound {
+        return file_op_err("rename", to, error);
+    }
+
+    let destination_parent = to.parent().unwrap_or_else(|| Path::new("."));
+    match fs::metadata(destination_parent) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return FsError::Io(format!(
+                "rename destination parent is not a directory: {}",
+                destination_parent.display()
+            ));
+        }
+        Err(parent_error) => {
+            return io_err(
+                "rename destination parent",
+                destination_parent,
+                &parent_error,
+            );
+        }
+    }
+
+    match fs::symlink_metadata(from) {
+        Err(source_error) if source_error.kind() == io::ErrorKind::NotFound => {
+            FsError::NotFound(format!("rename source {}: {source_error}", from.display()))
+        }
+        Err(source_error) => io_err("inspect rename source", from, &source_error),
+        Ok(_) => io_err("rename", to, error),
     }
 }
 
@@ -647,6 +754,41 @@ mod tests {
     use super::*;
     use crate::io::OpenMode;
     use tempfile::TempDir;
+
+    #[test]
+    fn should_use_portable_lock_fallback_when_os_lock_is_unsupported() {
+        // Arrange
+        let error = io::Error::new(io::ErrorKind::Unsupported, "lock operation unsupported");
+
+        // Act
+        let mapped = lock_error(Path::new(".midge_writer_effect.v2.lock"), &error);
+
+        // Assert
+        assert!(matches!(mapped, FsError::Unsupported(_)), "{mapped:?}");
+    }
+
+    #[test]
+    fn should_keep_process_lock_held_when_another_real_fs_view_contends() -> FsResult<()> {
+        // Arrange: two independently opened roots point at the same lock file.
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let first = RealFs::new(temp.path())?;
+        let second = RealFs::new(temp.path())?;
+        let path = FsPath::new(".midge_writer_effect.v2.lock");
+        let held = first.try_lock_exclusive(&path)?;
+
+        // Act: a contending view must not open and close another descriptor.
+        let contention = second.try_lock_exclusive(&path);
+
+        // Assert: the first view still owns the lock until its guard drops.
+        assert!(matches!(contention, Err(FsError::AlreadyExists(_))));
+        assert!(matches!(
+            second.try_lock_exclusive(&path),
+            Err(FsError::AlreadyExists(_))
+        ));
+        drop(held);
+        second.try_lock_exclusive(&path)?;
+        Ok(())
+    }
 
     #[test]
     fn should_create_real_fs() -> FsResult<()> {
@@ -838,6 +980,34 @@ mod tests {
         assert_eq!(contents, b"new");
         assert!(!temp.path().join("source.tmp").exists());
         Ok(())
+    }
+
+    #[test]
+    fn should_distinguish_missing_rename_source_from_destination_parent() {
+        // Arrange
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source.tmp");
+        std::fs::write(&source, b"source").expect("write source");
+        let missing_destination_parent = temp.path().join("missing/target");
+        let not_found = io::Error::new(io::ErrorKind::NotFound, "component missing");
+
+        // Act
+        let missing_parent = rename_err(&source, &missing_destination_parent, &not_found);
+        let missing_source = rename_err(
+            &temp.path().join("missing-source"),
+            &temp.path().join("target"),
+            &not_found,
+        );
+
+        // Assert
+        assert!(
+            matches!(missing_parent, FsError::Io(_)),
+            "{missing_parent:?}"
+        );
+        assert!(
+            matches!(missing_source, FsError::NotFound(_)),
+            "{missing_source:?}"
+        );
     }
 
     #[test]

@@ -73,13 +73,19 @@ pub(crate) struct LedgerStore {
     ledger: WalLedger,
     /// LEDGER's length in bytes.
     len: u64,
-    /// Exact synced image this open store is allowed to extend. Length alone
+    /// Exact synced image this open store is allowed to extend when no
+    /// external writer fence serializes all ledger access. Length alone
     /// cannot distinguish a same-size successor rewrite from its own image.
-    image: Bytes,
+    /// Production stores under `WalHistoryFence` omit this image so appends
+    /// do not reread and recopy the full journal for every edit.
+    image: Option<Bytes>,
     /// Edits appended after the snapshot.
     edits: usize,
     /// A write failed, so `ledger` and `len` may not describe LEDGER.
     failed: bool,
+    /// A different writer's image was observed. This store's cached ledger
+    /// must never be used to repair or replace that newer image.
+    fenced: bool,
 }
 
 /// A LEDGER image parsed up to its last valid frame.
@@ -119,6 +125,22 @@ impl LedgerStore {
     /// Refuses an uninitialized `ledger`, and refuses to replace an existing
     /// LEDGER.
     pub(crate) fn create(fs: Arc<dyn Fs>, ledger: &WalLedger) -> MidgeResult<Self> {
+        Self::create_with_fence_mode(fs, ledger, false)
+    }
+
+    /// Create LEDGER while the caller holds the WAL writer-effect fence.
+    pub(crate) fn create_under_writer_fence(
+        fs: Arc<dyn Fs>,
+        ledger: &WalLedger,
+    ) -> MidgeResult<Self> {
+        Self::create_with_fence_mode(fs, ledger, true)
+    }
+
+    fn create_with_fence_mode(
+        fs: Arc<dyn Fs>,
+        ledger: &WalLedger,
+        writer_fenced: bool,
+    ) -> MidgeResult<Self> {
         if fs
             .exists(&FsPath::new(LEDGER_FILE))
             .map_err(FsError::into_midge)?
@@ -131,9 +153,10 @@ impl LedgerStore {
             fs,
             ledger: ledger.clone(),
             len: 0,
-            image: Bytes::new(),
+            image: (!writer_fenced).then(Bytes::new),
             edits: 0,
             failed: true,
+            fenced: false,
         };
         store.compact()?;
         Ok(store)
@@ -146,6 +169,15 @@ impl LedgerStore {
     /// therefore durable once this returns, even when it was read from a
     /// crashed process's unsynced writes, and the journal starts small again.
     pub(crate) fn open(fs: Arc<dyn Fs>) -> MidgeResult<Option<Self>> {
+        Self::open_with_fence_mode(fs, false)
+    }
+
+    /// Open LEDGER while the caller holds the WAL writer-effect fence.
+    pub(crate) fn open_under_writer_fence(fs: Arc<dyn Fs>) -> MidgeResult<Option<Self>> {
+        Self::open_with_fence_mode(fs, true)
+    }
+
+    fn open_with_fence_mode(fs: Arc<dyn Fs>, writer_fenced: bool) -> MidgeResult<Option<Self>> {
         let Some(bytes) = read_ledger(fs.as_ref())? else {
             return Ok(None);
         };
@@ -154,9 +186,10 @@ impl LedgerStore {
             fs,
             ledger: parsed.ledger,
             len: 0,
-            image: Bytes::new(),
+            image: (!writer_fenced).then(Bytes::new),
             edits: 0,
             failed: true,
+            fenced: false,
         };
         store.compact()?;
         Ok(Some(store))
@@ -176,18 +209,33 @@ impl LedgerStore {
     /// a failed compaction does not fail the durable append, and the next
     /// append heals.
     pub(crate) fn append(&mut self, edit: &LedgerEdit) -> MidgeResult<()> {
+        if self.fenced {
+            return Err(MidgeError::Fenced(
+                "WAL ledger changed after this writer opened it".into(),
+            ));
+        }
         self.heal()?;
-        let mut next = self.ledger.clone();
-        next.apply(edit)?;
+        self.ledger.check(edit)?;
         let frame = encode_frame(&Frame::Edit(edit.clone()))?;
         if let Err(error) = self.write_frame(&frame) {
-            self.failed = true;
+            if matches!(&error, MidgeError::Fenced(_)) {
+                self.fenced = true;
+            } else {
+                self.failed = true;
+            }
             return Err(error);
         }
-        self.ledger = next;
-        let mut image = self.image.to_vec();
-        image.extend_from_slice(&frame);
-        self.image = Bytes::from(image);
+        if let Err(error) = self.ledger.apply(edit) {
+            self.failed = true;
+            return Err(MidgeError::Internal(format!(
+                "WAL ledger edit became invalid after its durable append: {error}"
+            )));
+        }
+        if let Some(image) = &self.image {
+            let mut next_image = image.to_vec();
+            next_image.extend_from_slice(&frame);
+            self.image = Some(Bytes::from(next_image));
+        }
         self.len += byte_len(&frame);
         self.edits += 1;
         if self.edits >= COMPACT_AFTER_EDITS {
@@ -216,6 +264,11 @@ impl LedgerStore {
     /// place. LEDGER afterwards holds exactly the ledger, so a successful
     /// compaction also clears an earlier failed write.
     pub(crate) fn compact(&mut self) -> MidgeResult<()> {
+        if self.fenced {
+            return Err(MidgeError::Fenced(
+                "WAL ledger changed after this writer opened it".into(),
+            ));
+        }
         let mut image = Vec::with_capacity(HEADER_LEN);
         image.extend_from_slice(&MAGIC);
         image.extend_from_slice(&VERSION.to_le_bytes());
@@ -223,7 +276,7 @@ impl LedgerStore {
         self.failed = true;
         publish(&self.fs, &image)?;
         self.len = byte_len(&image);
-        self.image = Bytes::from(image);
+        self.image = self.image.is_some().then(|| Bytes::from(image));
         self.edits = 0;
         self.failed = false;
         Ok(())
@@ -243,15 +296,17 @@ impl LedgerStore {
             )
             .map_err(FsError::into_midge)?;
         let len = file.len().map_err(FsError::into_midge)?;
-        let Some(current) = read_ledger(self.fs.as_ref())? else {
-            return Err(MidgeError::Fenced(
-                "WAL ledger disappeared after this writer opened it".into(),
-            ));
-        };
-        if current.as_ref() != self.image.as_ref() {
-            return Err(MidgeError::Fenced(
-                "WAL ledger changed after this writer opened it".into(),
-            ));
+        if let Some(image) = &self.image {
+            let Some(current) = read_ledger(self.fs.as_ref())? else {
+                return Err(MidgeError::Fenced(
+                    "WAL ledger disappeared after this writer opened it".into(),
+                ));
+            };
+            if current.as_ref() != image.as_ref() {
+                return Err(MidgeError::Fenced(
+                    "WAL ledger changed after this writer opened it".into(),
+                ));
+            }
         }
         if len != self.len {
             return Err(corruption(format!(

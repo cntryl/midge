@@ -206,18 +206,22 @@ impl WalActor {
         Self::preflight_prepared_transaction_ops(state, &apply_ops)?;
         self.ensure_lease_validity()?;
 
-        self.append_prepared_transaction_batches(state, &prepared_transactions)?;
         let strict_group = prepared_transactions
             .iter()
             .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
+        let admission_prevalidated = self.validate_writer_admission(state)?;
+        self.append_prepared_transaction_batches(state, &prepared_transactions)?;
         if strict_group {
             let last_sequence = prepared_transactions
                 .last()
                 .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
             // A failed sync fences the WAL. None of the group is in the
             // memtables, so replay keeps or drops each unit whole.
-            if let Err(error) = self.apply_strict_transaction_group_durability(state, last_sequence)
-            {
+            self.sync_authority_prevalidated = admission_prevalidated;
+            let durability_result =
+                self.apply_strict_transaction_group_durability(state, last_sequence);
+            self.sync_authority_prevalidated = false;
+            if let Err(error) = durability_result {
                 let group = prepared_transactions.iter().collect::<Vec<_>>();
                 return Err(Self::group_durability_error(&group, error));
             }

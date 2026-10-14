@@ -158,6 +158,30 @@ impl LeaderStore for StartupLeaderStore {
         })
     }
 
+    fn validate_write_admission(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.within(timeout, "writer admission validation", |timeout| {
+            self.inner
+                .validate_write_admission(holder_id, epoch, timeout)
+        })
+    }
+
+    fn validate_epoch_before_sync(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.within(timeout, "WAL sync authority validation", |timeout| {
+            self.inner
+                .validate_epoch_before_sync(holder_id, epoch, timeout)
+        })
+    }
+
     fn with_writer_epoch(
         &self,
         holder_id: &str,

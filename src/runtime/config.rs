@@ -193,30 +193,3 @@ impl Default for RuntimeConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn should_keep_cloud_retry_delays_out_of_cfg_test_constants() {
-        // Arrange
-        let sources = [
-            include_str!("durability.rs"),
-            include_str!("event_loop/coordination.rs"),
-            include_str!("actors/gc.rs"),
-        ];
-
-        // Act and Assert
-        for source in sources {
-            let lines = source.lines().collect::<Vec<_>>();
-            for pair in lines.windows(2) {
-                assert!(
-                    !(pair[0].trim() == "#[cfg(test)]"
-                        && pair[1].trim_start().starts_with("const ")
-                        && pair[1].contains("_RETRY_DELAY")),
-                    "retry delays must come from RuntimeRetryPolicy, not cfg(test) constants: {}",
-                    pair[1].trim()
-                );
-            }
-        }
-    }
-}

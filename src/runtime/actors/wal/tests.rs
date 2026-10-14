@@ -845,6 +845,57 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_keep_unknown_lease_authority_as_authority_loss_when_sync_fails() -> MidgeResult<()> {
+    // Arrange: the WAL append is admitted, then the lease store becomes
+    // unreachable at the writer thread's fsync boundary.
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut wal_actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let authority_calls = Arc::clone(&calls);
+    wal_actor.set_write_authority_for_test(Arc::new(move |operation| {
+        if authority_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            operation();
+            Ok(())
+        } else {
+            Err(MidgeError::LeaseUnavailable(
+                "injected provider outage during fsync authority check".into(),
+            ))
+        }
+    }));
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"authority-sync",
+        b"possibly durable",
+        DurabilityPolicy::Strict,
+    )?;
+
+    // Act
+    let result = wal_actor.append_prepared_transactions(&mut state, vec![prepared]);
+
+    // Assert: the WAL stops because authority is unknown, not because local
+    // storage was poisoned.
+    assert!(
+        matches!(result, Err(MidgeError::OutcomeUnknown(_))),
+        "{:?}",
+        result.as_ref().err()
+    );
+    assert!(wal_actor.is_fenced());
+    assert!(wal_actor.authority_lost());
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    Ok(())
+}
+
 fn begin_sync_for_test(
     actor: &mut WalActor,
     state: &mut RuntimeState,

@@ -161,13 +161,31 @@ impl LeaseError {
         match self {
             LeaseError::IoError(_) | LeaseError::Indeterminate(_) => {
                 crate::common::MidgeError::Busy(format!(
-                    "{context}: writer lease authority is unknown: {self}"
+                    "{context}: writer lease authority is unavailable: {self}"
                 ))
             }
             LeaseError::Timeout(_) => {
                 crate::common::MidgeError::Timeout(format!("{context}: {self}"))
             }
             other => crate::common::MidgeError::Fenced(format!("{context}: {other}")),
+        }
+    }
+
+    /// A writer storage effect may have reached durable storage before its
+    /// authority check failed. Preserve unknown authority as a lease failure
+    /// so commit handling reports an unknown outcome instead of retryable
+    /// local I/O poisoning.
+    pub(crate) fn into_writer_effect_error(self, context: &str) -> crate::common::MidgeError {
+        match self {
+            LeaseError::IoError(_) | LeaseError::Timeout(_) => {
+                crate::common::MidgeError::LeaseUnavailable(format!(
+                    "{context}: writer lease authority is unknown: {self}"
+                ))
+            }
+            LeaseError::Indeterminate(_) => crate::common::MidgeError::LeaseIndeterminate(format!(
+                "{context}: writer lease authority is indeterminate: {self}"
+            )),
+            other => other.into_validation_error(context),
         }
     }
 }

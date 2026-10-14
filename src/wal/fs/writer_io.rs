@@ -1137,16 +1137,18 @@ mod tests {
             ))
         });
         entered.wait();
-        let blocked_successor = store.acquire_leadership("successor");
+        let successor_attempt = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.acquire_leadership("successor"))
+        };
         resume.wait();
         append.join().expect("append thread completed")?;
-        let successor = store.acquire_leadership("successor").unwrap();
+        let successor = successor_attempt
+            .join()
+            .expect("successor attempt completed")
+            .unwrap();
 
         // Assert
-        assert!(matches!(
-            blocked_successor,
-            Err(crate::lease::LeaseError::AcquisitionFailed(_))
-        ));
         assert!(successor.epoch > predecessor.epoch);
         drop(writer);
         Ok(())

@@ -16,6 +16,97 @@ mod startup_deadline;
 
 static TEMP_PATH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+struct CountingLeaseReadBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+    lease_reads: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::storage::cloud::CloudBackend for CountingLeaseReadBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if key.ends_with(LEASE_OBJECT_KEY) {
+            self.lease_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if key.ends_with(LEASE_OBJECT_KEY) {
+            self.lease_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
+    }
+
+    crate::storage::cloud::forward_cloud_backend!(
+        inner;
+        submit_put, submit_get_range, submit_delete, submit_list, submit_head
+    );
+}
+
+#[test]
+fn should_validate_per_logical_write_group_not_per_local_wal_effect() {
+    // Arrange: acquire the real provider-backed lease and then count its
+    // object reads separately from acquisition and heartbeat work.
+    let backend = Arc::new(CountingLeaseReadBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        lease_reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend.clone(),
+        "midge".to_string(),
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        cloud,
+    ));
+    let _guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire provider lease");
+    let epoch = lease.epoch();
+    backend
+        .lease_reads
+        .store(0, std::sync::atomic::Ordering::Release);
+    let holder_id = lease.holder_id();
+    let mut effects_ran = 0;
+
+    // Act: one provider proof admits a logical write group; its physical WAL
+    // append and fsync effects use the bounded monotonic validity window.
+    lease
+        .leader_store
+        .validate_write_admission(&holder_id, epoch, Duration::from_secs(1))
+        .expect("provider authority admits the write group");
+    for _ in 0..2 {
+        lease
+            .leader_store
+            .with_writer_epoch(&holder_id, epoch, Duration::from_secs(1), &mut || {
+                effects_ran += 1
+            })
+            .expect("valid monotonic authority admits a local effect");
+    }
+
+    // Assert: a standalone sync boundary refreshes authority once, while the
+    // physical append/fsync checks do not each make another provider request.
+    assert_eq!(effects_ran, 2);
+    assert_eq!(
+        backend
+            .lease_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    lease
+        .leader_store
+        .validate_epoch_before_sync(&holder_id, epoch, Duration::from_secs(1))
+        .expect("standalone sync authority refresh succeeds");
+    assert_eq!(
+        backend
+            .lease_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+}
+
 fn test_config() -> CloudLeaseConfig {
     CloudLeaseConfig {
         bucket: "test-bucket".to_string(),

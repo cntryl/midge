@@ -25,6 +25,39 @@ fn path(value: &str) -> FsPath {
     FsPath::new(value)
 }
 
+#[test]
+fn should_release_exclusive_locks_when_power_is_lost() {
+    // Arrange: the current process owns a native lock on the simulated device.
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    let lock_path = path(".midge_writer_effect.v2.lock");
+    let old_lock = fs
+        .try_lock_exclusive(&lock_path)
+        .expect("acquire initial lock");
+    assert!(matches!(
+        fs.try_lock_exclusive(&lock_path),
+        Err(FsError::AlreadyExists(_))
+    ));
+
+    // Act: power loss ends the process; a successor takes the same lock.
+    device.power_loss(0);
+    let successor_fs = device.fs();
+    let successor_lock = successor_fs
+        .try_lock_exclusive(&lock_path)
+        .expect("power loss releases the process lock");
+    drop(old_lock);
+
+    // Assert: dropping a stale guard cannot release the successor's lock.
+    assert!(matches!(
+        successor_fs.try_lock_exclusive(&lock_path),
+        Err(FsError::AlreadyExists(_))
+    ));
+    drop(successor_lock);
+    successor_fs
+        .try_lock_exclusive(&lock_path)
+        .expect("dropping the current guard releases its lock");
+}
+
 fn parent_of(name: &str) -> &str {
     name.rsplit_once('/').map_or("", |(parent, _)| parent)
 }

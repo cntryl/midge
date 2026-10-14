@@ -129,7 +129,11 @@ pub(crate) fn commit_recovery_plan_within(
         })?;
         let wal = crate::io::scope_fs(wal, scope.clone());
         history.prepare_open_cut(cut, plan.max_unreplayed_sequence)?;
-        streaming_wal_plan::apply_open_cut(wal.as_ref(), cut)?;
+        let truncate = || streaming_wal_plan::apply_open_cut(wal.as_ref(), cut);
+        match &wal_fence {
+            Some(fence) => fence.with_writer_effect(truncate)?,
+            None => truncate()?,
+        }
     }
     scope.check("local WAL history")?;
     let history = match (plan.history, history) {

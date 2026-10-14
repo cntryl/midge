@@ -910,6 +910,30 @@ pub trait LeaderStore: Send + Sync {
         self.validate_epoch(expected_holder_id, expected_epoch)
     }
 
+    /// Validate once before admitting a logical WAL write group. Provider
+    /// stores keep this remote proof at the group boundary instead of making
+    /// one provider request for every physical append and ledger edit.
+    fn validate_write_admission(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)
+    }
+
+    /// Refresh authority before a sync that was not preceded by a validated
+    /// strict write group. The physical sync remains inside
+    /// `with_writer_epoch`, which performs the final local or provider check.
+    fn validate_epoch_before_sync(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)
+    }
+
     /// Run one writer-owned storage effect only while this holder and epoch
     /// remain current. Stores with a local mutation lock override this to
     /// serialize the validation and effect with takeover; provider stores

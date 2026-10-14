@@ -23,11 +23,9 @@ const SETTLE_LIMIT: Duration = Duration::from_secs(5);
 /// made durable, so a power loss can bring the lock back and block every
 /// later open.
 pub(crate) const LEASE_LOCK: &str = ".midge_leader.lock";
-/// Portable fallback writer-effect fences, which can be resurrected by power loss.
-const WRITER_EFFECT_LOCKS: [&str; 2] =
-    [".midge_writer_effect.v2.lock", ".midge_writer_effect.lock"];
-const STALE_COORDINATION_LOCKS: [&str; 3] =
-    [LEASE_LOCK, WRITER_EFFECT_LOCKS[0], WRITER_EFFECT_LOCKS[1]];
+/// Portable fallback writer-effect fence, which can be resurrected by power loss.
+const WRITER_EFFECT_LOCK: &str = ".midge_writer_effect.v2.lock";
+const STALE_COORDINATION_LOCKS: [&str; 2] = [LEASE_LOCK, WRITER_EFFECT_LOCK];
 
 /// What a campaign found.
 #[derive(Debug, Clone, PartialEq, Eq)]

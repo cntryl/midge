@@ -20,7 +20,9 @@
 
 use super::clock::LeaseClock;
 use super::fs_leader_store::FsLeaderStore;
-use super::traits::{LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease};
+use super::traits::{
+    LeaderRecord, LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease,
+};
 use crate::io::Fs;
 #[cfg(test)]
 use crate::io::{MockFs, RealFs};
@@ -126,6 +128,59 @@ impl FileSystemLease {
         Self::with_root(fs, ttl, ttl / 2, LeaseClock::default())
     }
 
+    fn validate_takeover_record(
+        &self,
+        existing: Option<&LeaderRecord>,
+        report_takeover: bool,
+    ) -> Result<(), LeaseError> {
+        let Some(existing) = existing else {
+            return Ok(());
+        };
+        if existing.holder_id == self.holder_id {
+            return Ok(());
+        }
+
+        let acquired_at =
+            chrono::DateTime::parse_from_rfc3339(&existing.acquired_at).map_err(|_| {
+                LeaseError::Indeterminate(format!(
+                    "leader timestamp is invalid; ownership is ambiguous (holder: {}, epoch: {})",
+                    existing.holder_id, existing.epoch
+                ))
+            })?;
+        let signed_age = self.clock.now().signed_duration_since(acquired_at);
+        if signed_age < chrono::Duration::zero() {
+            return Err(LeaseError::Indeterminate(format!(
+                "leader timestamp is in the future; ownership is ambiguous (holder: {}, epoch: {})",
+                existing.holder_id, existing.epoch
+            )));
+        }
+        let age = signed_age.to_std().map_err(|_| {
+            LeaseError::Indeterminate(format!(
+                "leader age is ambiguous (holder: {}, epoch: {})",
+                existing.holder_id, existing.epoch
+            ))
+        })?;
+        let stale_after = self.ttl.saturating_add(self.clock_skew_tolerance);
+        if age < stale_after {
+            return Err(LeaseError::AcquisitionFailed(format!(
+                "another Midge instance is already running against this storage \
+                 (holder: {}, epoch: {}, acquired {}s ago)",
+                existing.holder_id,
+                existing.epoch,
+                age.as_secs()
+            )));
+        }
+        if report_takeover && existing.acquired_at != super::fs_leader_store::RELEASED_TIMESTAMP {
+            tracing::warn!(
+                old_holder = %existing.holder_id,
+                old_epoch = existing.epoch,
+                age_secs = age.as_secs(),
+                "taking over stale leader record (previous holder likely crashed)"
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
         Arc::clone(&self.validity)
     }
@@ -146,8 +201,13 @@ impl PrimaryLease for FileSystemLease {
             ));
         }
 
-        // Check freshness while holding the acquisition lock so a concurrent
-        // winner cannot publish a live record between validation and CAS.
+        // Reject an ordinary second open before it takes the writer-effect
+        // lock. The locked check below closes the race with a concurrent
+        // acquisition; the early read keeps a failed open from delaying the
+        // live writer's next WAL effect.
+        let observed = self.leader_store.read_current()?;
+        self.validate_takeover_record(observed.as_ref(), false)?;
+
         // The validation closure's own error variant (Indeterminate for an
         // unparseable/ambiguous record, AcquisitionFailed for confirmed
         // contention) propagates verbatim — it must not be collapsed into a
@@ -161,60 +221,7 @@ impl PrimaryLease for FileSystemLease {
             .leader_store
             .acquire_leadership_after_validation_and_publish(
                 &self.holder_id,
-                |existing| {
-                    let Some(existing) = existing else {
-                        return Ok(());
-                    };
-                    if existing.holder_id == self.holder_id {
-                        return Ok(());
-                    }
-
-                    let acquired_at = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
-                        .map_err(|_| {
-                        LeaseError::Indeterminate(format!(
-                            "leader timestamp is invalid; ownership is ambiguous (holder: {}, \
-                             epoch: {})",
-                            existing.holder_id, existing.epoch
-                        ))
-                    })?;
-                    let signed_age = self.clock.now().signed_duration_since(acquired_at);
-                    if signed_age < chrono::Duration::zero() {
-                        return Err(LeaseError::Indeterminate(format!(
-                        "leader timestamp is in the future; ownership is ambiguous (holder: {}, \
-                         epoch: {})",
-                        existing.holder_id, existing.epoch
-                    )));
-                    }
-                    let age = signed_age.to_std().map_err(|_| {
-                        LeaseError::Indeterminate(format!(
-                            "leader age is ambiguous (holder: {}, epoch: {})",
-                            existing.holder_id, existing.epoch
-                        ))
-                    })?;
-                    // A takeover is delayed by a bounded skew allowance. This
-                    // trades failover latency for protection against a holder
-                    // whose wall clock stepped backwards while its monotonic
-                    // watchdog still considers the lease live.
-                    let stale_after = self.ttl.saturating_add(self.clock_skew_tolerance);
-                    if age < stale_after {
-                        return Err(LeaseError::AcquisitionFailed(format!(
-                            "another Midge instance is already running against this storage \
-                         (holder: {}, epoch: {}, acquired {}s ago)",
-                            existing.holder_id,
-                            existing.epoch,
-                            age.as_secs()
-                        )));
-                    }
-                    if existing.acquired_at != super::fs_leader_store::RELEASED_TIMESTAMP {
-                        tracing::warn!(
-                        old_holder = %existing.holder_id,
-                        old_epoch = existing.epoch,
-                        age_secs = age.as_secs(),
-                        "taking over stale leader record (previous holder likely crashed)"
-                        );
-                    }
-                    Ok(())
-                },
+                |existing| self.validate_takeover_record(existing, true),
                 |_| Ok(()),
                 minimum_epoch,
             )?;
@@ -557,6 +564,69 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(LeaseError::AlreadyAcquired(_))));
+    }
+
+    #[test]
+    fn should_reject_live_second_open_before_waiting_for_writer_effect() {
+        // Arrange: the live writer is in a storage effect while another
+        // engine tries to open the same filesystem database.
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let first = Arc::new(FileSystemLease::new_with_fs_for_test(
+            Arc::clone(&fs),
+            Duration::from_secs(30),
+        ));
+        let _first_guard = Arc::clone(&first).try_acquire().expect("first lease");
+        let effect_store = Arc::new(FsLeaderStore::new(Arc::clone(&fs), LeaseClock::default()));
+        let effect_entered = Arc::new(std::sync::Barrier::new(2));
+        let effect_continue = Arc::new(std::sync::Barrier::new(2));
+        let effect_store_worker = Arc::clone(&effect_store);
+        let entered_worker = Arc::clone(&effect_entered);
+        let continue_worker = Arc::clone(&effect_continue);
+        let holder_id = first.holder_id();
+        let epoch = first.epoch();
+        let effect = std::thread::spawn(move || {
+            let mut operation = || {
+                entered_worker.wait();
+                continue_worker.wait();
+            };
+            effect_store_worker.with_writer_epoch(
+                &holder_id,
+                epoch,
+                Duration::from_secs(1),
+                &mut operation,
+            )
+        });
+        effect_entered.wait();
+
+        let second = Arc::new(FileSystemLease::new_with_fs_for_test(
+            fs,
+            Duration::from_secs(30),
+        ));
+        let (done, result) = std::sync::mpsc::sync_channel(1);
+        let open_attempt = std::thread::spawn(move || {
+            let result = Arc::clone(&second).try_acquire().map(|_| ());
+            done.send(result).expect("report second open result");
+        });
+
+        // Act: look for the failed open while the first effect remains held.
+        let result_during_effect = result.recv_timeout(Duration::from_millis(100));
+
+        // Release and join before asserting, so a regression cannot strand a
+        // worker holding the effect lock.
+        effect_continue.wait();
+        effect.join().expect("writer effect completed").unwrap();
+        open_attempt.join().expect("second open completed");
+
+        // Assert: the second open reports confirmed contention promptly and
+        // never takes the lock away from the live writer.
+        assert!(
+            result_during_effect.is_ok(),
+            "failed open waited for the live writer-effect lock"
+        );
+        assert!(matches!(
+            result_during_effect.unwrap(),
+            Err(LeaseError::AcquisitionFailed(_))
+        ));
     }
 
     #[test]

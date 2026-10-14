@@ -1,5 +1,6 @@
 use super::*;
 use crate::io::{FsError, OpenOptions};
+use crate::lease::LeaderStore;
 use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use crate::wal::format::ChainLink;
 use crate::wal::planner::HistoryAction;
@@ -502,6 +503,65 @@ fn should_truncate_only_incomplete_active_wal_tail_before_virtual_replay() -> Mi
             .len,
         cut
     );
+    Ok(())
+}
+
+#[test]
+fn should_fence_cloud_recovery_open_cut_after_successor_acquires_lease() -> MidgeResult<()> {
+    // Arrange: planning identifies a torn suffix, then a successor takes the
+    // lease before recovery applies that plan.
+    let mut fixture = Fixture::new()?;
+    let valid = framed_wal(1, b"value");
+    let active = fixture.active(&valid)?;
+    drop(fixture.history()?);
+    let mut file = std::fs::OpenOptions::new().append(true).open(&active)?;
+    std::io::Write::write_all(&mut file, &[0xFF; 3])?;
+    drop(file);
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+    let before = std::fs::read(&active)?;
+    assert!(
+        recovered.plan.open_cut.is_some(),
+        "the active tail needs a cut"
+    );
+
+    let lease_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    let leader_store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+        Arc::clone(&lease_fs),
+        crate::lease::LeaseClock::default(),
+    ));
+    let predecessor = leader_store.acquire_leadership("predecessor")?;
+    leader_store.acquire_leadership("successor")?;
+    let fence = crate::runtime::wal_history::WalHistoryFence::new(
+        leader_store,
+        predecessor.holder_id,
+        predecessor.epoch,
+        Duration::from_secs(1),
+    );
+    let history = fixture.history()?;
+    let catalog = fixture.catalog();
+    let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::new(
+        crate::storage::HybridStorage::with_policy(
+            Arc::clone(&fixture.cloud),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ),
+    ));
+
+    // Act
+    let result = crate::runtime::cloud_startup::commit_recovery_plan_within(
+        &recovered.plan,
+        &persistence,
+        catalog.fencing_epoch(),
+        &catalog,
+        crate::runtime::cloud_startup::CacheHistory::Existing(history),
+        Some(fence),
+        &|| Ok(()),
+        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+    );
+
+    // Assert: stale recovery must not truncate the active segment the
+    // successor owns now.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert_eq!(std::fs::read(active)?, before);
     Ok(())
 }
 
