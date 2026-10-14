@@ -31,8 +31,8 @@ impl EventLoop {
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
         let result = self.try_seal_current_cloud_segment(deadline);
-        if result.is_err() && self.durability.cloud_seal_retry_needed() {
-            self.durability.defer_cloud_seal_retry();
+        if result.is_err() && self.pipeline.durability.cloud_seal_retry_needed() {
+            self.pipeline.durability.defer_cloud_seal_retry();
         }
         result
     }
@@ -50,12 +50,15 @@ impl EventLoop {
             expected_max_sequence,
             bytes_buffered,
         } = plan;
-        let ticket =
-            self.wal_transition
-                .begin_seal(segment_id, next_segment_id, expected_max_sequence)?;
+        let ticket = self.pipeline.wal_transition.begin_seal(
+            segment_id,
+            next_segment_id,
+            expected_max_sequence,
+        )?;
         let seal_start = Instant::now();
         let flushed =
-            self.wal_actor
+            self.actors
+                .wal_actor
                 .flush_for_cloud_upload_within(&mut self.state, deadline, &ticket);
         let max_sequence = match flushed {
             Ok(max_sequence) => max_sequence,
@@ -80,7 +83,7 @@ impl EventLoop {
         if let Err(error) = self.validate_runtime_writer_lease_within(deadline) {
             return self.cancel_reversible_cloud_seal(ticket, error);
         }
-        let receipt = match self.wal_actor.rotate(&mut self.state, &ticket) {
+        let receipt = match self.actors.wal_actor.rotate(&mut self.state, &ticket) {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.settle_failed_seal_step(ticket, &error);
@@ -114,13 +117,13 @@ impl EventLoop {
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<CloudSealPlan>> {
-        if !self.wal_actor.is_cloud_async() {
+        if !self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
         }
         // A fenced protocol refuses before reading the ledger, which may
         // already have recorded the rotation that fenced it.
-        self.wal_transition.ensure_ready()?;
-        let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
+        self.pipeline.wal_transition.ensure_ready()?;
+        let Some(storage) = self.actors.cloud_coordinator.hybrid_storage.clone() else {
             return Err(crate::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
             ));
@@ -128,18 +131,18 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.state.wal.pending_writes == 0 {
             return Ok(None);
         }
-        if !self.cloud_coordinator.cloud_wal.backlog().is_empty() {
+        if !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
             return Err(crate::common::MidgeError::WriteStall(
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
         }
-        self.durability.mark_cloud_seal_retry_needed();
+        self.pipeline.durability.mark_cloud_seal_retry_needed();
         self.validate_runtime_writer_lease_within(deadline)?;
 
         let segment_id = self.state.wal.open_segment();
         let next_segment_id = self.state.wal.history.ledger().next_segment_id();
-        let expected_max_sequence = self.wal_actor.open_segment_max_sequence();
-        if self.durability.current_key() != segment_id {
+        let expected_max_sequence = self.actors.wal_actor.open_segment_max_sequence();
+        if self.pipeline.durability.current_key() != segment_id {
             let error = crate::common::MidgeError::Internal(format!(
                 "durability generation drift: expected current key {segment_id}"
             ));
@@ -147,7 +150,7 @@ impl EventLoop {
             self.fail_durability_waiters_after_generation_drift(segment_id, &error);
             return Err(error);
         }
-        let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
+        let bytes_buffered = self.actors.wal_actor.bytes_since_sync() as u64;
         let existing_bytes = self
             .state
             .fs
@@ -177,7 +180,7 @@ impl EventLoop {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
         }
-        if let Err(error) = self.wal_transition.finish_seal(ticket, receipt) {
+        if let Err(error) = self.pipeline.wal_transition.finish_seal(ticket, receipt) {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
         }
@@ -191,7 +194,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         let segment_id = receipt.sealed_segment();
         let max_sequence = receipt.max_sequence();
-        self.wal_transition.note_sealed(ticket, receipt)?;
+        self.pipeline.wal_transition.note_sealed(ticket, receipt)?;
         WalTransitionBoundary::BeforeCoordinatorCommit.check()?;
         #[cfg(feature = "failpoints")]
         if crate::failpoints::is_active("midge::cloud::inject_coordinator_drift_after_wal_rotation")
@@ -201,25 +204,30 @@ impl EventLoop {
                     "injected WAL coordinator generation overflow".to_string(),
                 ));
             };
-            self.durability
+            self.pipeline
+                .durability
                 .rotate_from_to(segment_id, drifted_generation)?;
         }
-        self.durability
+        self.pipeline
+            .durability
             .rotate_from_to(segment_id, receipt.next_segment())?;
         WalTransitionBoundary::AfterCoordinatorCommit.check()?;
         WalTransitionBoundary::BeforeSegmentRegistration.check()?;
-        self.durability
+        self.pipeline
+            .durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .cloud_wal
             .queue_sealed(segment_id, max_sequence);
-        self.wal_transition.note_queued(segment_id)?;
+        self.pipeline.wal_transition.note_queued(segment_id)?;
         WalTransitionBoundary::AfterSegmentRegistration.check()?;
         WalTransitionBoundary::BeforeAccountingTransfer.check()?;
-        self.wal_actor
+        self.actors
+            .wal_actor
             .complete_cloud_upload_seal(&mut self.state, receipt);
-        self.durability.record_cloud_flush();
-        self.durability.clear_cloud_seal_retry_needed();
+        self.pipeline.durability.record_cloud_flush();
+        self.pipeline.durability.clear_cloud_seal_retry_needed();
         WalTransitionBoundary::AfterAccountingTransfer.check()
     }
 
@@ -236,18 +244,21 @@ impl EventLoop {
     ) {
         let segment_id = receipt.sealed_segment();
         let max_sequence = receipt.max_sequence();
-        self.durability
+        self.pipeline
+            .durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .cloud_wal
             .queue_sealed(segment_id, max_sequence);
-        if let Err(registration_error) = self.wal_transition.note_queued(segment_id) {
+        if let Err(registration_error) = self.pipeline.wal_transition.note_queued(segment_id) {
             tracing::error!(%registration_error, segment_id, "failed to retain sealed WAL transition obligation");
         }
-        self.wal_actor
+        self.actors
+            .wal_actor
             .complete_cloud_upload_seal(&mut self.state, receipt);
-        self.durability.record_cloud_flush();
-        self.durability.clear_cloud_seal_retry_needed();
+        self.pipeline.durability.record_cloud_flush();
+        self.pipeline.durability.clear_cloud_seal_retry_needed();
         self.fence_wal_transition(error, Some(segment_id));
         self.fail_durability_waiters_after_generation_drift(receipt.next_segment(), error);
         tracing::error!(
@@ -263,13 +274,13 @@ impl EventLoop {
         ticket: crate::runtime::wal_transition::WalSealTicket,
         original_error: crate::common::MidgeError,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        if let Err(cancel_error) = self.wal_actor.cancel_reversible_cloud_flush(&ticket) {
+        if let Err(cancel_error) = self.actors.wal_actor.cancel_reversible_cloud_flush(&ticket) {
             let segment_id = ticket.segment_id();
             self.fence_wal_transition(&cancel_error, None);
             self.fail_durability_waiters_after_generation_drift(segment_id, &cancel_error);
             return Err(cancel_error);
         }
-        self.wal_transition.abandon_prepared_seal(ticket);
+        self.pipeline.wal_transition.abandon_prepared_seal(ticket);
         Err(original_error)
     }
 
@@ -290,8 +301,8 @@ impl EventLoop {
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
-            if self.cloud_coordinator.cloud_wal.backlog().is_empty() {
+        let Some(storage) = self.actors.cloud_coordinator.hybrid_storage.clone() else {
+            if self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
                 return Ok(());
             }
             return Err(crate::common::MidgeError::Internal(
@@ -300,13 +311,16 @@ impl EventLoop {
         };
         let storage = CloudPersistence::new(storage);
 
-        if self.cloud_coordinator.cloud_wal.backlog().is_empty() {
+        if self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
             return Ok(());
         }
-        if !self.cloud_coordinator.cloud_wal.backlog().ready() {
+        if !self.actors.cloud_coordinator.cloud_wal.backlog().ready() {
             return Ok(());
         }
-        self.cloud_coordinator.cloud_wal.begin_upload_attempt();
+        self.actors
+            .cloud_coordinator
+            .cloud_wal
+            .begin_upload_attempt();
         // Validate once per drain pass, not once per segment. Under a provider
         // leader store each validation is a cloud GET, and the durable guarantee
         // is not this poll: `WalPublicationCatalog::require_epoch` plus the
@@ -317,7 +331,7 @@ impl EventLoop {
 
         loop {
             let Some((segment_id, max_sequence)) =
-                self.cloud_coordinator.cloud_wal.backlog().first()
+                self.actors.cloud_coordinator.cloud_wal.backlog().first()
             else {
                 return Ok(());
             };
@@ -332,12 +346,18 @@ impl EventLoop {
                     // this segment in the runtime backlog and avoid repeatedly
                     // paying lease validation and WAL readback while the queue
                     // is still full.
-                    self.cloud_coordinator.cloud_wal.defer_uploads_for_memory();
+                    self.actors
+                        .cloud_coordinator
+                        .cloud_wal
+                        .defer_uploads_for_memory();
                     return Ok(());
                 }
                 Err(error) => return Err(error),
             };
-            self.cloud_coordinator.cloud_wal.admitted_upload(segment_id);
+            self.actors
+                .cloud_coordinator
+                .cloud_wal
+                .admitted_upload(segment_id);
             if !self.state.cloud.pending_uploads.contains(&resource) {
                 self.state.cloud.pending_uploads.push(resource);
             }
@@ -350,24 +370,25 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn check_cloud_wal_admission(
         &self,
     ) -> crate::common::MidgeResult<()> {
-        if !self.wal_actor.is_cloud_async() {
+        if !self.actors.wal_actor.is_cloud_async() {
             return Ok(());
         }
-        let Some(storage) = &self.cloud_coordinator.hybrid_storage else {
+        let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage else {
             return Err(crate::common::MidgeError::Internal(
                 "CloudAsync requires HybridStorage".to_string(),
             ));
         };
-        if !self.cloud_coordinator.cloud_wal.backlog().is_empty() {
+        if !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
             return Err(crate::common::MidgeError::WriteStall(
                 "CloudAsync WAL recovery uploads are still draining".to_string(),
             ));
         }
-        storage.ensure_wal_write_admission(self.cloud_coordinator.cloud_wal.held_uploads())
+        storage.ensure_wal_write_admission(self.actors.cloud_coordinator.cloud_wal.held_uploads())
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
-        let deadline = crate::common::OperationDeadline::from_budget(self.runtime_response_timeout);
+        let deadline =
+            crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
         self.drain_cloud_wal_upload_backlog_within(&deadline);
     }
 
@@ -376,7 +397,8 @@ impl EventLoop {
         deadline: &crate::common::OperationDeadline,
     ) {
         if let Err(error) = self.try_drain_cloud_wal_upload_backlog_within(deadline) {
-            self.cloud_coordinator
+            self.actors
+                .cloud_coordinator
                 .cloud_wal
                 .defer_uploads_after_failure();
             self.state.mark_persistence_anomaly();
@@ -387,10 +409,10 @@ impl EventLoop {
 
 impl EventLoop {
     pub(crate) fn maybe_flush_cloud_async_wal(&mut self) {
-        if !self.wal_actor.is_cloud_async() {
+        if !self.actors.wal_actor.is_cloud_async() {
             return;
         }
-        if self.cloud_coordinator.hybrid_storage.is_none() {
+        if self.actors.cloud_coordinator.hybrid_storage.is_none() {
             return;
         }
 
@@ -404,9 +426,10 @@ impl EventLoop {
         }
 
         let pending_writes = self.state.wal.pending_writes;
-        let bytes_buffered = self.wal_actor.bytes_since_sync();
+        let bytes_buffered = self.actors.wal_actor.bytes_since_sync();
 
         if !self
+            .pipeline
             .durability
             .should_flush_cloud_async(pending_writes, bytes_buffered)
         {

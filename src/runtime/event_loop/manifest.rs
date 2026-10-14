@@ -10,21 +10,31 @@ impl ManifestCoordinator {
     fn ddl_authority(
         event_loop: &EventLoop,
     ) -> crate::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>> {
-        if !event_loop.cloud_coordinator.provider_ddl_fencing {
+        if !event_loop.actors.cloud_coordinator.provider_ddl_fencing {
             return Ok(None);
         }
         Ok(Some(crate::runtime::ddl::DdlLeaseAuthority {
-            store: event_loop.fencing.leader_store.clone().ok_or_else(|| {
-                crate::common::MidgeError::Fenced(
-                    "provider cloud DDL requires a leader store".into(),
-                )
-            })?,
-            holder_id: event_loop.fencing.leader_holder_id.clone().ok_or_else(|| {
-                crate::common::MidgeError::Fenced(
-                    "provider cloud DDL requires a lease holder".into(),
-                )
-            })?,
-            writer_epoch: event_loop.fencing.writer_epoch,
+            store: event_loop
+                .authority
+                .fencing
+                .leader_store
+                .clone()
+                .ok_or_else(|| {
+                    crate::common::MidgeError::Fenced(
+                        "provider cloud DDL requires a leader store".into(),
+                    )
+                })?,
+            holder_id: event_loop
+                .authority
+                .fencing
+                .leader_holder_id
+                .clone()
+                .ok_or_else(|| {
+                    crate::common::MidgeError::Fenced(
+                        "provider cloud DDL requires a lease holder".into(),
+                    )
+                })?,
+            writer_epoch: event_loop.authority.fencing.writer_epoch,
         }))
     }
 
@@ -36,6 +46,7 @@ impl ManifestCoordinator {
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
         let result = event_loop
+            .actors
             .manifest_actor
             .add_sst(&mut event_loop.state, file_meta)
             .and_then(|()| {
@@ -54,6 +65,7 @@ impl ManifestCoordinator {
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
         let result = event_loop
+            .actors
             .manifest_actor
             .compaction_complete(&mut event_loop.state, removed, added)
             .and_then(|()| {
@@ -112,14 +124,14 @@ impl ManifestCoordinator {
                 return HandleOutcome::Continue;
             }
         }
-        if event_loop.fencing.ddl_authority_ambiguous {
+        if event_loop.authority.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
-                event_loop.cloud_coordinator.hybrid_storage.as_ref(),
+                event_loop.actors.cloud_coordinator.hybrid_storage.as_ref(),
                 authority.as_ref(),
                 &deadline,
             ) {
-                Ok(()) => event_loop.fencing.ddl_authority_ambiguous = false,
+                Ok(()) => event_loop.authority.fencing.ddl_authority_ambiguous = false,
                 Err(error) => {
                     event_loop.respond(
                         request_id,
@@ -150,12 +162,12 @@ impl ManifestCoordinator {
                 };
                 crate::runtime::ddl::execute_within(
                     &mut event_loop.state,
-                    event_loop.cloud_coordinator.hybrid_storage.as_ref(),
+                    event_loop.actors.cloud_coordinator.hybrid_storage.as_ref(),
                     &edit,
                     authority.as_ref(),
                     &deadline,
                 )?;
-                event_loop.fencing.ddl_authority_ambiguous = false;
+                event_loop.authority.fencing.ddl_authority_ambiguous = false;
                 cf_id
             };
 
@@ -218,15 +230,15 @@ impl ManifestCoordinator {
                 return HandleOutcome::Continue;
             }
         }
-        if event_loop.fencing.ddl_authority_ambiguous {
+        if event_loop.authority.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
-                event_loop.cloud_coordinator.hybrid_storage.as_ref(),
+                event_loop.actors.cloud_coordinator.hybrid_storage.as_ref(),
                 authority.as_ref(),
                 &deadline,
             ) {
                 Ok(()) => {
-                    event_loop.fencing.ddl_authority_ambiguous = false;
+                    event_loop.authority.fencing.ddl_authority_ambiguous = false;
                     let drop_committed = event_loop
                         .state
                         .manifest
@@ -261,12 +273,12 @@ impl ManifestCoordinator {
                 event_loop.sync_current_wal()?;
                 crate::runtime::ddl::execute_within(
                     &mut event_loop.state,
-                    event_loop.cloud_coordinator.hybrid_storage.as_ref(),
+                    event_loop.actors.cloud_coordinator.hybrid_storage.as_ref(),
                     &edit,
                     authority.as_ref(),
                     &deadline,
                 )?;
-                event_loop.fencing.ddl_authority_ambiguous = false;
+                event_loop.authority.fencing.ddl_authority_ambiguous = false;
                 Ok(())
             });
         if let Err(error) = result {
@@ -307,7 +319,7 @@ impl ManifestCoordinator {
     /// error is worded or wrapped on its way here.
     fn record_ddl_authority_ambiguity(event_loop: &mut EventLoop) {
         if event_loop.state.take_ddl_authority_ambiguous() {
-            event_loop.fencing.ddl_authority_ambiguous = true;
+            event_loop.authority.fencing.ddl_authority_ambiguous = true;
             event_loop.state.mark_persistence_anomaly();
             event_loop.publish_snapshot();
         }
@@ -331,7 +343,7 @@ impl ManifestCoordinator {
         cf_id: crate::types::ColumnFamilyId,
     ) {
         let error_message = format!("column family {cf_id} was dropped");
-        if let Some(waiters) = event_loop.flush_barrier_waiters.remove(&cf_id) {
+        if let Some(waiters) = event_loop.publication.flush_barrier_waiters.remove(&cf_id) {
             for waiter in waiters {
                 event_loop.respond(
                     waiter.request_id,
@@ -343,7 +355,11 @@ impl ManifestCoordinator {
             }
         }
 
-        for request_id in event_loop.write_stall_waiters.take_column_family(cf_id) {
+        for request_id in event_loop
+            .pipeline
+            .write_stall_waiters
+            .take_column_family(cf_id)
+        {
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -384,7 +400,7 @@ mod tests {
         ManifestCoordinator::record_ddl_authority_ambiguity(&mut event_loop);
 
         // Assert
-        assert!(event_loop.fencing.ddl_authority_ambiguous);
+        assert!(event_loop.authority.fencing.ddl_authority_ambiguous);
         assert!(event_loop.state.persistence_anomaly_detected());
         Ok(())
     }
@@ -399,7 +415,7 @@ mod tests {
         ManifestCoordinator::record_ddl_authority_ambiguity(&mut event_loop);
 
         // Assert
-        assert!(!event_loop.fencing.ddl_authority_ambiguous);
+        assert!(!event_loop.authority.fencing.ddl_authority_ambiguous);
         assert!(!event_loop.state.persistence_anomaly_detected());
         Ok(())
     }

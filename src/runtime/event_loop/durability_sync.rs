@@ -67,7 +67,8 @@ impl EventLoop {
     /// when it waits for a later sync, or finish the timing now.
     pub(super) fn settle_applied_write(&mut self, request_id: u64, deferred: bool) {
         if deferred {
-            self.durability
+            self.pipeline
+                .durability
                 .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id });
         } else {
             self.state.clear_pending_transaction_barrier();
@@ -106,7 +107,10 @@ impl EventLoop {
         error: &crate::common::MidgeError,
     ) {
         self.state.mark_persistence_anomaly();
-        let waiters = self.durability.drain_all_waiters_and_reset(next_generation);
+        let waiters = self
+            .pipeline
+            .durability
+            .drain_all_waiters_and_reset(next_generation);
         self.fail_durability_waiters(waiters, error);
     }
 
@@ -159,10 +163,12 @@ impl EventLoop {
         &mut self,
         source: CompletionSource,
     ) -> crate::common::MidgeResult<()> {
-        let sealed_generation = self.durability.current_key();
+        let sealed_generation = self.pipeline.durability.current_key();
         let next_generation = self.next_wal_generation(sealed_generation)?;
-        self.wal_transition.ensure_ready()?;
-        if self.wal_actor.is_cloud_async() && sealed_generation != self.state.wal.open_segment() {
+        self.pipeline.wal_transition.ensure_ready()?;
+        if self.actors.wal_actor.is_cloud_async()
+            && sealed_generation != self.state.wal.open_segment()
+        {
             let error = crate::common::MidgeError::Internal(format!(
                 "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
                 self.state.wal.open_segment()
@@ -170,30 +176,32 @@ impl EventLoop {
             self.fence_wal_transition(&error, None);
             return Err(error);
         }
-        let ticket = self.wal_transition.begin_sync(sealed_generation)?;
+        let ticket = self.pipeline.wal_transition.begin_sync(sealed_generation)?;
         let receipt = match self
+            .actors
             .wal_actor
             .begin_sync_transition(&mut self.state, &ticket)
         {
             Ok(receipt) => receipt,
             Err(error) => {
-                if self.wal_actor.is_fenced() {
+                if self.actors.wal_actor.is_fenced() {
                     self.fence_sync_transition(&error, sealed_generation);
-                } else if let Err(finish_error) = self.wal_transition.finish_sync(ticket) {
+                } else if let Err(finish_error) = self.pipeline.wal_transition.finish_sync(ticket) {
                     self.fence_sync_transition(&finish_error, sealed_generation);
                 }
                 return Err(error);
             }
         };
-        if self.wal_actor.is_cloud_async() {
+        if self.actors.wal_actor.is_cloud_async() {
             if let Err(error) =
-                self.wal_actor
+                self.actors
+                    .wal_actor
                     .commit_sync_transition(&mut self.state, receipt, &ticket)
             {
                 self.fence_sync_transition(&error, sealed_generation);
                 return Err(error);
             }
-            if let Err(error) = self.wal_transition.finish_sync(ticket) {
+            if let Err(error) = self.pipeline.wal_transition.finish_sync(ticket) {
                 self.fence_sync_transition(&error, sealed_generation);
                 return Err(error);
             }
@@ -206,6 +214,7 @@ impl EventLoop {
             return Err(error);
         }
         if let Err(error) = self
+            .pipeline
             .durability
             .rotate_from_to(sealed_generation, next_generation)
         {
@@ -218,9 +227,10 @@ impl EventLoop {
             return Err(error);
         }
 
-        if let Err(error) = self
-            .wal_actor
-            .commit_sync_transition(&mut self.state, receipt, &ticket)
+        if let Err(error) =
+            self.actors
+                .wal_actor
+                .commit_sync_transition(&mut self.state, receipt, &ticket)
         {
             self.fence_sync_transition(&error, next_generation);
             return Err(error);
@@ -230,9 +240,12 @@ impl EventLoop {
             self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
-        let completed = self.durability.complete_waiters_at(sealed_generation);
+        let completed = self
+            .pipeline
+            .durability
+            .complete_waiters_at(sealed_generation);
         self.complete_durability_waiters(completed, source);
-        if let Err(error) = self.wal_transition.finish_sync(ticket) {
+        if let Err(error) = self.pipeline.wal_transition.finish_sync(ticket) {
             self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
@@ -248,15 +261,16 @@ impl EventLoop {
         realigned_generation: u64,
     ) {
         self.fence_wal_transition(error, None);
-        if self.durability.current_key() != realigned_generation {
+        if self.pipeline.durability.current_key() != realigned_generation {
             let _ = self
+                .pipeline
                 .durability
                 .drain_all_waiters_and_reset(realigned_generation);
         }
     }
 
     fn next_wal_generation(&self, current: u64) -> crate::common::MidgeResult<Option<u64>> {
-        if self.wal_actor.is_cloud_async() {
+        if self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
         }
         current.checked_add(1).map(Some).ok_or_else(|| {
@@ -281,7 +295,7 @@ impl EventLoop {
     fn sync_batched_wal(&mut self, msg_rx: Option<&Receiver<RuntimeMsg>>) {
         const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
 
-        if self.wal_actor.is_cloud_async() {
+        if self.actors.wal_actor.is_cloud_async() {
             return; // CloudAsync has separate logic
         }
 
@@ -291,9 +305,9 @@ impl EventLoop {
         // NOTE: Do NOT unconditionally sync just because there are pending writes; that
         // defeats group commit—let the batch window (time/bytes) determine when to sync.
         // Durable waiters will be satisfied when the batch window elapses.
-        let has_pending_waiters = self.durability.has_pending_waiters();
+        let has_pending_waiters = self.pipeline.durability.has_pending_waiters();
 
-        let should_sync = self.wal_actor.should_sync_batch();
+        let should_sync = self.actors.wal_actor.should_sync_batch();
 
         if !should_sync {
             return;
@@ -303,8 +317,8 @@ impl EventLoop {
         // This prevents the WAL actor from spinning at ~12 Hz doing empty fsyncs
         // when the engine has no work. Reset the sync timer so the time-based
         // threshold doesn't immediately re-trigger.
-        if !self.wal_actor.has_pending_data() && !has_pending_waiters {
-            self.wal_actor.reset_sync_timer();
+        if !self.actors.wal_actor.has_pending_data() && !has_pending_waiters {
+            self.actors.wal_actor.reset_sync_timer();
             return;
         }
 
@@ -343,7 +357,7 @@ impl EventLoop {
     /// current operation. DDL drop uses this so a later write cannot be
     /// coalesced ahead of the drop and then silently discarded by it.
     pub(super) fn sync_current_wal(&mut self) -> crate::common::MidgeResult<()> {
-        if self.wal_actor.is_cloud_async() {
+        if self.actors.wal_actor.is_cloud_async() {
             return Ok(()); // CloudAsync has separate logic
         }
 
@@ -357,7 +371,7 @@ impl EventLoop {
     pub(super) fn sync_local_wal_before_prune_rotation(
         &mut self,
     ) -> crate::common::MidgeResult<()> {
-        if self.wal_actor.is_cloud_async() {
+        if self.actors.wal_actor.is_cloud_async() {
             return Ok(());
         }
         self.sync_wal_generation(CompletionSource::SealedGeneration)
@@ -453,7 +467,7 @@ mod tests {
 
     struct PanickingSyncWriter(std::sync::atomic::AtomicBool);
 
-    struct StaleWriterLeaderStore;
+    struct StaleWriterLeaderStore(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl crate::lease::LeaderStore for StaleWriterLeaderStore {
         fn acquire_leadership(
@@ -468,9 +482,10 @@ mod tests {
         fn read_current(
             &self,
         ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            let stale = self.0.load(std::sync::atomic::Ordering::SeqCst);
             Ok(Some(crate::lease::LeaderRecord {
-                epoch: 2,
-                holder_id: "new-writer".to_string(),
+                epoch: if stale { 2 } else { 1 },
+                holder_id: if stale { "new-writer" } else { "old-writer" }.to_string(),
                 acquired_at: "test".to_string(),
             }))
         }
@@ -478,7 +493,7 @@ mod tests {
 
     /// A leader store that cannot be reached, so writer authority cannot be
     /// proven either way.
-    struct UnreachableLeaderStore;
+    struct UnreachableLeaderStore(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl crate::lease::LeaderStore for UnreachableLeaderStore {
         fn acquire_leadership(
@@ -493,9 +508,17 @@ mod tests {
         fn read_current(
             &self,
         ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
-            Err(crate::lease::LeaseError::IoError(
-                "leader store unreachable".to_string(),
-            ))
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(Some(crate::lease::LeaderRecord {
+                    epoch: 1,
+                    holder_id: "writer".to_string(),
+                    acquired_at: "test".to_string(),
+                }))
+            } else {
+                Err(crate::lease::LeaseError::IoError(
+                    "leader store unreachable".to_string(),
+                ))
+            }
         }
     }
 
@@ -570,16 +593,18 @@ mod tests {
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
         event_loop
+            .actors
             .wal_actor
             .replace_writer_for_test(Box::new(PanickingSyncWriter(
                 std::sync::atomic::AtomicBool::new(true),
             )));
-        let response = event_loop.router.register(77, "CloudDurability");
+        let response = event_loop.routing.router.register(77, "CloudDurability");
         event_loop
+            .pipeline
             .durability
             .queue_waiter(DurabilityWaiter::CloudDurability { request_id: 77 });
         event_loop.state.wal.pending_writes = 1;
-        let generation = event_loop.durability.current_key();
+        let generation = event_loop.pipeline.durability.current_key();
 
         // Act
         let result = event_loop.sync_wal_generation(CompletionSource::WalSync);
@@ -589,10 +614,10 @@ mod tests {
             result,
             Err(crate::common::MidgeError::Internal(_))
         ));
-        assert_eq!(event_loop.durability.current_key(), generation);
-        assert!(!event_loop.durability.has_pending_waiters());
-        assert!(event_loop.wal_actor.is_fenced());
-        assert!(event_loop.wal_transition.is_fenced());
+        assert_eq!(event_loop.pipeline.durability.current_key(), generation);
+        assert!(!event_loop.pipeline.durability.has_pending_waiters());
+        assert!(event_loop.actors.wal_actor.is_fenced());
+        assert!(event_loop.pipeline.wal_transition.is_fenced());
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(matches!(
             response.recv_timeout(std::time::Duration::from_secs(1)),
@@ -616,12 +641,13 @@ mod tests {
     #[test]
     fn should_report_one_fence_cause_when_sync_cannot_prove_writer_authority(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange: an unreachable leader store is not a lost lease, but the
-        // actor conservatively fences as if authority were lost. The protocol
-        // must report the same cause, not a local poison (#537 review).
+        // Arrange: the leader store becomes unreachable after one valid WAL
+        // append. The protocol must report that same cause, not a local poison.
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
-        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(UnreachableLeaderStore);
+        let authority_available = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let leader_store: Arc<dyn crate::lease::LeaderStore> =
+            Arc::new(UnreachableLeaderStore(Arc::clone(&authority_available)));
         let config = RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             writer_epoch: 1,
@@ -636,7 +662,7 @@ mod tests {
             config,
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        event_loop.wal_actor.append_single_op(
+        event_loop.actors.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 1,
@@ -647,10 +673,11 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
+        authority_available.store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = event_loop.sync_wal_generation(CompletionSource::WalSync);
 
         // Act
-        let next_write = event_loop.wal_actor.append_single_op(
+        let next_write = event_loop.actors.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 2,
@@ -661,7 +688,7 @@ mod tests {
                 ttl_seconds: None,
             },
         );
-        let next_sync = event_loop.wal_transition.ensure_ready();
+        let next_sync = event_loop.pipeline.wal_transition.ensure_ready();
 
         // Assert
         assert!(
@@ -682,7 +709,9 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(ResponseRouter::new());
-        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(StaleWriterLeaderStore);
+        let stale_authority = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leader_store: Arc<dyn crate::lease::LeaderStore> =
+            Arc::new(StaleWriterLeaderStore(Arc::clone(&stale_authority)));
         let config = RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             writer_epoch: 1,
@@ -697,7 +726,7 @@ mod tests {
             config,
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        event_loop.wal_actor.append_transaction(
+        event_loop.actors.wal_actor.append_transaction(
             &mut event_loop.state,
             crate::runtime::actors::wal::TransactionAppendParams {
                 request_id: 78,
@@ -714,9 +743,11 @@ mod tests {
                 conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             },
         )?;
+        stale_authority.store(true, std::sync::atomic::Ordering::SeqCst);
         let request_id = 79;
         let response = router.register(request_id, "CloudDurability");
         event_loop
+            .pipeline
             .durability
             .queue_waiter(DurabilityWaiter::CloudDurability { request_id });
 
@@ -725,7 +756,7 @@ mod tests {
             .sync_wal_generation(CompletionSource::WalSync)
             .expect_err("stale writer authority must reject the sync");
         let sequence_before_rejected = event_loop.state.sequence;
-        let rejected = event_loop.wal_actor.append_transaction(
+        let rejected = event_loop.actors.wal_actor.append_transaction(
             &mut event_loop.state,
             crate::runtime::actors::wal::TransactionAppendParams {
                 request_id: 80,
@@ -745,8 +776,8 @@ mod tests {
 
         // Assert
         assert!(matches!(error, crate::common::MidgeError::Fenced(_)));
-        assert!(event_loop.wal_actor.is_fenced());
-        assert!(event_loop.wal_transition.is_fenced());
+        assert!(event_loop.actors.wal_actor.is_fenced());
+        assert!(event_loop.pipeline.wal_transition.is_fenced());
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(matches!(
             rejected,
@@ -821,7 +852,7 @@ mod tests {
         expected: &LocalSyncExpectation,
     ) {
         assert_eq!(
-            event_loop.durability.current_key(),
+            event_loop.pipeline.durability.current_key(),
             expected.generation,
             "{boundary:?}"
         );
@@ -836,12 +867,12 @@ mod tests {
             "{boundary:?}"
         );
         assert_eq!(
-            event_loop.wal_actor.is_fenced(),
+            event_loop.actors.wal_actor.is_fenced(),
             expected.fenced,
             "{boundary:?}"
         );
         assert_eq!(
-            event_loop.wal_transition.is_fenced(),
+            event_loop.pipeline.wal_transition.is_fenced(),
             expected.fenced,
             "{boundary:?}"
         );
@@ -851,7 +882,7 @@ mod tests {
             "{boundary:?}"
         );
         assert!(
-            event_loop.wal_actor.is_open() || event_loop.wal_actor.is_fenced(),
+            event_loop.actors.wal_actor.is_open() || event_loop.actors.wal_actor.is_fenced(),
             "{boundary:?}: actor must never rest mid-transition"
         );
     }
@@ -869,6 +900,7 @@ mod tests {
                 create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
                     .expect("create event loop");
             event_loop
+                .actors
                 .wal_actor
                 .replace_writer_for_test(Box::new(PanickingSyncWriter(
                     std::sync::atomic::AtomicBool::new(false),
@@ -876,8 +908,12 @@ mod tests {
             event_loop.state.sequence = 9;
             event_loop.state.wal.pending_writes = 1;
             let request_id = 91_000 + expected.generation + expected.frontier;
-            let response = event_loop.router.register(request_id, "CloudDurability");
+            let response = event_loop
+                .routing
+                .router
+                .register(request_id, "CloudDurability");
             event_loop
+                .pipeline
                 .durability
                 .queue_waiter(DurabilityWaiter::CloudDurability { request_id });
             fail::cfg(boundary.failpoint_name(), "return")
@@ -894,7 +930,7 @@ mod tests {
             assert_local_sync_state(&event_loop, boundary, &expected);
 
             if boundary == WalTransitionBoundary::BeforeFsync {
-                assert!(event_loop.durability.has_pending_waiters());
+                assert!(event_loop.pipeline.durability.has_pending_waiters());
                 assert!(response.try_recv().is_err());
                 event_loop
                     .sync_wal_generation(CompletionSource::WalSync)
@@ -904,7 +940,7 @@ mod tests {
                     Ok(RuntimeResponse::Ok { request_id: actual }) if actual == request_id
                 ));
             } else {
-                assert!(!event_loop.durability.has_pending_waiters());
+                assert!(!event_loop.pipeline.durability.has_pending_waiters());
                 let terminal = response
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .expect("durability waiter terminal outcome");
@@ -939,7 +975,10 @@ mod tests {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let _ = event_loop.durability.drain_all_waiters_and_reset(u64::MAX);
+        let _ = event_loop
+            .pipeline
+            .durability
+            .drain_all_waiters_and_reset(u64::MAX);
         event_loop.state.sequence = 9;
         event_loop.state.wal.pending_writes = 1;
 
@@ -954,11 +993,11 @@ mod tests {
             crate::common::MidgeError::ResourceLimit(message)
                 if message.contains("generation space exhausted")
         ));
-        assert_eq!(event_loop.durability.current_key(), u64::MAX);
+        assert_eq!(event_loop.pipeline.durability.current_key(), u64::MAX);
         assert_eq!(event_loop.state.wal.frontiers.local_durable(), 0);
         assert_eq!(event_loop.state.wal.pending_writes, 1);
-        assert!(!event_loop.wal_actor.is_fenced());
-        assert!(!event_loop.wal_transition.is_fenced());
+        assert!(!event_loop.actors.wal_actor.is_fenced());
+        assert!(!event_loop.pipeline.wal_transition.is_fenced());
         assert!(!event_loop.state.persistence_anomaly_detected());
     }
 
@@ -968,10 +1007,14 @@ mod tests {
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
         event_loop
+            .pipeline
             .durability
             .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id: 77 });
         let barrier_request_id = 78;
-        let barrier_response = event_loop.router.register(barrier_request_id, "WalSync");
+        let barrier_response = event_loop
+            .routing
+            .router
+            .register(barrier_request_id, "WalSync");
 
         // Act
         super::super::wal::WalCoordinator::sync(&mut event_loop, barrier_request_id);
@@ -984,9 +1027,9 @@ mod tests {
             response,
             RuntimeResponse::Ok { request_id } if request_id == barrier_request_id
         ));
-        assert_eq!(event_loop.durability.waiters_fanned_out(), 1);
-        assert!(!event_loop.durability.has_pending_waiters());
-        assert_eq!(event_loop.durability.current_key(), 1);
+        assert_eq!(event_loop.pipeline.durability.waiters_fanned_out(), 1);
+        assert!(!event_loop.pipeline.durability.has_pending_waiters());
+        assert_eq!(event_loop.pipeline.durability.current_key(), 1);
         assert!(!event_loop.state.persistence_anomaly_detected());
     }
 
@@ -1012,13 +1055,18 @@ mod tests {
         )
         .expect("create event loop");
         let first_request = 88;
-        let first_response = event_loop.router.register(first_request, "TestRequest");
+        let first_response = event_loop
+            .routing
+            .router
+            .register(first_request, "TestRequest");
         event_loop
+            .pipeline
             .durability
             .queue_waiter(DurabilityWaiter::CloudDurability {
                 request_id: first_request,
             });
         event_loop
+            .actors
             .wal_actor
             .append_single_op(
                 &mut event_loop.state,
@@ -1046,9 +1094,9 @@ mod tests {
                 request_id,
             } if request_id == first_request
         ));
-        assert_eq!(event_loop.durability.current_key(), 1);
+        assert_eq!(event_loop.pipeline.durability.current_key(), 1);
         assert!(!event_loop.state.persistence_anomaly_detected());
-        assert!(!event_loop.durability.has_pending_waiters());
+        assert!(!event_loop.pipeline.durability.has_pending_waiters());
     }
 
     #[test]
@@ -1065,7 +1113,7 @@ mod tests {
         let drift = event_loop
             .sync_wal_generation(CompletionSource::WalSync)
             .expect_err("generation drift must fail the sync");
-        let next_write = event_loop.wal_actor.append_single_op(
+        let next_write = event_loop.actors.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 1,
@@ -1076,7 +1124,7 @@ mod tests {
                 ttl_seconds: None,
             },
         );
-        let next_sync = event_loop.wal_transition.ensure_ready();
+        let next_sync = event_loop.pipeline.wal_transition.ensure_ready();
 
         // Assert
         assert!(
@@ -1101,7 +1149,7 @@ mod tests {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let response = event_loop.router.register(51, "ApplyTransaction");
+        let response = event_loop.routing.router.register(51, "ApplyTransaction");
         event_loop
             .state
             .wal
@@ -1130,7 +1178,7 @@ mod tests {
                 ..
             })
         ));
-        let waiters = event_loop.durability.drain_all_waiters();
+        let waiters = event_loop.pipeline.durability.drain_all_waiters();
         assert!(matches!(
             waiters.as_slice(),
             [DurabilityWaiter::ConfirmTransactionApply { request_id: 51 }]
@@ -1148,7 +1196,7 @@ mod tests {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let response = event_loop.router.register(52, "ApplyTransaction");
+        let response = event_loop.routing.router.register(52, "ApplyTransaction");
         event_loop
             .state
             .wal
@@ -1177,7 +1225,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(!event_loop.durability.has_pending_waiters());
+        assert!(!event_loop.pipeline.durability.has_pending_waiters());
         // The append is already durable, so the ack itself ends the timing.
         assert!(
             !event_loop.state.pending_transaction_started(),
@@ -1190,7 +1238,7 @@ mod tests {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let response = event_loop.router.register(73, "WalAppend");
+        let response = event_loop.routing.router.register(73, "WalAppend");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 73,
             sequence: 19,
@@ -1214,7 +1262,7 @@ mod tests {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let response = event_loop.router.register(75, "Read");
+        let response = event_loop.routing.router.register(75, "Read");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::Read {
             request_id: 75,
             cf_id: 0,
@@ -1240,7 +1288,7 @@ mod tests {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let response = event_loop.router.register(76, "RangeScan");
+        let response = event_loop.routing.router.register(76, "RangeScan");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
             request_id: 76,
             cf_id: 0,
@@ -1268,7 +1316,7 @@ mod tests {
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
         event_loop.state.begin_pending_transaction();
-        let response = event_loop.router.register(74, "WalAppend");
+        let response = event_loop.routing.router.register(74, "WalAppend");
         let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 74,
             sequence: 41,

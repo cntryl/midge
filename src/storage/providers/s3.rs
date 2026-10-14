@@ -16,6 +16,10 @@ use super::rest::{
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
+#[cfg(test)]
+use crate::storage::cloud::{
+    CloudDeleteCapability, CloudHeadCapability, CloudReadCapability, CloudWriteCapability,
+};
 use chrono::Utc;
 use hex;
 use hmac::{Hmac, KeyInit, Mac};
@@ -1067,23 +1071,57 @@ impl ListPageParser for S3ListContext {
 }
 
 impl S3Backend {
+    fn read_request_headers(
+        request: CloudRequest,
+        headers: Vec<(String, String)>,
+        key: &str,
+        include_metadata: bool,
+        callback: &CloudCallback,
+    ) -> Option<CloudRequest> {
+        match super::rest::apply_read_headers(request, headers) {
+            Ok(request) => Some(request),
+            Err(error) => {
+                let error = CloudError::Protocol(error);
+                let event = if include_metadata {
+                    CloudEvent::GetWithMetadata {
+                        key: key.into(),
+                        result: Err(error),
+                    }
+                } else {
+                    CloudEvent::Get {
+                        key: key.into(),
+                        result: Err(error),
+                    }
+                };
+                let _ = callback.send(event);
+                None
+            }
+        }
+    }
+
     fn submit_get_request(
         &self,
         key: &str,
         timeout: Option<std::time::Duration>,
+        headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        let conditional_read = super::rest::has_read_precondition(&headers);
         let key = key.to_string();
         let url = self.object_url(&key);
         let mut request = CloudRequest::new(Method::GET, url);
         request.timeout = timeout;
+        let Some(request) = Self::read_request_headers(request, headers, &key, false, &callback)
+        else {
+            return;
+        };
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
             key: ctx,
             result: map_response(
                 result,
                 |status| status == 200,
                 |resp| Ok(resp.body),
-                |resp| s3_response_error(resp, "S3 GET", false),
+                |resp| s3_response_error(resp, "S3 GET", conditional_read),
             ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1093,11 +1131,17 @@ impl S3Backend {
         &self,
         key: &str,
         timeout: Option<std::time::Duration>,
+        headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        let conditional_read = super::rest::has_read_precondition(&headers);
         let key = key.to_string();
         let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
         request.timeout = timeout;
+        let Some(request) = Self::read_request_headers(request, headers, &key, true, &callback)
+        else {
+            return;
+        };
         let mapper =
             move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
                 key: ctx,
@@ -1112,18 +1156,175 @@ impl S3Backend {
                         )
                         .map(|metadata| (resp.body, metadata))
                     },
-                    |resp| s3_response_error(resp, "S3 GET", false),
+                    |resp| s3_response_error(resp, "S3 GET", conditional_read),
                 ),
             };
         self.executor.spawn_request(request, key, callback, mapper);
     }
 }
 
-impl CloudBackend for S3Backend {
-    fn set_request_timeout(&self, timeout: std::time::Duration) {
-        self.executor.set_default_timeout(timeout);
+impl crate::storage::cloud::CloudReadCapability for S3Backend {
+    fn submit_get_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        timeout: Option<std::time::Duration>,
+        include_metadata: bool,
+        callback: CloudCallback,
+    ) {
+        if include_metadata {
+            self.submit_get_with_metadata_request(key, timeout, headers, callback);
+        } else {
+            self.submit_get_request(key, timeout, headers, callback);
+        }
     }
 
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        self.submit_get_request(key, None, Vec::new(), callback);
+    }
+
+    fn submit_get_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_request(key, Some(timeout), Vec::new(), callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        self.submit_get_with_metadata_request(key, None, Vec::new(), callback);
+    }
+
+    fn submit_get_with_metadata_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_with_metadata_request(key, Some(timeout), Vec::new(), callback);
+    }
+
+    fn submit_get_range_with_identity(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.submit_get_range_with_reservation(key, start..end, expected, timeout, None, callback);
+    }
+
+    fn submit_get_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let options = crate::storage::cloud::CloudRequestOptions::default()
+            .with_deadline(crate::common::OperationDeadline::from_budget(timeout))
+            .with_reservation(reservation);
+        self.submit_get_range_with_request(key, range, expected, options, callback);
+    }
+
+    fn submit_get_range_with_request(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        let timeout = options.timeout().unwrap_or(std::time::Duration::MAX);
+        let reservation = options.reservation;
+
+        let start = range.start;
+        let end = range.end;
+        let key = key.to_string();
+        let request = match conditional_range_request(&range, &expected, timeout, |conditions| {
+            let mut request =
+                CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
+            for (name, value) in conditions {
+                request = request.with_header(name, value);
+            }
+            request
+        }) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(error),
+                });
+                return;
+            }
+        };
+        let request = match super::rest::apply_read_headers(request, options.headers) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(CloudError::Protocol(error)),
+                });
+                return;
+            }
+        };
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
+            let result = map_response(
+                result,
+                |status| status == 206,
+                |resp| {
+                    crate::storage::cloud::range::validate_range_response(
+                        &resp, start, end, &expected,
+                    )
+                    .map(|()| resp.body)
+                },
+                |resp| s3_response_error(resp, "S3 conditional RANGE", true),
+            );
+            CloudEvent::GetRange {
+                key: ctx,
+                start,
+                end: Some(end),
+                result,
+            }
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    #[cfg(test)]
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        let key = key.to_string();
+        let url = self.object_url(&key);
+        let mut request = CloudRequest::new(Method::GET, url);
+        let range = match end {
+            Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
+            None => format!("bytes={start}-"),
+        };
+        request = request.with_header("Range", range);
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetRange {
+            key: ctx,
+            start,
+            end,
+            result: map_response(
+                result,
+                |status| matches!(status, 200 | 206),
+                |resp| Ok(resp.body),
+                |resp| s3_response_error(resp, "S3 GET_RANGE", false),
+            ),
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for S3Backend {
     fn submit_put(
         &self,
         key: &str,
@@ -1180,122 +1381,9 @@ impl CloudBackend for S3Backend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
+}
 
-    fn submit_get(&self, key: &str, callback: CloudCallback) {
-        self.submit_get_request(key, None, callback);
-    }
-
-    fn submit_get_with_timeout(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: CloudCallback,
-    ) {
-        self.submit_get_request(key, Some(timeout), callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        self.submit_get_with_metadata_request(key, None, callback);
-    }
-
-    fn submit_get_with_metadata_with_timeout(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: CloudCallback,
-    ) {
-        self.submit_get_with_metadata_request(key, Some(timeout), callback);
-    }
-
-    fn submit_get_range_with_identity(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: std::time::Duration,
-        callback: CloudCallback,
-    ) {
-        self.submit_get_range_with_reservation(key, start..end, expected, timeout, None, callback);
-    }
-
-    fn submit_get_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
-        callback: CloudCallback,
-    ) {
-        let start = range.start;
-        let end = range.end;
-        let key = key.to_string();
-        let request = match conditional_range_request(&range, &expected, timeout, |conditions| {
-            let mut request =
-                CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
-            for (name, value) in conditions {
-                request = request.with_header(name, value);
-            }
-            request
-        }) {
-            Ok(request) => request,
-            Err(error) => {
-                let _ = callback.send(CloudEvent::GetRange {
-                    key,
-                    start,
-                    end: Some(end),
-                    result: Err(error),
-                });
-                return;
-            }
-        };
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
-            let result = map_response(
-                result,
-                |status| status == 206,
-                |resp| {
-                    crate::storage::cloud::range::validate_range_response(
-                        &resp, start, end, &expected,
-                    )
-                    .map(|()| resp.body)
-                },
-                |resp| s3_response_error(resp, "S3 conditional RANGE", true),
-            );
-            CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end: Some(end),
-                result,
-            }
-        };
-        self.executor.spawn_request(request, key, callback, mapper);
-    }
-
-    #[cfg(test)]
-    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
-        let key = key.to_string();
-        let url = self.object_url(&key);
-        let mut request = CloudRequest::new(Method::GET, url);
-        let range = match end {
-            Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
-            None => format!("bytes={start}-"),
-        };
-        request = request.with_header("Range", range);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetRange {
-            key: ctx,
-            start,
-            end,
-            result: map_response(
-                result,
-                |status| matches!(status, 200 | 206),
-                |resp| Ok(resp.body),
-                |resp| s3_response_error(resp, "S3 GET_RANGE", false),
-            ),
-        };
-        self.executor.spawn_request(request, key, callback, mapper);
-    }
-
+impl crate::storage::cloud::CloudDeleteCapability for S3Backend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);
@@ -1330,7 +1418,9 @@ impl CloudBackend for S3Backend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for S3Backend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit_list_with_headers(prefix, Vec::new(), callback);
     }
@@ -1365,7 +1455,9 @@ impl CloudBackend for S3Backend {
             finish_paged_list,
         );
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for S3Backend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.submit_head_with_headers(key, Vec::new(), callback);
     }
@@ -1397,6 +1489,12 @@ impl CloudBackend for S3Backend {
             ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
+impl CloudBackend for S3Backend {
+    fn set_request_timeout(&self, timeout: std::time::Duration) {
+        self.executor.set_default_timeout(timeout);
     }
 }
 

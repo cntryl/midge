@@ -178,10 +178,11 @@ impl Seek for FileWriter {
 mod tests {
     use super::*;
     use crate::common::MidgeError;
-    use crate::io::{Durability, Fs, FsPath, FsResult, MockFs, OpenMode, OpenOptions};
+    use crate::io::{Durability, FsPath, FsResult, MockFs, OpenMode, OpenOptions};
 
     fn open(fs: &MockFs, path: &str, create: bool) -> Box<dyn File> {
-        fs.open_persistent_handle(
+        crate::io::open_persistent_handle(
+            fs,
             &FsPath::new(path),
             OpenOptions {
                 mode: if create {

@@ -10,8 +10,8 @@ struct RecoveryRangeBudgetBackend {
     max_range_bytes: std::sync::atomic::AtomicU64,
 }
 
-impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_get);
 
     fn submit_get_range(
         &self,
@@ -40,6 +40,24 @@ impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {
             .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
     }
 }
+
+impl crate::storage::cloud::CloudWriteCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {}
 
 fn live_frontier(manifest: &Manifest, cf_id: u32) -> u64 {
     match manifest.flush_frontiers().get(cf_id).unwrap() {
@@ -2111,6 +2129,28 @@ fn should_retain_salvage_kept_sst_when_later_strict_cleanup_runs() {
     );
 }
 
+#[test]
+fn should_ignore_salvage_sst_that_vanishes_before_quarantine_rename() {
+    // Arrange: this SST was observed as residue, then disappeared before the
+    // quarantine rename could run.
+    let temp_dir = tempfile::tempdir().expect("create residue directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let vanished_name = crate::cloud_layout::file_name(0, 1, 10);
+    let _vanished = write_valid_sst_for_recovery_test(&state, &vanished_name, 1, b"vanished", 10);
+    std::fs::remove_file(state.host_sst_dir().join(&vanished_name))
+        .expect("remove SST before quarantine");
+    state.mark_opened_in_salvage_mode();
+
+    // Act
+    state
+        .quarantine_salvage_retained_ssts(std::slice::from_ref(&vanished_name))
+        .expect("a vanished SST is already absent from the quarantine source");
+
+    // Assert
+    assert!(!state.persistence_anomaly_detected());
+    assert!(!state.host_sst_dir().join(vanished_name).exists());
+}
+
 fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -2605,22 +2645,37 @@ impl crate::io::ReadFs for CountingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for CountingFs {
+    fn open_persistent(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        let file = crate::io::open_persistent_handle(&self.inner, path, options)?;
+        Ok(Box::new(self.wrap(path, file)))
+    }
+}
+
 impl crate::io::Fs for CountingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(
         &self,
         path: &crate::io::FsPath,
         options: crate::io::OpenOptions,
     ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-        let file = self.inner.open_persistent_handle(path, options)?;
-        Ok(Box::new(self.wrap(path, file)))
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        let file = self.inner.open_persistent_handle(path, options)?;
+        let file = crate::io::open_persistent_handle(&self.inner, path, options)?;
         Ok(Box::new(self.wrap(path, file)))
     }
 
@@ -3492,6 +3547,7 @@ fn state_on_device(
         Arc::new(device.fs()),
         crate::config::RecoveryPolicy::Strict,
         crate::runtime::state::RecoveryWal::Replay { writer_epoch: 1 },
+        None,
         None,
     )
 }

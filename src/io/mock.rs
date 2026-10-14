@@ -8,7 +8,6 @@ use super::traits::{
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -21,6 +20,7 @@ struct MockFileData {
 #[derive(Debug, Clone, Default)]
 pub struct MockFs {
     files: Arc<Mutex<HashMap<String, MockFileData>>>,
+    exclusive_locks: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Directories created explicitly. A directory also exists implicitly
     /// while some file lies below it, as on a real filesystem.
     directories: Arc<Mutex<std::collections::BTreeSet<String>>>,
@@ -29,6 +29,16 @@ pub struct MockFs {
     #[cfg(test)]
     fail_sync_dir: Arc<AtomicBool>,
 }
+
+struct MockFsLock(Arc<AtomicBool>);
+
+impl Drop for MockFsLock {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl super::traits::FsLock for MockFsLock {}
 
 impl MockFs {
     /// Create a new empty mock filesystem
@@ -159,6 +169,22 @@ impl ReadFs for MockFs {
 }
 
 impl Fs for MockFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn super::traits::FsLock>> {
+        let lock = Arc::clone(
+            self.exclusive_locks
+                .lock()
+                .entry(path.0.clone())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false))),
+        );
+        lock.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .map_err(|_| FsError::AlreadyExists(path.0.clone()))?;
+        Ok(Box::new(MockFsLock(lock)))
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let mut files = self.files.lock();
 
@@ -180,34 +206,6 @@ impl Fs for MockFs {
         Ok(Box::new(MockFile {
             path: path.0.clone(),
             fs: self,
-        }))
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        let mut files = self.files.lock();
-
-        if opts.create_new && files.contains_key(&path.0) {
-            return Err(FsError::AlreadyExists(path.0.clone()));
-        }
-        if !opts.create && !opts.create_new && !files.contains_key(&path.0) {
-            return Err(FsError::NotFound(path.0.clone()));
-        }
-
-        let file_data = files
-            .entry(path.0.clone())
-            .or_insert_with(|| MockFileData { data: Vec::new() });
-
-        if opts.truncate {
-            file_data.data.clear();
-        }
-        let readonly_snapshot =
-            (opts.mode == super::traits::OpenMode::ReadOnly).then(|| file_data.data.clone());
-        drop(files);
-
-        Ok(Box::new(MockPersistentFile {
-            path: path.0.clone(),
-            files: Arc::clone(&self.files),
-            readonly_snapshot,
         }))
     }
 
@@ -269,6 +267,36 @@ impl Fs for MockFs {
         } else {
             Err(FsError::NotFound(from.0.clone()))
         }
+    }
+}
+
+impl super::traits::PersistentHandleFs for MockFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        let mut files = self.files.lock();
+
+        if opts.create_new && files.contains_key(&path.0) {
+            return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+        if !opts.create && !opts.create_new && !files.contains_key(&path.0) {
+            return Err(FsError::NotFound(path.0.clone()));
+        }
+
+        let file_data = files
+            .entry(path.0.clone())
+            .or_insert_with(|| MockFileData { data: Vec::new() });
+
+        if opts.truncate {
+            file_data.data.clear();
+        }
+        let readonly_snapshot =
+            (opts.mode == super::traits::OpenMode::ReadOnly).then(|| file_data.data.clone());
+        drop(files);
+
+        Ok(Box::new(MockPersistentFile {
+            path: path.0.clone(),
+            files: Arc::clone(&self.files),
+            readonly_snapshot,
+        }))
     }
 }
 
@@ -528,7 +556,8 @@ mod tests {
         )?;
         writer.append(Bytes::from_static(b"stable bytes"))?;
         drop(writer);
-        let reader = fs.open_persistent_handle(
+        let reader = crate::io::open_persistent_handle(
+            &fs,
             &path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,
@@ -578,7 +607,8 @@ mod tests {
         // Arrange
         let fs = MockFs::new();
         let path = FsPath::new("grow-persistent.txt");
-        let mut file = fs.open_persistent_handle(
+        let mut file = crate::io::open_persistent_handle(
+            &fs,
             &path,
             OpenOptions {
                 mode: OpenMode::ReadWrite,

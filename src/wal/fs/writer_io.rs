@@ -143,7 +143,8 @@ impl FsWalWriterIo {
         authority: Option<crate::wal::traits::WriteAuthority>,
     ) -> MidgeResult<Self> {
         if let Some(check) = &authority {
-            check()?;
+            let mut no_op = || {};
+            check(&mut no_op)?;
         }
         let path = FsPath::new(path_str);
         // The segment holds exactly its header, which the WAL history wrote
@@ -171,7 +172,8 @@ impl FsWalWriterIo {
         let header = SegmentHeader::decode(&header_bytes)?;
         drop(file);
         if let Some(check) = &authority {
-            check()?;
+            let mut no_op = || {};
+            check(&mut no_op)?;
         }
 
         let writer = Self {
@@ -587,9 +589,11 @@ mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
     use crate::io::{Durability, File, FsResult, OpenOptions, ReadFs};
+    use crate::lease::LeaderStore;
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
 
     fn writer_without_background_worker() -> FsWalWriterIo {
         FsWalWriterIo {
@@ -682,24 +686,35 @@ mod tests {
         }
     }
 
-    impl Fs for SyncCountingFs {
-        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
+    impl crate::io::PersistentHandleFs for SyncCountingFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
             if let Some(gate) = &self.open_gate {
                 gate.0.send(()).unwrap();
                 gate.1.lock().unwrap().recv().unwrap();
             }
             Ok(Box::new(SyncCountingFile {
-                inner: self.inner.open_persistent_handle(path, options)?,
+                inner: crate::io::open_persistent_handle(&self.inner, path, options)?,
                 durable_sync_count: Arc::clone(&self.durable_sync_count),
             }))
+        }
+    }
+
+    impl Fs for SyncCountingFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
         }
 
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -792,18 +807,10 @@ mod tests {
         }
     }
 
-    impl Fs for GatedNoSpaceFs {
-        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
+    impl crate::io::PersistentHandleFs for GatedNoSpaceFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
             Ok(Box::new(GatedNoSpaceFile {
-                inner: self.inner.open_persistent_handle(path, options)?,
+                inner: crate::io::open_persistent_handle(&self.inner, path, options)?,
                 entered: self
                     .entered
                     .lock()
@@ -811,6 +818,25 @@ mod tests {
                     .clone(),
                 release: Arc::clone(&self.release),
             }))
+        }
+    }
+
+    impl Fs for GatedNoSpaceFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
         }
 
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -1060,11 +1086,13 @@ mod tests {
             fs.clone(),
             Duration::from_secs(5),
             crate::telemetry::CounterSink::default(),
-            Some(Arc::new(move || {
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))
+                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))?;
+                operation();
+                Ok(())
             })),
         )?;
         validity.expire_for_test();
@@ -1073,6 +1101,172 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
         assert_eq!(fs.durable_sync_count.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_hold_filesystem_writer_fence_around_background_append() -> MidgeResult<()> {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::LeaseClock::default(),
+        ));
+        let predecessor = store.acquire_leadership("predecessor").unwrap();
+        let predecessor_epoch = predecessor.epoch;
+        create_test_segment(fs.as_ref(), "wal.log")?;
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let authority_store = Arc::clone(&store);
+        let authority_entered = Arc::clone(&entered);
+        let authority_resume = Arc::clone(&resume);
+        let authority_calls = Arc::clone(&calls);
+        let writer = Arc::new(FsWalWriterIo::new_with_authority(
+            "wal.log",
+            Arc::clone(&fs),
+            Duration::from_secs(5),
+            crate::telemetry::CounterSink::default(),
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
+                let call = authority_calls.fetch_add(1, Ordering::SeqCst);
+                let mut run = || {
+                    if call >= 2 {
+                        authority_entered.wait();
+                        authority_resume.wait();
+                    }
+                    operation();
+                };
+                authority_store
+                    .with_writer_epoch(
+                        "predecessor",
+                        predecessor_epoch,
+                        Duration::from_secs(1),
+                        &mut run,
+                    )
+                    .map_err(|error| error.into_validation_error("background WAL append"))
+            })),
+        )?);
+        let append_writer = Arc::clone(&writer);
+
+        // Act: pause inside the actual background write while its epoch guard
+        // is held, then try takeover from a second store handle.
+        let append = std::thread::spawn(move || {
+            append_writer.append_record(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"fenced-key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            ))
+        });
+        entered.wait();
+        let successor_attempt = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.acquire_leadership("successor"))
+        };
+        resume.wait();
+        append.join().expect("append thread completed")?;
+        let successor = successor_attempt
+            .join()
+            .expect("successor attempt completed")
+            .unwrap();
+
+        // Assert
+        assert!(successor.epoch > predecessor.epoch);
+        drop(writer);
+        Ok(())
+    }
+
+    #[test]
+    fn should_serialize_background_append_with_same_epoch_wal_reservation() -> MidgeResult<()> {
+        // Arrange: the engine's WAL writer and event loop share one filesystem
+        // lease and can request effects concurrently in the same epoch.
+        let directory = tempfile::tempdir().expect("temporary database root");
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::LeaseClock::default(),
+        ));
+        let lease = store.acquire_leadership("holder").unwrap();
+        let epoch = lease.epoch;
+        let wal = crate::io::subdirectory(Arc::clone(&fs), crate::wal::WAL_DIR);
+        let fence = crate::runtime::wal_history::WalHistoryFence::new(
+            Arc::clone(&store) as Arc<dyn LeaderStore>,
+            "holder".into(),
+            epoch,
+            Duration::from_secs(2),
+        );
+        let mut history = crate::runtime::wal_history::WalHistory::open_with_fence(
+            Arc::clone(&wal),
+            1,
+            epoch,
+            &fence,
+        )?;
+        let writer = FsWalWriterIo::new_with_counters(
+            &crate::wal::segment_file_name(1),
+            Arc::clone(&wal),
+            Duration::from_secs(2),
+            crate::telemetry::CounterSink::default(),
+        )?;
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let first_effect = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let authority_store = Arc::clone(&store);
+        let authority_entered = Arc::clone(&entered);
+        let authority_resume = Arc::clone(&resume);
+        let authority_first_effect = Arc::clone(&first_effect);
+        writer.set_write_authority(Some(Arc::new(move |operation: &mut dyn FnMut()| {
+            let mut run = || {
+                if authority_first_effect.swap(false, Ordering::AcqRel) {
+                    authority_entered.wait();
+                    authority_resume.wait();
+                }
+                operation();
+            };
+            authority_store
+                .with_writer_epoch("holder", epoch, Duration::from_secs(2), &mut run)
+                .map_err(|error| error.into_validation_error("background WAL append"))
+        })));
+        let writer = Arc::new(writer);
+        let append_writer = Arc::clone(&writer);
+        let append = std::thread::spawn(move || {
+            append_writer.append_record(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"concurrent-key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            ))
+        });
+        entered.wait();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reserve = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal reservation start");
+            result_tx
+                .send(history.reserve(10))
+                .expect("send reservation result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reservation thread started");
+
+        // Act: the same-epoch reservation must wait while the background
+        // writer holds the real filesystem effect lock, then run successfully.
+        let early_result = result_rx.recv_timeout(Duration::from_millis(20));
+        resume.wait();
+        append.join().expect("background append thread completed")?;
+        reserve.join().expect("reservation thread completed");
+
+        // Assert
+        assert!(matches!(
+            early_result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        result_rx
+            .try_recv()
+            .expect("reservation result is available")?;
+        drop(writer);
         Ok(())
     }
 
@@ -1096,11 +1290,13 @@ mod tests {
             fs.clone(),
             Duration::from_secs(10),
             crate::telemetry::CounterSink::default(),
-            Some(Arc::new(move || {
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("queued WAL authority"))
+                    .map_err(|error| error.into_validation_error("queued WAL authority"))?;
+                operation();
+                Ok(())
             })),
         )?);
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();

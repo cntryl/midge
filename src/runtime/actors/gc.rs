@@ -16,20 +16,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-// Failed deletion must remain retryable, but immediately resubmitting a
-// permanently failing provider request would turn the event loop into a busy
-// loop. The short test delay keeps the regression test deterministic while the
-// production delay keeps retries bounded.
-#[cfg(not(test))]
-const CLOUD_DELETE_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const CLOUD_DELETE_RETRY_DELAY: Duration = Duration::from_millis(10);
-
-#[cfg(not(test))]
-const MANIFEST_RECLAMATION_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const MANIFEST_RECLAMATION_RETRY_DELAY: Duration = Duration::from_millis(10);
-
 /// Actor handling garbage collection
 pub struct GcActor {
     /// Last GC run timestamp
@@ -63,24 +49,37 @@ pub struct GcActor {
 
 impl GcActor {
     pub fn new() -> Self {
+        Self::with_retry_policy(crate::runtime::RuntimeRetryPolicy::default())
+    }
+
+    pub(crate) fn with_retry_policy(retry_policy: crate::runtime::RuntimeRetryPolicy) -> Self {
         Self {
             last_gc_run: None,
             pending_obsolete: VecDeque::new(),
             pending_retired_wal: VecDeque::new(),
             retired_wal_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_DELETE_RETRY_DELAY,
+                retry_policy.cloud_delete,
             ),
             pending_manifest_reclamation: VecDeque::new(),
             manifest_reclamation_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                MANIFEST_RECLAMATION_RETRY_DELAY,
+                retry_policy.manifest_reclamation,
             ),
             failed_cloud_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             failed_delete_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_DELETE_RETRY_DELAY,
+                retry_policy.cloud_delete,
             ),
             retry_notifier: None,
             cloud_delete_workers: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_delays(&self) -> (Duration, Duration, Duration) {
+        (
+            self.retired_wal_retry.configured_delay(),
+            self.manifest_reclamation_retry.configured_delay(),
+            self.failed_delete_retry.configured_delay(),
+        )
     }
 
     /// Configure the event-loop wakeup channel used by cloud delete workers.

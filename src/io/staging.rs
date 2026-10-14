@@ -348,6 +348,13 @@ mod tests {
     }
 
     impl Fs for RecordingFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
         fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             Ok(Box::new(RecordingFile {
                 inner: self.inner.open(path, options)?,

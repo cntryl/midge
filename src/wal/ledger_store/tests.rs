@@ -297,6 +297,61 @@ fn should_refuse_append_when_edit_does_not_apply() {
 }
 
 #[test]
+fn should_refuse_append_when_ledger_changes_without_changing_length() {
+    // Arrange
+    let fs = mock_fs();
+    let ledger = genesis_ledger();
+    let mut store = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    let mut successor_image = ledger_bytes(&fs);
+    let last = successor_image.last_mut().expect("snapshot has bytes");
+    *last ^= 1;
+    write_ledger_bytes(&fs, &successor_image);
+
+    // Act
+    let result = store.append(&rotate(1));
+
+    // Assert: a same-size rewrite is not the cached image this writer opened.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert_eq!(ledger_bytes(&fs), successor_image);
+}
+
+#[test]
+fn should_not_republish_stale_ledger_after_successor_changes_it() {
+    // Arrange: two stores opened the same ledger, then the successor advances
+    // it twice while the first store remains idle.
+    let fs = mock_fs();
+    let ledger = genesis_ledger();
+    let mut stale = LedgerStore::create(Arc::clone(&fs), &ledger).expect("create LEDGER");
+    let mut successor = LedgerStore::open(Arc::clone(&fs))
+        .expect("open successor LEDGER")
+        .expect("LEDGER exists");
+    successor
+        .append(&rotate(1))
+        .expect("successor appends first edit");
+    successor
+        .append(&rotate(2))
+        .expect("successor appends second edit");
+    let successor_image = ledger_bytes(&fs);
+
+    // Act: the stale store detects replacement, then is asked to edit again.
+    let detected = stale.append(&rotate(1));
+    let retry = stale.append(&rotate(1));
+
+    // Assert: detection permanently fences this cached store; it cannot
+    // compact its old snapshot over the successor's durable history.
+    assert!(
+        matches!(detected, Err(MidgeError::Fenced(_))),
+        "{detected:?}"
+    );
+    assert!(matches!(retry, Err(MidgeError::Fenced(_))), "{retry:?}");
+    assert_eq!(ledger_bytes(&fs), successor_image);
+    assert_eq!(
+        loaded(&fs),
+        (applied(&ledger, &[rotate(1), rotate(2)]), LedgerTail::Clean)
+    );
+}
+
+#[test]
 fn should_report_torn_when_final_frame_is_truncated() {
     // Arrange
     let fs = mock_fs();

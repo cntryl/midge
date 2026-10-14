@@ -92,30 +92,43 @@ impl WalActor {
         self.commit_sync_io(state, receipt)
     }
 
-    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+    fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        let admission_prevalidated =
+            std::mem::replace(&mut self.sync_authority_prevalidated, false);
         self.ensure_lease_validity()?;
         self.ensure_filesystem_wal_available(state)?;
 
-        // Epoch fencing check: verify our epoch is still current before making
-        // data durable.  If a newer writer has taken over, we must stop.
-        if let Some(store) = &self.leader_store {
-            if let Err(error) = store.validate_epoch(&self.leader_holder_id, self.current_epoch) {
-                let error = MidgeError::from(error);
-                tracing::error!(epoch = self.current_epoch, err = %error, "fenced at sync boundary");
-                // A failed authority proof is not a retryable pre-fsync I/O
-                // error: this writer may already be stale. Keep it from
-                // accepting more WAL-backed work while the event loop pairs
-                // this actor fence with the transition protocol and waiters.
-                self.fence_with_cause(
-                    state,
-                    format!("WAL writer authority validation failed: {error}"),
-                    true,
-                );
-                return Err(error);
+        // A strict transaction group carries its provider proof from admission
+        // directly to this sync. Other syncs refresh authority once here; the
+        // physical sync remains guarded by `with_writer_epoch` in either case.
+        if !admission_prevalidated {
+            if let Some(store) = &self.leader_store {
+                if let Err(error) = store.validate_epoch_before_sync(
+                    &self.leader_holder_id,
+                    self.current_epoch,
+                    self.storage_io_timeout,
+                ) {
+                    let error = error.into_writer_effect_error("WAL sync authority validation");
+                    tracing::error!(epoch = self.current_epoch, err = %error, "fenced at sync boundary");
+                    // A failed authority proof is not a retryable pre-fsync I/O
+                    // error: this writer may already be stale. Keep it from
+                    // accepting more WAL-backed work while the event loop pairs
+                    // this actor fence with the transition protocol and waiters.
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL writer authority validation failed: {error}"),
+                        true,
+                    );
+                    return Err(error);
+                }
             }
         }
 
-        self.ensure_lease_validity()?;
+        self.ensure_lease_validity()
+    }
+
+    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+        self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
 
         if let Err(error) = WalTransitionBoundary::BeforeFsync.check() {
@@ -164,7 +177,11 @@ impl WalActor {
                     if matches!(e, MidgeError::NoSpace(_)) {
                         Self::record_no_space_event(&self.counters);
                     }
-                    self.fence_transition(state, format!("WAL fsync failed: {e}"));
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL fsync failed: {e}"),
+                        Self::is_authority_failure(&e),
+                    );
                     return Err(e);
                 }
                 Err(panic_info) => {

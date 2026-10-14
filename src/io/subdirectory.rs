@@ -86,6 +86,12 @@ impl ReadFs for Subdirectory {
 }
 
 impl Fs for Subdirectory {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn super::traits::PersistentHandleFs)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -114,12 +120,12 @@ impl Fs for Subdirectory {
         self.inner.coordination_key()
     }
 
-    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.inner.open(&self.path(path)?, opts)
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn super::traits::FsLock>> {
+        self.inner.try_lock_exclusive(&self.path(path)?)
     }
 
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        self.inner.open_persistent_handle(&self.path(path)?, opts)
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(&self.path(path)?, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -140,6 +146,12 @@ impl Fs for Subdirectory {
 
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
         self.inner.rename_atomic(&self.path(from)?, &self.path(to)?)
+    }
+}
+
+impl super::traits::PersistentHandleFs for Subdirectory {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        crate::io::open_persistent_handle(self.inner.as_ref(), &self.path(path)?, opts)
     }
 }
 

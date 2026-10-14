@@ -103,7 +103,26 @@ impl ReadFs for RecordingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for RecordingFs {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        crate::io::open_persistent_handle(&self.inner, path, options)
+    }
+}
+
 impl Fs for RecordingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
@@ -115,14 +134,6 @@ impl Fs for RecordingFs {
             inner: self.inner.open(path, options)?,
             events: Arc::clone(&self.events),
         }))
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        self.inner.open_persistent_handle(path, options)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {

@@ -8,7 +8,8 @@ use std::collections::HashMap;
 
 impl EventLoop {
     pub(super) fn cloud_flush_staging_window(&self) -> Option<u64> {
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .filter(|storage| storage.ephemeral_sst_cache_enabled())
@@ -83,7 +84,8 @@ impl EventLoop {
             }
         }
         let required = self.pending_cloud_flush_headroom(growth, window);
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .expect("cloud staging storage")
@@ -139,7 +141,8 @@ impl EventLoop {
             return Ok(());
         };
         let required = self.pending_cloud_flush_headroom(&HashMap::new(), window);
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .expect("cloud staging storage")

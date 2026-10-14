@@ -16,6 +16,116 @@ mod startup_deadline;
 
 static TEMP_PATH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+struct CountingLeaseReadBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+    lease_reads: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::storage::cloud::CloudReadCapability for CountingLeaseReadBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if key.ends_with(LEASE_OBJECT_KEY) {
+            self.lease_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if key.ends_with(LEASE_OBJECT_KEY) {
+            self.lease_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
+    }
+
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for CountingLeaseReadBackend {}
+
+#[test]
+fn should_validate_per_logical_write_group_not_per_local_wal_effect() {
+    // Arrange: acquire the real provider-backed lease and then count its
+    // object reads separately from acquisition and heartbeat work.
+    let backend = Arc::new(CountingLeaseReadBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        lease_reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend.clone(),
+        "midge".to_string(),
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        cloud,
+    ));
+    let _guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire provider lease");
+    let epoch = lease.epoch();
+    backend
+        .lease_reads
+        .store(0, std::sync::atomic::Ordering::Release);
+    let holder_id = lease.holder_id();
+    let mut effects_ran = 0;
+
+    // Act: one provider proof admits a logical write group; its physical WAL
+    // append and fsync effects use the bounded monotonic validity window.
+    lease
+        .leader_store
+        .validate_write_admission(&holder_id, epoch, Duration::from_secs(1))
+        .expect("provider authority admits the write group");
+    for _ in 0..2 {
+        lease
+            .leader_store
+            .with_writer_epoch(&holder_id, epoch, Duration::from_secs(1), &mut || {
+                effects_ran += 1;
+            })
+            .expect("valid monotonic authority admits a local effect");
+    }
+
+    // Assert: a standalone sync boundary refreshes authority once, while the
+    // physical append/fsync checks do not each make another provider request.
+    assert_eq!(effects_ran, 2);
+    assert_eq!(
+        backend
+            .lease_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    lease
+        .leader_store
+        .validate_epoch_before_sync(&holder_id, epoch, Duration::from_secs(1))
+        .expect("standalone sync authority refresh succeeds");
+    assert_eq!(
+        backend
+            .lease_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+}
+
 fn test_config() -> CloudLeaseConfig {
     CloudLeaseConfig {
         bucket: "test-bucket".to_string(),
@@ -41,7 +151,37 @@ struct ScriptedConditionalPutBackend {
     scripted_target: ScriptedPutTarget,
 }
 
-impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
+impl crate::storage::cloud::CloudReadCapability for ScriptedConditionalPutBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
+            &self.inner,
+            key,
+            start,
+            end,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for ScriptedConditionalPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -74,7 +214,7 @@ impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
         if scripted {
             if self.apply_before_error {
                 let (inner_callback, inner_result) = std::sync::mpsc::channel();
-                crate::storage::cloud::CloudBackend::submit_put(
+                crate::storage::cloud::CloudWriteCapability::submit_put(
                     &self.inner,
                     key,
                     data,
@@ -101,50 +241,45 @@ impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
             });
             return;
         }
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
-    }
-
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudWriteCapability::submit_put(
             &self.inner,
             key,
-            start,
-            end,
+            data,
+            headers,
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for ScriptedConditionalPutBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
 }
+
+impl crate::storage::cloud::CloudListCapability for ScriptedConditionalPutBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ScriptedConditionalPutBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {}
 
 fn lease_with_scripted_conditional_put_error(
     scripted_error: crate::storage::cloud::CloudError,
@@ -249,7 +384,13 @@ impl LateCommitRenewalBackend {
             .take()
             .expect("late renewal PUT is pending");
         let (callback, result) = std::sync::mpsc::channel();
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, &key, data, headers, callback);
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            &key,
+            data,
+            headers,
+            callback,
+        );
         let result = result.recv_timeout(Duration::from_secs(5));
         self.late_commit_complete.store(true, Ordering::Release);
         assert!(matches!(
@@ -262,7 +403,52 @@ impl LateCommitRenewalBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
+impl crate::storage::cloud::CloudReadCapability for LateCommitRenewalBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            if let Some(signal) = self
+                .old_read_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                signal.send(()).expect("signal old reconciliation read");
+            }
+        }
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
+            &self.inner,
+            key,
+            start,
+            end,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for LateCommitRenewalBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -302,30 +488,57 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
                 std::thread::yield_now();
             }
         }
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            key,
+            data,
+            headers,
+            callback,
+        );
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for LateCommitRenewalBackend {
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudListCapability for LateCommitRenewalBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for LateCommitRenewalBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {}
+
+impl crate::storage::cloud::CloudReadCapability for BlockingRenewalBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        if self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
-        {
-            if let Some(signal) = self
-                .old_read_seen
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                signal.send(()).expect("signal old reconciliation read");
-            }
-        }
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
     }
 
     fn submit_get_range(
@@ -335,7 +548,7 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
         end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
             &self.inner,
             key,
             start,
@@ -343,26 +556,9 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
             callback,
         );
     }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
-    }
 }
 
-impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {
+impl crate::storage::cloud::CloudWriteCapability for BlockingRenewalBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -394,69 +590,54 @@ impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {
                 .recv()
                 .expect("release blocked renewal");
         }
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
-    }
-
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudWriteCapability::submit_put(
             &self.inner,
             key,
-            start,
-            end,
+            data,
+            headers,
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for BlockingRenewalBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
 }
 
-impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
+impl crate::storage::cloud::CloudListCapability for BlockingRenewalBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for BlockingRenewalBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {}
+
+impl crate::storage::cloud::CloudReadCapability for NoCasTokenBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, tx);
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(&self.inner, key, tx);
         let event = match rx.recv() {
             Ok(crate::storage::cloud::CloudEvent::GetWithMetadata {
                 key,
@@ -486,7 +667,7 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
         end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
             &self.inner,
             key,
             start,
@@ -494,23 +675,52 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for NoCasTokenBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for NoCasTokenBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for NoCasTokenBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for NoCasTokenBackend {
     fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, tx);
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, tx);
         let event = match rx.recv() {
             Ok(crate::storage::cloud::CloudEvent::Head {
                 key,
@@ -528,6 +738,8 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
         let _ = callback.send(event);
     }
 }
+
+impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {}
 
 fn temp_cache_path() -> PathBuf {
     let counter = TEMP_PATH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2910,26 +3122,16 @@ impl FlakyGetBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
-    }
-
+impl crate::storage::cloud::CloudReadCapability for FlakyGetBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if !self.take_failure(key, &callback) {
-            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+            crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
         }
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if !self.take_failure(key, &callback) {
-            crate::storage::cloud::CloudBackend::submit_get_with_metadata(
+            crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
                 &self.inner,
                 key,
                 callback,
@@ -2944,7 +3146,7 @@ impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
         end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
             &self.inner,
             key,
             start,
@@ -2952,24 +3154,55 @@ impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for FlakyGetBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for FlakyGetBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
 }
+
+impl crate::storage::cloud::CloudListCapability for FlakyGetBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FlakyGetBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for FlakyGetBackend {}
 
 #[test]
 fn should_keep_cloud_lease_active_when_renewal_read_fails_transiently() {

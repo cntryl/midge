@@ -123,6 +123,10 @@ impl ReadFs for TimedReadFs {
 }
 
 impl Fs for TimedReadFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let inner = self.inner.open(path, options)?;
         if path.0 != self.target {
@@ -437,6 +441,7 @@ fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_loca
         &Manifest::default(),
         HashMap::new(),
         None,
+        None,
         fs.as_ref(),
         history,
     );
@@ -478,6 +483,10 @@ impl ReadFs for ListingFailsFs {
 }
 
 impl Fs for ListingFailsFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.0.try_lock_exclusive(path)
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         self.0.open(path, opts)
     }

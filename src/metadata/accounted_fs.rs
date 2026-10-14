@@ -69,6 +69,16 @@ impl ReadFs for AccountedFs {
 }
 
 impl Fs for AccountedFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::traits::PersistentHandleFs)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -102,24 +112,6 @@ impl Fs for AccountedFs {
             payload: payload(path),
         }))
     }
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        let inner = if mutating_open(options) {
-            observe_mutation(&self.ledger, || {
-                self.inner.open_persistent_handle(path, options)
-            })
-        } else {
-            self.inner.open_persistent_handle(path, options)
-        }?;
-        Ok(Box::new(AccountedFile {
-            inner,
-            ledger: Arc::clone(&self.ledger),
-            payload: payload(path),
-        }))
-    }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_file(path))
     }
@@ -134,6 +126,23 @@ impl Fs for AccountedFs {
     }
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.rename_atomic(from, to))
+    }
+}
+
+impl crate::io::traits::PersistentHandleFs for AccountedFs {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        let inner = if mutating_open(options) {
+            observe_mutation(&self.ledger, || {
+                crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
+            })
+        } else {
+            crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
+        }?;
+        Ok(Box::new(AccountedFile {
+            inner,
+            ledger: Arc::clone(&self.ledger),
+            payload: payload(path),
+        }))
     }
 }
 

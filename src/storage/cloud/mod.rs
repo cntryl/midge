@@ -1,7 +1,7 @@
 //! Callback-based cloud storage abstractions.
 //!
 //! Aligns with the actor runtime model: synchronous submission + async completion.
-//! - `CloudBackend` defines submit-only methods (PUT/GET/DELETE/LIST/HEAD).
+//! - Operation capabilities define reads, writes, deletes, listings and metadata lookups.
 //! - Backends send results via `CloudCallback` channels (no futures in the engine).
 //! - `CloudStorage` is a namespace-aware dispatcher that shields the rest of the engine.
 //! - `MockCloudBackend` keeps deterministic testing without async runtimes.
@@ -11,7 +11,7 @@
 //! ```text
 //! CloudStorage (namespace-aware dispatcher)
 //!     ↓
-//! CloudBackend trait (interface: submit_put, submit_get, etc.)
+//! Focused cloud operation capabilities (composed by CloudBackend)
 //!     ↓
 //! [Real backends via CloudExecutor]  [MockCloudBackend for testing]
 //! ```
@@ -90,7 +90,13 @@ pub(crate) fn set_request_timeout_header(
     headers.retain(|(name, _)| !name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER));
     headers.push((
         REQUEST_TIMEOUT_HEADER.into(),
-        timeout.as_millis().max(1).to_string(),
+        timeout
+            .as_millis()
+            .saturating_add(u128::from(
+                !timeout.subsec_nanos().is_multiple_of(1_000_000),
+            ))
+            .max(1)
+            .to_string(),
     ));
 }
 
@@ -150,7 +156,10 @@ pub(crate) use event::object_match_precondition_headers;
 pub use event::{CloudCallback, CloudEvent, ObjectMetadata};
 
 mod backend;
-pub use backend::CloudBackend;
+pub use backend::{
+    CloudBackend, CloudDeleteCapability, CloudHeadCapability, CloudListCapability,
+    CloudReadCapability, CloudReadOptions, CloudRequestOptions, CloudWriteCapability,
+};
 
 #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 mod mock;

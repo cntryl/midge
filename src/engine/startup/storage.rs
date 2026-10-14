@@ -81,6 +81,7 @@ fn initialize_startup_state(
     opts: &OpenOptions,
     path: &StartupStoragePath,
     wal: crate::runtime::state::RecoveryWal,
+    wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<RuntimeState> {
     check_startup_scope(scope, "local recovery initialization")?;
@@ -90,6 +91,7 @@ fn initialize_startup_state(
         Arc::clone(&path.root),
         opts.recovery_policy(),
         wal,
+        wal_fence,
         scope,
     )
 }
@@ -101,6 +103,7 @@ fn initialize_startup_state(
 fn load_cloud_wal_history(
     path: &StartupStoragePath,
     writer_epoch: u64,
+    fence: &crate::runtime::wal_history::WalHistoryFence,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<crate::runtime::cloud_startup::CacheHistory> {
     // Bounded by the startup deadline, like local recovery; the scope stops
@@ -112,7 +115,11 @@ fn load_cloud_wal_history(
     crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
     let wal = crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR);
     Ok(
-        match crate::runtime::wal_history::WalHistory::load(Arc::clone(&wal), writer_epoch)? {
+        match crate::runtime::wal_history::WalHistory::load_with_fence(
+            Arc::clone(&wal),
+            writer_epoch,
+            fence,
+        )? {
             Some(history) => crate::runtime::cloud_startup::CacheHistory::Existing(history),
             None => crate::runtime::cloud_startup::CacheHistory::Fresh(wal),
         },
@@ -146,7 +153,8 @@ fn recover_cloud_wal(
         ));
     }
     let limits = super::streaming_recovery::CloudReplay::limits(opts);
-    let cache = load_cloud_wal_history(storage_path, lease.writer_epoch, scope)?;
+    let wal_fence = lease.wal_history_fence(opts.storage_io_timeout())?;
+    let cache = load_cloud_wal_history(storage_path, lease.writer_epoch, &wal_fence, scope)?;
     let ledger = match &cache {
         crate::runtime::cloud_startup::CacheHistory::Existing(history) => Some(history.ledger()),
         crate::runtime::cloud_startup::CacheHistory::Fresh(_) => None,
@@ -167,10 +175,10 @@ fn recover_cloud_wal(
     let history = commit_wal_plan(
         &streaming.plan,
         &CloudPersistence::new(Arc::clone(storage)),
-        lease.writer_epoch,
+        lease,
         catalog,
         cache,
-        &|| lease.ensure_healthy("during WAL salvage set aside"),
+        Some(&wal_fence),
         scope,
     )?;
     Ok((streaming, history))
@@ -218,10 +226,10 @@ fn build_wal_plan(
 fn commit_wal_plan(
     plan: &crate::wal::planner::RecoveryPlan,
     persistence: &CloudPersistence,
-    epoch: u64,
+    lease: &StartupLease,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     cache: crate::runtime::cloud_startup::CacheHistory,
-    validate: &dyn Fn() -> MidgeResult<()>,
+    wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
     let unbounded;
@@ -234,10 +242,11 @@ fn commit_wal_plan(
     crate::runtime::cloud_startup::commit_recovery_plan_within(
         plan,
         persistence,
-        epoch,
+        lease.writer_epoch,
         catalog,
         cache,
-        validate,
+        wal_fence,
+        &|| lease.ensure_healthy("during WAL salvage set aside"),
         scope,
     )
 }
@@ -250,6 +259,23 @@ fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority
         holder_id: lease.lease.holder_id(),
         writer_epoch: lease.writer_epoch,
     })
+}
+
+impl StartupLease {
+    fn wal_history_fence(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MidgeResult<crate::runtime::wal_history::WalHistoryFence> {
+        let store = self.leader_store.clone().ok_or_else(|| {
+            MidgeError::Internal("WAL history startup requires a leader store".into())
+        })?;
+        Ok(crate::runtime::wal_history::WalHistoryFence::new(
+            store,
+            self.lease.holder_id(),
+            self.writer_epoch,
+            timeout,
+        ))
+    }
 }
 
 fn fence_provider_ddl(
@@ -884,6 +910,7 @@ impl RuntimeStorageMaterialization {
             startup_scope: scope.cloned(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
+            retry_policy: opts.retry_policy(),
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -901,6 +928,21 @@ impl RuntimeStorageMaterialization {
         }
     }
 
+    fn build_simulated_cloud_stores(
+        opts: &OpenOptions,
+        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+    ) -> crate::storage::simulated::SimulatedCloudStores {
+        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
+            Arc::clone(store),
+            opts.simulated_cloud_local_storage_budget_bytes(),
+        );
+        cloud.hybrid_storage.enable_ephemeral_sst_cache(
+            opts.simulated_cloud_local_storage_budget_bytes()
+                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
+        );
+        cloud
+    }
+
     fn materialize_simulated_cloud(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -914,14 +956,7 @@ impl RuntimeStorageMaterialization {
             opts.storage_io_timeout(),
         )?;
         let store = location.open()?;
-        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
-            Arc::clone(&store),
-            opts.simulated_cloud_local_storage_budget_bytes(),
-        );
-        cloud.hybrid_storage.enable_ephemeral_sst_cache(
-            opts.simulated_cloud_local_storage_budget_bytes()
-                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
-        );
+        let cloud = Self::build_simulated_cloud_stores(opts, &store);
         let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
         let sst_read_fs = remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
         CloudStartupRecovery::reject_cloud_wal_without_catalog(store.as_ref(), scope)?;
@@ -966,6 +1001,7 @@ impl RuntimeStorageMaterialization {
             opts,
             storage_path,
             crate::runtime::state::RecoveryWal::Deferred(history),
+            None,
             scope,
         )?;
         if recovery_plan.opened_in_salvage_mode {
@@ -1110,6 +1146,7 @@ impl RuntimeStorageMaterialization {
             opts,
             storage_path,
             crate::runtime::state::RecoveryWal::Deferred(history),
+            None,
             scope,
         )?;
         if recovery_plan.opened_in_salvage_mode {
@@ -1177,6 +1214,7 @@ impl RuntimeStorageMaterialization {
             runtime_response_timeout: opts.runtime_response_timeout(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
+            retry_policy: opts.retry_policy(),
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -1199,6 +1237,11 @@ impl RuntimeStorageMaterialization {
                 storage_path,
                 crate::runtime::state::RecoveryWal::Replay {
                     writer_epoch: startup_lease.writer_epoch,
+                },
+                if storage_path.memory_mode {
+                    None
+                } else {
+                    Some(startup_lease.wal_history_fence(opts.storage_io_timeout())?)
                 },
                 scope,
             )?,
@@ -1423,8 +1466,8 @@ mod shared_simulated_authority_tests {
         assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
         assert_eq!(value.as_deref(), Some(b"shared".as_slice()));
         assert!(
-            matches!(stale_result, Err(crate::MidgeError::OutcomeUnknown(_))),
-            "{stale_result:?}"
+            matches!(stale_result, Err(crate::MidgeError::Fenced(_))),
+            "a stale cache must be fenced before any WAL effect: {stale_result:?}"
         );
         assert_eq!(
             successor

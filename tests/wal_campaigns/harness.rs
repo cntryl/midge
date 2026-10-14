@@ -129,7 +129,7 @@ pub(crate) struct Campaign {
     restored_names: BTreeMap<String, u64>,
     values: u64,
     images: Vec<Image>,
-    /// Resurrected lease locks removed after power losses (#811).
+    /// Resurrected lease mutation locks removed after power loss.
     stale_lease_locks: usize,
     config: Config,
 }
@@ -180,15 +180,17 @@ impl Campaign {
 
     fn options(&self) -> OpenOptions {
         let root: Arc<dyn Fs> = Arc::new(self.device.fs());
-        self.config
+        let builder = self
+            .config
             .mode
             .open_builder(self.named.path(), &self.view)
             .background_compaction(false)
             .lease_ttl(self.config.lease_ttl())
             .lease_clock_for_testing(Arc::new(self.clock.clone()))
-            .filesystem_for_testing(root)
-            .build()
-            .expect("open options")
+            .filesystem_for_testing(root);
+        #[cfg(feature = "failpoints")]
+        let builder = builder.fast_cloud_retries_for_testing();
+        builder.build().expect("open options")
     }
     fn engine(&self) -> &Engine {
         self.engine.as_ref().expect("engine is open")
@@ -325,6 +327,10 @@ impl Campaign {
             {
                 Ok(())
             }
+            // A commit admission stall is a definite pre-WAL refusal. The
+            // history already records this commit as unacknowledged; only
+            // acknowledged writes constrain crash recovery.
+            Err(MidgeError::WriteStall(_)) if operation == "commit" => Ok(()),
             Err(error)
                 if self.config.faulting()
                     && (error.to_string().contains(FAILURE_MESSAGE)
@@ -356,22 +362,24 @@ impl Campaign {
             .count()
     }
 
-    /// Open the engine once, clearing a lease lock #811 resurrected.
+    /// Open the engine, clearing a lease mutation lock resurrected by
+    /// power loss as an operator would (#811).
     fn open(&mut self, stop: Stop) -> Result<Engine, cntryl_midge::MidgeError> {
-        match Engine::open(self.options()) {
-            Err(error)
-                if stop.loses_power()
-                    && self.config.clear_stale_lease_lock
-                    && error.to_string().contains(LEASE_LOCK) =>
-            {
-                self.stale_lease_locks += 1;
-                self.device
-                    .fs()
-                    .remove_file(&FsPath::new(LEASE_LOCK))
-                    .expect("remove the stale lease lock");
-                Engine::open(self.options())
+        loop {
+            match Engine::open(self.options()) {
+                Err(error) if stop.loses_power() && self.config.clear_stale_lease_lock => {
+                    let message = error.to_string();
+                    if !message.contains(LEASE_LOCK) {
+                        return Err(error);
+                    }
+                    self.stale_lease_locks += 1;
+                    self.device
+                        .fs()
+                        .remove_file(&FsPath::new(LEASE_LOCK))
+                        .expect("remove the stale coordination lock");
+                }
+                opened => return opened,
             }
-            opened => opened,
         }
     }
 

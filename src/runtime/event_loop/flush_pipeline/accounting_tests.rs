@@ -60,6 +60,7 @@ impl Fixture {
 
     fn receive(&self) -> FlushWorkerResult {
         self.event_loop
+            .pipeline
             .flush_worker_result_rx
             .recv_timeout(WAIT)
             .expect("actual owned worker completion")
@@ -310,7 +311,7 @@ fn should_preserve_original_publication_when_actual_retry_runs_during_shutdown()
         assert_eq!(ordinary(&once).flush_committed_count, 0);
         std::fs::remove_dir(&path)?;
         fixture.event_loop.state.make_immutable_flush_retry_due(0);
-        fixture.event_loop.shutting_down = true;
+        fixture.event_loop.shutdown.shutting_down = true;
         fixture
             .event_loop
             .schedule_next_flush_worker_during_shutdown();

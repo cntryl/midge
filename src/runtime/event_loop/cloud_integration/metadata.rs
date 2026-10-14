@@ -40,11 +40,17 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn cloud_metadata_snapshot_for_wal_cleanup(
         &self,
     ) -> MidgeResult<SharedMetadataSnapshot> {
-        self.cloud_coordinator.metadata_snapshot_for_wal_cleanup(
-            self.fencing.leader_store.clone(),
-            self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
-            self.fencing.writer_epoch,
-        )
+        self.actors
+            .cloud_coordinator
+            .metadata_snapshot_for_wal_cleanup(
+                self.authority.fencing.leader_store.clone(),
+                self.authority
+                    .fencing
+                    .leader_holder_id
+                    .as_deref()
+                    .unwrap_or_default(),
+                self.authority.fencing.writer_epoch,
+            )
     }
 }
 

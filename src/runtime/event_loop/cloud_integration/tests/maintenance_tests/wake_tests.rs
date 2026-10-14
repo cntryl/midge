@@ -4,7 +4,8 @@ fn idle_cloud_loop() -> crate::common::MidgeResult<EventLoop> {
     let el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.cloud_coordinator
+    el.actors
+        .cloud_coordinator
         .hybrid_storage
         .as_ref()
         .unwrap()
@@ -18,20 +19,22 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     // Arrange: hold the worker after it queues its terminal event. Consuming
     // that event cannot yet reap the handle or release the publication gate.
     let mut el = idle_cloud_loop()?;
-    let response = el.router.register(91_008, "CompactAll");
+    let response = el.routing.router.register(91_008, "CompactAll");
     el.state.pending_compaction_waits.insert(
         91_008,
-        el.router
-            .request_deadline(91_008, el.runtime_response_timeout)
+        el.routing
+            .router
+            .request_deadline(91_008, el.routing.runtime_response_timeout)
             .unwrap(),
     );
-    el.cloud_coordinator.cloud_wal.admit_prunes([42]);
-    el.publication_gate
+    el.actors.cloud_coordinator.cloud_wal.admit_prunes([42]);
+    el.publication
+        .publication_gate
         .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
-    let storage = el.cloud_coordinator.hybrid_storage.clone().unwrap();
+    let storage = el.actors.cloud_coordinator.hybrid_storage.clone().unwrap();
     let (event_sent, event_ready) = std::sync::mpsc::channel();
     let (release_worker, release) = std::sync::mpsc::channel();
-    el.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(move || {
+    el.actors.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(move || {
         storage.queue_cloud_wal_prune_attempt_failed(42, "yielded proof work".into());
         event_sent.send(()).expect("report terminal event queued");
         release.recv().expect("release completed worker");
@@ -39,14 +42,15 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     event_ready.recv_timeout(Duration::from_secs(1)).unwrap();
     el.tick_hybrid_storage();
     el.drain_hybrid_storage_events();
-    assert_eq!(el.cloud_coordinator.cloud_wal.prunes().len(), 0);
+    assert_eq!(el.actors.cloud_coordinator.cloud_wal.prunes().len(), 0);
     assert!(!el
+        .actors
         .cloud_coordinator
         .cloud_wal_prune_worker
         .as_ref()
         .unwrap()
         .is_finished());
-    assert!(el.publication_gate.is_active());
+    assert!(el.publication.publication_gate.is_active());
     let active_worker_poll = el.idle_progress_timeout();
     let (requests, request_rx) = crossbeam::channel::unbounded();
 
@@ -69,8 +73,8 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     assert!(matches!(completion, Ok(RuntimeResponse::Ok { request_id: 91_008 })),
         "manual completion needs no additional request or 30-second maintenance tick: {completion:?}");
     assert!(active_worker_poll.is_some_and(|timeout| timeout <= Duration::from_millis(5)));
-    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
-    assert!(!el.publication_gate.is_active());
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    assert!(!el.publication.publication_gate.is_active());
     assert!(el.state.pending_compaction_waits.is_empty());
     Ok(())
 }
@@ -80,11 +84,13 @@ fn should_observe_finished_prune_worker_when_no_other_work_can_wake_runtime(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = idle_cloud_loop()?;
-    el.publication_gate
+    el.publication
+        .publication_gate
         .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
-    el.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(|| {}));
+    el.actors.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(|| {}));
     let deadline = Instant::now() + Duration::from_secs(1);
     while !el
+        .actors
         .cloud_coordinator
         .cloud_wal_prune_worker
         .as_ref()

@@ -73,6 +73,21 @@ If a process crashes while holding `.midge_leader.lock`, fence and stop every
 possible writer, preserve the database, and remove the lock only as an explicit
 operator recovery action. Never remove it merely because its timestamp is old.
 
+Filesystem writer fencing requires exclusive locks that the filesystem releases
+when the owning process exits. All hosts sharing a database must provide the
+same lock service. Unsupported filesystems are rejected before lease publication.
+The native lock file `.midge_writer_effect.v2.lock` is a permanent lock identity;
+never unlink it during recovery, because another process may still hold its
+inode locked.
+
+The first native lock owner also persists a protocol marker at
+`.midge_writer_effect.v2.fallback.lock`, preventing older create-new fallback
+clients from entering a different lock protocol. This marker survives crashes
+and is retained on clean shutdown. An existing legacy owner record, incomplete
+marker, or unrecognized content fails closed immediately. Preserve that file
+and stop and fence every possible writer before an operator removes it to allow
+the native protocol to initialize. Its timestamp alone never authorizes removal.
+
 ## Cloud-specific notes
 
 `cloud_async()` acknowledges local visibility and lets cloud upload proceed in

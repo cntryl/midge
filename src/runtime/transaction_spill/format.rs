@@ -106,17 +106,17 @@ fn spill_file_error(error: FsError) -> MidgeError {
 
 impl RunFile {
     pub(super) fn open(root: &dyn Fs, path: &FsPath) -> MidgeResult<Self> {
-        let file = root
-            .open_persistent_handle(
-                path,
-                OpenOptions {
-                    mode: OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(spill_file_error)?;
+        let file = crate::io::open_persistent_handle(
+            root,
+            path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(spill_file_error)?;
         let file = FileReader::new(file)?;
         #[cfg(test)]
         let tracker = RUN_FILE_TRACKER.with(|tracker| tracker.borrow().clone());
@@ -369,6 +369,7 @@ pub(super) fn write_run_with_reader_cache(
     let temp_path = super::spill_path(&format!("{name}.run.tmp"));
     let range_path = super::spill_path(&format!("{name}.ranges"));
     let range_temp_path = super::spill_path(&format!("{name}.ranges.tmp"));
+    let owned_paths = Arc::new(super::OwnedSpillPaths::default());
     let disk_charge = budget
         .map(|budget| {
             let bytes = spill_size_bound(ops)?;
@@ -377,32 +378,37 @@ pub(super) fn write_run_with_reader_cache(
                 budget: budget.clone(),
                 bytes,
                 root: root.clone(),
-                paths: [
-                    path.clone(),
-                    temp_path.clone(),
-                    range_path.clone(),
-                    range_temp_path.clone(),
-                ],
+                owned_paths: Arc::clone(&owned_paths),
             }))
         })
         .transpose()?;
     root.create_dir_all(&FsPath::new(super::SPILL_DIR))
         .map_err(FsError::into_midge)?;
-    let result = write_run_file(&**root, &temp_path, ops)
-        .and_then(|()| write_range_index_file(&**root, &range_temp_path, ops))
-        .and_then(|()| {
-            root.rename_atomic(&range_temp_path, &range_path)
-                .map_err(FsError::into_midge)?;
-            root.rename_atomic(&temp_path, &path)
-                .map_err(FsError::into_midge)?;
-            // Spill files are private pre-commit scratch. WAL commit is their
-            // durability boundary, so no parent-directory fsync is required.
-            Ok(())
-        });
+    let result = (|| {
+        write_run_file(&**root, &temp_path, ops, &owned_paths)?;
+        write_range_index_file(&**root, &range_temp_path, ops, &owned_paths)?;
+
+        // Reserve the final names with create_new before replacement renames.
+        // A collision must never let rename_atomic replace another run.
+        let range_reservation = create_spill_file(&**root, &range_path)?;
+        drop(range_reservation);
+        owned_paths.track(&range_path);
+        let run_reservation = create_spill_file(&**root, &path)?;
+        drop(run_reservation);
+        owned_paths.track(&path);
+
+        root.rename_atomic(&range_temp_path, &range_path)
+            .map_err(FsError::into_midge)?;
+        owned_paths.forget(&range_temp_path);
+        root.rename_atomic(&temp_path, &path)
+            .map_err(FsError::into_midge)?;
+        owned_paths.forget(&temp_path);
+        // Spill files are private pre-commit scratch. WAL commit is their
+        // durability boundary, so no parent-directory fsync is required.
+        Ok(())
+    })();
     if let Err(error) = result {
-        for path in [&temp_path, &range_temp_path, &path, &range_path] {
-            let _ = root.remove_file(path);
-        }
+        owned_paths.remove_all(&**root);
         return Err(error);
     }
     Ok(SpillRun {
@@ -467,27 +473,33 @@ fn spill_size_bound(ops: &[OrdinalOp]) -> MidgeResult<u64> {
 
 /// Create a spill file that must not already exist.
 pub(super) fn create_spill_file(root: &dyn Fs, path: &FsPath) -> MidgeResult<FileWriter> {
-    let file = root
-        .open_persistent_handle(
-            path,
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: true,
-                truncate: false,
-            },
-        )
-        .map_err(spill_file_error)?;
+    let file = crate::io::open_persistent_handle(
+        root,
+        path,
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: false,
+            create_new: true,
+            truncate: false,
+        },
+    )
+    .map_err(spill_file_error)?;
     Ok(FileWriter::new(file))
 }
 
-fn write_run_file(root: &dyn Fs, path: &FsPath, ops: &mut [OrdinalOp]) -> MidgeResult<()> {
+fn write_run_file(
+    root: &dyn Fs,
+    path: &FsPath,
+    ops: &mut [OrdinalOp],
+    owned_paths: &super::OwnedSpillPaths,
+) -> MidgeResult<()> {
     ops.sort_unstable_by(|left, right| {
         left.primary_key()
             .cmp(right.primary_key())
             .then_with(|| left.ordinal.cmp(&right.ordinal))
     });
     let mut file = create_spill_file(root, path)?;
+    owned_paths.track(path);
     file.write_all(&[0; RUN_HEADER_LEN])?;
 
     let mut ordinal_offsets = Vec::with_capacity(ops.len());

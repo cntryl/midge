@@ -37,7 +37,9 @@
 //! is one global choice, so any new directory operation can move it.
 
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions, ReadFs};
+use crate::io::{
+    Durability, File, Fs, FsError, FsLock, FsPath, FsResult, OpenMode, OpenOptions, ReadFs,
+};
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -533,6 +535,11 @@ struct State {
     pending: Vec<NamespaceOp>,
     /// Open handles per (process generation, inode).
     handles: BTreeMap<(u64, Inode), usize>,
+    /// Process-scoped advisory locks. These are volatile coordination state,
+    /// so process termination and power loss release them without touching
+    /// the simulated filesystem namespace.
+    active_locks: BTreeMap<String, u64>,
+    next_lock_id: u64,
     next_inode: Inode,
     generation: u64,
     faults: Vec<FaultRule>,
@@ -553,6 +560,8 @@ impl Default for State {
             nodes: BTreeMap::from([(ROOT, Node::Directory(Directory::new(root)))]),
             pending: Vec::new(),
             handles: BTreeMap::new(),
+            active_locks: BTreeMap::new(),
+            next_lock_id: 1,
             next_inode: ROOT + 1,
             generation: 0,
             faults: Vec::new(),
@@ -849,6 +858,7 @@ impl State {
     fn end_process(&mut self) {
         self.generation += 1;
         self.handles.clear();
+        self.active_locks.clear();
         self.reclaim();
     }
 
@@ -979,8 +989,12 @@ impl CrashDevice {
     /// one point.
     #[must_use]
     pub fn fork(&self) -> Self {
+        let mut state = self.lock().clone();
+        // A forked device is an independent crash image. Host locks are not
+        // part of that image and have no owner in the new device.
+        state.active_locks.clear();
         Self {
-            state: Arc::new(Mutex::new(self.lock().clone())),
+            state: Arc::new(Mutex::new(state)),
         }
     }
 
@@ -1123,6 +1137,26 @@ pub struct CrashFs {
     generation: u64,
 }
 
+struct CrashFsLock {
+    device: CrashDevice,
+    generation: u64,
+    path: String,
+    token: u64,
+}
+
+impl Drop for CrashFsLock {
+    fn drop(&mut self) {
+        let mut state = self.device.lock();
+        if state.generation == self.generation
+            && state.active_locks.get(&self.path) == Some(&self.token)
+        {
+            state.active_locks.remove(&self.path);
+        }
+    }
+}
+
+impl FsLock for CrashFsLock {}
+
 impl CrashFs {
     fn state(&self) -> FsResult<MutexGuard<'_, State>> {
         let state = self.device.lock();
@@ -1165,9 +1199,12 @@ impl CrashFs {
             }
             let (parent, name) = state.parent(&parts)?;
             let inode = match state.directory(parent)?.live.get(&name).copied() {
-                // `RealFs` classifies everything but a missing file as `Io`.
+                // Match `RealFs`' typed create-new collision.
                 Some(_) if opts.create_new => {
-                    return Err(FsError::Io(format!("open {}: file exists", path.0)))
+                    return Err(FsError::AlreadyExists(format!(
+                        "open {}: file exists",
+                        path.0
+                    )))
                 }
                 Some(inode) if state.is_directory(inode) => {
                     return Err(FsError::Io(format!("open {}: is a directory", path.0)))
@@ -1253,16 +1290,35 @@ impl ReadFs for CrashFs {
 }
 
 impl Fs for CrashFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn coordination_key(&self) -> u64 {
         Arc::as_ptr(&self.device.state) as usize as u64
     }
 
-    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.open_file(path, opts)
-            .map(|file| Box::new(file) as Box<dyn File>)
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+        let lock_path = Self::parts(path)?.join("/");
+        let mut state = self.state()?;
+        if state.active_locks.contains_key(&lock_path) {
+            return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+        let token = state.next_lock_id;
+        state.next_lock_id = state
+            .next_lock_id
+            .checked_add(1)
+            .ok_or_else(|| FsError::Io("simulated filesystem lock IDs exhausted".into()))?;
+        state.active_locks.insert(lock_path.clone(), token);
+        Ok(Box::new(CrashFsLock {
+            device: self.device.clone(),
+            generation: self.generation,
+            path: lock_path,
+            token,
+        }))
     }
 
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         self.open_file(path, opts)
             .map(|file| Box::new(file) as Box<dyn File>)
     }
@@ -1332,8 +1388,12 @@ impl Fs for CrashFs {
                 if let Some((_, parents)) = to_parts.split_last() {
                     state.create_dirs(parents)?;
                 }
-                // `RealFs` reports every rename failure as `Io` (#832).
-                let failed = |error: FsError| FsError::Io(format!("rename {}: {error}", to.0));
+                // Match `RealFs`' typed missing-source result while keeping
+                // other rename failures in the general I/O class.
+                let failed = |error: FsError| match error {
+                    FsError::NotFound(path) => FsError::NotFound(path),
+                    other => FsError::Io(format!("rename {}: {other}", to.0)),
+                };
                 let inode = state.lookup(&from_parts).map_err(failed)?;
                 if from_parts == to_parts {
                     return Ok(());
@@ -1359,6 +1419,13 @@ impl Fs for CrashFs {
                 }
                 state.rename((from_parent, from_name), (to_parent, to_name), inode)
             })
+    }
+}
+
+impl crate::io::traits::PersistentHandleFs for CrashFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        self.open_file(path, opts)
+            .map(|file| Box::new(file) as Box<dyn File>)
     }
 }
 

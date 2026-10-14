@@ -1,5 +1,6 @@
 use super::*;
 use crate::io::{FsError, OpenOptions};
+use crate::lease::LeaderStore;
 use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use crate::wal::format::ChainLink;
 use crate::wal::planner::HistoryAction;
@@ -502,6 +503,65 @@ fn should_truncate_only_incomplete_active_wal_tail_before_virtual_replay() -> Mi
             .len,
         cut
     );
+    Ok(())
+}
+
+#[test]
+fn should_fence_cloud_recovery_open_cut_after_successor_acquires_lease() -> MidgeResult<()> {
+    // Arrange: planning identifies a torn suffix, then a successor takes the
+    // lease before recovery applies that plan.
+    let mut fixture = Fixture::new()?;
+    let valid = framed_wal(1, b"value");
+    let active = fixture.active(&valid)?;
+    drop(fixture.history()?);
+    let mut file = std::fs::OpenOptions::new().append(true).open(&active)?;
+    std::io::Write::write_all(&mut file, &[0xFF; 3])?;
+    drop(file);
+    let recovered = fixture.plan_only(RecoveryPolicy::Strict, limits())?;
+    let before = std::fs::read(&active)?;
+    assert!(
+        recovered.plan.open_cut.is_some(),
+        "the active tail needs a cut"
+    );
+
+    let lease_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    let leader_store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+        Arc::clone(&lease_fs),
+        crate::lease::LeaseClock::default(),
+    ));
+    let predecessor = leader_store.acquire_leadership("predecessor")?;
+    leader_store.acquire_leadership("successor")?;
+    let fence = crate::runtime::wal_history::WalHistoryFence::new(
+        leader_store,
+        predecessor.holder_id,
+        predecessor.epoch,
+        Duration::from_secs(1),
+    );
+    let history = fixture.history()?;
+    let catalog = fixture.catalog();
+    let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::new(
+        crate::storage::HybridStorage::with_policy(
+            Arc::clone(&fixture.cloud),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ),
+    ));
+
+    // Act
+    let result = crate::runtime::cloud_startup::commit_recovery_plan_within(
+        &recovered.plan,
+        &persistence,
+        catalog.fencing_epoch(),
+        &catalog,
+        crate::runtime::cloud_startup::CacheHistory::Existing(history),
+        Some(&fence),
+        &|| Ok(()),
+        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+    );
+
+    // Assert: stale recovery must not truncate the active segment the
+    // successor owns now.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert_eq!(std::fs::read(active)?, before);
     Ok(())
 }
 
@@ -1156,7 +1216,30 @@ impl ReadFs for TruncateFailingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for TruncateFailingFs {
+    fn open_persistent(
+        &self,
+        path: &FsPath,
+        opts: OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for TruncateFailingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(
         &self,
         path: &FsPath,
@@ -1165,14 +1248,6 @@ impl Fs for TruncateFailingFs {
         Ok(Box::new(TruncateFailingFile {
             inner: self.inner.open(path, opts)?,
         }))
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        self.inner.open_persistent_handle(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> crate::io::FsResult<()> {
@@ -1606,6 +1681,7 @@ fn commit_as_startup(
         catalog.fencing_epoch(),
         &catalog,
         history,
+        None,
         &|| Ok(()),
         &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
     )
@@ -2149,6 +2225,50 @@ fn should_not_owe_or_replay_member_the_catalog_already_retired() -> MidgeResult<
     let reopened = fixture.history()?;
     assert_eq!(reopened.ledger().log_start(), 2);
     assert!(!fixture.segment(1).exists());
+    Ok(())
+}
+
+#[test]
+fn should_ignore_corrupt_local_copy_of_retired_prefix_when_later_history_remains() -> MidgeResult<()>
+{
+    // Arrange: segment 1 is retired in the catalog, but its local cache copy
+    // is damaged while segment 2 remains authoritative history.
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"one");
+    let second = framed_wal(2, b"two");
+    let retired_local = fixture.local(1, &first)?;
+    fixture.publish(1, 1, 7, &first)?;
+    fixture.local(2, &second)?;
+    fixture.publish(2, 2, 8, &second)?;
+    fixture.active(b"")?;
+    drop(fixture.history()?);
+    fixture.retire_through(1);
+    let mut damaged = std::fs::read(&retired_local)?;
+    damaged[crate::wal::format::HEADER_LEN + 8] ^= 1;
+    std::fs::write(&retired_local, damaged)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+    let history = commit_as_startup(
+        &fixture,
+        &recovered,
+        crate::runtime::cloud_startup::CacheHistory::Existing(fixture.history()?),
+    )?;
+
+    // Assert: retired local corruption cannot block later catalog history.
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert!(recovered.plan.local_segments.is_empty());
+    assert!(history.ledger().log_start() >= 2);
+    drop(history);
+    assert!(!retired_local.exists());
     Ok(())
 }
 

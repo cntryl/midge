@@ -6,7 +6,7 @@ struct DelayedReadBackend {
     reads: AtomicUsize,
 }
 
-impl CloudBackend for DelayedReadBackend {
+impl crate::storage::cloud::CloudReadCapability for DelayedReadBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.reads.fetch_add(1, Ordering::AcqRel);
         std::thread::sleep(Duration::from_millis(30));
@@ -19,11 +19,26 @@ impl CloudBackend for DelayedReadBackend {
         self.inner.submit_get_with_metadata(key, callback);
     }
 
-    crate::storage::cloud::forward_cloud_backend!(
-        inner;
-        submit_put, submit_get_range, submit_delete, submit_list, submit_head
-    );
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range);
 }
+
+impl crate::storage::cloud::CloudWriteCapability for DelayedReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for DelayedReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for DelayedReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for DelayedReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for DelayedReadBackend {}
 
 #[test]
 fn should_reject_metadata_result_when_submission_exhausts_operation_deadline() {

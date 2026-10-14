@@ -62,6 +62,10 @@ impl ReadFs for TransientReadFs {
 }
 
 impl Fs for TransientReadFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(TransientReadFile {
             inner: self.inner.open(path, opts)?,

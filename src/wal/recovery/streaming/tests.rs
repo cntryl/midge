@@ -83,6 +83,10 @@ impl ReadFs for BoundedFs {
 }
 
 impl Fs for BoundedFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(BoundedFile {
             inner: self.inner.open(path, opts)?,

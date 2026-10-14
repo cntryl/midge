@@ -10,11 +10,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-#[cfg(not(test))]
-const CLOUD_SEAL_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const CLOUD_SEAL_RETRY_DELAY: Duration = Duration::from_millis(10);
-
 /// Single `CloudAsync` segment being uploaded
 #[derive(Debug, Clone)]
 pub struct CloudAsyncInflightSegment {
@@ -111,10 +106,25 @@ pub struct DurabilityCoordinator {
 
 impl DurabilityCoordinator {
     /// Create a new coordinator with initial durability key.
+    #[cfg(test)]
     pub fn new(
         initial_durability_key: u64,
         is_cloud_async: bool,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+    ) -> Self {
+        Self::new_with_retry_policy(
+            initial_durability_key,
+            is_cloud_async,
+            cloud_runtime_policy,
+            crate::runtime::RuntimeRetryPolicy::default(),
+        )
+    }
+
+    pub(crate) fn new_with_retry_policy(
+        initial_durability_key: u64,
+        is_cloud_async: bool,
+        cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+        retry_policy: crate::runtime::RuntimeRetryPolicy,
     ) -> Self {
         Self {
             waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
@@ -122,12 +132,17 @@ impl DurabilityCoordinator {
             last_cloud_flush: Instant::now(),
             cloud_seal_retry_needed: false,
             cloud_seal_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_SEAL_RETRY_DELAY,
+                retry_policy.cloud_seal,
             ),
             is_cloud_async,
             cloud_runtime_policy,
             waiters_fanned_out: AtomicU64::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloud_seal_retry_delay(&self) -> Duration {
+        self.cloud_seal_retry.configured_delay()
     }
 
     /// Check if a sequence number is durable at the requested level.

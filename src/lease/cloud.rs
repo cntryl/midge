@@ -9,8 +9,8 @@
 
 use super::clock::LeaseClock;
 use super::traits::{
-    CloudMetadataGeneration, CloudMetadataHead, LeaderRecord, LeaderStore, LeaseError, LeaseGuard,
-    LeaseValidity, PrimaryLease,
+    CloudMetadataGeneration, CloudMetadataHead, LeaderAcquisition, LeaderRecord, LeaderStore,
+    LeaseError, LeaseGuard, LeaseValidity, PrimaryLease,
 };
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -221,8 +221,7 @@ impl ProviderLeaderStore {
         holder_id: &str,
         minimum_epoch: u64,
         cloud: &CloudStorage,
-        scope: Option<&crate::common::DeadlineScope>,
-        on_cleanup_epoch: &mut dyn FnMut(u64),
+        mut acquisition: Option<&mut LeaderAcquisition<'_>>,
     ) -> Result<LeaderRecord, LeaseError> {
         let (existing, metadata) = self.read_acquisition_state(cloud)?;
         let epoch = existing
@@ -250,36 +249,15 @@ impl ProviderLeaderStore {
             })?,
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };
-        if let Some(scope) = scope {
-            scope
-                .begin_ambiguous_mutation("cloud lease conditional acquisition")
-                .map_err(super::traits::scope_lease_error)?;
+        if let Some(acquisition) = acquisition.as_deref_mut() {
             // A committed request can lose its response. Retain only an exact
             // cleanup candidate before submit; release must still read and
             // match holder, owner token and epoch before conditional expiration.
-            on_cleanup_epoch(epoch);
+            acquisition.begin_mutation(Some(epoch))?;
         }
-        if let Err(error) = provider_write_doc(cloud, &document, headers) {
-            if let Some(scope) = scope {
-                if matches!(error, LeaseError::AcquisitionFailed(_)) {
-                    scope.resolve_ambiguous_mutation();
-                    return Err(error);
-                }
-                return Err(LeaseError::Indeterminate(format!(
-                    "cloud lease acquisition CAS is unresolved: {error}"
-                )));
-            }
-            return Err(error);
-        }
-        if let Err(error) = self.finish_acquisition(cloud, &document, epoch, valid_until, scope) {
-            return Err(if scope.is_some() {
-                LeaseError::Indeterminate(format!(
-                    "cloud lease CAS committed but acquisition did not finish: {error}"
-                ))
-            } else {
-                error
-            });
-        }
+        provider_write_doc(cloud, &document, headers)?;
+        let scope = acquisition.as_ref().map(|acquisition| acquisition.scope());
+        self.finish_acquisition(cloud, &document, epoch, valid_until, scope)?;
         Ok(LeaderRecord {
             epoch,
             holder_id: document.holder_id,
@@ -322,27 +300,18 @@ impl LeaderStore for ProviderLeaderStore {
         holder_id: &str,
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
-        self.acquire_with_cloud(holder_id, minimum_epoch, &self.cloud, None, &mut |_| {})
+        self.acquire_with_cloud(holder_id, minimum_epoch, &self.cloud, None)
     }
 
-    fn acquire_leadership_with_minimum_epoch_within(
+    fn acquire_leadership_with_context(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        scope: &crate::common::DeadlineScope,
-        on_cleanup_epoch: &mut dyn FnMut(u64),
+        acquisition: &mut LeaderAcquisition<'_>,
     ) -> Result<LeaderRecord, LeaseError> {
-        scope
-            .check("cloud lease acquisition")
-            .map_err(super::traits::scope_lease_error)?;
-        let cloud = self.cloud.with_startup_scope(scope.clone());
-        self.acquire_with_cloud(
-            holder_id,
-            minimum_epoch,
-            &cloud,
-            Some(scope),
-            on_cleanup_epoch,
-        )
+        acquisition.check()?;
+        let cloud = self.cloud.with_startup_scope(acquisition.scope().clone());
+        self.acquire_with_cloud(holder_id, minimum_epoch, &cloud, Some(acquisition))
     }
 
     fn read_current_with_timeout(
@@ -530,6 +499,28 @@ impl LeaderStore for ProviderLeaderStore {
                 "leader record missing".to_string(),
             )),
         }
+    }
+
+    fn with_writer_epoch(
+        &self,
+        _expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "cloud WAL storage effect deadline exhausted".into(),
+            ));
+        }
+
+        // Provider-backed leases already hold a conservative monotonic
+        // validity window. Checking that local deadline around a local-cache
+        // effect avoids a remote lease-object read for every WAL write and
+        // fsync. Shared cloud publications still use their conditional CAS.
+        self.validity.remaining(expected_epoch)?;
+        operation();
+        self.validity.remaining(expected_epoch).map(|_| ())
     }
 
     fn validate_epoch(
@@ -955,15 +946,15 @@ impl CloudStorageLease {
             ));
         }
         let record = if let Some(scope) = scope {
-            self.leader_store
-                .acquire_leadership_with_minimum_epoch_within(
-                    &self.holder_id,
-                    minimum_epoch,
-                    scope,
-                    &mut |epoch| {
-                        *pending_release = Some(epoch);
-                    },
-                )?
+            super::traits::acquire_leadership_with_minimum_epoch_within(
+                self.leader_store.as_ref(),
+                &self.holder_id,
+                minimum_epoch,
+                scope,
+                &mut |epoch| {
+                    *pending_release = Some(epoch);
+                },
+            )?
         } else {
             self.leader_store
                 .acquire_leadership_with_minimum_epoch(&self.holder_id, minimum_epoch)?

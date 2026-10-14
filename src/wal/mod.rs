@@ -53,6 +53,7 @@ pub(crate) mod replay;
 pub(crate) mod sequence;
 pub(crate) mod traits;
 pub mod types;
+pub(crate) mod writer_effect;
 
 /// Pad sealed WAL segment names to the full `u64` width so filesystem and
 /// object-store listings sort in the same order as segment ids.

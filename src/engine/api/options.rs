@@ -179,6 +179,7 @@ pub struct OpenOptions {
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
+    retry_policy: crate::runtime::RuntimeRetryPolicy,
     io_timeouts: IoTimeouts<Duration>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
@@ -206,6 +207,7 @@ pub struct OpenOptionsBuilder {
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
+    retry_policy: crate::runtime::RuntimeRetryPolicy,
     io_timeouts: IoTimeouts<Option<Duration>>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
@@ -453,6 +455,10 @@ impl OpenOptions {
         }
     }
 
+    pub(crate) fn retry_policy(&self) -> crate::runtime::RuntimeRetryPolicy {
+        self.retry_policy
+    }
+
     pub(crate) fn background_compaction_enabled(&self) -> bool {
         self.compaction.background_enabled
     }
@@ -550,6 +556,7 @@ impl OpenOptionsBuilder {
                 Self::derive_compression_policy(Goal::default()),
             ),
             cloud: CloudWritePolicyConfig::default(),
+            retry_policy: crate::runtime::RuntimeRetryPolicy::default(),
             io_timeouts: IoTimeouts {
                 storage: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
                 runtime_response: None,
@@ -646,6 +653,15 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Shorten cloud retry delays for deterministic campaign and integration tests.
+    #[cfg(feature = "failpoints")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fast_cloud_retries_for_testing(mut self) -> Self {
+        self.retry_policy = crate::runtime::RuntimeRetryPolicy::fast_for_testing();
+        self
+    }
+
     /// Set the recovery policy.
     #[must_use]
     pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
@@ -700,7 +716,7 @@ impl OpenOptionsBuilder {
     /// lease, SST, transaction spill and cloud working files are served from
     /// it. A simulated cloud lives under the root's host directory, so a root
     /// without one needs [`Self::object_store_for_testing`]. The filesystem
-    /// must support [`crate::io::Fs::open_persistent_handle`], which SST
+    /// must expose [`crate::io::PersistentHandleFs`], which SST
     /// builds use for scratch.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
@@ -955,6 +971,7 @@ impl OpenOptionsBuilder {
                 compression_policy,
             ),
             cloud: self.cloud,
+            retry_policy: self.retry_policy,
             io_timeouts: IoTimeouts {
                 storage: self.io_timeouts.storage,
                 runtime_response: runtime_response_timeout,

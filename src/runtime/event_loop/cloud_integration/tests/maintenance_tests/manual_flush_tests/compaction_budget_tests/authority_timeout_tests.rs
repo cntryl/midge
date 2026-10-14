@@ -33,6 +33,7 @@ impl RecoveryInputs {
             authority: fixture.lease.get_leader_store().expect("actual authority"),
             remote: fixture
                 .el
+                .actors
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
@@ -63,6 +64,7 @@ impl RecoveryInputs {
             root,
             crate::config::RecoveryPolicy::Strict,
             crate::runtime::state::RecoveryWal::Deferred(history),
+            None,
             None,
         )?;
         let recovered_names = manifest_names(&recovered.manifest);
@@ -121,6 +123,7 @@ fn begin_held_manifest_phase(
 ) -> MidgeResult<PhaseEvidence> {
     let completion = fixture
         .el
+        .publication
         .compaction_publish_result_rx
         .recv_timeout(FIXTURE_WAIT)
         .expect("genuine OutputDurable completion");
@@ -161,9 +164,18 @@ fn capture_retained_evidence(fixture: &BudgetFixture) -> RetainedEvidence {
             &fixture.el.state.fs,
             crate::config::RecoveryPolicy::Strict,
         ),
-        no_final_phase: !fixture.el.compaction_publish_actor.is_inflight()
-            && fixture.el.compaction_publish_result_rx.is_empty()
-            && fixture.el.compaction_publication.get().is_none(),
+        no_final_phase: !fixture.el.actors.compaction_publish_actor.is_inflight()
+            && fixture
+                .el
+                .publication
+                .compaction_publish_result_rx
+                .is_empty()
+            && fixture
+                .el
+                .publication
+                .compaction_publication
+                .get()
+                .is_none(),
         rows: fixture.exact_output_rows(),
         cas: fixture.backend.cas_writes.lock().unwrap().clone(),
     }

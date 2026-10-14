@@ -197,7 +197,8 @@ impl SstRawVersionScan {
             .as_ref()
             .map(|budget| budget.reserve(bounds_bytes, "raw cursor bounds"))
             .transpose()?;
-        let (file, lifecycle) = match reader.fs.open_persistent_handle(
+        let (file, lifecycle) = match crate::io::open_persistent_handle(
+            reader.fs.as_ref(),
             &reader.path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,
@@ -439,7 +440,8 @@ impl SstStateScan {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Self {
-        let (file, lifecycle) = match reader.fs.open_persistent_handle(
+        let (file, lifecycle) = match crate::io::open_persistent_handle(
+            reader.fs.as_ref(),
             &reader.path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,

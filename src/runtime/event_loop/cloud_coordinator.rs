@@ -22,10 +22,18 @@ impl CloudCoordinator {
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
             provider_ddl_fencing: config.provider_ddl_fencing,
-            cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_entries.clone()),
+            cloud_wal: CloudWalUploadTracker::with_retry_policy(
+                config.recovered_cloud_wal_entries.clone(),
+                config.retry_policy,
+            ),
             cloud_wal_prune_worker: None,
             cloud_maintenance: CloudMaintenance::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn cloud_wal_retry_delay(&self) -> std::time::Duration {
+        self.cloud_wal.backlog().retry_delay()
     }
 
     pub(super) fn maintenance_enabled(&self, is_cloud_async: bool, is_memory_mode: bool) -> bool {

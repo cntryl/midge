@@ -53,7 +53,7 @@ pub use state::RuntimeState;
 
 pub(crate) use config::RecoveredCloudWalSegment;
 pub use config::RuntimeConfig;
-pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy};
+pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy, RuntimeRetryPolicy};
 pub use handle::RuntimeHandle;
 pub(crate) use lifecycle::{RuntimeLifecycle, RuntimeLifecycleState, RuntimeTransactionGuard};
 pub(crate) use metadata_publication::MetadataPublicationLock;

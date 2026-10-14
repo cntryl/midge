@@ -25,7 +25,7 @@ impl EventLoop {
 
     fn tick_hybrid_storage_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
         self.reap_cloud_wal_prune_worker();
-        let Some(storage) = &self.cloud_coordinator.hybrid_storage else {
+        let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage else {
             return;
         };
 
@@ -51,7 +51,7 @@ impl EventLoop {
     }
 
     fn drain_hybrid_storage_events_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
-        let Some(rx) = &self.cloud_coordinator.hybrid_storage_events else {
+        let Some(rx) = &self.actors.cloud_coordinator.hybrid_storage_events else {
             return;
         };
 
@@ -84,10 +84,12 @@ impl EventLoop {
         event: crate::storage::StorageEvent,
         deadline: Option<&OperationDeadline>,
     ) {
-        if self.verification_barrier.is_active()
+        if self.publication.verification_barrier.is_active()
             && !Self::is_verification_safe_storage_event(&event)
         {
-            self.verification_barrier.defer_storage_event(event);
+            self.publication
+                .verification_barrier
+                .defer_storage_event(event);
             return;
         }
         match event {
@@ -109,7 +111,10 @@ impl EventLoop {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
             }
             crate::storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
-                self.cloud_coordinator.cloud_wal.release_prune(segment_id);
+                self.actors
+                    .cloud_coordinator
+                    .cloud_wal
+                    .release_prune(segment_id);
                 tracing::debug!(
                     segment_id,
                     error = %error,
@@ -193,7 +198,8 @@ impl EventLoop {
         let contention = crate::common::resource_budget::ResourceContention::from_error(error);
         if !deadline.is_expired()
             && contention.is_some_and(|contention| {
-                self.cloud_coordinator
+                self.actors
+                    .cloud_coordinator
                     .hybrid_storage
                     .as_ref()
                     .and_then(|storage| storage.maintenance_memory())
@@ -216,7 +222,7 @@ impl EventLoop {
         ready_segments: &[OwedSegment],
         durable: OwedSegment,
     ) {
-        if let Err(error) = self.wal_transition.begin_ack(durable.segment_id) {
+        if let Err(error) = self.pipeline.wal_transition.begin_ack(durable.segment_id) {
             self.fence_cloud_ack_transition(ready_segments, &error);
             return;
         }
@@ -241,21 +247,32 @@ impl EventLoop {
             return;
         }
         for segment in ready_segments {
-            let waiters = self.durability.complete_waiters_at(segment.segment_id);
+            let waiters = self
+                .pipeline
+                .durability
+                .complete_waiters_at(segment.segment_id);
             self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
-            if let Err(error) = self.wal_transition.note_cloud_durable(segment.segment_id) {
+            if let Err(error) = self
+                .pipeline
+                .wal_transition
+                .note_cloud_durable(segment.segment_id)
+            {
                 self.fence_cloud_ack_transition(ready_segments, &error);
                 return;
             }
         }
 
-        if let Err(error) = self.wal_transition.finish_ack(durable.segment_id) {
+        if let Err(error) = self.pipeline.wal_transition.finish_ack(durable.segment_id) {
             self.fence_cloud_ack_transition(ready_segments, &error);
             return;
         }
 
         for segment in ready_segments {
-            if let Some(enqueued_at) = self.durability.retire_cloud_segment(segment.segment_id) {
+            if let Some(enqueued_at) = self
+                .pipeline
+                .durability
+                .retire_cloud_segment(segment.segment_id)
+            {
                 self.state.diagnostics.record(|m| {
                     m.record_cloud_async_wal_ack_latency_us(Self::elapsed_micros_to_u64(
                         enqueued_at.elapsed(),
@@ -268,7 +285,7 @@ impl EventLoop {
             .iter()
             .map(|segment| segment.segment_id)
             .collect();
-        if self.verification_barrier.is_active() {
+        if self.publication.verification_barrier.is_active() {
             // Verification replays the local WAL and reads the SSTs, so hold
             // the retirement, prune and flush until the barrier releases. The
             // acknowledgement itself has already completed its waiters.
@@ -276,7 +293,9 @@ impl EventLoop {
                 segments = ready_ids.len(),
                 "deferring acknowledged local WAL retirement under the verification barrier"
             );
-            self.verification_barrier.defer_wal_retirements(&ready_ids);
+            self.publication
+                .verification_barrier
+                .defer_wal_retirements(&ready_ids);
             return;
         }
         self.retire_acked_local_wal_segments(&ready_ids);
@@ -323,7 +342,11 @@ impl EventLoop {
         segment_id: u64,
         result: crate::storage::StorageOutcome<()>,
     ) {
-        let admitted = self.cloud_coordinator.cloud_wal.release_prune(segment_id);
+        let admitted = self
+            .actors
+            .cloud_coordinator
+            .cloud_wal
+            .release_prune(segment_id);
         if !admitted {
             tracing::debug!(segment_id, "ignored stale cloud WAL prune completion");
             return;
@@ -336,10 +359,13 @@ impl EventLoop {
             self.fence_wal_transition(&error, Some(segment_id));
             tracing::error!(%error, segment_id, "cloud WAL obligation retirement fenced");
         }
-        self.background_compaction_schedule.mark_due();
+        self.pipeline.background_compaction_schedule.mark_due();
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
-                self.cloud_coordinator.cloud_wal.retire_pruned(segment_id);
+                self.actors
+                    .cloud_coordinator
+                    .cloud_wal
+                    .retire_pruned(segment_id);
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {
@@ -347,7 +373,10 @@ impl EventLoop {
                 // deletion is attempted. A failed delete is therefore a safe
                 // ignored orphan. Storage owns its bounded conditional retry
                 // independently of the now-absent catalog entry.
-                self.cloud_coordinator.cloud_wal.retire_pruned(segment_id);
+                self.actors
+                    .cloud_coordinator
+                    .cloud_wal
+                    .retire_pruned(segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
@@ -371,19 +400,20 @@ impl EventLoop {
     /// event loop.
     pub(super) fn cloud_ack_deadline(&self, segment_id: u64) -> OperationDeadline {
         let request_ids = self
+            .pipeline
             .durability
             .cloud_durability_request_ids_at_or_after(segment_id);
         if request_ids.is_empty() {
-            return OperationDeadline::from_budget(self.runtime_response_timeout);
+            return OperationDeadline::from_budget(self.routing.runtime_response_timeout);
         }
         let latest_start = request_ids
             .iter()
-            .filter_map(|request_id| self.router.registered_at(*request_id))
+            .filter_map(|request_id| self.routing.router.registered_at(*request_id))
             .max();
         latest_start.map_or_else(
-            || OperationDeadline::from_budget(self.runtime_response_timeout),
+            || OperationDeadline::from_budget(self.routing.runtime_response_timeout),
             |latest_start| {
-                OperationDeadline::from_start(latest_start, self.runtime_response_timeout)
+                OperationDeadline::from_start(latest_start, self.routing.runtime_response_timeout)
             },
         )
     }
@@ -408,12 +438,14 @@ impl EventLoop {
     /// was proven is neither, so a late storage event about it must not
     /// mutate ownership, frontier, or waiter state it does not cover.
     pub(super) fn owns_cloud_upload(&self, segment_id: u64) -> bool {
-        self.wal_transition.owns_segment(segment_id)
+        self.pipeline.wal_transition.owns_segment(segment_id)
             || self
+                .pipeline
                 .durability
                 .cloud_segment_max_sequence(segment_id)
                 .is_some()
             || !self
+                .pipeline
                 .durability
                 .cloud_durability_request_ids_at(segment_id)
                 .is_empty()
@@ -449,9 +481,12 @@ impl EventLoop {
             return false;
         }
         self.state.cloud.forget_pending_upload(segment_id);
-        self.cloud_coordinator.cloud_wal.withdraw_upload(segment_id);
+        self.actors
+            .cloud_coordinator
+            .cloud_wal
+            .withdraw_upload(segment_id);
         self.fail_blocked_waiters(segment_id, error);
-        if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
+        if let Err(registration_error) = self.pipeline.wal_transition.note_requeued(segment_id) {
             self.fence_wal_transition(&registration_error, Some(segment_id));
             tracing::error!(%registration_error, segment_id, "cloud WAL failure could not preserve transition ownership");
         }
@@ -469,7 +504,11 @@ impl EventLoop {
         // create a second mutation that could also become durable. A later
         // ACK may already be buffered, but it cannot advance the frontier
         // until this segment is uploaded and verified again.
-        let Some(max_sequence) = self.durability.cloud_segment_max_sequence(segment_id) else {
+        let Some(max_sequence) = self
+            .pipeline
+            .durability
+            .cloud_segment_max_sequence(segment_id)
+        else {
             tracing::error!(
                 segment_id,
                 "could not requeue failed cloud WAL publication because its inflight sequence maximum is unknown"
@@ -490,11 +529,11 @@ impl EventLoop {
         }
         // Only a sealed ledger member is history worth uploading again; the
         // runtime owning any other segment is a bug.
-        if let Err(not_member) =
-            self.cloud_coordinator
-                .cloud_wal
-                .requeue(segment_id, max_sequence, history.ledger())
-        {
+        if let Err(not_member) = self.actors.cloud_coordinator.cloud_wal.requeue(
+            segment_id,
+            max_sequence,
+            history.ledger(),
+        ) {
             let error = crate::common::MidgeError::Internal(format!(
                 "could not requeue failed cloud WAL upload: {not_member}"
             ));
@@ -524,7 +563,10 @@ impl EventLoop {
     fn fail_blocked_waiters(&mut self, segment_id: u64, error: &crate::common::MidgeError) {
         self.state.mark_persistence_anomaly();
         tracing::error!(segment_id, error = %error, "Cloud upload failed");
-        let waiters = self.durability.drain_waiters_at_or_after(segment_id);
+        let waiters = self
+            .pipeline
+            .durability
+            .drain_waiters_at_or_after(segment_id);
         self.fail_durability_waiters(waiters, error);
     }
 }
@@ -543,6 +585,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -567,6 +610,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -593,6 +637,7 @@ mod tests {
         )
         .unwrap();
         let shared = el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -622,6 +667,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -663,6 +709,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()

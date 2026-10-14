@@ -48,7 +48,7 @@ impl EventLoop {
         };
 
         self.state.cloud.forget_pending_upload(segment_id);
-        if let Err(error) = self.wal_transition.note_acknowledged(segment_id) {
+        if let Err(error) = self.pipeline.wal_transition.note_acknowledged(segment_id) {
             if self.state.wal.frontiers.cloud_durable() >= max_sequence {
                 tracing::debug!(segment_id, "ignored duplicate cloud WAL acknowledgement");
                 return;
@@ -56,11 +56,15 @@ impl EventLoop {
             self.requeue_failed_cloud_upload(segment_id, &error);
             return;
         }
-        self.cloud_coordinator.cloud_wal.record_upload(upload);
+        self.actors
+            .cloud_coordinator
+            .cloud_wal
+            .record_upload(upload);
 
         let ready_segments = match self
+            .pipeline
             .durability
-            .contiguous_acked_cloud_segments(self.cloud_coordinator.cloud_wal.acks())
+            .contiguous_acked_cloud_segments(self.actors.cloud_coordinator.cloud_wal.acks())
         {
             Ok(ready_segments) => ready_segments,
             Err(refusal) => {
@@ -101,6 +105,7 @@ impl EventLoop {
         deadline: &OperationDeadline,
     ) -> bool {
         let run = self
+            .actors
             .cloud_coordinator
             .cloud_wal
             .acks()
@@ -130,7 +135,8 @@ impl EventLoop {
             );
             return false;
         }
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .cloud_wal
             .mark_published(ready_segments);
         true
@@ -164,7 +170,8 @@ impl EventLoop {
             PublicationError::Retriable(error) => {
                 // Withdraw the upload first, so no other acknowledgement
                 // publishes it while its retry is queued.
-                self.cloud_coordinator
+                self.actors
+                    .cloud_coordinator
                     .cloud_wal
                     .withdraw_upload(segment.segment_id);
                 if self.defer_cloud_ack_for_memory(segment.segment_id, &error, deadline)
@@ -184,14 +191,18 @@ impl EventLoop {
     /// Objects are immutable and never overwritten, so nothing after it can
     /// be published either: fence the writer.
     pub(super) fn fence_cloud_upload(&mut self, segment_id: u64, error: &MidgeError) {
-        self.cloud_coordinator.cloud_wal.withdraw_upload(segment_id);
+        self.actors
+            .cloud_coordinator
+            .cloud_wal
+            .withdraw_upload(segment_id);
         self.state.cloud.forget_pending_upload(segment_id);
         self.fence_wal_transition(error, Some(segment_id));
         tracing::error!(segment_id, %error, "cloud WAL upload cannot be published; writer fenced");
     }
 
     fn cloud_persistence(&self) -> Result<CloudPersistence, PublicationError> {
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .map(|storage| CloudPersistence::new(std::sync::Arc::clone(storage)))

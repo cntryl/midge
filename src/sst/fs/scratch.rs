@@ -52,18 +52,17 @@ impl TrackedScratch {
             counted: true,
             outstanding,
         };
-        let file = scratch
-            .fs
-            .open_persistent_handle(
-                &scratch.path,
-                OpenOptions {
-                    mode: OpenMode::ReadWrite,
-                    create: false,
-                    create_new: true,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
+        let file = crate::io::open_persistent_handle(
+            scratch.fs.as_ref(),
+            &scratch.path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: false,
+                create_new: true,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
         scratch.file = Some(file);
         Ok(scratch)
     }
@@ -186,6 +185,13 @@ mod tests {
     }
 
     impl Fs for HandlelessFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.0.try_lock_exclusive(path)
+        }
+
         fn coordination_key(&self) -> u64 {
             self.0.coordination_key()
         }

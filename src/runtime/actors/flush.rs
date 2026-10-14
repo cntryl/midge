@@ -773,7 +773,30 @@ mod tests {
         }
     }
 
+    impl crate::io::PersistentHandleFs for PublicationTestFs {
+        fn open_persistent(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+            crate::io::open_persistent_handle(&self.inner, path, options)
+        }
+    }
+
     impl crate::io::Fs for PublicationTestFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
         fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
             crate::io::Fs::host_addressing(&self.inner)
         }
@@ -788,14 +811,6 @@ mod tests {
             options: crate::io::OpenOptions,
         ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
             crate::io::Fs::open(&self.inner, path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &crate::io::FsPath,
-            options: crate::io::OpenOptions,
-        ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-            crate::io::Fs::open_persistent_handle(&self.inner, path, options)
         }
 
         fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
@@ -1072,7 +1087,7 @@ mod tests {
     fn should_reject_conflicting_remote_bytes_without_publishing_flush_metadata() -> MidgeResult<()>
     {
         // Arrange
-        use crate::storage::cloud::CloudBackend;
+        use crate::storage::cloud::CloudWriteCapability;
         let fixture = publication_fixture(usize::MAX)?;
         let bytes = std::fs::read(&fixture.task.build.staging_path)?;
         let mut corrupted = bytes.clone();

@@ -68,6 +68,11 @@ impl RetrySchedule {
         self.at
             .map(|at| at.saturating_duration_since(self.clock.now()))
     }
+
+    #[cfg(test)]
+    pub(crate) fn configured_delay(&self) -> Duration {
+        self.delay
+    }
 }
 
 #[cfg(test)]

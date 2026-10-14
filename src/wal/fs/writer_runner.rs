@@ -3,7 +3,7 @@ use crate::wal::format::SegmentDigest;
 use crate::wal::traits::WalAppendError;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct SyncState {
@@ -132,7 +132,8 @@ impl WriterRunner {
 
     fn open_file_handle(&self) -> FsResult<Box<dyn crate::io::File + '_>> {
         // Prefer persistent handle if available
-        match self.config.fs.open_persistent_handle(
+        match crate::io::open_persistent_handle(
+            self.config.fs.as_ref(),
             &self.config.path,
             crate::io::OpenOptions {
                 mode: crate::io::OpenMode::ReadWrite,
@@ -270,24 +271,25 @@ impl WriterRunner {
                 unchanged: true,
             })?;
 
-        self.check_write_authority().map_err(|error| WriteFailure {
-            error,
-            unchanged: true,
-        })?;
-
         if let Some(file) = file_opt.as_mut() {
-            let write_result =
-                if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
-                    let partial_len = (big_bytes.len() / 2).max(1);
-                    file.write_at(start_pos, big_bytes.slice(..partial_len))
-                        .and_then(|()| {
-                            Err(crate::io::FsError::NoSpace(
-                                "after partial positional WAL write".to_string(),
-                            ))
-                        })
-                } else {
-                    file.write_at(start_pos, big_bytes.clone())
-                };
+            let write_result = self
+                .run_with_write_authority(|| {
+                    if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
+                        let partial_len = (big_bytes.len() / 2).max(1);
+                        file.write_at(start_pos, big_bytes.slice(..partial_len))
+                            .and_then(|()| {
+                                Err(crate::io::FsError::NoSpace(
+                                    "after partial positional WAL write".to_string(),
+                                ))
+                            })
+                    } else {
+                        file.write_at(start_pos, big_bytes.clone())
+                    }
+                })
+                .map_err(|error| WriteFailure {
+                    error: error.error,
+                    unchanged: !error.started,
+                })?;
             return match write_result {
                 Ok(()) => {
                     // The digest holds every byte written, in order: a
@@ -300,41 +302,14 @@ impl WriterRunner {
                 }
                 Err(write_error) => {
                     tracing::error!(error = ?write_error, start_pos, "wal writer write_at failed");
-                    self.check_write_authority().map_err(|error| WriteFailure {
-                        error,
-                        unchanged: false,
-                    })?;
-                    let rollback = file.truncate(start_pos);
-                    if rollback.is_ok() {
-                        self.check_write_authority().map_err(|error| WriteFailure {
-                            error,
-                            unchanged: false,
-                        })?;
-                    }
-                    let rollback = rollback.and_then(|()| file.sync(Durability::Durable));
-                    if rollback.is_ok() {
-                        self.check_write_authority().map_err(|error| WriteFailure {
-                            error,
-                            unchanged: false,
-                        })?;
-                    }
-                    match rollback
-                    {
-                        Ok(()) => Err(WriteFailure {
-                            error: writer_error(
-                                format!("wal writer write_at failed (partial WAL append rolled back to {start_pos})"),
-                                &write_error,
-                            ),
-                            unchanged: true,
-                        }),
-                        Err(rollback_error) => Err(WriteFailure {
-                            error: writer_error(
-                                format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
-                                &write_error,
-                            ),
-                            unchanged: false,
-                        }),
-                    }
+                    self.rollback_partial_append(file.as_mut(), start_pos, &write_error)?;
+                    Err(WriteFailure {
+                        error: writer_error(
+                            format!("wal writer write_at failed (partial WAL append rolled back to {start_pos})"),
+                            &write_error,
+                        ),
+                        unchanged: true,
+                    })
                 }
             };
         }
@@ -345,12 +320,59 @@ impl WriterRunner {
         })
     }
 
-    fn check_write_authority(&self) -> crate::common::MidgeResult<()> {
-        let authority = self.config.write_authority.read().clone();
-        if let Some(check) = authority {
-            check()?;
+    fn rollback_partial_append(
+        &self,
+        file: &mut dyn crate::io::File,
+        start_pos: u64,
+        write_error: &crate::io::FsError,
+    ) -> Result<(), WriteFailure> {
+        let truncate_result = self
+            .run_with_write_authority(|| file.truncate(start_pos))
+            .map_err(|error| WriteFailure {
+                error: error.error,
+                unchanged: false,
+            })?;
+        if let Err(rollback_error) = truncate_result {
+            return Err(WriteFailure {
+                error: writer_error(
+                    format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
+                    write_error,
+                ),
+                unchanged: false,
+            });
         }
-        Ok(())
+
+        let sync_result = self
+            .run_with_write_authority(|| file.sync(Durability::Durable))
+            .map_err(|error| WriteFailure {
+                error: error.error,
+                unchanged: false,
+            })?;
+        sync_result.map_err(|rollback_error| WriteFailure {
+            error: writer_error(
+                format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
+                write_error,
+            ),
+            unchanged: false,
+        })
+    }
+
+    fn run_with_write_authority<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, crate::wal::writer_effect::WriterEffectError> {
+        let authority = self.config.write_authority.read().clone();
+        crate::wal::writer_effect::with_writer_effect(
+            |run| {
+                if let Some(check) = authority {
+                    check(run)
+                } else {
+                    run();
+                    Ok(())
+                }
+            },
+            operation,
+        )
     }
 
     fn ensure_file_handle<'a>(
@@ -415,22 +437,36 @@ impl WriterRunner {
                 }
             }
         }
-        if let Err(error) = self.check_write_authority() {
-            self.mark_sync_failure(error);
-            return Err(());
-        }
-        if let Some(file) = file_opt.as_mut() {
-            let sync_start = Instant::now();
-            if let Err(e) = file.sync(Durability::Durable) {
-                tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
-                self.mark_sync_failure(writer_error("wal writer fsync failed", &e));
+        let sync_result = self.run_with_write_authority(|| {
+            if let Some(file) = file_opt.as_mut() {
+                let sync_start = Instant::now();
+                file.sync(Durability::Durable)
+                    .map(|()| sync_start.elapsed())
+            } else {
+                Ok(Duration::ZERO)
+            }
+        });
+        let sync_result = match sync_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.mark_sync_failure(error.error);
                 return Err(());
             }
-            let sync_elapsed = sync_start.elapsed();
-            self.config.counters.record(|m| {
-                m.record_wal_fsync_ns(u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX));
-                m.record_wal_fsync_count();
-            });
+        };
+        match sync_result {
+            Ok(sync_elapsed) => {
+                self.config.counters.record(|m| {
+                    m.record_wal_fsync_ns(
+                        u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
+                    );
+                    m.record_wal_fsync_count();
+                });
+            }
+            Err(error) => {
+                tracing::error!(error = ?error, "WAL fsync failed - marking sync as failed");
+                self.mark_sync_failure(writer_error("wal writer fsync failed", &error));
+                return Err(());
+            }
         }
 
         let mut s = self.config.sync_state.lock();
@@ -584,11 +620,13 @@ mod tests {
                 .unwrap();
             let check = Arc::clone(&validity);
             let runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
-            *runner.config.write_authority.write() = Some(Arc::new(move || {
+            *runner.config.write_authority.write() = Some(Arc::new(move |operation| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("rollback authority"))
+                    .map_err(|error| error.into_validation_error("rollback authority"))?;
+                operation();
+                Ok(())
             }));
             let physical_bytes = Arc::new(AtomicU64::new(0));
             let sync_count = Arc::new(AtomicU64::new(0));
@@ -790,11 +828,13 @@ mod tests {
             .activate(1, Instant::now() + std::time::Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
-        *runner.config.write_authority.write() = Some(Arc::new(move || {
+        *runner.config.write_authority.write() = Some(Arc::new(move |operation| {
             check
                 .remaining(1)
                 .map(|_| ())
-                .map_err(|error| error.into_validation_error("physical WAL authority"))
+                .map_err(|error| error.into_validation_error("physical WAL authority"))?;
+            operation();
+            Ok(())
         }));
         let mut file = Some(runner.open_file_handle().unwrap());
         validity.expire_for_test();

@@ -42,6 +42,42 @@ fn should_reject_spill_before_creating_files_when_shared_disk_budget_is_exhauste
 }
 
 #[test]
+fn should_preserve_existing_spill_files_given_run_name_collision() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(0));
+    for (txn_id, suffix) in [(1, "run.tmp"), (2, "run")] {
+        let name = format!("{txn_id:016x}-00000000.{suffix}");
+        let collision = dir.path().join("txn").join(&name);
+        std::fs::create_dir_all(collision.parent().expect("spill directory"))?;
+        std::fs::write(&collision, b"owned by an earlier run")?;
+        let mut writes =
+            TransactionWriteSet::new(Arc::clone(&pool), &root_at(dir.path()), false, txn_id);
+
+        // Act
+        let result = writes.push(put(b"key", b"value"));
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Internal(_))),
+            "collision at {name} should be reported as an engine collision: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&collision)?,
+            b"owned by an earlier run",
+            "collision at {name} must not replace or remove the existing spill"
+        );
+        let remaining = std::fs::read_dir(dir.path().join("txn"))?
+            .map(|entry| entry.expect("spill entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining.len(), 1, "failed run left its own scratch files");
+        assert_eq!(remaining[0], std::ffi::OsStr::new(&name));
+        std::fs::remove_file(collision)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed() -> MidgeResult<()>
 {
     // Arrange

@@ -274,6 +274,10 @@ impl ReadFs for DelayedReadFs {
 }
 
 impl Fs for DelayedReadFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn coordination_key(&self) -> u64 {
         self.inner.coordination_key()
     }

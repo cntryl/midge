@@ -4,11 +4,6 @@ use crate::wal::publish::{AckSet, OwedSegment};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-#[cfg(not(test))]
-const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
-
 /// Owns cloud WAL admission, acknowledgement, retirement, and local cleanup.
 pub(crate) struct CloudWalUploadTracker {
     /// Acknowledged segments: verified uploads, and segments the catalog
@@ -56,12 +51,15 @@ impl std::fmt::Display for NotMember {
 impl std::error::Error for NotMember {}
 
 impl UploadBacklog {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_retry_delay(crate::runtime::RuntimeRetryPolicy::default().cloud_wal)
+    }
+
+    fn with_retry_delay(delay: Duration) -> Self {
         Self {
             queued: BTreeMap::new(),
-            retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_WAL_RUNTIME_RETRY_DELAY,
-            ),
+            retry: crate::runtime::retry_schedule::RetrySchedule::new(delay),
         }
     }
 
@@ -146,6 +144,11 @@ impl UploadBacklog {
         (!self.queued.is_empty())
             .then(|| self.retry.remaining())
             .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_delay(&self) -> Duration {
+        self.retry.configured_delay()
     }
 }
 
@@ -232,12 +235,20 @@ impl LocalRetirement {
 }
 
 impl CloudWalUploadTracker {
+    #[cfg(test)]
     /// A tracker acknowledging the segments recovery found published, each
     /// with the last sequence it holds.
     pub(super) fn new(recovered: BTreeMap<u64, CatalogEntry>) -> Self {
+        Self::with_retry_policy(recovered, crate::runtime::RuntimeRetryPolicy::default())
+    }
+
+    pub(super) fn with_retry_policy(
+        recovered: BTreeMap<u64, CatalogEntry>,
+        retry_policy: crate::runtime::RuntimeRetryPolicy,
+    ) -> Self {
         Self {
             acks: AckSet::recovered(recovered),
-            backlog: UploadBacklog::new(),
+            backlog: UploadBacklog::with_retry_delay(retry_policy.cloud_wal),
             prunes: PruneTracker::default(),
             local_retirement: LocalRetirementQueue::default(),
         }

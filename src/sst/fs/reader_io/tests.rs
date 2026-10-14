@@ -103,7 +103,31 @@ impl ReadFs for CountingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for CountingFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        if !self.persistent_handles {
+            return Err(FsError::Unsupported(
+                "test backend uses path-based SST reads".to_string(),
+            ));
+        }
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for CountingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
@@ -113,15 +137,6 @@ impl Fs for CountingFs {
             inner: self.inner.open(path, opts)?,
             reads: Arc::clone(&self.reads),
         }))
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        if !self.persistent_handles {
-            return Err(FsError::Unsupported(
-                "test backend uses path-based SST reads".to_string(),
-            ));
-        }
-        self.inner.open_persistent_handle(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {

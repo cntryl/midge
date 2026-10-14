@@ -26,21 +26,23 @@ fn cloud_debt_with_wal_records(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.cloud_coordinator
+    el.actors
+        .cloud_coordinator
         .hybrid_storage
         .as_ref()
         .unwrap()
         .enable_ephemeral_sst_cache(64 * 1024 * 1024);
     let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
-        el.cloud_coordinator
+        el.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
             .remote_sst_backend(),
         Duration::from_secs(3),
     ));
-    el.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(
+    el.actors.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(
         crate::runtime::event_loop::resources::compaction_sst_factory(
             reads,
             crate::codec::CompressionPolicy::default(),
@@ -81,8 +83,8 @@ fn cloud_debt_with_wal_records(
     }
     publish_test_flush_frontier(&mut el, 0, last);
     let (tx, rx) = crossbeam::channel::unbounded();
-    el.worker_msg_tx = Some(tx);
-    el.inline_flush_worker = false;
+    el.pipeline.worker_msg_tx = Some(tx);
+    el.pipeline.inline_flush_worker = false;
     Ok((el, rx, other))
 }
 
@@ -97,6 +99,7 @@ fn complete_compaction(el: &mut EventLoop, worker: &crossbeam::channel::Receiver
 fn complete_flush(el: &mut EventLoop) {
     for phase in ["build", "publish", "mirror"] {
         let completion = el
+            .pipeline
             .flush_worker_result_rx
             .recv_timeout(Duration::from_secs(3))
             .unwrap_or_else(|error| panic!("flush {phase}: {error}"));
@@ -114,7 +117,7 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
     let flush_id = el.state.get_cf(0).unwrap().immutable_flushes[0].flush_id;
     el.state.mark_immutable_flush_failed(flush_id).unwrap();
     el.state.make_immutable_flush_retry_due(0);
-    el.cloud_coordinator.cloud_maintenance.next =
+    el.actors.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::Compaction;
 
     // Act
@@ -133,9 +136,9 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
         4
     );
     drain_prune_completion_for_test(&mut el);
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(!el.actors.cloud_coordinator.cloud_wal.acks().contains(81));
     el.schedule_next_flush_worker();
-    assert!(el.flush_actor.is_inflight());
+    assert!(el.actors.flush_actor.is_inflight());
     complete_flush(&mut el);
     assert!(el.state.get_cf(0).unwrap().immutable_memtables.is_empty());
     assert_eq!(el.state.flush_metrics.publish_count, 1);
@@ -151,13 +154,13 @@ fn should_keep_compact_all_pending_while_fair_turns_service_other_work(
     el.state.set_compaction_enabled(false);
     queue_generation_for_maintenance_test(&mut el, 82)?;
     let request_id = 91_001;
-    let response = el.router.register(request_id, "CompactAll");
+    let response = el.routing.router.register(request_id, "CompactAll");
 
     // Act
     CompactionCoordinator::compact_all(&mut el, request_id);
 
     // Assert: explicit entry also respects the preferred flush turn.
-    assert!(el.flush_actor.is_inflight());
+    assert!(el.actors.flush_actor.is_inflight());
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
     assert!(response.try_recv().is_err());
     complete_flush(&mut el);
@@ -188,11 +191,11 @@ fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn
     let (mut el, _, _) = cloud_debt(1)?;
     queue_generation_for_maintenance_test(&mut el, 82)?;
     let request_id = 91_002;
-    let response = el.router.register(request_id, "CompactAll");
+    let response = el.routing.router.register(request_id, "CompactAll");
     CompactionCoordinator::compact_all(&mut el, request_id);
 
     // Act
-    el.compaction_fence.degrade();
+    el.authority.compaction_fence.degrade();
     complete_flush(&mut el);
 
     // Assert
@@ -235,7 +238,7 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
         el.state.manifest.test_mut().next_sst_seqs.insert(cf_id, 2);
     }
     let (tx, rx) = crossbeam::channel::unbounded();
-    el.worker_msg_tx = Some(tx);
+    el.pipeline.worker_msg_tx = Some(tx);
     Ok((el, rx))
 }
 
@@ -246,6 +249,7 @@ fn should_leave_below_threshold_local_debt_when_no_manual_obligation_exists(
     let (mut el, worker) = local_debt()?;
     el.state.set_compaction_enabled(true);
     let plan = el
+        .actors
         .compaction_actor
         .check_manual_compaction(&el.state)?
         .unwrap();
@@ -276,7 +280,7 @@ fn should_finish_requested_local_debt_when_background_compaction_is_disabled(
     // Arrange
     let (mut el, worker) = local_debt()?;
     el.state.set_compaction_enabled(false);
-    let response = el.router.register(91_007, "CompactAll");
+    let response = el.routing.router.register(91_007, "CompactAll");
 
     // Act
     CompactionCoordinator::compact_all(&mut el, 91_007);

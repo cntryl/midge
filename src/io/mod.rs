@@ -46,7 +46,7 @@ pub use real::RealFs;
 pub(crate) use scoped_fs::{scope_fs, scope_read_fs};
 pub(crate) use subdirectory::subdirectory;
 pub use traits::{
-    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions,
-    ReadFile, ReadFs,
+    open_persistent_handle, Durability, File, Fs, FsError, FsLock, FsPath, FsResult,
+    HostAddressing, OpenMode, OpenOptions, PersistentHandleFs, ReadFile, ReadFs,
 };
 pub(crate) use whole_file::{copy_durably, read_all, truncate_durably};

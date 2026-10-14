@@ -35,10 +35,11 @@ fn capture_queued_evidence(
     uploads_before: Vec<(String, u64)>,
 ) -> MidgeResult<QueuedEvidence> {
     let outcome = fixture.drive_manual_response(response);
-    fixture.el.gc_actor.shutdown_workers();
+    fixture.el.actors.gc_actor.shutdown_workers();
     let inputs = input_names(fixture);
     let quotas = fixture
         .el
+        .actors
         .cloud_coordinator
         .hybrid_storage
         .as_ref()
@@ -77,9 +78,18 @@ fn capture_queued_evidence(
             .el
             .state
             .has_compaction_publication_intent(&inputs, &fixture.outputs),
-        no_phase: !fixture.el.compaction_publish_actor.is_inflight()
-            && fixture.el.compaction_publish_result_rx.is_empty()
-            && fixture.el.compaction_publication.get().is_none(),
+        no_phase: !fixture.el.actors.compaction_publish_actor.is_inflight()
+            && fixture
+                .el
+                .publication
+                .compaction_publish_result_rx
+                .is_empty()
+            && fixture
+                .el
+                .publication
+                .compaction_publication
+                .get()
+                .is_none(),
         active: fixture.el.state.active_compactions.load(Ordering::Acquire),
         reservations: quotas.usage.reservations,
         staging_reserved: quotas.usage.compaction_staging_reserved_bytes,
@@ -97,6 +107,7 @@ fn receive_live_success(
 ) -> CompactionPublishCompletion {
     let completion = fixture
         .el
+        .publication
         .compaction_publish_result_rx
         .recv_timeout(FIXTURE_WAIT)
         .expect("actual successful worker receipt");
@@ -241,11 +252,12 @@ fn final_clear_timeout_case() -> MidgeResult<(QueuedEvidence, Vec<ReadEvidence>,
     }));
     assert!(second.error.is_none() && second.completed_at < started + CALLER_BUDGET);
     assert!(
-        fixture.el.compaction_publish_actor.is_inflight(),
+        fixture.el.actors.compaction_publish_actor.is_inflight(),
         "the genuine final worker must be submitted before expiry"
     );
     let completion = fixture
         .el
+        .publication
         .compaction_publish_result_rx
         .recv_timeout(FIXTURE_WAIT)
         .expect("actual final mirror completion");

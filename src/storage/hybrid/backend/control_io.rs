@@ -332,23 +332,9 @@ mod ownership_tests {
         inner: MockCloudBackend,
         pending: parking_lot::Mutex<Option<(Vec<u8>, CloudCallback)>>,
     }
-    impl CloudBackend for PendingUpload {
-        crate::storage::cloud::unsupported_cloud_backend!(
-            submit_get,
-            submit_get_with_metadata,
-            submit_delete,
-            submit_list,
-        );
+    impl crate::storage::cloud::CloudReadCapability for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
 
-        fn submit_put(
-            &self,
-            _key: &str,
-            bytes: Vec<u8>,
-            _headers: Vec<(String, String)>,
-            callback: CloudCallback,
-        ) {
-            *self.pending.lock() = Some((bytes, callback));
-        }
         fn submit_get_range(
             &self,
             key: &str,
@@ -358,10 +344,35 @@ mod ownership_tests {
         ) {
             self.inner.submit_get_range(key, start, end, callback);
         }
+    }
+
+    impl crate::storage::cloud::CloudWriteCapability for PendingUpload {
+        fn submit_put(
+            &self,
+            _key: &str,
+            bytes: Vec<u8>,
+            _headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            *self.pending.lock() = Some((bytes, callback));
+        }
+    }
+
+    impl crate::storage::cloud::CloudDeleteCapability for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+    }
+
+    impl crate::storage::cloud::CloudListCapability for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+    }
+
+    impl crate::storage::cloud::CloudHeadCapability for PendingUpload {
         fn submit_head(&self, key: &str, callback: CloudCallback) {
             self.inner.submit_head(key, callback);
         }
     }
+
+    impl CloudBackend for PendingUpload {}
 
     #[test]
     fn should_retain_control_upload_charge_after_timeout_until_provider_releases_body() {

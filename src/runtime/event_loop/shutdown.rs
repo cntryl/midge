@@ -5,7 +5,7 @@ use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
     pub(super) fn handle_shutdown_request(&mut self, request_id: Option<u64>) -> HandleOutcome {
-        if self.verification_barrier.token.is_some() {
+        if self.publication.verification_barrier.token.is_some() {
             let message = request_id.map_or(RuntimeMsg::Shutdown, |request_id| {
                 RuntimeMsg::ShutdownWithResponse { request_id }
             });
@@ -19,7 +19,7 @@ impl EventLoop {
         let shutdown_started = std::time::Instant::now();
         self.trace_shutdown_start();
         let mut shutdown_error = None;
-        self.shutting_down = true;
+        self.shutdown.shutting_down = true;
 
         // Local mode does not checkpoint memtables on shutdown, so the WAL
         // tail is the only copy of buffered commits from the last batch
@@ -50,9 +50,10 @@ impl EventLoop {
             }
         }
 
-        let cloud_async = self.wal_actor.is_cloud_async();
-        let cloud_shutdown_deadline =
-            crate::common::OperationDeadline::from_budget(self.shutdown_cloud_drain_timeout);
+        let cloud_async = self.actors.wal_actor.is_cloud_async();
+        let cloud_shutdown_deadline = crate::common::OperationDeadline::from_budget(
+            self.shutdown.shutdown_cloud_drain_timeout,
+        );
 
         // Finish work already admitted to the flush pipeline before sealing
         // the final WAL generation. Cloud shutdown uses the same bounded
@@ -68,16 +69,7 @@ impl EventLoop {
             }
         } else {
             trace_shutdown_phase("local-flush-pipeline-drain", None, || {
-                while self.flush_actor.is_inflight() {
-                    match self
-                        .flush_worker_result_rx
-                        .recv_timeout(std::time::Duration::from_millis(25))
-                    {
-                        Ok(result) => self.handle_flush_worker_result(result),
-                        Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                        Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
+                self.drain_local_shutdown_flush_pipeline();
             });
         }
 
@@ -159,28 +151,47 @@ impl EventLoop {
         HandleOutcome::Break
     }
 
+    fn drain_local_shutdown_flush_pipeline(&mut self) {
+        while self.actors.flush_actor.is_inflight() {
+            match self
+                .pipeline
+                .flush_worker_result_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+            {
+                Ok(result) => self.handle_flush_worker_result(result),
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
     fn trace_shutdown_start(&self) {
         tracing::info!(
             writer_epoch = self.state.writer_epoch,
-            cloud_async = self.wal_actor.is_cloud_async(),
+            cloud_async = self.actors.wal_actor.is_cloud_async(),
             immutable_flushes_pending = self
                 .state
                 .column_families
                 .values()
                 .map(|cf| cf.immutable_flushes.len())
                 .sum::<usize>(),
-            flush_worker_inflight = self.flush_actor.is_inflight(),
-            compaction_publisher_inflight = self.compaction_publish_actor.is_inflight(),
+            flush_worker_inflight = self.actors.flush_actor.is_inflight(),
+            compaction_publisher_inflight = self.actors.compaction_publish_actor.is_inflight(),
             wal_pending_writes = self.state.wal.pending_writes,
-            runtime_uploads_pending = self.cloud_coordinator.cloud_wal.backlog().len(),
+            runtime_uploads_pending = self.actors.cloud_coordinator.cloud_wal.backlog().len(),
             storage_uploads_pending = self
+                .actors
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
                 .map_or(0, |storage| storage.pending_upload_count()),
-            wal_segments_acked = self.cloud_coordinator.cloud_wal.acks().len(),
-            wal_prunes_inflight = self.cloud_coordinator.cloud_wal.prunes().len(),
-            wal_preflight_worker_owned = self.cloud_coordinator.cloud_wal_prune_worker.is_some(),
+            wal_segments_acked = self.actors.cloud_coordinator.cloud_wal.acks().len(),
+            wal_prunes_inflight = self.actors.cloud_coordinator.cloud_wal.prunes().len(),
+            wal_preflight_worker_owned = self
+                .actors
+                .cloud_coordinator
+                .cloud_wal_prune_worker
+                .is_some(),
             "Runtime shutdown started"
         );
     }
@@ -202,7 +213,7 @@ impl EventLoop {
     ) {
         let join_deadline = cloud_async.then_some(cloud_shutdown_deadline);
         if let Err(error) = trace_shutdown_phase("flush-worker-join", join_deadline, || {
-            self.flush_actor.shutdown_and_join()
+            self.actors.flush_actor.shutdown_and_join()
         }) {
             if shutdown_error.is_none() {
                 *shutdown_error = Some(error);
@@ -212,16 +223,18 @@ impl EventLoop {
         // Stop compaction only after the final checkpoint has settled. Its
         // worker owns staged SST output and must finish while this lease epoch
         // is still valid.
-        let compaction_storage = self
-            .cloud_coordinator
-            .hybrid_storage
-            .as_ref()
-            .map(|storage| {
-                std::sync::Arc::clone(storage)
-                    as std::sync::Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
-            });
+        let compaction_storage =
+            self.actors
+                .cloud_coordinator
+                .hybrid_storage
+                .as_ref()
+                .map(|storage| {
+                    std::sync::Arc::clone(storage)
+                        as std::sync::Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
+                });
         trace_shutdown_phase("compaction-worker-join", join_deadline, || {
-            self.compaction_actor
+            self.actors
+                .compaction_actor
                 .cancel_and_join_worker(&mut self.state, compaction_storage.as_ref());
         });
 
@@ -229,7 +242,7 @@ impl EventLoop {
         // Join them before the event loop exits; Engine releases its lease
         // only after this runtime has quiesced.
         trace_shutdown_phase("sst-gc-worker-join", join_deadline, || {
-            self.gc_actor.shutdown_workers();
+            self.actors.gc_actor.shutdown_workers();
         });
         trace_shutdown_phase("wal-preflight-worker-join", join_deadline, || {
             self.join_cloud_wal_prune_worker();
@@ -237,7 +250,7 @@ impl EventLoop {
         if cloud_async {
             self.drain_hybrid_storage_events_within(cloud_shutdown_deadline);
         }
-        if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
+        if let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage {
             trace_shutdown_phase("storage-prune-worker-join", join_deadline, || {
                 storage.shutdown_background_workers();
             });
@@ -248,9 +261,14 @@ impl EventLoop {
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> Option<MidgeError> {
-        let storage = self.cloud_coordinator.hybrid_storage.as_ref()?.clone();
+        let storage = self
+            .actors
+            .cloud_coordinator
+            .hybrid_storage
+            .as_ref()?
+            .clone();
         while (storage.pending_upload_count() > 0
-            || !self.cloud_coordinator.cloud_wal.backlog().is_empty())
+            || !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty())
             && !deadline.is_expired()
         {
             // UploadQueue and the runtime backlog are two ownership domains
@@ -274,7 +292,7 @@ impl EventLoop {
         }
 
         let storage_pending = storage.pending_upload_count();
-        let runtime_pending = self.cloud_coordinator.cloud_wal.backlog().len();
+        let runtime_pending = self.actors.cloud_coordinator.cloud_wal.backlog().len();
         if storage_pending > 0 || runtime_pending > 0 {
             crate::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
             tracing::warn!(
@@ -292,8 +310,9 @@ impl EventLoop {
     }
 
     fn drain_shutdown_compaction_publication(&mut self) -> crate::common::MidgeResult<()> {
-        while self.compaction_publish_actor.is_inflight() {
+        while self.actors.compaction_publish_actor.is_inflight() {
             match self
+                .publication
                 .compaction_publish_result_rx
                 .recv_timeout(std::time::Duration::from_millis(25))
             {
@@ -311,13 +330,13 @@ impl EventLoop {
                 }
             }
         }
-        if self.compaction_publication.is_active() {
+        if self.publication.compaction_publication.is_active() {
             return Err(MidgeError::Internal(
                 "compaction publication was left without a worker completion during shutdown"
                     .to_string(),
             ));
         }
-        self.compaction_publish_actor.shutdown_and_join()
+        self.actors.compaction_publish_actor.shutdown_and_join()
     }
 
     fn checkpoint_active_cloud_memtables_within(
@@ -348,7 +367,7 @@ impl EventLoop {
                 .values()
                 .map(|cf| cf.immutable_flushes.len())
                 .sum::<usize>();
-            if pending == 0 && !self.flush_actor.is_inflight() {
+            if pending == 0 && !self.actors.flush_actor.is_inflight() {
                 return Ok(());
             }
             if deadline.is_expired() {
@@ -358,11 +377,11 @@ impl EventLoop {
             }
 
             self.schedule_next_flush_worker_during_shutdown();
-            if self.flush_actor.is_inflight() {
+            if self.actors.flush_actor.is_inflight() {
                 let wait_for = deadline
                     .remaining()
                     .min(std::time::Duration::from_millis(25));
-                match self.flush_worker_result_rx.recv_timeout(wait_for) {
+                match self.pipeline.flush_worker_result_rx.recv_timeout(wait_for) {
                     Ok(result) => self.handle_flush_worker_result(result),
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
@@ -374,7 +393,7 @@ impl EventLoop {
                 continue;
             }
 
-            if self.publication_gate.is_active() {
+            if self.publication.publication_gate.is_active() {
                 self.reap_cloud_wal_prune_worker();
                 let sleep_for = deadline
                     .remaining()
@@ -401,32 +420,38 @@ impl EventLoop {
 
     pub(super) fn fail_shutdown_held_work(&mut self) {
         let mut messages = Vec::new();
-        if let Some(message) = self.pending_msg.take() {
+        if let Some(message) = self.routing.pending_msg.take() {
             messages.push(message);
         }
-        messages.extend(self.verification_barrier.deferred_messages.drain(..));
-        messages.extend(self.publication_gate.take_deferred());
+        messages.extend(
+            self.publication
+                .verification_barrier
+                .deferred_messages
+                .drain(..),
+        );
+        messages.extend(self.publication.publication_gate.take_deferred());
         for message in messages {
             self.fail_shutdown_message(message);
         }
 
         let mut routed_request_ids = std::collections::BTreeSet::new();
         routed_request_ids.extend(
-            self.flush_barrier_waiters
+            self.publication
+                .flush_barrier_waiters
                 .drain()
                 .flat_map(|(_, waiters)| waiters)
                 .map(|waiter| waiter.request_id),
         );
         routed_request_ids
             .extend(std::mem::take(&mut self.state.pending_compaction_waits).into_keys());
-        routed_request_ids.extend(self.write_stall_waiters.drain());
-        let durability_waiters = self.durability.drain_all_waiters();
+        routed_request_ids.extend(self.pipeline.write_stall_waiters.drain());
+        let durability_waiters = self.pipeline.durability.drain_all_waiters();
         routed_request_ids.extend(
             durability_waiters
                 .iter()
                 .filter_map(shutdown_waiter_request_id),
         );
-        routed_request_ids.extend(self.inline_responses.borrow().keys().copied());
+        routed_request_ids.extend(self.routing.inline_responses.borrow().keys().copied());
 
         for request_id in routed_request_ids {
             self.respond(
@@ -580,6 +605,7 @@ mod tests {
         .expect("create event loop");
         let syncs = Arc::new(AtomicUsize::new(0));
         event_loop
+            .actors
             .wal_actor
             .replace_writer_for_test(Box::new(CountingSyncWriter(Arc::clone(&syncs))));
         (event_loop, syncs)
@@ -590,7 +616,7 @@ mod tests {
         // Arrange
         let (mut event_loop, syncs) = local_event_loop_with_counting_writer();
         event_loop.state.wal.pending_writes = 1;
-        let response = event_loop.router.register(1, "Shutdown");
+        let response = event_loop.routing.router.register(1, "Shutdown");
 
         // Act
         let outcome = event_loop.handle_shutdown(Some(1));
@@ -612,13 +638,14 @@ mod tests {
         // Arrange
         let (mut event_loop, _syncs) = local_event_loop_with_counting_writer();
         event_loop.state.wal.pending_writes = 1;
-        let waiter = event_loop.router.register(7, "WalAppend");
-        event_loop.durability.queue_waiter(DurabilityWaiter::Test(
-            TestDurabilityWaiter::WalAppend {
+        let waiter = event_loop.routing.router.register(7, "WalAppend");
+        event_loop
+            .pipeline
+            .durability
+            .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
                 request_id: 7,
                 sequence: 1,
-            },
-        ));
+            }));
 
         // Act
         event_loop.handle_shutdown(None);

@@ -25,6 +25,39 @@ fn path(value: &str) -> FsPath {
     FsPath::new(value)
 }
 
+#[test]
+fn should_release_exclusive_locks_when_power_is_lost() {
+    // Arrange: the current process owns a native lock on the simulated device.
+    let device = CrashDevice::new();
+    let fs = device.fs();
+    let lock_path = path(".midge_writer_effect.v2.lock");
+    let old_lock = fs
+        .try_lock_exclusive(&lock_path)
+        .expect("acquire initial lock");
+    assert!(matches!(
+        fs.try_lock_exclusive(&lock_path),
+        Err(FsError::AlreadyExists(_))
+    ));
+
+    // Act: power loss ends the process; a successor takes the same lock.
+    device.power_loss(0);
+    let successor_fs = device.fs();
+    let successor_lock = successor_fs
+        .try_lock_exclusive(&lock_path)
+        .expect("power loss releases the process lock");
+    drop(old_lock);
+
+    // Assert: dropping a stale guard cannot release the successor's lock.
+    assert!(matches!(
+        successor_fs.try_lock_exclusive(&lock_path),
+        Err(FsError::AlreadyExists(_))
+    ));
+    drop(successor_lock);
+    successor_fs
+        .try_lock_exclusive(&lock_path)
+        .expect("dropping the current guard releases its lock");
+}
+
 fn parent_of(name: &str) -> &str {
     name.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
@@ -614,9 +647,8 @@ fn should_fence_crashed_process_when_it_acts_after_crash() {
     let device = CrashDevice::new();
     let crashed = device.fs();
     durable_file(&crashed, "segment", b"data");
-    let handle = crashed
-        .open_persistent_handle(&path("segment"), CREATE)
-        .expect("open handle");
+    let handle =
+        crate::io::open_persistent_handle(&crashed, &path("segment"), CREATE).expect("open handle");
 
     // Act
     device.process_crash();
@@ -707,9 +739,8 @@ fn should_keep_unlinked_open_file_readable_until_its_handle_closes() {
     let device = CrashDevice::new();
     let fs = device.fs();
     durable_file(&fs, "pinned", b"pinned");
-    let handle = fs
-        .open_persistent_handle(&path("pinned"), READ_ONLY)
-        .expect("pin file");
+    let handle =
+        crate::io::open_persistent_handle(&fs, &path("pinned"), READ_ONLY).expect("pin file");
 
     // Act
     fs.remove_file(&path("pinned")).expect("unlink");

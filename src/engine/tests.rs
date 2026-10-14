@@ -399,10 +399,13 @@ fn install_blocking_renewal_lease(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let healthy = heartbeat.healthy_flag();
     heartbeat.stop();
-    if let Some(original_lease) = engine.lease_state.lease.take() {
-        original_lease.release()?;
+    // Keep the filesystem writer record current while replacing only the
+    // heartbeat used by this test. Releasing it would correctly fence every
+    // later WAL effect through the runtime's still-installed leader store.
+    drop(engine.lease_state.lease.take());
+    if let Some(guard) = engine.lease_state.guard.take() {
+        guard.disarm_for_test();
     }
-    engine.lease_state.guard.take();
 
     let lease_guard = Arc::clone(lease).try_acquire()?;
     let engine_lease: Arc<dyn crate::lease::PrimaryLease> = lease.clone();
@@ -425,7 +428,19 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard, None)?;
+    if let Some(heartbeat) = lease_heartbeat {
+        let mut heartbeat = heartbeat
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        heartbeat.stop();
+    }
+    // This fixture replaces the PrimaryLease implementation while the WAL
+    // actor keeps using the engine's filesystem LeaderStore. Retain its
+    // current epoch for the later shutdown retry; the temp directory owns it.
+    drop(lease);
+    if let Some(lease_guard) = lease_guard {
+        lease_guard.disarm_for_test();
+    }
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -1195,9 +1210,11 @@ struct FormatPutFailBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
 }
 
-impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for FormatPutFailBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -1219,6 +1236,20 @@ impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {}
 
 #[test]
 fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
@@ -1524,8 +1555,8 @@ impl ListOmittingCloudBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get_range, submit_get_range_with_identity, submit_delete);
+impl crate::storage::cloud::CloudReadCapability for ListOmittingCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.full_reads
@@ -1538,7 +1569,17 @@ impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.submit_get_with_metadata(key, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for ListOmittingCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ListOmittingCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ListOmittingCloudBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         if prefix.ends_with(&self.omitted_prefix) {
             let _ = callback.send(crate::storage::cloud::CloudEvent::List {
@@ -1549,9 +1590,13 @@ impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
         }
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for ListOmittingCloudBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
+
+impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {}
 
 fn test_sst_bytes_with_key_value(key: &[u8], value: &[u8]) -> Vec<u8> {
     use crate::sst::traits::SstFactory;
@@ -2349,9 +2394,23 @@ mod salvage_removes_definitively_lost_ssts {
         inner: Arc<crate::storage::cloud::MockCloudBackend>,
     }
 
-    impl crate::storage::cloud::CloudBackend for HeadRefusingCloudBackend {
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+    impl crate::storage::cloud::CloudReadCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+    }
 
+    impl crate::storage::cloud::CloudWriteCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+    }
+
+    impl crate::storage::cloud::CloudDeleteCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+    }
+
+    impl crate::storage::cloud::CloudListCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+    }
+
+    impl crate::storage::cloud::CloudHeadCapability for HeadRefusingCloudBackend {
         fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
             let _ = callback.send(crate::storage::cloud::CloudEvent::Head {
                 key: key.to_string(),
@@ -2361,6 +2420,8 @@ mod salvage_removes_definitively_lost_ssts {
             });
         }
     }
+
+    impl crate::storage::cloud::CloudBackend for HeadRefusingCloudBackend {}
 
     #[test]
     fn should_keep_the_manifest_entry_when_the_cloud_head_request_fails() {
