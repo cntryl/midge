@@ -1155,7 +1155,20 @@ impl Drop for CrashFsLock {
     }
 }
 
-impl FsLock for CrashFsLock {}
+impl FsLock for CrashFsLock {
+    fn validate_held(&self) -> FsResult<()> {
+        let state = self.device.lock();
+        if state.generation == self.generation
+            && state.active_locks.get(&self.path) == Some(&self.token)
+        {
+            Ok(())
+        } else {
+            Err(FsError::Io(
+                "the simulated process no longer owns its lock".into(),
+            ))
+        }
+    }
+}
 
 impl CrashFs {
     fn state(&self) -> FsResult<MutexGuard<'_, State>> {

@@ -38,7 +38,15 @@ impl Drop for MockFsLock {
     }
 }
 
-impl super::traits::FsLock for MockFsLock {}
+impl super::traits::FsLock for MockFsLock {
+    fn validate_held(&self) -> FsResult<()> {
+        if self.0.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(FsError::Io("mock filesystem lock is no longer held".into()))
+        }
+    }
+}
 
 impl MockFs {
     /// Create a new empty mock filesystem

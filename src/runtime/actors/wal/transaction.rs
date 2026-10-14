@@ -209,23 +209,7 @@ impl WalActor {
         let strict_group = prepared_transactions
             .iter()
             .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
-        let admission_prevalidated = self.validate_writer_admission(state)?;
-        self.append_prepared_transaction_batches(state, &prepared_transactions)?;
-        if strict_group {
-            let last_sequence = prepared_transactions
-                .last()
-                .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
-            // A failed sync fences the WAL. None of the group is in the
-            // memtables, so replay keeps or drops each unit whole.
-            self.sync_authority_prevalidated = admission_prevalidated;
-            let durability_result =
-                self.apply_strict_transaction_group_durability(state, last_sequence);
-            self.sync_authority_prevalidated = false;
-            if let Err(error) = durability_result {
-                let group = prepared_transactions.iter().collect::<Vec<_>>();
-                return Err(Self::group_durability_error(&group, error));
-            }
-        }
+        self.append_prepared_group_wal(state, &prepared_transactions, strict_group)?;
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
         let mut pending = prepared_transactions.into_iter();
@@ -299,6 +283,56 @@ impl WalActor {
             applied: results,
             failure: None,
         })
+    }
+
+    fn append_prepared_group_wal(
+        &mut self,
+        state: &mut RuntimeState,
+        prepared: &[PreparedTransactionAppend],
+        strict: bool,
+    ) -> MidgeResult<()> {
+        let group = if strict {
+            let acquired = self
+                .writer()
+                .and_then(crate::wal::WalWriter::writer_group_capability)
+                .map(|writer| writer.begin_group(self.storage_io_timeout))
+                .transpose();
+            match acquired {
+                Ok(group) => group,
+                Err(error) => {
+                    if Self::is_authority_failure(&error) {
+                        self.fence_with_cause(
+                            state,
+                            format!("WAL group admission authority validation failed: {error}"),
+                            true,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let prevalidated = group.is_some() || self.validate_writer_admission(state)?;
+        self.append_prepared_transaction_batches(state, prepared, group.as_ref())?;
+        if strict {
+            let last_sequence = prepared
+                .last()
+                .map_or(state.sequence, |unit| unit.sequence_plan.commit_seq);
+            // The root covers append, fsync and ledger evidence, then leaves
+            // before applying any unit or starting a lease transition.
+            self.sync_authority_prevalidated = prevalidated;
+            let result =
+                self.apply_strict_group_durability_with_group(state, last_sequence, group.as_ref());
+            self.sync_authority_prevalidated = false;
+            if let Err(error) = result {
+                return Err(Self::group_durability_error(
+                    &prepared.iter().collect::<Vec<_>>(),
+                    error,
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Fence the WAL for group units none of whose ops reached the memtables.
@@ -590,6 +624,7 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: &[PreparedTransactionAppend],
+        group: Option<&crate::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
         let mut records = Vec::with_capacity(prepared_transactions.len());
         let mut total_wal_bytes = 0usize;
@@ -635,7 +670,15 @@ impl WalActor {
         }
         if let Some(writer) = self.writer_mut() {
             let append_start = Instant::now();
-            let append_result = writer.append_batch_accounted(&records);
+            let append_result = match group {
+                Some(group) => writer
+                    .writer_group_capability()
+                    .ok_or_else(|| {
+                        MidgeError::Internal("strict WAL group lost its writer capability".into())
+                    })?
+                    .append_batch_in_group(&records, group),
+                None => writer.append_batch_accounted(&records),
+            };
             if let Err(failure) = append_result {
                 let unchanged = failure.unchanged;
                 let error = self.settle_failed_wal_append(admitted, failure);

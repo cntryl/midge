@@ -31,6 +31,7 @@ pub mod fs_leader_store;
 mod heartbeat;
 mod scoped_leader_store;
 mod traits;
+mod writer_effect_groups;
 
 pub use crate::types::SharedGenerationId;
 pub(crate) use clock::LeaseClock;
@@ -45,6 +46,10 @@ pub(crate) use traits::LeaseValidity;
 pub use traits::{
     CloudMetadataGeneration, CloudMetadataHead, CloudMetadataObject, LeaderStore, LeaseGuard,
     PrimaryLease,
+};
+pub use writer_effect_groups::{
+    ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups,
+    WriterEffectTicket,
 };
 
 use crate::config::Storage;

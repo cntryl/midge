@@ -47,7 +47,15 @@ pub type FsResult<T> = Result<T, FsError>;
 ///
 /// Locks are coordination state, not durable data. Dropping the guard releases
 /// the lock, and the operating system releases host locks when a process exits.
-pub trait FsLock: Send + Sync {}
+pub trait FsLock: Send + Sync {
+    /// Verify that this guard still owns the acquired lock. Native guards
+    /// retain ownership until drop; revocable simulation guards must reject
+    /// calls after process crash or ownership replacement.
+    ///
+    /// # Errors
+    /// Returns an error when this guard no longer owns its acquired lock.
+    fn validate_held(&self) -> FsResult<()>;
+}
 
 /// Durability semantics for filesystem operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

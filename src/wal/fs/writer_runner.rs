@@ -1,12 +1,16 @@
 use crate::io::{Durability, Fs, FsPath, FsResult};
 use crate::wal::format::SegmentDigest;
 use crate::wal::traits::WalAppendError;
+use crate::wal::writer_authority::{ActiveRequestEffect, PendingWriterEffect};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct SyncState {
+    pub(crate) submitted_writes: u64,
+    pub(crate) completed_writes: u64,
+    pub(crate) requests: std::collections::VecDeque<PendingSync>,
     pub pending_flushes: u64,
     pub pending_fsyncs: u64,
     pub completed_flushes: u64,
@@ -19,6 +23,12 @@ pub struct SyncState {
     pub last_write_error: Option<crate::common::MidgeError>,
     /// The failure that set `sync_failed`, replayed to every later caller.
     pub last_sync_error: Option<crate::common::MidgeError>,
+}
+
+pub(crate) struct PendingSync {
+    pub(crate) id: u64,
+    pub(crate) writes_through: u64,
+    pub(crate) effect: PendingWriterEffect,
 }
 
 impl SyncState {
@@ -66,14 +76,33 @@ pub(crate) fn writer_error(
 pub(crate) struct QueuedWrite {
     pub(crate) data: Vec<u8>,
     pub(crate) ack: std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>,
+    effect: Option<PendingWriterEffect>,
+    id: u64,
 }
 
 impl QueuedWrite {
+    #[cfg(test)]
     pub(crate) fn new(
         data: Vec<u8>,
         ack: std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>,
     ) -> Self {
-        Self { data, ack }
+        let (effect, _) =
+            PendingWriterEffect::admit(None, None, std::time::Duration::from_secs(1)).unwrap();
+        Self::admitted(data, ack, effect, 0)
+    }
+
+    pub(crate) fn admitted(
+        data: Vec<u8>,
+        ack: std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>,
+        effect: PendingWriterEffect,
+        id: u64,
+    ) -> Self {
+        Self {
+            data,
+            ack,
+            effect: Some(effect),
+            id,
+        }
     }
 }
 
@@ -106,6 +135,7 @@ pub(crate) const MAX_BUFFER_POOL_SIZE: usize = 64;
 
 /// Configuration struct to reduce constructor arguments
 pub struct WriterConfig {
+    #[cfg(test)]
     pub(crate) write_authority:
         Arc<parking_lot::RwLock<Option<crate::wal::traits::WriteAuthority>>>,
     pub fs: Arc<dyn Fs>,
@@ -186,6 +216,9 @@ impl WriterRunner {
 
     fn wait_for_batch_or_pending_sync(&self) -> Option<Vec<QueuedWrite>> {
         let mut q = self.config.queue.lock();
+        if self.config.sync_state.lock().failure().is_some() {
+            return None;
+        }
         while q.is_empty()
             && !self
                 .config
@@ -203,7 +236,23 @@ impl WriterRunner {
             return None;
         }
 
-        Some(std::mem::take(&mut *q))
+        let count = q.first().map_or(0, |first| {
+            q.iter()
+                .take_while(|entry| {
+                    first
+                        .effect
+                        .as_ref()
+                        .expect("queued write retains its unactivated authority admission")
+                        .same_authority(
+                            entry
+                                .effect
+                                .as_ref()
+                                .expect("queued write retains its unactivated authority admission"),
+                        )
+                })
+                .count()
+        });
+        Some(q.drain(..count).collect())
     }
 
     fn has_pending_sync_or_flush(&self) -> bool {
@@ -228,8 +277,22 @@ impl WriterRunner {
         batch: &mut [QueuedWrite],
     ) -> Result<u64, WriteFailure> {
         let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
+        let effects = batch
+            .iter_mut()
+            .map(|entry| {
+                entry
+                    .effect
+                    .take()
+                    .expect("drained write activates its authority admission exactly once")
+                    .activate()
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| WriteFailure {
+                error,
+                unchanged: true,
+            })?;
         let write_start = Instant::now();
-        let start_pos = self.append_once(file_opt, &big_bytes)?;
+        let start_pos = self.append_with_effects(file_opt, &big_bytes, &effects)?;
         let write_elapsed = write_start.elapsed();
 
         self.config.counters.record(|m| {
@@ -256,10 +319,33 @@ impl WriterRunner {
         big
     }
 
+    #[cfg(test)]
     fn append_once<'a>(
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
         big_bytes: &bytes::Bytes,
+    ) -> Result<u64, WriteFailure> {
+        let (effect, _root) = PendingWriterEffect::admit(
+            self.config.write_authority.read().clone(),
+            None,
+            std::time::Duration::from_secs(1),
+        )
+        .map_err(|error| WriteFailure {
+            error,
+            unchanged: true,
+        })?;
+        let effect = effect.activate().map_err(|error| WriteFailure {
+            error,
+            unchanged: true,
+        })?;
+        self.append_with_effects(file_opt, big_bytes, &[effect])
+    }
+
+    fn append_with_effects<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+        big_bytes: &bytes::Bytes,
+        effects: &[ActiveRequestEffect],
     ) -> Result<u64, WriteFailure> {
         let start_pos = self
             .config
@@ -272,24 +358,23 @@ impl WriterRunner {
             })?;
 
         if let Some(file) = file_opt.as_mut() {
-            let write_result = self
-                .run_with_write_authority(|| {
-                    if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
-                        let partial_len = (big_bytes.len() / 2).max(1);
-                        file.write_at(start_pos, big_bytes.slice(..partial_len))
-                            .and_then(|()| {
-                                Err(crate::io::FsError::NoSpace(
-                                    "after partial positional WAL write".to_string(),
-                                ))
-                            })
-                    } else {
-                        file.write_at(start_pos, big_bytes.clone())
-                    }
-                })
-                .map_err(|error| WriteFailure {
-                    error: error.error,
-                    unchanged: !error.started,
-                })?;
+            let write_result = Self::run_with_effects(effects, || {
+                if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
+                    let partial_len = (big_bytes.len() / 2).max(1);
+                    file.write_at(start_pos, big_bytes.slice(..partial_len))
+                        .and_then(|()| {
+                            Err(crate::io::FsError::NoSpace(
+                                "after partial positional WAL write".to_string(),
+                            ))
+                        })
+                } else {
+                    file.write_at(start_pos, big_bytes.clone())
+                }
+            })
+            .map_err(|error| WriteFailure {
+                error: error.error,
+                unchanged: !error.started,
+            })?;
             return match write_result {
                 Ok(()) => {
                     // The digest holds every byte written, in order: a
@@ -302,7 +387,7 @@ impl WriterRunner {
                 }
                 Err(write_error) => {
                     tracing::error!(error = ?write_error, start_pos, "wal writer write_at failed");
-                    self.rollback_partial_append(file.as_mut(), start_pos, &write_error)?;
+                    Self::rollback_partial_append(file.as_mut(), start_pos, &write_error, effects)?;
                     Err(WriteFailure {
                         error: writer_error(
                             format!("wal writer write_at failed (partial WAL append rolled back to {start_pos})"),
@@ -321,13 +406,12 @@ impl WriterRunner {
     }
 
     fn rollback_partial_append(
-        &self,
         file: &mut dyn crate::io::File,
         start_pos: u64,
         write_error: &crate::io::FsError,
+        effects: &[ActiveRequestEffect],
     ) -> Result<(), WriteFailure> {
-        let truncate_result = self
-            .run_with_write_authority(|| file.truncate(start_pos))
+        let truncate_result = Self::run_with_effects(effects, || file.truncate(start_pos))
             .map_err(|error| WriteFailure {
                 error: error.error,
                 unchanged: false,
@@ -342,8 +426,7 @@ impl WriterRunner {
             });
         }
 
-        let sync_result = self
-            .run_with_write_authority(|| file.sync(Durability::Durable))
+        let sync_result = Self::run_with_effects(effects, || file.sync(Durability::Durable))
             .map_err(|error| WriteFailure {
                 error: error.error,
                 unchanged: false,
@@ -357,22 +440,17 @@ impl WriterRunner {
         })
     }
 
-    fn run_with_write_authority<T>(
-        &self,
+    fn run_with_effects<T>(
+        effects: &[ActiveRequestEffect],
         operation: impl FnOnce() -> T,
     ) -> Result<T, crate::wal::writer_effect::WriterEffectError> {
-        let authority = self.config.write_authority.read().clone();
-        crate::wal::writer_effect::with_writer_effect(
-            |run| {
-                if let Some(check) = authority {
-                    check(run)
-                } else {
-                    run();
-                    Ok(())
-                }
-            },
-            operation,
-        )
+        for effect in effects.iter().skip(1) {
+            effect.validate()?;
+        }
+        effects
+            .first()
+            .expect("every physical request owns an authority admission")
+            .run(operation)
     }
 
     fn ensure_file_handle<'a>(
@@ -396,8 +474,12 @@ impl WriterRunner {
             std::sync::atomic::Ordering::SeqCst,
         );
 
+        let queue = self.config.queue.lock();
         let mut s = self.config.sync_state.lock();
-        s.completed_flushes = s.pending_flushes;
+        s.completed_writes = batch.last().map_or(s.completed_writes, |entry| entry.id);
+        if queue.is_empty() {
+            s.completed_flushes = s.pending_flushes;
+        }
         self.config.sync_cond.notify_all();
     }
 
@@ -406,6 +488,10 @@ impl WriterRunner {
             return;
         }
 
+        let queue = self.config.queue.lock();
+        if !queue.is_empty() {
+            return;
+        }
         let mut s = self.config.sync_state.lock();
         s.completed_flushes = s.pending_flushes;
         self.config.sync_cond.notify_all();
@@ -420,9 +506,25 @@ impl WriterRunner {
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
     ) -> Result<(), ()> {
-        if !self.has_pending_fsyncs() {
+        let requests = self.take_ready_syncs()?;
+        if requests.is_empty() {
             return Ok(());
         }
+        let completed = requests
+            .last()
+            .expect("nonempty ready sync requests have a final barrier")
+            .id;
+        let effects = match requests
+            .into_iter()
+            .map(|request| request.effect.activate())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(effects) => effects,
+            Err(error) => {
+                self.mark_sync_failure(error);
+                return Err(());
+            }
+        };
 
         if file_opt.is_none() {
             match self.open_file_handle() {
@@ -437,7 +539,7 @@ impl WriterRunner {
                 }
             }
         }
-        let sync_result = self.run_with_write_authority(|| {
+        let sync_result = Self::run_with_effects(&effects, || {
             if let Some(file) = file_opt.as_mut() {
                 let sync_start = Instant::now();
                 file.sync(Durability::Durable)
@@ -470,14 +572,27 @@ impl WriterRunner {
         }
 
         let mut s = self.config.sync_state.lock();
-        s.completed_fsyncs = s.pending_fsyncs;
+        s.completed_fsyncs = completed;
         self.config.sync_cond.notify_all();
         Ok(())
     }
 
-    fn has_pending_fsyncs(&self) -> bool {
-        let s = self.config.sync_state.lock();
-        s.pending_fsyncs > s.completed_fsyncs
+    fn take_ready_syncs(&self) -> Result<Vec<PendingSync>, ()> {
+        let mut state = self.config.sync_state.lock();
+        if state.failure().is_some() {
+            return Err(());
+        }
+        let count = state.requests.front().map_or(0, |first| {
+            state
+                .requests
+                .iter()
+                .take_while(|request| {
+                    request.writes_through <= state.completed_writes
+                        && first.effect.same_authority(&request.effect)
+                })
+                .count()
+        });
+        Ok(state.requests.drain(..count).collect())
     }
 
     fn mark_sync_failure(&self, error: crate::common::MidgeError) {
@@ -534,6 +649,33 @@ impl WriterRunner {
                 error: failure.error.replay(),
                 unchanged: failure.unchanged,
             }));
+        }
+        self.config.sync_cond.notify_all();
+        self.config.queue_cond.notify_all();
+    }
+}
+
+impl Drop for WriterRunner {
+    fn drop(&mut self) {
+        // This also runs on panic. Shared writer state may outlive its worker,
+        // so every queued child must be released before a successor can enter.
+        let mut queue = self.config.queue.lock();
+        let mut state = self.config.sync_state.lock();
+        let error = state.failure().unwrap_or_else(|| {
+            crate::common::MidgeError::Internal(
+                "WAL worker stopped before request completion".into(),
+            )
+        });
+        state.write_failed = true;
+        state.last_write_error = Some(error.replay());
+        state.requests.clear();
+        let pending = std::mem::take(&mut *queue);
+        drop(state);
+        drop(queue);
+        for entry in pending {
+            let _ = entry
+                .ack
+                .send(Err(WalAppendError::unchanged(error.replay())));
         }
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
@@ -620,14 +762,15 @@ mod tests {
                 .unwrap();
             let check = Arc::clone(&validity);
             let runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
-            *runner.config.write_authority.write() = Some(Arc::new(move |operation| {
-                check
-                    .remaining(1)
-                    .map(|_| ())
-                    .map_err(|error| error.into_validation_error("rollback authority"))?;
-                operation();
-                Ok(())
-            }));
+            *runner.config.write_authority.write() =
+                Some(Arc::new(move |operation: &mut dyn FnMut()| {
+                    check
+                        .remaining(1)
+                        .map(|_| ())
+                        .map_err(|error| error.into_validation_error("rollback authority"))?;
+                    operation();
+                    Ok(())
+                }));
             let physical_bytes = Arc::new(AtomicU64::new(0));
             let sync_count = Arc::new(AtomicU64::new(0));
             let mut file: Option<Box<dyn crate::io::File>> = Some(Box::new(PartialWriteFile {
@@ -788,6 +931,20 @@ mod tests {
     }
 
     fn runner_with_sync_state(sync_state: Arc<Mutex<SyncState>>) -> WriterRunner {
+        {
+            let mut state = sync_state.lock();
+            if state.pending_fsyncs > state.completed_fsyncs {
+                let (effect, _) =
+                    PendingWriterEffect::admit(None, None, std::time::Duration::from_secs(1))
+                        .unwrap();
+                let request = PendingSync {
+                    id: state.pending_fsyncs,
+                    writes_through: state.completed_writes,
+                    effect,
+                };
+                state.requests.push_back(request);
+            }
+        }
         let fs: Arc<dyn Fs> = Arc::new(FailingOpenFs);
         WriterRunner::new(WriterConfig {
             fs,
@@ -828,14 +985,15 @@ mod tests {
             .activate(1, Instant::now() + std::time::Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
-        *runner.config.write_authority.write() = Some(Arc::new(move |operation| {
-            check
-                .remaining(1)
-                .map(|_| ())
-                .map_err(|error| error.into_validation_error("physical WAL authority"))?;
-            operation();
-            Ok(())
-        }));
+        *runner.config.write_authority.write() =
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
+                check
+                    .remaining(1)
+                    .map(|_| ())
+                    .map_err(|error| error.into_validation_error("physical WAL authority"))?;
+                operation();
+                Ok(())
+            }));
         let mut file = Some(runner.open_file_handle().unwrap());
         validity.expire_for_test();
         // Act

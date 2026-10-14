@@ -34,8 +34,17 @@ impl WalActor {
         state: &mut RuntimeState,
         last_sequence: u64,
     ) -> MidgeResult<()> {
+        self.apply_strict_group_durability_with_group(state, last_sequence, None)
+    }
+
+    pub(super) fn apply_strict_group_durability_with_group(
+        &mut self,
+        state: &mut RuntimeState,
+        last_sequence: u64,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
-        if let Err(error) = self.sync_internal(state) {
+        if let Err(error) = self.sync_internal_with_group(state, group) {
             // The strict records are already on disk but not yet in memory.
             // Continuing as `Open` would let the runtime view and the recovery
             // view diverge, so even a failure before the fsync call fences.
@@ -58,8 +67,12 @@ impl WalActor {
     /// no protocol ticket: the records are made durable and the frontier moves,
     /// but waiters keyed to the current generation stay pending until the
     /// paired event-loop sync closes that generation.
-    pub(super) fn sync_internal(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
-        let receipt = self.begin_sync_io(state)?;
+    fn sync_internal_with_group(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
+        let receipt = self.begin_sync_io(state, group)?;
         self.commit_sync_io(state, receipt)
     }
 
@@ -74,7 +87,7 @@ impl WalActor {
         state: &mut RuntimeState,
         _ticket: &WalSyncTicket,
     ) -> MidgeResult<WalSyncReceipt> {
-        let result = self.begin_sync_io(state);
+        let result = self.begin_sync_io(state, None);
         debug_assert!(
             result.is_ok() || self.is_open() || self.is_fenced(),
             "a failed WAL sync must settle in Open or Fenced"
@@ -127,7 +140,11 @@ impl WalActor {
         self.ensure_lease_validity()
     }
 
-    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+    fn begin_sync_io(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<WalSyncReceipt> {
         self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
 
@@ -161,8 +178,14 @@ impl WalActor {
                 let writer = self.writer_mut().ok_or_else(|| {
                     MidgeError::Internal("WAL writer disappeared during fsync".to_string())
                 })?;
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    writer.sync_with_timeout(fsync_timeout)
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match group {
+                    Some(group) => writer
+                        .writer_group_capability()
+                        .ok_or_else(|| {
+                            MidgeError::Internal("strict WAL group lost its sync capability".into())
+                        })?
+                        .sync_in_group(fsync_timeout, group),
+                    None => writer.sync_with_timeout(fsync_timeout),
                 }))
             };
 
@@ -230,17 +253,25 @@ impl WalActor {
             }
         }
 
-        self.persist_sync_boundary(state)?;
+        self.persist_sync_boundary(state, group)?;
         Ok(WalSyncReceipt {
             durable_sequence: state.sequence,
             pending_writes: state.wal.pending_writes,
         })
     }
 
-    fn persist_sync_boundary(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+    fn persist_sync_boundary(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
         if let Some(writer) = self.writer() {
             let bytes = writer.current_pos();
-            if let Err(error) = state.wal.history.record_sync(bytes) {
+            let recorded = match group {
+                Some(group) => state.wal.history.record_sync_in_group(bytes, group),
+                None => state.wal.history.record_sync(bytes),
+            };
+            if let Err(error) = recorded {
                 self.fence_transition(
                     state,
                     format!("failed to persist WAL sync boundary: {error}"),
