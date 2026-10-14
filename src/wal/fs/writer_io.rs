@@ -1178,7 +1178,7 @@ mod tests {
             Arc::clone(&wal),
             1,
             epoch,
-            fence,
+            &fence,
         )?;
         let writer = FsWalWriterIo::new_with_counters(
             &crate::wal::segment_file_name(1),

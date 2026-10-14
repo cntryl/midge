@@ -139,7 +139,7 @@ impl FsLeaderStore {
     }
 
     fn acquire_lock(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
-        self.acquire_lock_at(holder_id, FsPath::new(LEADER_LOCK_FILE), "lease mutation")
+        self.acquire_lock_at(holder_id, &FsPath::new(LEADER_LOCK_FILE), "lease mutation")
     }
 
     /// Serialize a lease transition with any admitted writer effect. A
@@ -285,7 +285,7 @@ impl FsLeaderStore {
     fn acquire_lock_at(
         &self,
         holder_id: &str,
-        lock_path: FsPath,
+        lock_path: &FsPath,
         purpose: &str,
     ) -> Result<LockGuard<'_>, LeaseError> {
         match self.try_acquire_lock_file(holder_id, lock_path.clone(), purpose, Durability::Durable) {

@@ -81,7 +81,7 @@ fn should_validate_per_logical_write_group_not_per_local_wal_effect() {
         lease
             .leader_store
             .with_writer_epoch(&holder_id, epoch, Duration::from_secs(1), &mut || {
-                effects_ran += 1
+                effects_ran += 1;
             })
             .expect("valid monotonic authority admits a local effect");
     }

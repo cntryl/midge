@@ -312,68 +312,14 @@ impl WriterRunner {
                 }
                 Err(write_error) => {
                     tracing::error!(error = ?write_error, start_pos, "wal writer write_at failed");
-                    let mut truncate_result = None;
-                    let mut truncate = || {
-                        truncate_result = Some(file.truncate(start_pos));
-                    };
-                    self.run_with_write_authority(&mut truncate)
-                        .map_err(|error| WriteFailure {
-                            error,
-                            unchanged: false,
-                        })?;
-                    let Some(truncate_result) = truncate_result else {
-                        return Err(WriteFailure {
-                            error: crate::common::MidgeError::Internal(
-                                "WAL writer authority completed without running its truncate"
-                                    .into(),
-                            ),
-                            unchanged: false,
-                        });
-                    };
-                    if let Err(rollback_error) = truncate_result {
-                        return Err(WriteFailure {
-                            error: writer_error(
-                                format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
-                                &write_error,
-                            ),
-                            unchanged: false,
-                        });
-                    }
-
-                    let mut sync_result = None;
-                    let mut sync = || {
-                        sync_result = Some(file.sync(Durability::Durable));
-                    };
-                    self.run_with_write_authority(&mut sync)
-                        .map_err(|error| WriteFailure {
-                            error,
-                            unchanged: false,
-                        })?;
-                    let Some(sync_result) = sync_result else {
-                        return Err(WriteFailure {
-                            error: crate::common::MidgeError::Internal(
-                                "WAL writer authority completed without running its rollback sync"
-                                    .into(),
-                            ),
-                            unchanged: false,
-                        });
-                    };
-                    match sync_result {
-                        Ok(()) => Err(WriteFailure {
-                            error: writer_error(
-                                format!("wal writer write_at failed (partial WAL append rolled back to {start_pos})"),
-                                &write_error,
-                            ),
-                            unchanged: true,
-                        }),
-                        Err(rollback_error) => Err(WriteFailure {
-                            error: writer_error(
-                                format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
-                                &write_error,
-                            ),
-                            unchanged: false,
-                        }),
-                    }
+                    self.rollback_partial_append(file.as_mut(), start_pos, &write_error)?;
+                    Err(WriteFailure {
+                        error: writer_error(
+                            format!("wal writer write_at failed (partial WAL append rolled back to {start_pos})"),
+                            &write_error,
+                        ),
+                        unchanged: true,
+                    })
                 }
             };
         }
@@ -381,6 +327,65 @@ impl WriterRunner {
         Err(WriteFailure {
             error: crate::common::MidgeError::Internal("wal writer has no file handle".to_string()),
             unchanged: true,
+        })
+    }
+
+    fn rollback_partial_append(
+        &self,
+        file: &mut dyn crate::io::File,
+        start_pos: u64,
+        write_error: &crate::io::FsError,
+    ) -> Result<(), WriteFailure> {
+        let mut truncate_result = None;
+        let mut truncate = || {
+            truncate_result = Some(file.truncate(start_pos));
+        };
+        self.run_with_write_authority(&mut truncate)
+            .map_err(|error| WriteFailure {
+                error,
+                unchanged: false,
+            })?;
+        let Some(truncate_result) = truncate_result else {
+            return Err(WriteFailure {
+                error: crate::common::MidgeError::Internal(
+                    "WAL writer authority completed without running its truncate".into(),
+                ),
+                unchanged: false,
+            });
+        };
+        if let Err(rollback_error) = truncate_result {
+            return Err(WriteFailure {
+                error: writer_error(
+                    format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
+                    write_error,
+                ),
+                unchanged: false,
+            });
+        }
+
+        let mut sync_result = None;
+        let mut sync = || {
+            sync_result = Some(file.sync(Durability::Durable));
+        };
+        self.run_with_write_authority(&mut sync)
+            .map_err(|error| WriteFailure {
+                error,
+                unchanged: false,
+            })?;
+        let Some(sync_result) = sync_result else {
+            return Err(WriteFailure {
+                error: crate::common::MidgeError::Internal(
+                    "WAL writer authority completed without running its rollback sync".into(),
+                ),
+                unchanged: false,
+            });
+        };
+        sync_result.map_err(|rollback_error| WriteFailure {
+            error: writer_error(
+                format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
+                write_error,
+            ),
+            unchanged: false,
         })
     }
 

@@ -555,7 +555,7 @@ impl RuntimeState {
                     Arc::clone(&wal),
                     1,
                     writer_epoch,
-                    fence.clone(),
+                    fence,
                 )?,
                 None => crate::runtime::wal_history::WalHistory::open(
                     Arc::clone(&wal),

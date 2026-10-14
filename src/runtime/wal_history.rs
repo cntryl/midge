@@ -199,9 +199,9 @@ impl WalHistory {
         wal: Arc<dyn Fs>,
         first_open: SegmentId,
         epoch: u64,
-        fence: WalHistoryFence,
+        fence: &WalHistoryFence,
     ) -> MidgeResult<Self> {
-        with_writer_fence(Some(&fence), epoch, || {
+        with_writer_fence(Some(fence), epoch, || {
             Self::open_inner(wal, first_open, epoch, Some(fence.clone()))
         })
     }
@@ -236,9 +236,9 @@ impl WalHistory {
     pub(crate) fn load_with_fence(
         wal: Arc<dyn Fs>,
         epoch: u64,
-        fence: WalHistoryFence,
+        fence: &WalHistoryFence,
     ) -> MidgeResult<Option<Self>> {
-        with_writer_fence(Some(&fence), epoch, || {
+        with_writer_fence(Some(fence), epoch, || {
             Self::load_inner(wal, epoch, Some(fence.clone()))
         })
     }
@@ -292,9 +292,9 @@ impl WalHistory {
         epoch: u64,
         anchor: ChainLink,
         open: SegmentId,
-        fence: WalHistoryFence,
+        fence: &WalHistoryFence,
     ) -> MidgeResult<Self> {
-        with_writer_fence(Some(&fence), epoch, || {
+        with_writer_fence(Some(fence), epoch, || {
             Self::genesis_inner(
                 wal,
                 epoch,

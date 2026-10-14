@@ -553,7 +553,7 @@ fn should_fence_cloud_recovery_open_cut_after_successor_acquires_lease() -> Midg
         catalog.fencing_epoch(),
         &catalog,
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
-        Some(fence),
+        Some(&fence),
         &|| Ok(()),
         &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
     );

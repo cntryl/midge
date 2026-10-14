@@ -92,7 +92,7 @@ impl WalActor {
         self.commit_sync_io(state, receipt)
     }
 
-    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+    fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let admission_prevalidated =
             std::mem::replace(&mut self.sync_authority_prevalidated, false);
         self.ensure_lease_validity()?;
@@ -124,7 +124,11 @@ impl WalActor {
             }
         }
 
-        self.ensure_lease_validity()?;
+        self.ensure_lease_validity()
+    }
+
+    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+        self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
 
         if let Err(error) = WalTransitionBoundary::BeforeFsync.check() {

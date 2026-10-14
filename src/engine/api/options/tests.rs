@@ -3,8 +3,11 @@ use super::*;
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_apply_fast_cloud_retry_policy_when_test_builder_is_used() {
-    // Arrange and Act
-    let options = OpenOptions::in_memory()
+    // Arrange
+    let builder = OpenOptions::in_memory();
+
+    // Act
+    let options = builder
         .fast_cloud_retries_for_testing()
         .build()
         .expect("test options");

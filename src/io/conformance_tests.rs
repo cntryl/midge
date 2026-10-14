@@ -327,6 +327,7 @@ fn should_report_already_exists_when_creating_new_over_existing_file() {
             )
             .map(|_| ());
 
+        // Assert
         assert!(
             matches!(result, Err(FsError::AlreadyExists(_))),
             "{backend}: {result:?}"

@@ -182,6 +182,44 @@ fn should_leave_wal_history_unchanged_when_salvage_lacks_family_authority() {
     assert_eq!(crate::io::read_all(wal.as_ref(), &ledger).unwrap(), before);
 }
 
+fn write_torn_recovery_segment(wal: &Arc<dyn Fs>, segment_name: &str) -> MidgeResult<u64> {
+    let writer = crate::wal::fs::FsWalWriterIo::new_with_counters(
+        segment_name,
+        Arc::clone(wal),
+        std::time::Duration::from_secs(2),
+        crate::telemetry::CounterSink::default(),
+    )?;
+    writer.append_record(&crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"recovery-key"),
+        Some(Bytes::from_static(b"recovery-value")),
+        1,
+    ))?;
+    writer.sync()?;
+    drop(writer);
+    let segment_path = FsPath::new(segment_name);
+    let mut segment = wal
+        .open(
+            &segment_path,
+            crate::io::OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
+    let valid_prefix_bytes = segment.len().map_err(FsError::into_midge)?;
+    segment
+        .write_at(valid_prefix_bytes, Bytes::from_static(b"\0"))
+        .map_err(FsError::into_midge)?;
+    segment
+        .sync(Durability::Durable)
+        .map_err(FsError::into_midge)?;
+    drop(segment);
+    Ok(valid_prefix_bytes)
+}
+
 #[test]
 fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -> MidgeResult<()> {
     // Arrange: recovery captures a torn active tail, then pauses before it
@@ -205,45 +243,13 @@ fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -
         Arc::clone(&wal),
         1,
         predecessor.epoch,
-        predecessor_fence.clone(),
+        &predecessor_fence,
     )?;
     drop(history);
 
     let segment_name = crate::wal::segment_file_name(1);
-    let writer = crate::wal::fs::FsWalWriterIo::new_with_counters(
-        &segment_name,
-        Arc::clone(&wal),
-        std::time::Duration::from_secs(2),
-        crate::telemetry::CounterSink::default(),
-    )?;
-    writer.append_record(&crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
-        Bytes::from_static(b"recovery-key"),
-        Some(Bytes::from_static(b"recovery-value")),
-        1,
-    ))?;
-    writer.sync()?;
-    drop(writer);
+    let valid_prefix_bytes = write_torn_recovery_segment(&wal, &segment_name)?;
     let segment_path = FsPath::new(segment_name.clone());
-    let mut segment = wal
-        .open(
-            &segment_path,
-            crate::io::OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .map_err(FsError::into_midge)?;
-    let valid_prefix_bytes = segment.len().map_err(FsError::into_midge)?;
-    segment
-        .write_at(valid_prefix_bytes, Bytes::from_static(b"\0"))
-        .map_err(FsError::into_midge)?;
-    segment
-        .sync(Durability::Durable)
-        .map_err(FsError::into_midge)?;
-    drop(segment);
 
     let gate = RecoveryReadGate::new();
     let gated_root: Arc<dyn Fs> = Arc::new(SnapshotRecoveryFs {
@@ -300,9 +306,8 @@ fn should_fence_stale_recovery_tail_truncation_after_successor_seals_segment() -
     let predecessor_result = predecessor_recovery
         .join()
         .expect("predecessor recovery thread completed");
-    let predecessor_error = match predecessor_result {
-        Err(error) => error,
-        Ok(_) => panic!("stale recovery completed after successor takeover"),
+    let Err(predecessor_error) = predecessor_result else {
+        panic!("stale recovery completed after successor takeover");
     };
     assert!(
         matches!(

@@ -103,7 +103,7 @@ fn initialize_startup_state(
 fn load_cloud_wal_history(
     path: &StartupStoragePath,
     writer_epoch: u64,
-    fence: crate::runtime::wal_history::WalHistoryFence,
+    fence: &crate::runtime::wal_history::WalHistoryFence,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<crate::runtime::cloud_startup::CacheHistory> {
     // Bounded by the startup deadline, like local recovery; the scope stops
@@ -154,7 +154,7 @@ fn recover_cloud_wal(
     }
     let limits = super::streaming_recovery::CloudReplay::limits(opts);
     let wal_fence = lease.wal_history_fence(opts.storage_io_timeout())?;
-    let cache = load_cloud_wal_history(storage_path, lease.writer_epoch, wal_fence.clone(), scope)?;
+    let cache = load_cloud_wal_history(storage_path, lease.writer_epoch, &wal_fence, scope)?;
     let ledger = match &cache {
         crate::runtime::cloud_startup::CacheHistory::Existing(history) => Some(history.ledger()),
         crate::runtime::cloud_startup::CacheHistory::Fresh(_) => None,
@@ -175,11 +175,10 @@ fn recover_cloud_wal(
     let history = commit_wal_plan(
         &streaming.plan,
         &CloudPersistence::new(Arc::clone(storage)),
-        lease.writer_epoch,
+        lease,
         catalog,
         cache,
-        Some(wal_fence),
-        &|| lease.ensure_healthy("during WAL salvage set aside"),
+        Some(&wal_fence),
         scope,
     )?;
     Ok((streaming, history))
@@ -227,11 +226,10 @@ fn build_wal_plan(
 fn commit_wal_plan(
     plan: &crate::wal::planner::RecoveryPlan,
     persistence: &CloudPersistence,
-    epoch: u64,
+    lease: &StartupLease,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     cache: crate::runtime::cloud_startup::CacheHistory,
-    wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
-    validate: &dyn Fn() -> MidgeResult<()>,
+    wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
     let unbounded;
@@ -244,11 +242,11 @@ fn commit_wal_plan(
     crate::runtime::cloud_startup::commit_recovery_plan_within(
         plan,
         persistence,
-        epoch,
+        lease.writer_epoch,
         catalog,
         cache,
         wal_fence,
-        validate,
+        &|| lease.ensure_healthy("during WAL salvage set aside"),
         scope,
     )
 }
@@ -930,6 +928,21 @@ impl RuntimeStorageMaterialization {
         }
     }
 
+    fn build_simulated_cloud_stores(
+        opts: &OpenOptions,
+        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+    ) -> crate::storage::simulated::SimulatedCloudStores {
+        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
+            Arc::clone(store),
+            opts.simulated_cloud_local_storage_budget_bytes(),
+        );
+        cloud.hybrid_storage.enable_ephemeral_sst_cache(
+            opts.simulated_cloud_local_storage_budget_bytes()
+                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
+        );
+        cloud
+    }
+
     fn materialize_simulated_cloud(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -943,14 +956,7 @@ impl RuntimeStorageMaterialization {
             opts.storage_io_timeout(),
         )?;
         let store = location.open()?;
-        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
-            Arc::clone(&store),
-            opts.simulated_cloud_local_storage_budget_bytes(),
-        );
-        cloud.hybrid_storage.enable_ephemeral_sst_cache(
-            opts.simulated_cloud_local_storage_budget_bytes()
-                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
-        );
+        let cloud = Self::build_simulated_cloud_stores(opts, &store);
         let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
         let sst_read_fs = remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
         CloudStartupRecovery::reject_cloud_wal_without_catalog(store.as_ref(), scope)?;

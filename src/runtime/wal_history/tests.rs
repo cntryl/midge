@@ -55,7 +55,7 @@ fn should_fence_stale_history_before_successor_wal_effects() {
         std::time::Duration::from_secs(1),
     );
     let mut history =
-        WalHistory::open_with_fence(Arc::clone(&wal), 1, predecessor.epoch, fence).unwrap();
+        WalHistory::open_with_fence(Arc::clone(&wal), 1, predecessor.epoch, &fence).unwrap();
     let ledger_path = FsPath::new(crate::wal::ledger_store::LEDGER_FILE);
     let before = crate::io::read_all(wal.as_ref(), &ledger_path).unwrap();
     leader.acquire_leadership("successor").unwrap();
